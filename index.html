@@ -36,7 +36,6 @@
     <button class="tab" data-vista="proveedores">Proveedores</button>
     <button class="tab" data-vista="movimientos">Movimientos</button>
     <button class="tab" data-vista="mermas">Mermas</button>
-    <button class="tab" data-vista="rotacion">Rotación</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
   </nav>
 
@@ -321,69 +320,6 @@
     </table>
   </section>
 
-  <h3 class="subtitulo" style="margin-top:24px">Historial de pérdidas registradas</h3>
-  <section class="toolbar">
-    <label class="toggle-critico">Desde <input type="date" id="mermas-filtro-desde"></label>
-    <label class="toggle-critico">Hasta <input type="date" id="mermas-filtro-hasta"></label>
-    <button class="btn btn-secundario" id="mermas-limpiar-filtros">Limpiar filtro</button>
-  </section>
-  <section class="tabla-wrap">
-    <table class="tabla">
-      <thead>
-        <tr>
-          <th>Fecha</th>
-          <th>Producto</th>
-          <th class="num">Cantidad</th>
-          <th>Motivo</th>
-          <th>Responsable</th>
-        </tr>
-      </thead>
-      <tbody id="tbody-mermas-historial">
-        <tr><td colspan="5" class="vacio">Cargando…</td></tr>
-      </tbody>
-    </table>
-  </section>
-
-  </section>
-
-  <section class="vista" id="vista-rotacion" style="display:none">
-
-  <section class="toolbar">
-    <p class="bodega-intro">Cómo se mueve realmente el inventario: qué se usa mucho, qué casi no se toca, y qué lleva tiempo parado. Como en el taller casi todo es consumo interno (no venta directa), aquí se mide toda salida de stock por igual.</p>
-    <label class="toggle-critico">Período
-      <select id="rotacion-periodo">
-        <option value="30">Últimos 30 días</option>
-        <option value="90" selected>Últimos 90 días</option>
-        <option value="180">Últimos 180 días</option>
-        <option value="365">Último año</option>
-      </select>
-    </label>
-  </section>
-
-  <section class="dash-grid">
-
-    <div class="dash-panel">
-      <h3 class="dash-titulo">Más utilizados</h3>
-      <div class="dash-lista" id="rot-mas-utilizados"><p class="vacio">Cargando…</p></div>
-    </div>
-
-    <div class="dash-panel">
-      <h3 class="dash-titulo">Baja rotación</h3>
-      <div class="dash-lista" id="rot-baja-rotacion"><p class="vacio">Cargando…</p></div>
-    </div>
-
-    <div class="dash-panel">
-      <h3 class="dash-titulo">Inmovilizados</h3>
-      <div class="dash-lista" id="rot-inmovilizados"><p class="vacio">Cargando…</p></div>
-    </div>
-
-    <div class="dash-panel">
-      <h3 class="dash-titulo">Tendencia de consumo (6 meses)</h3>
-      <div class="rot-tendencia" id="rot-tendencia"><p class="vacio">Cargando…</p></div>
-    </div>
-
-  </section>
-
   </section>
 
 </div>
@@ -400,11 +336,11 @@
       <p class="id-sistema-tag" id="f-id-sistema-tag" style="display:none"></p>
       <div class="campo">
         <label>Código interno (factura/fabricante)</label>
-        <input type="text" id="f-codigo" class="uppercase-input" placeholder="Ej: FRE-0012 (opcional)">
+        <input type="text" id="f-codigo" placeholder="Ej: FRE-0012 (opcional)">
       </div>
       <div class="campo">
         <label>Descripción</label>
-        <textarea id="f-descripcion" class="uppercase-input" rows="2" placeholder="Detalle adicional del producto"></textarea>
+        <textarea id="f-descripcion" rows="2" placeholder="Detalle adicional del producto"></textarea>
       </div>
       <div class="grid-2">
         <div class="campo">
@@ -433,24 +369,18 @@
         </div>
         <p class="ayuda-inline" id="f-ubicacion-legacy" style="display:none"></p>
       </div>
-      <div class="grid-2" id="grid-stock-inicial">
+      <div class="grid-3" id="grid-stock-inicial">
         <div class="campo">
           <label>Stock inicial disponible</label>
           <input type="number" id="f-stock-disponible" min="0" value="0">
         </div>
         <div class="campo">
-          <label id="f-costo-label">Costo promedio inicial ($ CLP)</label>
-          <input type="number" id="f-costo" min="0" step="1" value="0">
-        </div>
-      </div>
-      <div class="grid-2">
-        <div class="campo">
-          <label>Stock mínimo (alerta de crítico)</label>
+          <label>Stock mínimo (alerta)</label>
           <input type="number" id="f-stock-minimo" min="0" value="0">
         </div>
         <div class="campo">
-          <label>Stock ideal (para reponer)</label>
-          <input type="number" id="f-stock-ideal" min="0" value="0">
+          <label id="f-costo-label">Costo promedio inicial ($ CLP)</label>
+          <input type="number" id="f-costo" min="0" step="1" value="0">
         </div>
       </div>
       <p class="ayuda" id="ayuda-stock">El stock inicial queda registrado como primer movimiento de entrada. Una vez creado el producto, los cambios de stock (y el costo, que se recalcula solo como promedio ponderado) se hacen desde "Registrar movimiento".</p>
@@ -481,7 +411,7 @@
             <label>Tipo</label>
             <select id="m-tipo">
               <option value="entrada">Entrada (ingreso de stock)</option>
-              <option value="salida">Salida</option>
+              <option value="salida">Salida (consumo / venta / reserva / uso)</option>
               <option value="perdida">Pérdida (merma)</option>
             </select>
           </div>
@@ -504,11 +434,11 @@
           </div>
           <div class="campo">
             <label>Motivo</label>
-            <input type="text" id="m-motivo" class="uppercase-input" placeholder="Ej: Compra a proveedor, orden de trabajo #123…">
+            <input type="text" id="m-motivo" placeholder="Ej: Compra a proveedor, orden de trabajo #123…">
           </div>
           <div class="campo">
             <label>Responsable</label>
-            <input type="text" id="m-usuario" readonly>
+            <input type="text" id="m-usuario" placeholder="Nombre de quien registra">
           </div>
           <div class="modal-actions modal-actions--start">
             <button type="submit" class="btn btn-primary">Registrar movimiento</button>
@@ -573,7 +503,7 @@
       <div class="grid-3">
         <div class="campo">
           <label>N° de factura *</label>
-          <input type="text" id="fac-numero" class="uppercase-input" required placeholder="Ej: F-1023">
+          <input type="text" id="fac-numero" required placeholder="Ej: F-1023">
         </div>
         <div class="campo">
           <label>Proveedor</label>
@@ -644,7 +574,7 @@
       <input type="hidden" id="pv-id">
       <div class="campo">
         <label>Nombre *</label>
-        <input type="text" id="pv-nombre" class="uppercase-input" required placeholder="Ej: Repuestos ABC">
+        <input type="text" id="pv-nombre" required placeholder="Ej: Repuestos ABC">
       </div>
       <div class="grid-2">
         <div class="campo">
@@ -662,7 +592,7 @@
       </div>
       <div class="campo">
         <label>Dirección</label>
-        <input type="text" id="pv-direccion" class="uppercase-input" placeholder="Ej: Av. Siempre Viva 123, Santiago">
+        <input type="text" id="pv-direccion" placeholder="Ej: Av. Siempre Viva 123, Santiago">
       </div>
       <div class="modal-actions modal-actions--split" id="pv-acciones-editar" style="display:none">
         <button type="button" class="btn btn-danger" id="btn-eliminar-proveedor">Eliminar proveedor</button>
@@ -726,7 +656,7 @@
       </div>
       <div class="campo">
         <label>Nombre para mostrar</label>
-        <input type="text" id="us-nombre" class="uppercase-input" placeholder="Ej: Juan Pérez">
+        <input type="text" id="us-nombre" placeholder="Ej: Juan Pérez">
       </div>
       <div class="campo">
         <label id="us-password-label">Contraseña *</label>

@@ -21,7 +21,9 @@
       </div>
     </div>
     <div class="topbar-acciones">
+      <span class="sesion-usuario" id="sesion-usuario"></span>
       <button class="btn btn-secundario" id="btn-respaldo">Respaldo</button>
+      <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
       <button class="btn btn-primary" id="btn-nuevo" style="display:none">+ Nuevo producto</button>
     </div>
   </header>
@@ -32,6 +34,7 @@
     <button class="tab" data-vista="bodega">Bodega</button>
     <button class="tab" data-vista="facturas">Facturas</button>
     <button class="tab" data-vista="proveedores">Proveedores</button>
+    <button class="tab" data-vista="usuarios">Usuarios</button>
   </nav>
 
   <section class="vista" id="vista-dashboard">
@@ -203,6 +206,31 @@
       </thead>
       <tbody id="tbody-proveedores">
         <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-usuarios" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Personas con acceso al sistema.</p>
+    <button class="btn btn-primary" id="btn-nuevo-usuario">+ Nuevo usuario</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Usuario</th>
+          <th>Nombre</th>
+          <th>Creado</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-usuarios">
+        <tr><td colspan="4" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -405,6 +433,12 @@
       <div id="fac-lineas"></div>
       <button type="button" class="btn-link" id="fac-agregar-linea">+ Agregar producto</button>
 
+      <label class="toggle-critico" style="margin-top:16px">
+        <input type="checkbox" id="fac-aplicar-stock" checked>
+        Ingresar el stock automáticamente al guardar (recomendado)
+      </label>
+      <p class="ayuda-inline">Si lo desmarcas, la factura queda registrada pero el stock no se toca hasta que lo ingreses manualmente producto por producto.</p>
+
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-factura">Cancelar</button>
         <button type="submit" class="btn btn-primary">Guardar factura</button>
@@ -507,6 +541,39 @@
       </div>
       <div class="modal-actions modal-actions--start">
         <button type="submit" class="btn btn-danger">Restaurar (reemplaza todo)</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Nuevo / editar usuario -->
+<div class="modal-overlay" id="modal-usuario">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-usuario-titulo">Nuevo usuario</h2>
+      <button class="modal-close" data-close="modal-usuario">&times;</button>
+    </div>
+    <form id="form-usuario">
+      <input type="hidden" id="us-id">
+      <div class="campo">
+        <label>Usuario (para iniciar sesión) *</label>
+        <input type="text" id="us-username" required placeholder="Ej: jperez" autocomplete="off">
+      </div>
+      <div class="campo">
+        <label>Nombre para mostrar</label>
+        <input type="text" id="us-nombre" placeholder="Ej: Juan Pérez">
+      </div>
+      <div class="campo">
+        <label id="us-password-label">Contraseña *</label>
+        <input type="password" id="us-password" autocomplete="new-password" placeholder="Mínimo 4 caracteres">
+      </div>
+      <div class="modal-actions modal-actions--split" id="us-acciones-editar" style="display:none">
+        <button type="button" class="btn btn-danger" id="btn-eliminar-usuario">Eliminar usuario</button>
+        <span></span>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-usuario">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar usuario</button>
       </div>
     </form>
   </div>

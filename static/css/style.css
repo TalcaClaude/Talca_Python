@@ -589,6 +589,12 @@ body::before { content: none; }
   align-items: center;
 }
 
+.sesion-usuario {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-right: 4px;
+}
+
 /* ---------- Dashboard ---------- */
 
 .dash-grid {

@@ -12,6 +12,8 @@ const state = {
   productosParaFactura: [],
   proveedores: [],
   proveedorActivoId: null,
+  sesion: { username: null, nombre: null },
+  usuarios: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -71,6 +73,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-bodega").style.display = vista === "bodega" ? "block" : "none";
     document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
+    document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
       dashboard: "Dashboard",
@@ -78,12 +81,14 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       bodega: "Organización Física de Bodega",
       facturas: "Facturas de compra",
       proveedores: "Proveedores",
+      usuarios: "Usuarios",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "dashboard") cargarDashboard();
     if (vista === "bodega") cargarUbicaciones();
     if (vista === "facturas") cargarFacturas();
     if (vista === "proveedores") cargarProveedores();
+    if (vista === "usuarios") cargarUsuarios();
   });
 });
 
@@ -781,18 +786,26 @@ document.getElementById("form-factura").addEventListener("submit", async (e) => 
     return;
   }
 
+  const aplicarStock = document.getElementById("fac-aplicar-stock").checked;
+
   const payload = {
     numero: document.getElementById("fac-numero").value,
     proveedor_id: document.getElementById("fac-proveedor-id").value,
     fecha: document.getElementById("fac-fecha").value,
     lineas,
+    aplicar_stock: aplicarStock,
+    usuario: state.sesion.username || "Sistema",
   };
 
   try {
-    await api("/api/facturas", { method: "POST", body: JSON.stringify(payload) });
-    toast("Factura registrada");
+    const nueva = await api("/api/facturas", { method: "POST", body: JSON.stringify(payload) });
+    if (aplicarStock) {
+      toast(`Factura registrada y stock ingresado para ${nueva.lineas.length} producto(s)`);
+    } else {
+      toast("Factura registrada (stock pendiente de ingresar manualmente)");
+    }
     cerrarModal("modal-factura");
-    await cargarFacturas();
+    await Promise.all([cargarFacturas(), cargarProductos(), cargarResumen()]);
   } catch (e) {
     toast(e.message, true);
   }
@@ -1068,8 +1081,119 @@ document.getElementById("form-restaurar").addEventListener("submit", async (e) =
 });
 
 // ---------------------------------------------------------------------------
+// Sesión
+// ---------------------------------------------------------------------------
+
+async function cargarSesion() {
+  try {
+    const s = await api("/api/sesion");
+    state.sesion = s;
+    document.getElementById("sesion-usuario").textContent = s.nombre ? `👤 ${s.nombre}` : "";
+    document.getElementById("m-usuario").value = s.nombre || s.username || "";
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Usuarios
+// ---------------------------------------------------------------------------
+
+async function cargarUsuarios() {
+  const tbody = document.getElementById("tbody-usuarios");
+  try {
+    const data = await api("/api/usuarios");
+    state.usuarios = data.usuarios;
+    renderTablaUsuarios();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Error al cargar usuarios: ${e.message}</td></tr>`;
+  }
+}
+
+function renderTablaUsuarios() {
+  const tbody = document.getElementById("tbody-usuarios");
+  tbody.innerHTML = state.usuarios.map(u => `
+    <tr data-id="${u.id}">
+      <td class="mono">${escapeHtml(u.username)}</td>
+      <td>${escapeHtml(u.nombre) || "—"}</td>
+      <td class="mono">${fmtFecha(u.creado_en)}</td>
+      <td></td>
+    </tr>
+  `).join("");
+
+  tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+    tr.addEventListener("click", () => abrirEdicionUsuario(parseInt(tr.dataset.id, 10)));
+  });
+}
+
+document.getElementById("btn-nuevo-usuario").addEventListener("click", () => {
+  document.getElementById("form-usuario").reset();
+  document.getElementById("us-id").value = "";
+  document.getElementById("us-username").disabled = false;
+  document.getElementById("us-password-label").textContent = "Contraseña *";
+  document.getElementById("us-password").required = true;
+  document.getElementById("modal-usuario-titulo").textContent = "Nuevo usuario";
+  document.getElementById("us-acciones-editar").style.display = "none";
+  abrirModal("modal-usuario");
+});
+
+function abrirEdicionUsuario(id) {
+  const u = state.usuarios.find(x => x.id === id);
+  if (!u) return;
+  document.getElementById("us-id").value = u.id;
+  document.getElementById("us-username").value = u.username;
+  document.getElementById("us-username").disabled = true;
+  document.getElementById("us-nombre").value = u.nombre || "";
+  document.getElementById("us-password").value = "";
+  document.getElementById("us-password").required = false;
+  document.getElementById("us-password-label").textContent = "Nueva contraseña (déjalo vacío para no cambiarla)";
+  document.getElementById("modal-usuario-titulo").textContent = "Editar usuario";
+  document.getElementById("us-acciones-editar").style.display = "flex";
+  abrirModal("modal-usuario");
+}
+
+document.getElementById("form-usuario").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = document.getElementById("us-id").value;
+  const payload = {
+    username: document.getElementById("us-username").value,
+    nombre: document.getElementById("us-nombre").value,
+    password: document.getElementById("us-password").value,
+  };
+  try {
+    if (id) {
+      await api(`/api/usuarios/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("Usuario actualizado");
+    } else {
+      await api("/api/usuarios", { method: "POST", body: JSON.stringify(payload) });
+      toast("Usuario creado");
+    }
+    cerrarModal("modal-usuario");
+    await Promise.all([cargarUsuarios(), cargarSesion()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+document.getElementById("btn-eliminar-usuario").addEventListener("click", async () => {
+  const id = document.getElementById("us-id").value;
+  const u = state.usuarios.find(x => x.id === parseInt(id, 10));
+  if (!id || !u) return;
+  if (!confirm(`¿Eliminar el usuario "${u.username}"?`)) return;
+  try {
+    await api(`/api/usuarios/${id}`, { method: "DELETE" });
+    toast("Usuario eliminado");
+    cerrarModal("modal-usuario");
+    await cargarUsuarios();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
+cargarSesion();
 cargarProductos();
 cargarDashboard();

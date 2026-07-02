@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario — Taller Mecánico</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-tag">01</span>
+      <div class="brand-text">
+        <h1>Inventario<span>Taller</span></h1>
+        <p class="brand-sub" id="brand-sub">Dashboard</p>
+      </div>
+    </div>
+    <div class="topbar-acciones">
+      <span class="sesion-usuario" id="sesion-usuario"></span>
+      <button class="btn btn-secundario" id="btn-respaldo">Respaldo</button>
+      <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+      <button class="btn btn-primary" id="btn-nuevo" style="display:none">+ Nuevo producto</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab activo" data-vista="dashboard">Dashboard</button>
+    <button class="tab" data-vista="productos">Productos</button>
+    <button class="tab" data-vista="bodega">Bodega</button>
+    <button class="tab" data-vista="facturas">Facturas</button>
+    <button class="tab" data-vista="proveedores">Proveedores</button>
+    <button class="tab" data-vista="movimientos">Movimientos</button>
+    <button class="tab" data-vista="reservas">Reservas</button>
+    <button class="tab" data-vista="usuarios">Usuarios</button>
+  </nav>
+
+  <section class="vista" id="vista-dashboard">
+
+  <section class="summary" id="summary">
+    <div class="summary-card">
+      <span class="summary-label">Productos</span>
+      <span class="summary-value" id="s-total-productos">—</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">Unidades totales</span>
+      <span class="summary-value" id="s-total-unidades">—</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">Valor de inventario</span>
+      <span class="summary-value" id="s-valor-total">—</span>
+    </div>
+    <div class="summary-card summary-card--warn" id="s-criticos-card">
+      <span class="summary-label">Stock crítico</span>
+      <span class="summary-value" id="s-criticos">—</span>
+    </div>
+  </section>
+
+  <section class="dash-grid">
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">⚠ Stock crítico</h3>
+      <div class="dash-lista" id="dash-stock-critico"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Últimos movimientos</h3>
+      <div class="dash-lista" id="dash-ultimos-movimientos"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Compras recientes</h3>
+      <div class="dash-lista" id="dash-compras-recientes"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Mayor rotación (salidas)</h3>
+      <div class="dash-lista" id="dash-mas-movidos"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Sin movimiento aún</h3>
+      <div class="dash-lista" id="dash-sin-movimiento"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">Estado general de la bodega</h3>
+      <div class="dash-bodega-resumen" id="dash-bodega-resumen"><p class="vacio">Cargando…</p></div>
+    </div>
+
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-productos" style="display:none">
+
+  <section class="toolbar">
+    <input type="text" id="buscar" placeholder="Buscar por código, nombre, modelo o ubicación…">
+    <select id="filtro-categoria">
+      <option value="">Todas las categorías</option>
+    </select>
+    <label class="toggle-critico">
+      <input type="checkbox" id="filtro-criticos">
+      Solo stock crítico
+    </label>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>N°</th>
+          <th>Producto</th>
+          <th>Categoría</th>
+          <th>Ubicación</th>
+          <th class="num">Disponible</th>
+          <th class="num">Reservado</th>
+          <th class="num">Total</th>
+          <th class="num">Costo prom.</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-productos">
+        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-bodega" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Bodega única, organizada en <strong>pasillos</strong> → <strong>estanterías</strong> → <strong>niveles</strong>. Cada ubicación guarda como máximo un producto.</p>
+    <button class="btn btn-primary" id="btn-nueva-ubicacion">+ Nueva ubicación</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Código</th>
+          <th>Pasillo</th>
+          <th>Estantería</th>
+          <th>Nivel</th>
+          <th>Estado</th>
+          <th>Producto guardado</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-ubicaciones">
+        <tr><td colspan="7" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-facturas" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Registra aquí las facturas de compra con sus productos y precios. Luego, al ingresar stock, escribes el número de factura y el sistema completa la cantidad y el precio exactos.</p>
+    <button class="btn btn-primary" id="btn-nueva-factura">+ Nueva factura</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>N° Factura</th>
+          <th>Proveedor</th>
+          <th>Fecha</th>
+          <th class="num">Líneas</th>
+          <th>Estado</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-facturas">
+        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-proveedores" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Proveedores registrados, para usar al crear una factura.</p>
+    <button class="btn btn-primary" id="btn-nuevo-proveedor">+ Nuevo proveedor</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Nombre</th>
+          <th>RUT</th>
+          <th>Teléfono</th>
+          <th>Email</th>
+          <th class="num">Facturas</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-proveedores">
+        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-usuarios" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Personas con acceso al sistema.</p>
+    <button class="btn btn-primary" id="btn-nuevo-usuario">+ Nuevo usuario</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Usuario</th>
+          <th>Nombre</th>
+          <th>Creado</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-usuarios">
+        <tr><td colspan="4" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-movimientos" style="display:none">
+
+  <section class="toolbar">
+    <input type="text" id="mov-buscar" placeholder="Buscar por motivo, producto, factura o responsable…">
+    <select id="mov-filtro-tipo">
+      <option value="">Todos los tipos</option>
+      <option value="entrada">Entrada</option>
+      <option value="salida">Salida</option>
+      <option value="ajuste">Ajuste</option>
+    </select>
+    <select id="mov-filtro-categoria">
+      <option value="">Todas las categorías</option>
+    </select>
+  </section>
+  <section class="toolbar">
+    <label class="toggle-critico">Desde <input type="date" id="mov-filtro-desde"></label>
+    <label class="toggle-critico">Hasta <input type="date" id="mov-filtro-hasta"></label>
+    <button class="btn btn-secundario" id="mov-limpiar-filtros">Limpiar filtros</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Producto</th>
+          <th>Tipo</th>
+          <th>Categoría</th>
+          <th class="num">Cantidad</th>
+          <th class="num">Stock resultante</th>
+          <th>Factura</th>
+          <th>Responsable</th>
+          <th>Motivo</th>
+        </tr>
+      </thead>
+      <tbody id="tbody-movimientos">
+        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-reservas" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Stock apartado para trabajos futuros. Para reservar, entra al producto desde la pestaña "Productos".</p>
+    <select id="res-filtro-estado">
+      <option value="activa">Activas</option>
+      <option value="consumida">Consumidas</option>
+      <option value="liberada">Liberadas</option>
+      <option value="">Todas</option>
+    </select>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Producto</th>
+          <th class="num">Cantidad</th>
+          <th>Orden de trabajo</th>
+          <th>Motivo</th>
+          <th>Responsable</th>
+          <th>Fecha</th>
+          <th>Estado</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-reservas">
+        <tr><td colspan="8" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+</div>
+
+<!-- Modal: Crear / Editar producto -->
+<div class="modal-overlay" id="modal-producto">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-producto-titulo">Nuevo producto</h2>
+      <button class="modal-close" data-close="modal-producto">&times;</button>
+    </div>
+    <form id="form-producto">
+      <input type="hidden" id="f-id">
+      <p class="id-sistema-tag" id="f-id-sistema-tag" style="display:none"></p>
+      <div class="campo">
+        <label>Código interno (factura/fabricante)</label>
+        <input type="text" id="f-codigo" placeholder="Ej: FRE-0012 (opcional)">
+      </div>
+      <div class="campo">
+        <label>Descripción</label>
+        <textarea id="f-descripcion" rows="2" placeholder="Detalle adicional del producto"></textarea>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Categoría *</label>
+          <div class="campo-select-mas">
+            <select id="f-categoria"><option value="">Sin categoría</option></select>
+            <button type="button" class="btn-link" data-nuevo="categoria">+ Nueva</button>
+          </div>
+        </div>
+        <div class="campo">
+          <label>Modelo *</label>
+          <div class="campo-select-mas">
+            <select id="f-modelo"><option value="">Sin modelo</option></select>
+            <button type="button" class="btn-link" data-nuevo="modelo">+ Nuevo</button>
+          </div>
+        </div>
+      </div>
+      <p class="ayuda-inline">La categoría y el modelo identifican al producto en el sistema: no puede haber dos productos con la misma combinación. Si necesitas más stock de algo que ya existe, ingrésalo con una factura en vez de crear un producto nuevo.</p>
+      <div class="campo">
+        <label>Ubicación física</label>
+        <div class="campo-ubicacion">
+          <select id="f-ubicacion-id">
+            <option value="">Sin asignar</option>
+          </select>
+          <button type="button" class="btn-link" id="btn-crear-ubicacion-inline">+ Nueva ubicación</button>
+        </div>
+        <p class="ayuda-inline" id="f-ubicacion-legacy" style="display:none"></p>
+      </div>
+      <div class="grid-3" id="grid-stock-inicial">
+        <div class="campo">
+          <label>Stock inicial disponible</label>
+          <input type="number" id="f-stock-disponible" min="0" value="0">
+        </div>
+        <div class="campo">
+          <label>Stock mínimo (alerta)</label>
+          <input type="number" id="f-stock-minimo" min="0" value="0">
+        </div>
+        <div class="campo">
+          <label id="f-costo-label">Costo promedio inicial ($ CLP)</label>
+          <input type="number" id="f-costo" min="0" step="1" value="0">
+        </div>
+      </div>
+      <p class="ayuda" id="ayuda-stock">El stock inicial queda registrado como primer movimiento de entrada. Una vez creado el producto, los cambios de stock (y el costo, que se recalcula solo como promedio ponderado) se hacen desde "Registrar movimiento".</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-producto">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar producto</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Detalle producto + movimientos -->
+<div class="modal-overlay" id="modal-detalle">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="detalle-nombre">Producto</h2>
+      <button class="modal-close" data-close="modal-detalle">&times;</button>
+    </div>
+
+    <div class="detalle-grid">
+      <div class="detalle-info">
+        <dl id="detalle-ficha"></dl>
+
+        <h3 class="subtitulo">Registrar movimiento</h3>
+        <form id="form-movimiento">
+          <input type="hidden" id="m-producto-id">
+          <div class="campo">
+            <label>Tipo</label>
+            <select id="m-tipo">
+              <option value="entrada">Entrada (ingreso de stock)</option>
+              <option value="salida">Salida (consumo / venta / uso)</option>
+              <option value="ajuste">Ajuste (fijar stock exacto)</option>
+            </select>
+          </div>
+          <div class="campo">
+            <label>Categoría</label>
+            <select id="m-categoria"></select>
+          </div>
+          <div class="campo" id="m-factura-wrap">
+            <label>N° de factura (opcional)</label>
+            <input type="text" id="m-factura" placeholder="Ej: F-1023">
+            <p class="ayuda-inline" id="m-factura-preview" style="display:none"></p>
+          </div>
+          <div class="campo">
+            <label id="m-cantidad-label">Cantidad</label>
+            <input type="number" id="m-cantidad" min="0" required>
+          </div>
+          <div class="campo" id="m-costo-wrap">
+            <label>Costo unitario de esta compra ($ CLP, opcional)</label>
+            <input type="number" id="m-costo" min="0" step="1" placeholder="Déjalo vacío si no cambió">
+          </div>
+          <div class="campo">
+            <label>Motivo</label>
+            <input type="text" id="m-motivo" placeholder="Ej: Compra a proveedor, orden de trabajo #123…">
+          </div>
+          <div class="campo">
+            <label>Responsable</label>
+            <input type="text" id="m-usuario" placeholder="Nombre de quien registra">
+          </div>
+          <div class="modal-actions modal-actions--start">
+            <button type="submit" class="btn btn-primary">Registrar movimiento</button>
+          </div>
+        </form>
+
+        <h3 class="subtitulo">Reservar stock</h3>
+        <form id="form-reservar">
+          <div class="campo">
+            <label>Cantidad a reservar</label>
+            <input type="number" id="res-cantidad" min="1" required>
+          </div>
+          <div class="campo">
+            <label>Orden de trabajo</label>
+            <input type="text" id="res-ot" placeholder="Ej: OT-2201">
+          </div>
+          <div class="campo">
+            <label>Motivo / notas</label>
+            <input type="text" id="res-motivo" placeholder="Ej: Reparación caja cliente X">
+          </div>
+          <div class="modal-actions modal-actions--start">
+            <button type="submit" class="btn btn-secundario">Reservar</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="detalle-historial">
+        <h3 class="subtitulo">Historial de movimientos</h3>
+        <div class="historial-lista" id="historial-lista">
+          <p class="vacio">Sin movimientos aún.</p>
+        </div>
+
+        <h3 class="subtitulo">Reservas activas</h3>
+        <div class="historial-lista" id="reservas-lista">
+          <p class="vacio">Sin reservas activas.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-actions modal-actions--split">
+      <button type="button" class="btn btn-danger" id="btn-eliminar-producto">Eliminar producto</button>
+      <button type="button" class="btn btn-secundario" id="btn-editar-producto">Editar datos</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Nueva ubicación -->
+<div class="modal-overlay" id="modal-ubicacion">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Nueva ubicación</h2>
+      <button class="modal-close" data-close="modal-ubicacion">&times;</button>
+    </div>
+    <form id="form-ubicacion">
+      <div class="grid-3">
+        <div class="campo">
+          <label>Pasillo</label>
+          <input type="number" id="u-pasillo" min="1" required>
+        </div>
+        <div class="campo">
+          <label>Estantería</label>
+          <input type="number" id="u-estanteria" min="1" required>
+        </div>
+        <div class="campo">
+          <label>Nivel</label>
+          <input type="number" id="u-nivel" min="1" required>
+        </div>
+      </div>
+      <p class="ayuda" id="u-preview">Código resultante: —</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-ubicacion">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Crear ubicación</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Nueva factura -->
+<div class="modal-overlay" id="modal-factura">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Nueva factura</h2>
+      <button class="modal-close" data-close="modal-factura">&times;</button>
+    </div>
+    <form id="form-factura">
+      <div class="grid-3">
+        <div class="campo">
+          <label>N° de factura *</label>
+          <input type="text" id="fac-numero" required placeholder="Ej: F-1023">
+        </div>
+        <div class="campo">
+          <label>Proveedor</label>
+          <div class="campo-select-mas">
+            <select id="fac-proveedor-id"><option value="">Sin proveedor</option></select>
+            <button type="button" class="btn-link" id="fac-nuevo-proveedor">+ Nuevo</button>
+          </div>
+        </div>
+        <div class="campo">
+          <label>Fecha</label>
+          <input type="date" id="fac-fecha">
+        </div>
+      </div>
+
+      <h3 class="subtitulo">Productos de la factura</h3>
+      <div id="fac-lineas"></div>
+      <button type="button" class="btn-link" id="fac-agregar-linea">+ Agregar producto</button>
+
+      <label class="toggle-critico" style="margin-top:16px">
+        <input type="checkbox" id="fac-aplicar-stock" checked>
+        Ingresar el stock automáticamente al guardar (recomendado)
+      </label>
+      <p class="ayuda-inline">Si lo desmarcas, la factura queda registrada pero el stock no se toca hasta que lo ingreses manualmente producto por producto.</p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-factura">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar factura</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Detalle de factura -->
+<div class="modal-overlay" id="modal-factura-detalle">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="fac-detalle-titulo">Factura</h2>
+      <button class="modal-close" data-close="modal-factura-detalle">&times;</button>
+    </div>
+    <div id="fac-detalle-info" class="ayuda"></div>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Producto</th>
+            <th class="num">Cantidad</th>
+            <th class="num">Precio unit.</th>
+            <th>Estado</th>
+          </tr>
+        </thead>
+        <tbody id="fac-detalle-lineas"></tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-danger" id="btn-eliminar-factura">Eliminar factura</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Nuevo / editar proveedor -->
+<div class="modal-overlay" id="modal-proveedor">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-proveedor-titulo">Nuevo proveedor</h2>
+      <button class="modal-close" data-close="modal-proveedor">&times;</button>
+    </div>
+    <form id="form-proveedor">
+      <input type="hidden" id="pv-id">
+      <div class="campo">
+        <label>Nombre *</label>
+        <input type="text" id="pv-nombre" required placeholder="Ej: Repuestos ABC">
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>RUT</label>
+          <input type="text" id="pv-rut" placeholder="Ej: 76.123.456-7">
+        </div>
+        <div class="campo">
+          <label>Teléfono</label>
+          <input type="text" id="pv-telefono" placeholder="Ej: +56 9 1234 5678">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Email</label>
+        <input type="email" id="pv-email" placeholder="Ej: ventas@proveedor.cl">
+      </div>
+      <div class="campo">
+        <label>Dirección</label>
+        <input type="text" id="pv-direccion" placeholder="Ej: Av. Siempre Viva 123, Santiago">
+      </div>
+      <div class="modal-actions modal-actions--split" id="pv-acciones-editar" style="display:none">
+        <button type="button" class="btn btn-danger" id="btn-eliminar-proveedor">Eliminar proveedor</button>
+        <span></span>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-proveedor">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar proveedor</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Respaldo -->
+<div class="modal-overlay" id="modal-respaldo">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Respaldo de datos</h2>
+      <button class="modal-close" data-close="modal-respaldo">&times;</button>
+    </div>
+
+    <div id="respaldo-diagnostico" class="ayuda">Cargando diagnóstico…</div>
+
+    <h3 class="subtitulo">Respaldo automático diario (por correo)</h3>
+    <div id="respaldo-auto-estado" class="ayuda">Cargando…</div>
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-secundario" id="btn-probar-respaldo-auto">Enviar un respaldo de prueba ahora</button>
+    </div>
+
+    <h3 class="subtitulo">Descargar respaldo</h3>
+    <p class="ayuda-inline">Guarda una copia de toda la base de datos en tu computador. Hazlo antes de cada actualización del sistema, por si algo sale mal.</p>
+    <div class="modal-actions modal-actions--start">
+      <a href="/api/backup/descargar" class="btn btn-primary" id="btn-descargar-respaldo">Descargar respaldo (.db)</a>
+    </div>
+
+    <h3 class="subtitulo">Restaurar desde un respaldo</h3>
+    <p class="ayuda-inline">⚠ Esto reemplaza TODOS los datos actuales por los del archivo que subas. Úsalo solo para recuperarte de una pérdida de datos.</p>
+    <form id="form-restaurar">
+      <div class="campo">
+        <input type="file" id="restaurar-archivo" accept=".db">
+      </div>
+      <div class="modal-actions modal-actions--start">
+        <button type="submit" class="btn btn-danger">Restaurar (reemplaza todo)</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Nuevo / editar usuario -->
+<div class="modal-overlay" id="modal-usuario">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-usuario-titulo">Nuevo usuario</h2>
+      <button class="modal-close" data-close="modal-usuario">&times;</button>
+    </div>
+    <form id="form-usuario">
+      <input type="hidden" id="us-id">
+      <div class="campo">
+        <label>Usuario (para iniciar sesión) *</label>
+        <input type="text" id="us-username" required placeholder="Ej: jperez" autocomplete="off">
+      </div>
+      <div class="campo">
+        <label>Nombre para mostrar</label>
+        <input type="text" id="us-nombre" placeholder="Ej: Juan Pérez">
+      </div>
+      <div class="campo">
+        <label id="us-password-label">Contraseña *</label>
+        <input type="password" id="us-password" autocomplete="new-password" placeholder="Mínimo 4 caracteres">
+      </div>
+      <div class="modal-actions modal-actions--split" id="us-acciones-editar" style="display:none">
+        <button type="button" class="btn btn-danger" id="btn-eliminar-usuario">Eliminar usuario</button>
+        <span></span>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-usuario">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar usuario</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

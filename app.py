@@ -47,7 +47,7 @@ def init_db():
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS productos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY,
             codigo_interno TEXT DEFAULT '',
             nombre TEXT NOT NULL,
             descripcion TEXT DEFAULT '',
@@ -158,19 +158,26 @@ def init_db():
         db.commit()
 
     # ---- Migración 3: el código interno deja de ser obligatorio/único a nivel
-    # de columna (ahora es opcional). Si la tabla viene de una versión anterior
-    # con esa restricción, se reconstruye preservando todos los datos.
+    # de columna (ahora es opcional). Y el id deja de usar AUTOINCREMENT: así,
+    # si borras el último producto creado, el siguiente que crees reutiliza
+    # ese número en vez de saltárselo para siempre. Si la tabla viene de una
+    # versión anterior con alguna de esas dos cosas, se reconstruye
+    # preservando todos los datos.
     info_codigo = next(
         (c for c in db.execute("PRAGMA table_info(productos)").fetchall() if c[1] == "codigo_interno"),
         None,
     )
-    necesita_reconstruir = info_codigo is not None and info_codigo[3] == 1  # notnull == 1
+    sql_tabla = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'productos'"
+    ).fetchone()
+    tiene_autoincrement = sql_tabla is not None and "AUTOINCREMENT" in sql_tabla[0].upper()
+    necesita_reconstruir = (info_codigo is not None and info_codigo[3] == 1) or tiene_autoincrement  # notnull == 1
 
     if necesita_reconstruir:
         db.executescript(
             """
             CREATE TABLE productos_nueva (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY,
                 codigo_interno TEXT DEFAULT '',
                 nombre TEXT NOT NULL,
                 descripcion TEXT DEFAULT '',
@@ -200,6 +207,7 @@ def init_db():
 
             DROP TABLE productos;
             ALTER TABLE productos_nueva RENAME TO productos;
+            DELETE FROM sqlite_sequence WHERE name = 'productos';
             """
         )
         db.commit()
@@ -241,8 +249,14 @@ def init_db():
         db.executemany("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", [(m,) for m in MODELOS_INICIALES])
     db.commit()
 
-    # ---- Migración 5: recalcula el nombre automático de productos antiguos
-    # que aún tengan el nombre escrito a mano (por si quedó desalineado).
+    # ---- Migración 5: se elimina el campo "marca" del sistema (a pedido del
+    # taller: la categoría + el modelo son suficientes para identificar el
+    # producto). Se limpia en todos los productos ya cargados y se
+    # recalcula el nombre automático por si dependía de la marca.
+    db.execute("UPDATE productos SET marca = '' WHERE marca IS NOT NULL AND marca != ''")
+    for r in db.execute("SELECT id, codigo_interno, categoria, modelo FROM productos").fetchall():
+        nuevo_nombre = nombre_automatico(r[2], r[3], r[1], r[0])
+        db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nuevo_nombre, r[0]))
     db.commit()
 
     # ---- Migración 6: agrega facturas.proveedor_id y crea registros de
@@ -284,15 +298,13 @@ def codigo_ubicacion(pasillo, estanteria, nivel):
     return f"P{pasillo}-E{estanteria}-N{nivel}"
 
 
-def nombre_automatico(categoria, modelo, marca, codigo_interno, id_num):
+def nombre_automatico(categoria, modelo, codigo_interno, id_num):
     """El producto ya no tiene un campo 'nombre' editable: se arma solo a
     partir de categoría + modelo (los datos que realmente lo identifican),
     con respaldos razonables si esos vienen vacíos."""
     partes = [p for p in [(categoria or "").strip(), (modelo or "").strip()] if p]
     if partes:
         return " - ".join(partes)
-    if (marca or "").strip():
-        return marca.strip()
     if (codigo_interno or "").strip():
         return codigo_interno.strip()
     return f"Producto #{id_num:04d}"
@@ -336,11 +348,11 @@ def listar_productos():
 
     if q:
         sql += """ AND (
-            p.codigo_interno LIKE ? OR p.nombre LIKE ? OR p.marca LIKE ?
+            p.codigo_interno LIKE ? OR p.nombre LIKE ?
             OR p.modelo LIKE ? OR u.codigo LIKE ? OR CAST(p.id AS TEXT) LIKE ?
         )"""
         like = f"%{q}%"
-        params += [like, like, like, like, like, like]
+        params += [like, like, like, like, like]
 
     if categoria:
         sql += " AND p.categoria = ?"
@@ -392,7 +404,6 @@ def crear_producto():
 
     codigo_interno = (data.get("codigo_interno") or "").strip()
     categoria = (data.get("categoria") or "").strip()
-    marca = (data.get("marca") or "").strip()
     modelo = (data.get("modelo") or "").strip()
 
     db = get_db()
@@ -403,6 +414,17 @@ def crear_producto():
         ).fetchone()
         if existe:
             return jsonify({"error": f"Ya existe un producto con código '{codigo_interno}'"}), 400
+
+    if categoria or modelo:
+        duplicado = db.execute(
+            "SELECT id, id AS pid FROM productos WHERE lower(trim(categoria)) = lower(trim(?)) AND lower(trim(modelo)) = lower(trim(?))",
+            (categoria, modelo),
+        ).fetchone()
+        if duplicado:
+            return jsonify({
+                "error": f"Ya existe un producto con esa categoría y modelo (#{duplicado[0]:04d}). "
+                         f"Si necesitas más stock, ingrésalo con una factura en vez de crear un producto nuevo."
+            }), 400
 
     ts = now_iso()
     try:
@@ -422,11 +444,8 @@ def crear_producto():
         existe_ubi = db.execute("SELECT id FROM ubicaciones WHERE id = ?", (ubicacion_id,)).fetchone()
         if not existe_ubi:
             return jsonify({"error": "La ubicación seleccionada no existe"}), 400
-        ocupada = db.execute(
-            "SELECT id FROM productos WHERE ubicacion_id = ?", (ubicacion_id,)
-        ).fetchone()
-        if ocupada:
-            return jsonify({"error": "Esa ubicación ya está ocupada por otro producto"}), 400
+        # Nota: una ubicación puede tener más de un producto (es normal en
+        # una bodega real), así que aquí no se valida "ocupación".
 
     # El nombre se autogenera (no existe como campo del formulario); se
     # calcula una vez que sabemos el id definitivo del producto.
@@ -436,13 +455,12 @@ def crear_producto():
             codigo_interno, nombre, descripcion, categoria, marca, modelo,
             ubicacion_id, stock_disponible, stock_reservado, stock_minimo,
             costo_compra, creado_en, actualizado_en
-        ) VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, '', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             codigo_interno,
             (data.get("descripcion") or "").strip(),
             categoria,
-            marca,
             modelo,
             ubicacion_id,
             stock_disponible,
@@ -454,7 +472,7 @@ def crear_producto():
         ),
     )
     nuevo_id = cur.lastrowid
-    nombre = nombre_automatico(categoria, modelo, marca, codigo_interno, nuevo_id)
+    nombre = nombre_automatico(categoria, modelo, codigo_interno, nuevo_id)
     db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nombre, nuevo_id))
 
     # Si se crea con stock inicial, se deja registrado como movimiento de entrada
@@ -470,7 +488,6 @@ def crear_producto():
     db.commit()
 
     _asegurar_categoria(db, categoria)
-    _asegurar_marca(db, marca)
     _asegurar_modelo(db, modelo)
     db.commit()
 
@@ -514,18 +531,24 @@ def editar_producto(producto_id):
             existe_ubi = db.execute("SELECT id FROM ubicaciones WHERE id = ?", (ubicacion_id,)).fetchone()
             if not existe_ubi:
                 return jsonify({"error": "La ubicación seleccionada no existe"}), 400
-            ocupada = db.execute(
-                "SELECT id FROM productos WHERE ubicacion_id = ? AND id != ?", (ubicacion_id, producto_id)
-            ).fetchone()
-            if ocupada:
-                return jsonify({"error": "Esa ubicación ya está ocupada por otro producto"}), 400
+            # Una ubicación puede tener más de un producto; no se valida "ocupación".
     else:
         ubicacion_id = row["ubicacion_id"]
 
     categoria = (data.get("categoria") if data.get("categoria") is not None else row["categoria"]).strip()
-    marca = (data.get("marca") if data.get("marca") is not None else row["marca"]).strip()
     modelo = (data.get("modelo") if data.get("modelo") is not None else row["modelo"]).strip()
-    nombre = nombre_automatico(categoria, modelo, marca, codigo_interno, producto_id)
+
+    if categoria or modelo:
+        duplicado_pm = db.execute(
+            "SELECT id FROM productos WHERE lower(trim(categoria)) = lower(trim(?)) AND lower(trim(modelo)) = lower(trim(?)) AND id != ?",
+            (categoria, modelo, producto_id),
+        ).fetchone()
+        if duplicado_pm:
+            return jsonify({
+                "error": f"Ya existe otro producto con esa categoría y modelo (#{duplicado_pm[0]:04d})."
+            }), 400
+
+    nombre = nombre_automatico(categoria, modelo, codigo_interno, producto_id)
 
     # Nota: el stock disponible/reservado NO se edita aquí directamente.
     # Se ajusta siempre a través de /movimiento para dejar trazabilidad.
@@ -533,7 +556,7 @@ def editar_producto(producto_id):
         """
         UPDATE productos SET
             codigo_interno = ?, nombre = ?, descripcion = ?, categoria = ?,
-            marca = ?, modelo = ?, ubicacion_id = ?,
+            marca = '', modelo = ?, ubicacion_id = ?,
             stock_minimo = ?, costo_compra = ?, actualizado_en = ?
         WHERE id = ?
         """,
@@ -542,7 +565,6 @@ def editar_producto(producto_id):
             nombre,
             (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip(),
             categoria,
-            marca,
             modelo,
             ubicacion_id,
             stock_minimo,
@@ -554,7 +576,6 @@ def editar_producto(producto_id):
     db.commit()
 
     _asegurar_categoria(db, categoria)
-    _asegurar_marca(db, marca)
     _asegurar_modelo(db, modelo)
     db.commit()
 
@@ -723,30 +744,24 @@ def registrar_movimiento(producto_id):
 @app.route("/api/ubicaciones", methods=["GET"])
 def listar_ubicaciones():
     db = get_db()
-    rows = db.execute(
-        """
-        SELECT u.*,
-               p.id AS producto_id, p.codigo_interno, p.nombre AS producto_nombre
-        FROM ubicaciones u
-        LEFT JOIN productos p ON p.ubicacion_id = u.id
-        ORDER BY u.pasillo, u.estanteria, u.nivel
-        """
+    ubis = db.execute(
+        "SELECT * FROM ubicaciones ORDER BY pasillo, estanteria, nivel"
     ).fetchall()
 
     ubicaciones = []
-    for r in rows:
+    for u in ubis:
+        productos = db.execute(
+            "SELECT id, codigo_interno, nombre FROM productos WHERE ubicacion_id = ? ORDER BY nombre COLLATE NOCASE",
+            (u["id"],),
+        ).fetchall()
         ubicaciones.append({
-            "id": r["id"],
-            "pasillo": r["pasillo"],
-            "estanteria": r["estanteria"],
-            "nivel": r["nivel"],
-            "codigo": r["codigo"],
-            "ocupada": r["producto_id"] is not None,
-            "producto": {
-                "id": r["producto_id"],
-                "codigo_interno": r["codigo_interno"],
-                "nombre": r["producto_nombre"],
-            } if r["producto_id"] is not None else None,
+            "id": u["id"],
+            "pasillo": u["pasillo"],
+            "estanteria": u["estanteria"],
+            "nivel": u["nivel"],
+            "codigo": u["codigo"],
+            "ocupada": len(productos) > 0,
+            "productos": [dict(p) for p in productos],
         })
 
     return jsonify({"ubicaciones": ubicaciones, "total": len(ubicaciones)})
@@ -791,11 +806,20 @@ def eliminar_ubicacion(ubicacion_id):
     if row is None:
         return jsonify({"error": "Ubicación no encontrada"}), 404
 
-    ocupada = db.execute(
-        "SELECT id FROM productos WHERE ubicacion_id = ?", (ubicacion_id,)
-    ).fetchone()
-    if ocupada:
-        return jsonify({"error": "No se puede eliminar: hay un producto guardado en esa ubicación"}), 400
+    forzar = request.args.get("forzar") == "1"
+    cant_productos = db.execute(
+        "SELECT COUNT(*) FROM productos WHERE ubicacion_id = ?", (ubicacion_id,)
+    ).fetchone()[0]
+
+    if cant_productos > 0 and not forzar:
+        return jsonify({
+            "error": f"Esta ubicación tiene {cant_productos} producto(s) guardado(s). "
+                     f"Puedes eliminarla de todas formas: esos productos quedan sin ubicación asignada.",
+            "requiere_forzar": True,
+        }), 409
+
+    if forzar:
+        db.execute("UPDATE productos SET ubicacion_id = NULL WHERE ubicacion_id = ?", (ubicacion_id,))
 
     db.execute("DELETE FROM ubicaciones WHERE id = ?", (ubicacion_id,))
     db.commit()
@@ -810,12 +834,6 @@ def _asegurar_categoria(db, nombre):
     nombre = (nombre or "").strip()
     if nombre:
         db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (nombre,))
-
-
-def _asegurar_marca(db, nombre):
-    nombre = (nombre or "").strip()
-    if nombre:
-        db.execute("INSERT OR IGNORE INTO marcas (nombre) VALUES (?)", (nombre,))
 
 
 def _asegurar_modelo(db, nombre):
@@ -839,25 +857,6 @@ def crear_categoria():
         return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
     db = get_db()
     db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (nombre,))
-    db.commit()
-    return jsonify({"nombre": nombre}), 201
-
-
-@app.route("/api/marcas", methods=["GET"])
-def listar_marcas():
-    db = get_db()
-    rows = db.execute("SELECT nombre FROM marcas ORDER BY nombre COLLATE NOCASE").fetchall()
-    return jsonify({"marcas": [r["nombre"] for r in rows]})
-
-
-@app.route("/api/marcas", methods=["POST"])
-def crear_marca():
-    data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
-    if not nombre:
-        return jsonify({"error": "El nombre de la marca no puede estar vacío"}), 400
-    db = get_db()
-    db.execute("INSERT OR IGNORE INTO marcas (nombre) VALUES (?)", (nombre,))
     db.commit()
     return jsonify({"nombre": nombre}), 201
 

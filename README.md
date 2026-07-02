@@ -49,6 +49,19 @@ Sistema de logística y abastecimiento para el taller, basado en el documento
     ese stock, no te deja eliminarla hasta que ajustes el stock a mano
     primero — para no dejar el inventario descuadrado.
 
+## Ajustes de esta ronda
+- **Se eliminó "Marca"** del sistema. La categoría + el modelo son
+  suficientes para identificar cada producto. Si ya tenías productos con
+  marca cargada, se limpió sola al abrir esta versión.
+- **Una ubicación ahora puede tener varios productos** (antes era 1 a 1,
+  lo cual no reflejaba la realidad de una bodega).
+- **No se pueden crear dos productos con la misma categoría + modelo.**
+  Si necesitas más stock de algo que ya existe, se ingresa con una
+  factura (Registrar movimiento), no creando el producto de nuevo.
+- **El N° de sistema ahora reutiliza números libres**: si creas un
+  producto y lo borras, el siguiente que crees puede reutilizar ese
+  número (antes seguía saltándose los números borrados para siempre).
+
 ## Proveedores (Módulo 4)
 - Pestaña "Proveedores": nombre, RUT, teléfono, email y dirección.
 - Al crear una factura, eliges el proveedor de una lista (con "+ Nuevo"

@@ -1,0 +1,1234 @@
+"""
+Sistema de Inventario - Taller Mecánico
+Módulo 2: Administración de Inventario + Módulo 3: Organización Física de
+Bodega + una primera pieza del Módulo 4: Facturas de compra.
+
+Backend en Flask + SQLite. Sin dependencias raras: solo Flask,
+para que sea fácil de instalar y correr en cualquier PC o servidor.
+"""
+
+import os
+import sqlite3
+from datetime import datetime
+
+from flask import Flask, g, jsonify, request, render_template
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
+
+app = Flask(__name__)
+
+CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
+MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
+
+
+# ---------------------------------------------------------------------------
+# Conexión a la base de datos
+# ---------------------------------------------------------------------------
+
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DB_PATH)
+        g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(exception=None):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    db = sqlite3.connect(DB_PATH)
+
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS productos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo_interno TEXT DEFAULT '',
+            nombre TEXT NOT NULL,
+            descripcion TEXT DEFAULT '',
+            categoria TEXT DEFAULT '',
+            marca TEXT DEFAULT '',
+            modelo TEXT DEFAULT '',
+            ubicacion TEXT DEFAULT '',
+            ubicacion_id INTEGER REFERENCES ubicaciones(id),
+            stock_disponible INTEGER NOT NULL DEFAULT 0,
+            stock_reservado INTEGER NOT NULL DEFAULT 0,
+            stock_minimo INTEGER NOT NULL DEFAULT 0,
+            costo_compra REAL NOT NULL DEFAULT 0,
+            creado_en TEXT NOT NULL,
+            actualizado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS movimientos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            producto_id INTEGER NOT NULL,
+            fecha TEXT NOT NULL,
+            tipo TEXT NOT NULL,          -- entrada | salida | ajuste
+            cantidad INTEGER NOT NULL,
+            motivo TEXT DEFAULT '',
+            usuario TEXT DEFAULT '',
+            costo_unitario REAL,
+            factura_id INTEGER,
+            factura_numero TEXT,
+            stock_resultante INTEGER NOT NULL,
+            FOREIGN KEY (producto_id) REFERENCES productos (id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS ubicaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pasillo INTEGER NOT NULL,
+            estanteria INTEGER NOT NULL,
+            nivel INTEGER NOT NULL,
+            codigo TEXT UNIQUE NOT NULL,
+            creado_en TEXT NOT NULL,
+            UNIQUE (pasillo, estanteria, nivel)
+        );
+
+        CREATE TABLE IF NOT EXISTS categorias (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS marcas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS modelos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS facturas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero TEXT UNIQUE NOT NULL,
+            proveedor TEXT DEFAULT '',
+            proveedor_id INTEGER REFERENCES proveedores(id),
+            fecha TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS proveedores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL,
+            rut TEXT DEFAULT '',
+            telefono TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            direccion TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS factura_lineas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            factura_id INTEGER NOT NULL,
+            producto_id INTEGER NOT NULL,
+            cantidad INTEGER NOT NULL,
+            precio_unitario REAL NOT NULL,
+            aplicada INTEGER NOT NULL DEFAULT 0,
+            aplicada_en TEXT,
+            FOREIGN KEY (factura_id) REFERENCES facturas (id) ON DELETE CASCADE,
+            FOREIGN KEY (producto_id) REFERENCES productos (id)
+        );
+        """
+    )
+    db.commit()
+
+    # ---- Migración 1: agrega productos.ubicacion_id si la base ya existía
+    # de una versión sin Módulo 3 (sin perder los datos ya cargados).
+    columnas = [c[1] for c in db.execute("PRAGMA table_info(productos)").fetchall()]
+    if "ubicacion_id" not in columnas:
+        db.execute("ALTER TABLE productos ADD COLUMN ubicacion_id INTEGER REFERENCES ubicaciones(id)")
+        db.commit()
+
+    # ---- Migración 2: columnas nuevas en movimientos (costo_unitario, factura)
+    columnas_mov = [c[1] for c in db.execute("PRAGMA table_info(movimientos)").fetchall()]
+    if "costo_unitario" not in columnas_mov:
+        db.execute("ALTER TABLE movimientos ADD COLUMN costo_unitario REAL")
+        db.commit()
+    if "factura_id" not in columnas_mov:
+        db.execute("ALTER TABLE movimientos ADD COLUMN factura_id INTEGER")
+        db.commit()
+    if "factura_numero" not in columnas_mov:
+        db.execute("ALTER TABLE movimientos ADD COLUMN factura_numero TEXT")
+        db.commit()
+
+    # ---- Migración 3: el código interno deja de ser obligatorio/único a nivel
+    # de columna (ahora es opcional). Si la tabla viene de una versión anterior
+    # con esa restricción, se reconstruye preservando todos los datos.
+    info_codigo = next(
+        (c for c in db.execute("PRAGMA table_info(productos)").fetchall() if c[1] == "codigo_interno"),
+        None,
+    )
+    necesita_reconstruir = info_codigo is not None and info_codigo[3] == 1  # notnull == 1
+
+    if necesita_reconstruir:
+        db.executescript(
+            """
+            CREATE TABLE productos_nueva (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                codigo_interno TEXT DEFAULT '',
+                nombre TEXT NOT NULL,
+                descripcion TEXT DEFAULT '',
+                categoria TEXT DEFAULT '',
+                marca TEXT DEFAULT '',
+                modelo TEXT DEFAULT '',
+                ubicacion TEXT DEFAULT '',
+                ubicacion_id INTEGER REFERENCES ubicaciones(id),
+                stock_disponible INTEGER NOT NULL DEFAULT 0,
+                stock_reservado INTEGER NOT NULL DEFAULT 0,
+                stock_minimo INTEGER NOT NULL DEFAULT 0,
+                costo_compra REAL NOT NULL DEFAULT 0,
+                creado_en TEXT NOT NULL,
+                actualizado_en TEXT NOT NULL
+            );
+
+            INSERT INTO productos_nueva (
+                id, codigo_interno, nombre, descripcion, categoria, marca, modelo,
+                ubicacion, ubicacion_id, stock_disponible, stock_reservado,
+                stock_minimo, costo_compra, creado_en, actualizado_en
+            )
+            SELECT
+                id, codigo_interno, nombre, descripcion, categoria, marca, modelo,
+                ubicacion, ubicacion_id, stock_disponible, stock_reservado,
+                stock_minimo, costo_compra, creado_en, actualizado_en
+            FROM productos;
+
+            DROP TABLE productos;
+            ALTER TABLE productos_nueva RENAME TO productos;
+            """
+        )
+        db.commit()
+
+    # Índice único parcial: el código interno solo debe ser único cuando se
+    # informa (puede quedar vacío porque no todas las facturas lo traen).
+    db.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_codigo_interno_unico
+        ON productos (codigo_interno)
+        WHERE codigo_interno IS NOT NULL AND codigo_interno != ''
+        """
+    )
+    db.commit()
+
+    # ---- Migración 4: corrige una carga anterior en la que los modelos de
+    # caja (JF011, 722.9, etc.) habían quedado precargados como "marca" en
+    # vez de "modelo". Se mueven de la tabla marcas a la tabla modelos, y se
+    # corrigen los productos que ya los tenían asignados como marca.
+    for valor in MODELOS_INICIALES:
+        estaba_en_marcas = db.execute("SELECT id FROM marcas WHERE nombre = ?", (valor,)).fetchone()
+        if estaba_en_marcas:
+            db.execute("DELETE FROM marcas WHERE nombre = ?", (valor,))
+            db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (valor,))
+            db.execute(
+                "UPDATE productos SET modelo = ?, marca = '' WHERE marca = ? AND (modelo IS NULL OR modelo = '')",
+                (valor, valor),
+            )
+            db.execute(
+                "UPDATE productos SET marca = '' WHERE marca = ?",
+                (valor,),
+            )
+    db.commit()
+
+    # ---- Semillas: categorías y modelos iniciales (solo si la tabla está vacía)
+    if db.execute("SELECT COUNT(*) FROM categorias").fetchone()[0] == 0:
+        db.executemany("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", [(c,) for c in CATEGORIAS_INICIALES])
+    if db.execute("SELECT COUNT(*) FROM modelos").fetchone()[0] == 0:
+        db.executemany("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", [(m,) for m in MODELOS_INICIALES])
+    db.commit()
+
+    # ---- Migración 5: recalcula el nombre automático de productos antiguos
+    # que aún tengan el nombre escrito a mano (por si quedó desalineado).
+    db.commit()
+
+    # ---- Migración 6: agrega facturas.proveedor_id y crea registros de
+    # proveedor a partir del texto libre que ya existía, sin perder nada.
+    columnas_fac = [c[1] for c in db.execute("PRAGMA table_info(facturas)").fetchall()]
+    if "proveedor_id" not in columnas_fac:
+        db.execute("ALTER TABLE facturas ADD COLUMN proveedor_id INTEGER REFERENCES proveedores(id)")
+        db.commit()
+
+    nombres_proveedor = [
+        r[0] for r in db.execute(
+            "SELECT DISTINCT proveedor FROM facturas WHERE proveedor IS NOT NULL AND proveedor != '' AND (proveedor_id IS NULL)"
+        ).fetchall()
+    ]
+    for nombre in nombres_proveedor:
+        db.execute("INSERT OR IGNORE INTO proveedores (nombre, creado_en) VALUES (?, ?)", (nombre, now_iso()))
+        db.execute(
+            "UPDATE facturas SET proveedor_id = (SELECT id FROM proveedores WHERE nombre = ?) "
+            "WHERE proveedor = ? AND proveedor_id IS NULL",
+            (nombre, nombre),
+        )
+    db.commit()
+
+    db.close()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def row_to_dict(row):
+    d = dict(row)
+    d["stock_total"] = d["stock_disponible"] + d["stock_reservado"]
+    d["id_sistema"] = f"{d['id']:04d}"
+    return d
+
+
+def codigo_ubicacion(pasillo, estanteria, nivel):
+    return f"P{pasillo}-E{estanteria}-N{nivel}"
+
+
+def nombre_automatico(categoria, modelo, marca, codigo_interno, id_num):
+    """El producto ya no tiene un campo 'nombre' editable: se arma solo a
+    partir de categoría + modelo (los datos que realmente lo identifican),
+    con respaldos razonables si esos vienen vacíos."""
+    partes = [p for p in [(categoria or "").strip(), (modelo or "").strip()] if p]
+    if partes:
+        return " - ".join(partes)
+    if (marca or "").strip():
+        return marca.strip()
+    if (codigo_interno or "").strip():
+        return codigo_interno.strip()
+    return f"Producto #{id_num:04d}"
+
+
+PRODUCTO_SELECT = """
+    SELECT p.*, u.codigo AS ubicacion_codigo, u.pasillo AS ubicacion_pasillo,
+           u.estanteria AS ubicacion_estanteria, u.nivel AS ubicacion_nivel
+    FROM productos p
+    LEFT JOIN ubicaciones u ON p.ubicacion_id = u.id
+"""
+
+
+def now_iso():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------------------
+# Páginas
+# ---------------------------------------------------------------------------
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+# ---------------------------------------------------------------------------
+# API: Productos
+# ---------------------------------------------------------------------------
+
+@app.route("/api/productos", methods=["GET"])
+def listar_productos():
+    db = get_db()
+    q = request.args.get("q", "").strip()
+    categoria = request.args.get("categoria", "").strip()
+    solo_criticos = request.args.get("criticos") == "1"
+    ubicacion_id = request.args.get("ubicacion_id", "").strip()
+
+    sql = PRODUCTO_SELECT + " WHERE 1=1"
+    params = []
+
+    if q:
+        sql += """ AND (
+            p.codigo_interno LIKE ? OR p.nombre LIKE ? OR p.marca LIKE ?
+            OR p.modelo LIKE ? OR u.codigo LIKE ? OR CAST(p.id AS TEXT) LIKE ?
+        )"""
+        like = f"%{q}%"
+        params += [like, like, like, like, like, like]
+
+    if categoria:
+        sql += " AND p.categoria = ?"
+        params.append(categoria)
+
+    if solo_criticos:
+        sql += " AND p.stock_disponible <= p.stock_minimo"
+
+    if ubicacion_id:
+        sql += " AND p.ubicacion_id = ?"
+        params.append(ubicacion_id)
+
+    sql += " ORDER BY p.nombre COLLATE NOCASE ASC"
+
+    rows = db.execute(sql, params).fetchall()
+    productos = [row_to_dict(r) for r in rows]
+
+    categorias = [r["categoria"] for r in db.execute(
+        "SELECT DISTINCT categoria FROM productos WHERE categoria != '' ORDER BY categoria"
+    ).fetchall()]
+
+    return jsonify({
+        "productos": productos,
+        "categorias": categorias,
+        "total": len(productos),
+    })
+
+
+@app.route("/api/productos/<int:producto_id>", methods=["GET"])
+def obtener_producto(producto_id):
+    db = get_db()
+    row = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    movimientos = db.execute(
+        "SELECT * FROM movimientos WHERE producto_id = ? ORDER BY fecha DESC, id DESC",
+        (producto_id,),
+    ).fetchall()
+
+    producto = row_to_dict(row)
+    producto["movimientos"] = [dict(m) for m in movimientos]
+    return jsonify(producto)
+
+
+@app.route("/api/productos", methods=["POST"])
+def crear_producto():
+    data = request.get_json(force=True, silent=True) or {}
+
+    codigo_interno = (data.get("codigo_interno") or "").strip()
+    categoria = (data.get("categoria") or "").strip()
+    marca = (data.get("marca") or "").strip()
+    modelo = (data.get("modelo") or "").strip()
+
+    db = get_db()
+
+    if codigo_interno:
+        existe = db.execute(
+            "SELECT id FROM productos WHERE codigo_interno = ?", (codigo_interno,)
+        ).fetchone()
+        if existe:
+            return jsonify({"error": f"Ya existe un producto con código '{codigo_interno}'"}), 400
+
+    ts = now_iso()
+    try:
+        stock_disponible = int(data.get("stock_disponible") or 0)
+        stock_reservado = int(data.get("stock_reservado") or 0)
+        stock_minimo = int(data.get("stock_minimo") or 0)
+        costo_compra = float(data.get("costo_compra") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Stock y costo deben ser números"}), 400
+
+    ubicacion_id = data.get("ubicacion_id") or None
+    if ubicacion_id:
+        try:
+            ubicacion_id = int(ubicacion_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Ubicación inválida"}), 400
+        existe_ubi = db.execute("SELECT id FROM ubicaciones WHERE id = ?", (ubicacion_id,)).fetchone()
+        if not existe_ubi:
+            return jsonify({"error": "La ubicación seleccionada no existe"}), 400
+        ocupada = db.execute(
+            "SELECT id FROM productos WHERE ubicacion_id = ?", (ubicacion_id,)
+        ).fetchone()
+        if ocupada:
+            return jsonify({"error": "Esa ubicación ya está ocupada por otro producto"}), 400
+
+    # El nombre se autogenera (no existe como campo del formulario); se
+    # calcula una vez que sabemos el id definitivo del producto.
+    cur = db.execute(
+        """
+        INSERT INTO productos (
+            codigo_interno, nombre, descripcion, categoria, marca, modelo,
+            ubicacion_id, stock_disponible, stock_reservado, stock_minimo,
+            costo_compra, creado_en, actualizado_en
+        ) VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            codigo_interno,
+            (data.get("descripcion") or "").strip(),
+            categoria,
+            marca,
+            modelo,
+            ubicacion_id,
+            stock_disponible,
+            stock_reservado,
+            stock_minimo,
+            costo_compra,
+            ts,
+            ts,
+        ),
+    )
+    nuevo_id = cur.lastrowid
+    nombre = nombre_automatico(categoria, modelo, marca, codigo_interno, nuevo_id)
+    db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nombre, nuevo_id))
+
+    # Si se crea con stock inicial, se deja registrado como movimiento de entrada
+    if stock_disponible > 0:
+        db.execute(
+            """
+            INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, motivo, usuario, costo_unitario, stock_resultante)
+            VALUES (?, ?, 'entrada', ?, 'Stock inicial al crear producto', ?, ?, ?)
+            """,
+            (nuevo_id, ts, stock_disponible, (data.get("usuario") or "Sistema"), costo_compra, stock_disponible),
+        )
+
+    db.commit()
+
+    _asegurar_categoria(db, categoria)
+    _asegurar_marca(db, marca)
+    _asegurar_modelo(db, modelo)
+    db.commit()
+
+    nuevo = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (nuevo_id,)).fetchone()
+    return jsonify(row_to_dict(nuevo)), 201
+
+
+@app.route("/api/productos/<int:producto_id>", methods=["PUT"])
+def editar_producto(producto_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+
+    codigo_interno = data.get("codigo_interno", row["codigo_interno"])
+    codigo_interno = (codigo_interno or "").strip()
+
+    if codigo_interno:
+        duplicado = db.execute(
+            "SELECT id FROM productos WHERE codigo_interno = ? AND id != ?",
+            (codigo_interno, producto_id),
+        ).fetchone()
+        if duplicado:
+            return jsonify({"error": f"Ya existe otro producto con código '{codigo_interno}'"}), 400
+
+    try:
+        stock_minimo = int(data.get("stock_minimo", row["stock_minimo"]))
+        costo_compra = float(data.get("costo_compra", row["costo_compra"]))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Stock mínimo y costo deben ser números"}), 400
+
+    if "ubicacion_id" in data:
+        ubicacion_id = data.get("ubicacion_id") or None
+        if ubicacion_id:
+            try:
+                ubicacion_id = int(ubicacion_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Ubicación inválida"}), 400
+            existe_ubi = db.execute("SELECT id FROM ubicaciones WHERE id = ?", (ubicacion_id,)).fetchone()
+            if not existe_ubi:
+                return jsonify({"error": "La ubicación seleccionada no existe"}), 400
+            ocupada = db.execute(
+                "SELECT id FROM productos WHERE ubicacion_id = ? AND id != ?", (ubicacion_id, producto_id)
+            ).fetchone()
+            if ocupada:
+                return jsonify({"error": "Esa ubicación ya está ocupada por otro producto"}), 400
+    else:
+        ubicacion_id = row["ubicacion_id"]
+
+    categoria = (data.get("categoria") if data.get("categoria") is not None else row["categoria"]).strip()
+    marca = (data.get("marca") if data.get("marca") is not None else row["marca"]).strip()
+    modelo = (data.get("modelo") if data.get("modelo") is not None else row["modelo"]).strip()
+    nombre = nombre_automatico(categoria, modelo, marca, codigo_interno, producto_id)
+
+    # Nota: el stock disponible/reservado NO se edita aquí directamente.
+    # Se ajusta siempre a través de /movimiento para dejar trazabilidad.
+    db.execute(
+        """
+        UPDATE productos SET
+            codigo_interno = ?, nombre = ?, descripcion = ?, categoria = ?,
+            marca = ?, modelo = ?, ubicacion_id = ?,
+            stock_minimo = ?, costo_compra = ?, actualizado_en = ?
+        WHERE id = ?
+        """,
+        (
+            codigo_interno,
+            nombre,
+            (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip(),
+            categoria,
+            marca,
+            modelo,
+            ubicacion_id,
+            stock_minimo,
+            costo_compra,
+            now_iso(),
+            producto_id,
+        ),
+    )
+    db.commit()
+
+    _asegurar_categoria(db, categoria)
+    _asegurar_marca(db, marca)
+    _asegurar_modelo(db, modelo)
+    db.commit()
+
+    actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
+    return jsonify(row_to_dict(actualizado))
+
+
+@app.route("/api/productos/<int:producto_id>", methods=["DELETE"])
+def eliminar_producto(producto_id):
+    db = get_db()
+    row = db.execute("SELECT id FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    forzar = request.args.get("forzar") == "1"
+
+    cant_movimientos = db.execute(
+        "SELECT COUNT(*) FROM movimientos WHERE producto_id = ?", (producto_id,)
+    ).fetchone()[0]
+    cant_lineas_factura = db.execute(
+        "SELECT COUNT(*) FROM factura_lineas WHERE producto_id = ?", (producto_id,)
+    ).fetchone()[0]
+
+    if (cant_movimientos > 0 or cant_lineas_factura > 0) and not forzar:
+        partes = []
+        if cant_movimientos > 0:
+            partes.append(f"{cant_movimientos} movimiento(s) de stock")
+        if cant_lineas_factura > 0:
+            partes.append(f"{cant_lineas_factura} línea(s) de factura")
+        detalle = " y ".join(partes)
+        return jsonify({
+            "error": f"Este producto tiene {detalle} asociados. Si lo eliminas, se pierde ese historial de forma permanente.",
+            "requiere_forzar": True,
+        }), 409
+
+    if forzar:
+        # El producto deja de existir, así que su historial y su presencia
+        # en facturas ya no tienen sentido: se eliminan junto con él.
+        db.execute("DELETE FROM factura_lineas WHERE producto_id = ?", (producto_id,))
+        # Los movimientos se eliminan solos por ON DELETE CASCADE.
+
+    db.execute("DELETE FROM productos WHERE id = ?", (producto_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# API: Movimientos (ingreso/salida/ajuste de stock, con trazabilidad)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/productos/<int:producto_id>/movimiento", methods=["POST"])
+def registrar_movimiento(producto_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    tipo = (data.get("tipo") or "").strip().lower()
+    motivo = (data.get("motivo") or "").strip()
+    usuario = (data.get("usuario") or "").strip() or "Sin especificar"
+    factura_numero = (data.get("factura_numero") or "").strip()
+
+    if tipo not in ("entrada", "salida", "ajuste"):
+        return jsonify({"error": "Tipo de movimiento inválido (usa entrada, salida o ajuste)"}), 400
+
+    if factura_numero and tipo != "entrada":
+        return jsonify({"error": "El número de factura solo aplica a movimientos de entrada"}), 400
+
+    try:
+        cantidad = int(data.get("cantidad"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "La cantidad debe ser un número entero"}), 400
+
+    if tipo in ("entrada", "salida") and cantidad <= 0:
+        return jsonify({"error": "La cantidad debe ser mayor a 0"}), 400
+
+    costo_unitario = None
+    if tipo == "entrada" and data.get("costo_unitario") not in (None, ""):
+        try:
+            costo_unitario = float(data.get("costo_unitario"))
+            if costo_unitario < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+
+    # ---- Si viene un número de factura, esta manda: la cantidad y el costo
+    # se toman EXACTOS de la línea de esa factura para ese producto (no de
+    # lo que haya tipeado el usuario), y esa línea queda marcada como usada.
+    factura = None
+    linea = None
+    if factura_numero:
+        factura = db.execute("SELECT * FROM facturas WHERE numero = ?", (factura_numero,)).fetchone()
+        if not factura:
+            return jsonify({"error": f"No existe una factura registrada con el número '{factura_numero}'"}), 400
+        linea = db.execute(
+            "SELECT * FROM factura_lineas WHERE factura_id = ? AND producto_id = ?",
+            (factura["id"], producto_id),
+        ).fetchone()
+        if not linea:
+            return jsonify({"error": f"Este producto no aparece en la factura '{factura_numero}'"}), 400
+        if linea["aplicada"]:
+            return jsonify({"error": f"La línea de este producto en la factura '{factura_numero}' ya fue ingresada a stock antes"}), 400
+        cantidad = linea["cantidad"]
+        costo_unitario = linea["precio_unitario"]
+
+    stock_actual = row["stock_disponible"]
+    costo_actual = row["costo_compra"]
+    nuevo_costo_promedio = costo_actual
+
+    if tipo == "entrada":
+        nuevo_stock = stock_actual + cantidad
+        if costo_unitario is not None:
+            # Costo Promedio Ponderado: recalcula el costo de referencia del
+            # producto combinando lo que ya había con lo que se acaba de comprar.
+            valor_actual = stock_actual * costo_actual
+            valor_nuevo = cantidad * costo_unitario
+            nuevo_costo_promedio = (valor_actual + valor_nuevo) / nuevo_stock if nuevo_stock > 0 else costo_unitario
+    elif tipo == "salida":
+        if cantidad > stock_actual:
+            return jsonify({"error": f"No hay stock suficiente (disponible: {stock_actual})"}), 400
+        nuevo_stock = stock_actual - cantidad
+    else:  # ajuste -> cantidad es el nuevo stock disponible absoluto
+        if cantidad < 0:
+            return jsonify({"error": "El stock ajustado no puede ser negativo"}), 400
+        nuevo_stock = cantidad
+        cantidad = nuevo_stock - stock_actual  # delta real para el registro
+
+    ts = now_iso()
+    db.execute(
+        "UPDATE productos SET stock_disponible = ?, costo_compra = ?, actualizado_en = ? WHERE id = ?",
+        (nuevo_stock, nuevo_costo_promedio, ts, producto_id),
+    )
+    db.execute(
+        """
+        INSERT INTO movimientos (
+            producto_id, fecha, tipo, cantidad, motivo, usuario,
+            costo_unitario, factura_id, factura_numero, stock_resultante
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            producto_id, ts, tipo, cantidad, motivo, usuario, costo_unitario,
+            factura["id"] if factura else None,
+            factura["numero"] if factura else None,
+            nuevo_stock,
+        ),
+    )
+
+    if linea:
+        db.execute(
+            "UPDATE factura_lineas SET aplicada = 1, aplicada_en = ? WHERE id = ?",
+            (ts, linea["id"]),
+        )
+
+    db.commit()
+
+    actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
+    return jsonify(row_to_dict(actualizado)), 201
+
+
+# ---------------------------------------------------------------------------
+# API: Ubicaciones (Módulo 3 - Organización Física de Bodega)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/ubicaciones", methods=["GET"])
+def listar_ubicaciones():
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT u.*,
+               p.id AS producto_id, p.codigo_interno, p.nombre AS producto_nombre
+        FROM ubicaciones u
+        LEFT JOIN productos p ON p.ubicacion_id = u.id
+        ORDER BY u.pasillo, u.estanteria, u.nivel
+        """
+    ).fetchall()
+
+    ubicaciones = []
+    for r in rows:
+        ubicaciones.append({
+            "id": r["id"],
+            "pasillo": r["pasillo"],
+            "estanteria": r["estanteria"],
+            "nivel": r["nivel"],
+            "codigo": r["codigo"],
+            "ocupada": r["producto_id"] is not None,
+            "producto": {
+                "id": r["producto_id"],
+                "codigo_interno": r["codigo_interno"],
+                "nombre": r["producto_nombre"],
+            } if r["producto_id"] is not None else None,
+        })
+
+    return jsonify({"ubicaciones": ubicaciones, "total": len(ubicaciones)})
+
+
+@app.route("/api/ubicaciones", methods=["POST"])
+def crear_ubicacion():
+    data = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+
+    try:
+        pasillo = int(data.get("pasillo"))
+        estanteria = int(data.get("estanteria"))
+        nivel = int(data.get("nivel"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Pasillo, estantería y nivel deben ser números enteros"}), 400
+
+    if pasillo <= 0 or estanteria <= 0 or nivel <= 0:
+        return jsonify({"error": "Pasillo, estantería y nivel deben ser mayores a 0"}), 400
+
+    existe = db.execute(
+        "SELECT id FROM ubicaciones WHERE pasillo = ? AND estanteria = ? AND nivel = ?",
+        (pasillo, estanteria, nivel),
+    ).fetchone()
+    if existe:
+        return jsonify({"error": "Esa ubicación (pasillo/estantería/nivel) ya existe"}), 400
+
+    codigo = codigo_ubicacion(pasillo, estanteria, nivel)
+    cur = db.execute(
+        "INSERT INTO ubicaciones (pasillo, estanteria, nivel, codigo, creado_en) VALUES (?, ?, ?, ?, ?)",
+        (pasillo, estanteria, nivel, codigo, now_iso()),
+    )
+    db.commit()
+    nueva = db.execute("SELECT * FROM ubicaciones WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nueva)), 201
+
+
+@app.route("/api/ubicaciones/<int:ubicacion_id>", methods=["DELETE"])
+def eliminar_ubicacion(ubicacion_id):
+    db = get_db()
+    row = db.execute("SELECT id FROM ubicaciones WHERE id = ?", (ubicacion_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Ubicación no encontrada"}), 404
+
+    ocupada = db.execute(
+        "SELECT id FROM productos WHERE ubicacion_id = ?", (ubicacion_id,)
+    ).fetchone()
+    if ocupada:
+        return jsonify({"error": "No se puede eliminar: hay un producto guardado en esa ubicación"}), 400
+
+    db.execute("DELETE FROM ubicaciones WHERE id = ?", (ubicacion_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# API: Categorías, Marcas y Modelos (listas precargadas, ampliables desde la interfaz)
+# ---------------------------------------------------------------------------
+
+def _asegurar_categoria(db, nombre):
+    nombre = (nombre or "").strip()
+    if nombre:
+        db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (nombre,))
+
+
+def _asegurar_marca(db, nombre):
+    nombre = (nombre or "").strip()
+    if nombre:
+        db.execute("INSERT OR IGNORE INTO marcas (nombre) VALUES (?)", (nombre,))
+
+
+def _asegurar_modelo(db, nombre):
+    nombre = (nombre or "").strip()
+    if nombre:
+        db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (nombre,))
+
+
+@app.route("/api/categorias", methods=["GET"])
+def listar_categorias():
+    db = get_db()
+    rows = db.execute("SELECT nombre FROM categorias ORDER BY nombre COLLATE NOCASE").fetchall()
+    return jsonify({"categorias": [r["nombre"] for r in rows]})
+
+
+@app.route("/api/categorias", methods=["POST"])
+def crear_categoria():
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = (data.get("nombre") or "").strip()
+    if not nombre:
+        return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (nombre,))
+    db.commit()
+    return jsonify({"nombre": nombre}), 201
+
+
+@app.route("/api/marcas", methods=["GET"])
+def listar_marcas():
+    db = get_db()
+    rows = db.execute("SELECT nombre FROM marcas ORDER BY nombre COLLATE NOCASE").fetchall()
+    return jsonify({"marcas": [r["nombre"] for r in rows]})
+
+
+@app.route("/api/marcas", methods=["POST"])
+def crear_marca():
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = (data.get("nombre") or "").strip()
+    if not nombre:
+        return jsonify({"error": "El nombre de la marca no puede estar vacío"}), 400
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO marcas (nombre) VALUES (?)", (nombre,))
+    db.commit()
+    return jsonify({"nombre": nombre}), 201
+
+
+@app.route("/api/modelos", methods=["GET"])
+def listar_modelos():
+    db = get_db()
+    rows = db.execute("SELECT nombre FROM modelos ORDER BY nombre COLLATE NOCASE").fetchall()
+    return jsonify({"modelos": [r["nombre"] for r in rows]})
+
+
+@app.route("/api/modelos", methods=["POST"])
+def crear_modelo():
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = (data.get("nombre") or "").strip()
+    if not nombre:
+        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (nombre,))
+    db.commit()
+    return jsonify({"nombre": nombre}), 201
+
+
+# ---------------------------------------------------------------------------
+# API: Proveedores (Módulo 4 - Ingreso de Compras)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/proveedores", methods=["GET"])
+def listar_proveedores():
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT pr.*, COUNT(f.id) AS cantidad_facturas
+        FROM proveedores pr
+        LEFT JOIN facturas f ON f.proveedor_id = pr.id
+        GROUP BY pr.id
+        ORDER BY pr.nombre COLLATE NOCASE
+        """
+    ).fetchall()
+    return jsonify({"proveedores": [dict(r) for r in rows]})
+
+
+@app.route("/api/proveedores", methods=["POST"])
+def crear_proveedor():
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = (data.get("nombre") or "").strip()
+    if not nombre:
+        return jsonify({"error": "El nombre del proveedor es obligatorio"}), 400
+
+    db = get_db()
+    existe = db.execute("SELECT id FROM proveedores WHERE nombre = ?", (nombre,)).fetchone()
+    if existe:
+        return jsonify({"error": f"Ya existe un proveedor con el nombre '{nombre}'"}), 400
+
+    cur = db.execute(
+        "INSERT INTO proveedores (nombre, rut, telefono, email, direccion, creado_en) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            nombre,
+            (data.get("rut") or "").strip(),
+            (data.get("telefono") or "").strip(),
+            (data.get("email") or "").strip(),
+            (data.get("direccion") or "").strip(),
+            now_iso(),
+        ),
+    )
+    db.commit()
+    nuevo = db.execute("SELECT *, 0 AS cantidad_facturas FROM proveedores WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nuevo)), 201
+
+
+@app.route("/api/proveedores/<int:proveedor_id>", methods=["PUT"])
+def editar_proveedor(proveedor_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Proveedor no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = (data.get("nombre") or row["nombre"]).strip()
+    if not nombre:
+        return jsonify({"error": "El nombre del proveedor es obligatorio"}), 400
+
+    duplicado = db.execute(
+        "SELECT id FROM proveedores WHERE nombre = ? AND id != ?", (nombre, proveedor_id)
+    ).fetchone()
+    if duplicado:
+        return jsonify({"error": f"Ya existe otro proveedor con el nombre '{nombre}'"}), 400
+
+    db.execute(
+        "UPDATE proveedores SET nombre = ?, rut = ?, telefono = ?, email = ?, direccion = ? WHERE id = ?",
+        (
+            nombre,
+            (data.get("rut") if data.get("rut") is not None else row["rut"]).strip(),
+            (data.get("telefono") if data.get("telefono") is not None else row["telefono"]).strip(),
+            (data.get("email") if data.get("email") is not None else row["email"]).strip(),
+            (data.get("direccion") if data.get("direccion") is not None else row["direccion"]).strip(),
+            proveedor_id,
+        ),
+    )
+    db.commit()
+    actualizado = db.execute(
+        """
+        SELECT pr.*, COUNT(f.id) AS cantidad_facturas
+        FROM proveedores pr LEFT JOIN facturas f ON f.proveedor_id = pr.id
+        WHERE pr.id = ? GROUP BY pr.id
+        """,
+        (proveedor_id,),
+    ).fetchone()
+    return jsonify(dict(actualizado))
+
+
+@app.route("/api/proveedores/<int:proveedor_id>", methods=["DELETE"])
+def eliminar_proveedor(proveedor_id):
+    db = get_db()
+    row = db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Proveedor no encontrado"}), 404
+
+    forzar = request.args.get("forzar") == "1"
+    cant_facturas = db.execute(
+        "SELECT COUNT(*) FROM facturas WHERE proveedor_id = ?", (proveedor_id,)
+    ).fetchone()[0]
+
+    if cant_facturas > 0 and not forzar:
+        return jsonify({
+            "error": f"Este proveedor tiene {cant_facturas} factura(s) asociada(s). "
+                     f"Puedes eliminarlo de todas formas: las facturas se conservan, solo quedan sin proveedor asignado.",
+            "requiere_forzar": True,
+        }), 409
+
+    if forzar:
+        db.execute("UPDATE facturas SET proveedor_id = NULL WHERE proveedor_id = ?", (proveedor_id,))
+
+    db.execute("DELETE FROM proveedores WHERE id = ?", (proveedor_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# API: Facturas (primera pieza del Módulo 4 - Ingreso de Compras)
+# ---------------------------------------------------------------------------
+
+FACTURA_SELECT = """
+    SELECT f.*, pr.nombre AS proveedor_nombre
+    FROM facturas f
+    LEFT JOIN proveedores pr ON f.proveedor_id = pr.id
+"""
+
+
+def _factura_resumen(db, factura_row):
+    lineas = db.execute(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(aplicada), 0) AS aplicadas FROM factura_lineas WHERE factura_id = ?",
+        (factura_row["id"],),
+    ).fetchone()
+    d = dict(factura_row)
+    d["proveedor_display"] = d.get("proveedor_nombre") or d.get("proveedor") or ""
+    d["total_lineas"] = lineas["total"]
+    d["lineas_aplicadas"] = lineas["aplicadas"]
+    return d
+
+
+def _factura_detalle(db, factura_row):
+    d = dict(factura_row)
+    d["proveedor_display"] = d.get("proveedor_nombre") or d.get("proveedor") or ""
+    lineas = db.execute(
+        """
+        SELECT fl.*, p.nombre AS producto_nombre, p.id AS producto_id_num,
+               p.codigo_interno AS producto_codigo_interno
+        FROM factura_lineas fl
+        JOIN productos p ON p.id = fl.producto_id
+        WHERE fl.factura_id = ?
+        ORDER BY fl.id
+        """,
+        (factura_row["id"],),
+    ).fetchall()
+    d["lineas"] = []
+    for l in lineas:
+        ld = dict(l)
+        ld["producto_id_sistema"] = f"{ld['producto_id_num']:04d}"
+        d["lineas"].append(ld)
+    return d
+
+
+@app.route("/api/facturas", methods=["GET"])
+def listar_facturas():
+    db = get_db()
+    rows = db.execute(FACTURA_SELECT + " ORDER BY f.creado_en DESC, f.id DESC").fetchall()
+    return jsonify({"facturas": [_factura_resumen(db, r) for r in rows]})
+
+
+@app.route("/api/facturas/<int:factura_id>", methods=["GET"])
+def obtener_factura(factura_id):
+    db = get_db()
+    row = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Factura no encontrada"}), 404
+    return jsonify(_factura_detalle(db, row))
+
+
+@app.route("/api/facturas/numero/<path:numero>", methods=["GET"])
+def obtener_factura_por_numero(numero):
+    db = get_db()
+    row = db.execute(FACTURA_SELECT + " WHERE f.numero = ?", (numero,)).fetchone()
+    if row is None:
+        return jsonify({"error": "No existe una factura con ese número"}), 404
+    return jsonify(_factura_detalle(db, row))
+
+
+@app.route("/api/facturas", methods=["POST"])
+def crear_factura():
+    data = request.get_json(force=True, silent=True) or {}
+    numero = (data.get("numero") or "").strip()
+    proveedor_id = data.get("proveedor_id") or None
+    fecha = (data.get("fecha") or "").strip()
+    lineas_in = data.get("lineas") or []
+
+    if not numero:
+        return jsonify({"error": "El número de factura es obligatorio"}), 400
+    if not lineas_in:
+        return jsonify({"error": "Agrega al menos un producto a la factura"}), 400
+
+    db = get_db()
+
+    if proveedor_id:
+        try:
+            proveedor_id = int(proveedor_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Proveedor inválido"}), 400
+        existe_prov = db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone()
+        if not existe_prov:
+            return jsonify({"error": "El proveedor seleccionado no existe"}), 400
+
+    existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
+    if existe:
+        return jsonify({"error": f"Ya existe una factura registrada con el número '{numero}'"}), 400
+
+    lineas_validadas = []
+    productos_vistos = set()
+    for i, linea in enumerate(lineas_in, start=1):
+        try:
+            producto_id = int(linea.get("producto_id"))
+            cantidad = int(linea.get("cantidad"))
+            precio_unitario = float(linea.get("precio_unitario"))
+        except (TypeError, ValueError):
+            return jsonify({"error": f"Línea {i}: producto, cantidad y precio deben ser válidos"}), 400
+
+        if cantidad <= 0:
+            return jsonify({"error": f"Línea {i}: la cantidad debe ser mayor a 0"}), 400
+        if precio_unitario < 0:
+            return jsonify({"error": f"Línea {i}: el precio no puede ser negativo"}), 400
+
+        producto = db.execute("SELECT id FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        if not producto:
+            return jsonify({"error": f"Línea {i}: el producto seleccionado no existe"}), 400
+
+        if producto_id in productos_vistos:
+            return jsonify({"error": f"Línea {i}: ese producto ya está agregado en otra línea de esta misma factura"}), 400
+        productos_vistos.add(producto_id)
+
+        lineas_validadas.append((producto_id, cantidad, precio_unitario))
+
+    ts = now_iso()
+    cur = db.execute(
+        "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en) VALUES (?, ?, ?, ?)",
+        (numero, proveedor_id, fecha, ts),
+    )
+    factura_id = cur.lastrowid
+
+    for producto_id, cantidad, precio_unitario in lineas_validadas:
+        db.execute(
+            """
+            INSERT INTO factura_lineas (factura_id, producto_id, cantidad, precio_unitario)
+            VALUES (?, ?, ?, ?)
+            """,
+            (factura_id, producto_id, cantidad, precio_unitario),
+        )
+
+    db.commit()
+
+    nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
+    return jsonify(_factura_detalle(db, nueva)), 201
+
+
+@app.route("/api/facturas/<int:factura_id>", methods=["DELETE"])
+def eliminar_factura(factura_id):
+    db = get_db()
+    factura = db.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
+    if factura is None:
+        return jsonify({"error": "Factura no encontrada"}), 404
+
+    forzar = request.args.get("forzar") == "1"
+    data = request.get_json(force=True, silent=True) or {}
+    usuario = (data.get("usuario") or "").strip() or "Sistema"
+
+    lineas_aplicadas = db.execute(
+        "SELECT * FROM factura_lineas WHERE factura_id = ? AND aplicada = 1", (factura_id,)
+    ).fetchall()
+
+    if lineas_aplicadas and not forzar:
+        return jsonify({
+            "error": f"{len(lineas_aplicadas)} producto(s) de esta factura ya fueron ingresados a stock. "
+                     f"Si la eliminas de todas formas, se intentará revertir automáticamente ese stock.",
+            "requiere_forzar": True,
+        }), 409
+
+    if forzar and lineas_aplicadas:
+        # Antes de tocar nada: confirmar que TODAS las líneas aplicadas se
+        # pueden revertir (que quede suficiente stock disponible). Si alguna
+        # no se puede, se aborta completa para no dejar la reversión a medias.
+        pendientes_de_revertir = []
+        for linea in lineas_aplicadas:
+            producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
+            if producto is None:
+                continue  # el producto ya no existe: nada que revertir
+            if producto["stock_disponible"] < linea["cantidad"]:
+                return jsonify({
+                    "error": f"No se puede eliminar: el producto '{producto['nombre']}' ya no tiene "
+                             f"suficiente stock disponible para revertir esta factura (probablemente parte "
+                             f"de ese stock ya se consumió). Ajusta el stock manualmente antes de eliminarla."
+                }), 409
+            pendientes_de_revertir.append((producto, linea))
+
+        ts = now_iso()
+        for producto, linea in pendientes_de_revertir:
+            nuevo_stock = producto["stock_disponible"] - linea["cantidad"]
+            db.execute(
+                "UPDATE productos SET stock_disponible = ?, actualizado_en = ? WHERE id = ?",
+                (nuevo_stock, ts, producto["id"]),
+            )
+            db.execute(
+                """
+                INSERT INTO movimientos (
+                    producto_id, fecha, tipo, cantidad, motivo, usuario,
+                    costo_unitario, factura_id, factura_numero, stock_resultante
+                ) VALUES (?, ?, 'salida', ?, ?, ?, NULL, NULL, ?, ?)
+                """,
+                (
+                    producto["id"], ts, linea["cantidad"],
+                    f"Reversión automática por eliminación de la factura '{factura['numero']}' (corrección de error)",
+                    usuario, factura["numero"], nuevo_stock,
+                ),
+            )
+
+    db.execute("DELETE FROM facturas WHERE id = ?", (factura_id,))
+    db.commit()
+    return jsonify({"ok": True, "revertido": bool(lineas_aplicadas)})
+
+
+# ---------------------------------------------------------------------------
+# API: Resumen (base para el futuro Dashboard)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/resumen", methods=["GET"])
+def resumen():
+    db = get_db()
+    row = db.execute(
+        """
+        SELECT
+            COUNT(*) AS total_productos,
+            COALESCE(SUM(stock_disponible + stock_reservado), 0) AS total_unidades,
+            COALESCE(SUM((stock_disponible + stock_reservado) * costo_compra), 0) AS valor_total,
+            COALESCE(SUM(CASE WHEN stock_disponible <= stock_minimo THEN 1 ELSE 0 END), 0) AS stock_critico
+        FROM productos
+        """
+    ).fetchone()
+    return jsonify(dict(row))
+
+
+init_db()
+
+if __name__ == "__main__":
+    debug_mode = os.environ.get("FLASK_DEBUG") == "1"
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=debug_mode)

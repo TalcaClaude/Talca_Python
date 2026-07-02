@@ -1,0 +1,963 @@
+const state = {
+  productos: [],
+  categorias: [],
+  productoActivo: null,
+  ubicaciones: [],
+  origenModalUbicacion: "producto", // "producto" | "bodega"
+  categoriasDisponibles: [],
+  marcasDisponibles: [],
+  modelosDisponibles: [],
+  facturas: [],
+  facturaActivaId: null,
+  facturaEncontrada: null, // resultado del último lookup por número en el form de movimiento
+  productosParaFactura: [],
+  proveedores: [],
+  proveedorActivoId: null,
+};
+
+// ---------------------------------------------------------------------------
+// Utilidades
+// ---------------------------------------------------------------------------
+
+function fmtMoney(n) {
+  return "$" + Math.round(n).toLocaleString("es-CL");
+}
+
+function fmtFecha(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString("es-CL", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function toast(msg, isError = false) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.classList.toggle("error", isError);
+  el.classList.add("visible");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove("visible"), 3200);
+}
+
+function abrirModal(id) {
+  document.getElementById(id).classList.add("abierto");
+}
+function cerrarModal(id) {
+  document.getElementById(id).classList.remove("abierto");
+}
+
+document.querySelectorAll("[data-close]").forEach(btn => {
+  btn.addEventListener("click", () => cerrarModal(btn.dataset.close));
+});
+
+// Los modales ya NO se cierran al hacer click afuera (para no perder datos
+// escritos por accidente). Solo se cierran con la X, "Cancelar", o ESC.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  document.querySelectorAll(".modal-overlay.abierto").forEach(overlay => {
+    overlay.classList.remove("abierto");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pestañas: Productos / Bodega
+// ---------------------------------------------------------------------------
+
+document.querySelectorAll(".tab").forEach(tabBtn => {
+  tabBtn.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(b => b.classList.remove("activo"));
+    tabBtn.classList.add("activo");
+    const vista = tabBtn.dataset.vista;
+    document.getElementById("vista-productos").style.display = vista === "productos" ? "block" : "none";
+    document.getElementById("vista-bodega").style.display = vista === "bodega" ? "block" : "none";
+    document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
+    document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
+    document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
+    const titulos = {
+      productos: "Administración de Inventario",
+      bodega: "Organización Física de Bodega",
+      facturas: "Facturas de compra",
+      proveedores: "Proveedores",
+    };
+    document.getElementById("brand-sub").textContent = titulos[vista];
+    if (vista === "bodega") cargarUbicaciones();
+    if (vista === "facturas") cargarFacturas();
+    if (vista === "proveedores") cargarProveedores();
+  });
+});
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || "Error inesperado");
+    err.requiereForzar = !!data.requiere_forzar;
+    throw err;
+  }
+  return data;
+}
+
+async function eliminarConReintento(url, mensajeConfirmacionInicial, bodyForzado) {
+  if (!confirm(mensajeConfirmacionInicial)) return false;
+  try {
+    await api(url, { method: "DELETE" });
+    return true;
+  } catch (e) {
+    if (e.requiereForzar && confirm(`${e.message}\n\n¿Eliminar de todas formas? Esta acción no se puede deshacer.`)) {
+      const urlForzada = url + (url.includes("?") ? "&" : "?") + "forzar=1";
+      const opciones = { method: "DELETE" };
+      if (bodyForzado) opciones.body = JSON.stringify(bodyForzado);
+      const resultado = await api(urlForzada, opciones);
+      return resultado;
+    }
+    if (!e.requiereForzar) throw e;
+    return false;
+  }
+}
+
+async function cargarUbicaciones() {
+  try {
+    const data = await api("/api/ubicaciones");
+    state.ubicaciones = data.ubicaciones;
+    renderTablaUbicaciones();
+    return data.ubicaciones;
+  } catch (e) {
+    toast(e.message, true);
+    return [];
+  }
+}
+
+function renderTablaUbicaciones() {
+  const tbody = document.getElementById("tbody-ubicaciones");
+  if (state.ubicaciones.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Aún no hay ubicaciones creadas. Usa "+ Nueva ubicación" para empezar a mapear la bodega.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = state.ubicaciones.map(u => `
+    <tr>
+      <td class="mono">${escapeHtml(u.codigo)}</td>
+      <td class="mono">${u.pasillo}</td>
+      <td class="mono">${u.estanteria}</td>
+      <td class="mono">${u.nivel}</td>
+      <td><span class="estado-pill estado-pill--${u.ocupada ? "ocupada" : "libre"}">${u.ocupada ? "Ocupada" : "Libre"}</span></td>
+      <td>${u.producto ? `<span class="codigo-pill">${u.producto.codigo_interno ? escapeHtml(u.producto.codigo_interno) : "#" + String(u.producto.id).padStart(4, "0")}</span> ${escapeHtml(u.producto.nombre)}` : "—"}</td>
+      <td>${u.ocupada ? "" : `<button class="btn-link" data-borrar-ubicacion="${u.id}">Eliminar</button>`}</td>
+    </tr>
+  `).join("");
+
+  tbody.querySelectorAll("[data-borrar-ubicacion]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.borrarUbicacion;
+      if (!confirm("¿Eliminar esta ubicación vacía?")) return;
+      try {
+        await api(`/api/ubicaciones/${id}`, { method: "DELETE" });
+        toast("Ubicación eliminada");
+        await cargarUbicaciones();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  });
+}
+
+function renderSelectUbicaciones(seleccionActualId) {
+  const select = document.getElementById("f-ubicacion-id");
+  const disponibles = state.ubicaciones.filter(u => !u.ocupada || u.id === seleccionActualId);
+  select.innerHTML = '<option value="">Sin asignar</option>' +
+    disponibles.map(u => `<option value="${u.id}">${escapeHtml(u.codigo)}</option>`).join("");
+  select.value = seleccionActualId || "";
+}
+
+document.getElementById("btn-nueva-ubicacion").addEventListener("click", () => {
+  state.origenModalUbicacion = "bodega";
+  document.getElementById("form-ubicacion").reset();
+  document.getElementById("u-preview").textContent = "Código resultante: —";
+  abrirModal("modal-ubicacion");
+});
+
+document.getElementById("btn-crear-ubicacion-inline").addEventListener("click", () => {
+  state.origenModalUbicacion = "producto";
+  document.getElementById("form-ubicacion").reset();
+  document.getElementById("u-preview").textContent = "Código resultante: —";
+  abrirModal("modal-ubicacion");
+});
+
+["u-pasillo", "u-estanteria", "u-nivel"].forEach(id => {
+  document.getElementById(id).addEventListener("input", () => {
+    const p = document.getElementById("u-pasillo").value;
+    const e = document.getElementById("u-estanteria").value;
+    const n = document.getElementById("u-nivel").value;
+    document.getElementById("u-preview").textContent =
+      (p && e && n) ? `Código resultante: P${p}-E${e}-N${n}` : "Código resultante: —";
+  });
+});
+
+document.getElementById("form-ubicacion").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const payload = {
+    pasillo: document.getElementById("u-pasillo").value,
+    estanteria: document.getElementById("u-estanteria").value,
+    nivel: document.getElementById("u-nivel").value,
+  };
+  try {
+    const nueva = await api("/api/ubicaciones", { method: "POST", body: JSON.stringify(payload) });
+    toast("Ubicación creada: " + nueva.codigo);
+    cerrarModal("modal-ubicacion");
+    await cargarUbicaciones();
+    if (state.origenModalUbicacion === "producto") {
+      renderSelectUbicaciones(nueva.id);
+      document.getElementById("f-ubicacion-id").value = nueva.id;
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Categorías y marcas precargadas (con alta rápida desde el formulario)
+// ---------------------------------------------------------------------------
+
+async function cargarCategoriasYMarcas() {
+  try {
+    const [cats, marcas, modelos] = await Promise.all([
+      api("/api/categorias"),
+      api("/api/marcas"),
+      api("/api/modelos"),
+    ]);
+    state.categoriasDisponibles = cats.categorias;
+    state.marcasDisponibles = marcas.marcas;
+    state.modelosDisponibles = modelos.modelos;
+    renderSelectCategoria();
+    renderSelectMarca();
+    renderSelectModelo();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderSelectCategoria(seleccionActual) {
+  const select = document.getElementById("f-categoria");
+  const actual = seleccionActual !== undefined ? seleccionActual : select.value;
+  select.innerHTML = '<option value="">Sin categoría</option>' +
+    state.categoriasDisponibles.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+  select.value = actual || "";
+}
+
+function renderSelectMarca(seleccionActual) {
+  const select = document.getElementById("f-marca");
+  const actual = seleccionActual !== undefined ? seleccionActual : select.value;
+  select.innerHTML = '<option value="">Sin marca</option>' +
+    state.marcasDisponibles.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  select.value = actual || "";
+}
+
+function renderSelectModelo(seleccionActual) {
+  const select = document.getElementById("f-modelo");
+  const actual = seleccionActual !== undefined ? seleccionActual : select.value;
+  select.innerHTML = '<option value="">Sin modelo</option>' +
+    state.modelosDisponibles.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  select.value = actual || "";
+}
+
+const ETIQUETAS_ALTA_RAPIDA = {
+  categoria: { texto: "categoría", render: renderSelectCategoria },
+  marca: { texto: "marca", render: renderSelectMarca },
+  modelo: { texto: "modelo", render: renderSelectModelo },
+};
+
+document.querySelectorAll("[data-nuevo]").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const tipo = btn.dataset.nuevo; // "categoria" | "marca" | "modelo"
+    const info = ETIQUETAS_ALTA_RAPIDA[tipo];
+    const nombre = prompt(`Nombre de la nueva ${info.texto}:`);
+    if (!nombre || !nombre.trim()) return;
+    try {
+      await api(`/api/${tipo}s`, { method: "POST", body: JSON.stringify({ nombre: nombre.trim() }) });
+      await cargarCategoriasYMarcas();
+      info.render(nombre.trim());
+      toast(`${info.texto[0].toUpperCase() + info.texto.slice(1)} agregada`);
+    } catch (e) {
+      toast(e.message, true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Carga de datos: productos
+// ---------------------------------------------------------------------------
+
+async function cargarResumen() {
+  try {
+    const r = await api("/api/resumen");
+    document.getElementById("s-total-productos").textContent = r.total_productos;
+    document.getElementById("s-total-unidades").textContent = r.total_unidades;
+    document.getElementById("s-valor-total").textContent = fmtMoney(r.valor_total);
+    document.getElementById("s-criticos").textContent = r.stock_critico;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function cargarProductos() {
+  const q = document.getElementById("buscar").value.trim();
+  const categoria = document.getElementById("filtro-categoria").value;
+  const criticos = document.getElementById("filtro-criticos").checked;
+
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (categoria) params.set("categoria", categoria);
+  if (criticos) params.set("criticos", "1");
+
+  const tbody = document.getElementById("tbody-productos");
+  try {
+    const data = await api("/api/productos?" + params.toString());
+    state.productos = data.productos;
+    state.categorias = data.categorias;
+    renderCategorias();
+    renderTabla();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar productos: ${e.message}</td></tr>`;
+  }
+}
+
+function renderCategorias() {
+  const select = document.getElementById("filtro-categoria");
+  const actual = select.value;
+  select.innerHTML = '<option value="">Todas las categorías</option>' +
+    state.categorias.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+  select.value = actual;
+}
+
+function renderTabla() {
+  const tbody = document.getElementById("tbody-productos");
+  if (state.productos.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">No se encontraron productos.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = state.productos.map(p => {
+    const critico = p.stock_disponible <= p.stock_minimo;
+    let ubicacionTexto;
+    if (p.ubicacion_codigo) {
+      ubicacionTexto = `<span class="codigo-pill">${escapeHtml(p.ubicacion_codigo)}</span>`;
+    } else if (p.ubicacion) {
+      ubicacionTexto = `<span class="subtexto" title="Ubicación antigua, sin asignar a una ubicación estructurada">${escapeHtml(p.ubicacion)} · pendiente</span>`;
+    } else {
+      ubicacionTexto = "—";
+    }
+    return `
+      <tr data-id="${p.id}">
+        <td><span class="codigo-pill">#${escapeHtml(p.id_sistema)}</span></td>
+        <td>
+          <div class="nombre-producto">${escapeHtml(p.nombre)} ${critico ? '<span class="badge-critico">Crítico</span>' : ""}</div>
+          <div class="subtexto">${escapeHtml([p.codigo_interno, p.marca, p.modelo].filter(Boolean).join(" · ")) || "&nbsp;"}</div>
+        </td>
+        <td>${escapeHtml(p.categoria) || "—"}</td>
+        <td>${ubicacionTexto}</td>
+        <td class="num mono">${p.stock_disponible}</td>
+        <td class="num mono">${p.stock_reservado}</td>
+        <td class="num mono">${p.stock_total}</td>
+        <td class="num mono">${fmtMoney(p.costo_compra)}</td>
+        <td></td>
+      </tr>
+    `;
+  }).join("");
+
+  tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+    tr.addEventListener("click", () => abrirDetalle(parseInt(tr.dataset.id, 10)));
+  });
+}
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ---------------------------------------------------------------------------
+// Filtros
+// ---------------------------------------------------------------------------
+
+let buscarTimeout;
+document.getElementById("buscar").addEventListener("input", () => {
+  clearTimeout(buscarTimeout);
+  buscarTimeout = setTimeout(cargarProductos, 250);
+});
+document.getElementById("filtro-categoria").addEventListener("change", cargarProductos);
+document.getElementById("filtro-criticos").addEventListener("change", cargarProductos);
+
+// ---------------------------------------------------------------------------
+// Modal: crear / editar producto
+// ---------------------------------------------------------------------------
+
+const formProducto = document.getElementById("form-producto");
+
+document.getElementById("btn-nuevo").addEventListener("click", async () => {
+  formProducto.reset();
+  document.getElementById("f-id").value = "";
+  document.getElementById("f-id-sistema-tag").style.display = "none";
+  document.getElementById("modal-producto-titulo").textContent = "Nuevo producto";
+  document.getElementById("grid-stock-inicial").style.display = "grid";
+  document.getElementById("ayuda-stock").style.display = "block";
+  document.getElementById("f-costo-label").textContent = "Costo promedio inicial ($ CLP)";
+  document.getElementById("f-stock-disponible").closest(".campo").style.display = "flex";
+  document.getElementById("f-ubicacion-legacy").style.display = "none";
+  await Promise.all([cargarUbicaciones(), cargarCategoriasYMarcas()]);
+  renderSelectUbicaciones(null);
+  renderSelectCategoria("");
+  renderSelectMarca("");
+  renderSelectModelo("");
+  abrirModal("modal-producto");
+});
+
+async function abrirEdicion(p) {
+  document.getElementById("f-id").value = p.id;
+  document.getElementById("f-id-sistema-tag").textContent = `N° de sistema: #${p.id_sistema} (no editable)`;
+  document.getElementById("f-id-sistema-tag").style.display = "block";
+  document.getElementById("f-codigo").value = p.codigo_interno || "";
+  document.getElementById("f-descripcion").value = p.descripcion || "";
+  document.getElementById("f-stock-minimo").value = p.stock_minimo;
+  document.getElementById("f-costo").value = p.costo_compra;
+  document.getElementById("f-costo-label").textContent = "Costo promedio actual ($ CLP)";
+
+  await Promise.all([cargarUbicaciones(), cargarCategoriasYMarcas()]);
+  renderSelectUbicaciones(p.ubicacion_id);
+  renderSelectCategoria(p.categoria || "");
+  renderSelectMarca(p.marca || "");
+  renderSelectModelo(p.modelo || "");
+
+  const legacy = document.getElementById("f-ubicacion-legacy");
+  if (!p.ubicacion_id && p.ubicacion) {
+    legacy.textContent = `Ubicación anterior (sin migrar): "${p.ubicacion}". Selecciona una ubicación de la lista para reemplazarla.`;
+    legacy.style.display = "block";
+  } else {
+    legacy.style.display = "none";
+  }
+
+  document.getElementById("modal-producto-titulo").textContent = "Editar producto";
+  document.getElementById("grid-stock-inicial").style.display = "grid";
+  document.getElementById("ayuda-stock").style.display = "none";
+  document.getElementById("f-stock-disponible").closest(".campo").style.display = "none";
+
+  abrirModal("modal-producto");
+}
+
+formProducto.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = document.getElementById("f-id").value;
+
+  const payload = {
+    codigo_interno: document.getElementById("f-codigo").value,
+    descripcion: document.getElementById("f-descripcion").value,
+    categoria: document.getElementById("f-categoria").value,
+    marca: document.getElementById("f-marca").value,
+    modelo: document.getElementById("f-modelo").value,
+    ubicacion_id: document.getElementById("f-ubicacion-id").value,
+    stock_minimo: document.getElementById("f-stock-minimo").value,
+    costo_compra: document.getElementById("f-costo").value,
+  };
+
+  if (!id) {
+    payload.stock_disponible = document.getElementById("f-stock-disponible").value;
+  }
+
+  try {
+    if (id) {
+      await api(`/api/productos/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("Producto actualizado");
+    } else {
+      await api("/api/productos", { method: "POST", body: JSON.stringify(payload) });
+      toast("Producto creado");
+    }
+    cerrarModal("modal-producto");
+    document.getElementById("f-stock-disponible").closest(".campo").style.display = "flex";
+    await Promise.all([cargarProductos(), cargarResumen()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Modal: detalle + movimientos
+// ---------------------------------------------------------------------------
+
+async function abrirDetalle(id) {
+  try {
+    const p = await api(`/api/productos/${id}`);
+    state.productoActivo = p;
+    renderDetalle(p);
+    resetearCampoFactura();
+    abrirModal("modal-detalle");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function renderDetalle(p) {
+  document.getElementById("detalle-nombre").textContent = `${p.nombre}`;
+  document.getElementById("m-producto-id").value = p.id;
+
+  const ubicacionTexto = p.ubicacion_codigo
+    ? `<span class="mono">${escapeHtml(p.ubicacion_codigo)}</span>`
+    : (p.ubicacion ? `${escapeHtml(p.ubicacion)} <span class="subtexto">(pendiente de asignar)</span>` : "—");
+
+  const ficha = document.getElementById("detalle-ficha");
+  ficha.innerHTML = `
+    <dt>N° de sistema</dt><dd class="mono">#${escapeHtml(p.id_sistema)}</dd>
+    <dt>Código interno</dt><dd class="mono">${escapeHtml(p.codigo_interno) || "—"}</dd>
+    <dt>Categoría</dt><dd>${escapeHtml(p.categoria) || "—"}</dd>
+    <dt>Marca / Modelo</dt><dd>${escapeHtml([p.marca, p.modelo].filter(Boolean).join(" · ")) || "—"}</dd>
+    <dt>Ubicación</dt><dd>${ubicacionTexto}</dd>
+    <dt>Descripción</dt><dd>${escapeHtml(p.descripcion) || "—"}</dd>
+    <dt>Disponible</dt><dd class="mono">${p.stock_disponible}</dd>
+    <dt>Reservado</dt><dd class="mono">${p.stock_reservado}</dd>
+    <dt>Total</dt><dd class="mono">${p.stock_total}</dd>
+    <dt>Stock mínimo</dt><dd class="mono">${p.stock_minimo}</dd>
+    <dt>Costo promedio</dt><dd class="mono">${fmtMoney(p.costo_compra)}</dd>
+  `;
+
+  const lista = document.getElementById("historial-lista");
+  if (!p.movimientos || p.movimientos.length === 0) {
+    lista.innerHTML = `<p class="vacio">Sin movimientos aún.</p>`;
+  } else {
+    lista.innerHTML = p.movimientos.map(m => `
+      <div class="mov-item">
+        <span class="mov-tipo mov-tipo--${m.tipo}">${m.tipo}</span>
+        <span class="mov-detalle">
+          ${m.cantidad >= 0 ? "+" : ""}${m.cantidad} → stock: ${m.stock_resultante}
+          ${m.costo_unitario !== null && m.costo_unitario !== undefined ? " · " + fmtMoney(m.costo_unitario) + " c/u" : ""}
+          ${m.factura_numero ? " · factura " + escapeHtml(m.factura_numero) : ""}
+          ${m.motivo ? " · " + escapeHtml(m.motivo) : ""}
+          ${m.usuario ? " · " + escapeHtml(m.usuario) : ""}
+        </span>
+        <span class="mov-fecha">${fmtFecha(m.fecha)}</span>
+      </div>
+    `).join("");
+  }
+}
+
+function desbloquearCamposMovimiento() {
+  document.getElementById("m-cantidad").readOnly = false;
+  document.getElementById("m-costo").readOnly = false;
+}
+
+function resetearCampoFactura() {
+  document.getElementById("m-factura").value = "";
+  document.getElementById("m-factura-preview").style.display = "none";
+  desbloquearCamposMovimiento();
+  state.facturaEncontrada = null;
+}
+
+async function buscarFacturaParaMovimiento() {
+  const numero = document.getElementById("m-factura").value.trim();
+  const preview = document.getElementById("m-factura-preview");
+  desbloquearCamposMovimiento();
+  state.facturaEncontrada = null;
+
+  if (!numero || !state.productoActivo) {
+    preview.style.display = "none";
+    return;
+  }
+
+  try {
+    const factura = await api(`/api/facturas/numero/${encodeURIComponent(numero)}`);
+    const linea = factura.lineas.find(l => l.producto_id === state.productoActivo.id);
+
+    if (!linea) {
+      preview.textContent = `La factura "${numero}" no incluye este producto.`;
+      preview.style.display = "block";
+      return;
+    }
+    if (linea.aplicada) {
+      preview.textContent = `Esta línea ya fue ingresada a stock antes (${fmtFecha(linea.aplicada_en)}).`;
+      preview.style.display = "block";
+      return;
+    }
+
+    document.getElementById("m-cantidad").value = linea.cantidad;
+    document.getElementById("m-costo").value = linea.precio_unitario;
+    document.getElementById("m-cantidad").readOnly = true;
+    document.getElementById("m-costo").readOnly = true;
+    preview.textContent = `✓ Detectado en factura "${numero}": ${linea.cantidad} unidades a ${fmtMoney(linea.precio_unitario)} c/u (cantidad y costo se bloquean para que coincidan con la factura).`;
+    preview.style.display = "block";
+    state.facturaEncontrada = linea;
+  } catch (e) {
+    preview.textContent = e.message;
+    preview.style.display = "block";
+  }
+}
+
+let facturaLookupTimeout;
+document.getElementById("m-factura").addEventListener("input", () => {
+  clearTimeout(facturaLookupTimeout);
+  facturaLookupTimeout = setTimeout(buscarFacturaParaMovimiento, 400);
+});
+
+document.getElementById("m-tipo").addEventListener("change", (e) => {
+  const label = document.getElementById("m-cantidad-label");
+  const esEntrada = e.target.value === "entrada";
+  label.textContent = e.target.value === "ajuste" ? "Nuevo stock disponible (valor final)" : "Cantidad";
+  document.getElementById("m-costo-wrap").style.display = esEntrada ? "flex" : "none";
+  document.getElementById("m-factura-wrap").style.display = esEntrada ? "flex" : "none";
+  if (!esEntrada) resetearCampoFactura();
+});
+
+document.getElementById("form-movimiento").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = document.getElementById("m-producto-id").value;
+  const payload = {
+    tipo: document.getElementById("m-tipo").value,
+    cantidad: document.getElementById("m-cantidad").value,
+    costo_unitario: document.getElementById("m-costo").value,
+    factura_numero: document.getElementById("m-factura").value,
+    motivo: document.getElementById("m-motivo").value,
+    usuario: document.getElementById("m-usuario").value,
+  };
+  try {
+    await api(`/api/productos/${id}/movimiento`, { method: "POST", body: JSON.stringify(payload) });
+    toast("Movimiento registrado");
+    document.getElementById("form-movimiento").reset();
+    document.getElementById("m-costo-wrap").style.display = "flex";
+    document.getElementById("m-factura-wrap").style.display = "flex";
+    document.getElementById("m-cantidad-label").textContent = "Cantidad";
+    resetearCampoFactura();
+    await Promise.all([cargarProductos(), cargarResumen()]);
+    await abrirDetalle(id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+document.getElementById("btn-editar-producto").addEventListener("click", () => {
+  cerrarModal("modal-detalle");
+  abrirEdicion(state.productoActivo);
+});
+
+document.getElementById("btn-eliminar-producto").addEventListener("click", async () => {
+  const p = state.productoActivo;
+  if (!p) return;
+  const identificador = p.codigo_interno || `#${p.id_sistema}`;
+  try {
+    const eliminado = await eliminarConReintento(
+      `/api/productos/${p.id}`,
+      `¿Eliminar "${p.nombre}" (${identificador})? Esta acción no se puede deshacer.`
+    );
+    if (!eliminado) return;
+    toast("Producto eliminado");
+    cerrarModal("modal-detalle");
+    await Promise.all([cargarProductos(), cargarResumen()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Facturas (primera pieza del Módulo 4 - Ingreso de Compras)
+// ---------------------------------------------------------------------------
+
+async function cargarFacturas() {
+  const tbody = document.getElementById("tbody-facturas");
+  try {
+    const data = await api("/api/facturas");
+    state.facturas = data.facturas;
+    renderTablaFacturas();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar facturas: ${e.message}</td></tr>`;
+  }
+}
+
+function renderTablaFacturas() {
+  const tbody = document.getElementById("tbody-facturas");
+  if (state.facturas.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Aún no hay facturas registradas. Usa "+ Nueva factura" para empezar.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = state.facturas.map(f => {
+    const completa = f.total_lineas > 0 && f.lineas_aplicadas === f.total_lineas;
+    const estado = completa
+      ? '<span class="estado-pill estado-pill--ocupada">Todo ingresado</span>'
+      : (f.lineas_aplicadas > 0
+        ? `<span class="estado-pill estado-pill--ocupada">${f.lineas_aplicadas}/${f.total_lineas} ingresado</span>`
+        : '<span class="estado-pill estado-pill--pendiente">Pendiente</span>');
+    return `
+      <tr data-id="${f.id}">
+        <td class="mono">${escapeHtml(f.numero)}</td>
+        <td>${escapeHtml(f.proveedor_display) || "—"}</td>
+        <td class="mono">${escapeHtml(f.fecha) || "—"}</td>
+        <td class="num mono">${f.total_lineas}</td>
+        <td>${estado}</td>
+        <td></td>
+      </tr>
+    `;
+  }).join("");
+
+  tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+    tr.addEventListener("click", () => abrirFacturaDetalle(parseInt(tr.dataset.id, 10)));
+  });
+}
+
+function filaLineaFactura(idx) {
+  const div = document.createElement("div");
+  div.className = "fac-linea-row";
+  div.dataset.idx = idx;
+  div.innerHTML = `
+    <div class="campo">
+      <label>Producto</label>
+      <select class="fac-linea-producto">
+        <option value="">Selecciona un producto…</option>
+        ${state.productosParaFactura.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}${p.codigo_interno ? " (" + escapeHtml(p.codigo_interno) + ")" : ""}</option>`).join("")}
+      </select>
+    </div>
+    <div class="campo">
+      <label>Cantidad</label>
+      <input type="number" class="fac-linea-cantidad" min="1" value="1">
+    </div>
+    <div class="campo">
+      <label>Precio unit. ($ CLP)</label>
+      <input type="number" class="fac-linea-precio" min="0" step="1" value="0">
+    </div>
+    <button type="button" class="fac-linea-quitar">Quitar</button>
+  `;
+  div.querySelector(".fac-linea-quitar").addEventListener("click", () => div.remove());
+  return div;
+}
+
+document.getElementById("fac-agregar-linea").addEventListener("click", () => {
+  const cont = document.getElementById("fac-lineas");
+  cont.appendChild(filaLineaFactura(cont.children.length));
+});
+
+document.getElementById("btn-nueva-factura").addEventListener("click", async () => {
+  document.getElementById("form-factura").reset();
+  document.getElementById("fac-lineas").innerHTML = "";
+  try {
+    const [dataProductos, dataProveedores] = await Promise.all([
+      api("/api/productos"),
+      api("/api/proveedores"),
+    ]);
+    state.productosParaFactura = dataProductos.productos;
+    state.proveedores = dataProveedores.proveedores;
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  renderSelectProveedorFactura("");
+  document.getElementById("fac-lineas").appendChild(filaLineaFactura(0));
+  abrirModal("modal-factura");
+});
+
+function renderSelectProveedorFactura(seleccionActual) {
+  const select = document.getElementById("fac-proveedor-id");
+  const actual = seleccionActual !== undefined ? seleccionActual : select.value;
+  select.innerHTML = '<option value="">Sin proveedor</option>' +
+    state.proveedores.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join("");
+  select.value = actual || "";
+}
+
+document.getElementById("fac-nuevo-proveedor").addEventListener("click", async () => {
+  const nombre = prompt("Nombre del nuevo proveedor:");
+  if (!nombre || !nombre.trim()) return;
+  try {
+    const nuevo = await api("/api/proveedores", { method: "POST", body: JSON.stringify({ nombre: nombre.trim() }) });
+    const dataProveedores = await api("/api/proveedores");
+    state.proveedores = dataProveedores.proveedores;
+    renderSelectProveedorFactura(nuevo.id);
+    toast("Proveedor agregado. Puedes completar RUT/teléfono/email después, en la pestaña Proveedores.");
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+document.getElementById("form-factura").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const filas = Array.from(document.querySelectorAll("#fac-lineas .fac-linea-row"));
+  const lineas = filas.map(fila => ({
+    producto_id: fila.querySelector(".fac-linea-producto").value,
+    cantidad: fila.querySelector(".fac-linea-cantidad").value,
+    precio_unitario: fila.querySelector(".fac-linea-precio").value,
+  }));
+
+  if (lineas.some(l => !l.producto_id)) {
+    toast("Selecciona un producto en cada línea", true);
+    return;
+  }
+
+  const payload = {
+    numero: document.getElementById("fac-numero").value,
+    proveedor_id: document.getElementById("fac-proveedor-id").value,
+    fecha: document.getElementById("fac-fecha").value,
+    lineas,
+  };
+
+  try {
+    await api("/api/facturas", { method: "POST", body: JSON.stringify(payload) });
+    toast("Factura registrada");
+    cerrarModal("modal-factura");
+    await cargarFacturas();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+async function abrirFacturaDetalle(id) {
+  try {
+    const f = await api(`/api/facturas/${id}`);
+    state.facturaActivaId = f.id;
+    document.getElementById("fac-detalle-titulo").textContent = `Factura ${f.numero}`;
+    document.getElementById("fac-detalle-info").textContent =
+      `Proveedor: ${f.proveedor_display || "—"}   ·   Fecha: ${f.fecha || "—"}   ·   Registrada: ${fmtFecha(f.creado_en)}`;
+
+    const tbody = document.getElementById("fac-detalle-lineas");
+    tbody.innerHTML = f.lineas.map(l => `
+      <tr>
+        <td>#${escapeHtml(l.producto_id_sistema)} — ${escapeHtml(l.producto_nombre)}</td>
+        <td class="num mono">${l.cantidad}</td>
+        <td class="num mono">${fmtMoney(l.precio_unitario)}</td>
+        <td>${l.aplicada
+          ? `<span class="estado-pill estado-pill--ocupada">Ingresado ${fmtFecha(l.aplicada_en)}</span>`
+          : '<span class="estado-pill estado-pill--pendiente">Pendiente</span>'}</td>
+      </tr>
+    `).join("");
+
+    abrirModal("modal-factura-detalle");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-eliminar-factura").addEventListener("click", async () => {
+  const id = state.facturaActivaId;
+  if (!id) return;
+  try {
+    const resultado = await eliminarConReintento(
+      `/api/facturas/${id}`,
+      "¿Eliminar esta factura? Esta acción no se puede deshacer.",
+      { usuario: "Sistema" }
+    );
+    if (!resultado) return;
+    if (resultado.revertido) {
+      toast("Factura eliminada. El stock que había ingresado fue revertido (revisa el costo promedio si corresponde).");
+    } else {
+      toast("Factura eliminada");
+    }
+    cerrarModal("modal-factura-detalle");
+    await cargarFacturas();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Proveedores
+// ---------------------------------------------------------------------------
+
+async function cargarProveedores() {
+  const tbody = document.getElementById("tbody-proveedores");
+  try {
+    const data = await api("/api/proveedores");
+    state.proveedores = data.proveedores;
+    renderTablaProveedores();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar proveedores: ${e.message}</td></tr>`;
+  }
+}
+
+function renderTablaProveedores() {
+  const tbody = document.getElementById("tbody-proveedores");
+  if (state.proveedores.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Aún no hay proveedores registrados. Usa "+ Nuevo proveedor" para empezar.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = state.proveedores.map(p => `
+    <tr data-id="${p.id}">
+      <td>${escapeHtml(p.nombre)}</td>
+      <td class="mono">${escapeHtml(p.rut) || "—"}</td>
+      <td>${escapeHtml(p.telefono) || "—"}</td>
+      <td>${escapeHtml(p.email) || "—"}</td>
+      <td class="num mono">${p.cantidad_facturas}</td>
+      <td></td>
+    </tr>
+  `).join("");
+
+  tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+    tr.addEventListener("click", () => abrirEdicionProveedor(parseInt(tr.dataset.id, 10)));
+  });
+}
+
+document.getElementById("btn-nuevo-proveedor").addEventListener("click", () => {
+  document.getElementById("form-proveedor").reset();
+  document.getElementById("pv-id").value = "";
+  document.getElementById("modal-proveedor-titulo").textContent = "Nuevo proveedor";
+  document.getElementById("pv-acciones-editar").style.display = "none";
+  abrirModal("modal-proveedor");
+});
+
+function abrirEdicionProveedor(id) {
+  const p = state.proveedores.find(x => x.id === id);
+  if (!p) return;
+  document.getElementById("pv-id").value = p.id;
+  document.getElementById("pv-nombre").value = p.nombre;
+  document.getElementById("pv-rut").value = p.rut || "";
+  document.getElementById("pv-telefono").value = p.telefono || "";
+  document.getElementById("pv-email").value = p.email || "";
+  document.getElementById("pv-direccion").value = p.direccion || "";
+  document.getElementById("modal-proveedor-titulo").textContent = "Editar proveedor";
+  document.getElementById("pv-acciones-editar").style.display = "flex";
+  state.proveedorActivoId = p.id;
+  abrirModal("modal-proveedor");
+}
+
+document.getElementById("btn-eliminar-proveedor").addEventListener("click", async () => {
+  const id = state.proveedorActivoId;
+  const p = state.proveedores.find(x => x.id === id);
+  if (!id || !p) return;
+  try {
+    const eliminado = await eliminarConReintento(
+      `/api/proveedores/${id}`,
+      `¿Eliminar el proveedor "${p.nombre}"?`
+    );
+    if (!eliminado) return;
+    toast("Proveedor eliminado");
+    cerrarModal("modal-proveedor");
+    await cargarProveedores();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+document.getElementById("form-proveedor").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = document.getElementById("pv-id").value;
+  const payload = {
+    nombre: document.getElementById("pv-nombre").value,
+    rut: document.getElementById("pv-rut").value,
+    telefono: document.getElementById("pv-telefono").value,
+    email: document.getElementById("pv-email").value,
+    direccion: document.getElementById("pv-direccion").value,
+  };
+  try {
+    if (id) {
+      await api(`/api/proveedores/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("Proveedor actualizado");
+    } else {
+      await api("/api/proveedores", { method: "POST", body: JSON.stringify(payload) });
+      toast("Proveedor creado");
+    }
+    cerrarModal("modal-proveedor");
+    await cargarProveedores();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+cargarResumen();
+cargarProductos();

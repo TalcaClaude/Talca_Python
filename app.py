@@ -13,7 +13,7 @@ import time
 import threading
 import smtplib
 from email.message import EmailMessage
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Flask, g, jsonify, request, render_template, send_file, session, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -1966,6 +1966,115 @@ def dashboard():
             "total_proveedores": total_proveedores,
             "facturas_pendientes": facturas_pendientes,
         },
+    })
+
+
+# ---------------------------------------------------------------------------
+# API: Rotación (Módulo 8 - Control de Rotación)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/rotacion", methods=["GET"])
+def rotacion():
+    """Módulo 8: Control de Rotación.
+
+    En este taller casi no hay venta directa (todo es consumo interno), así
+    que no se distingue "más vendidos" de "más utilizados": se mide toda
+    salida de stock por igual (tipo = 'salida'), sin importar la categoría,
+    dentro de la ventana de días que pida el usuario.
+    """
+    db = get_db()
+
+    try:
+        dias = int(request.args.get("dias", 90))
+    except (TypeError, ValueError):
+        dias = 90
+    dias = max(7, min(dias, 730))
+    desde = (datetime.now() - timedelta(days=dias)).isoformat(timespec="seconds")
+
+    # ---- Más utilizados: mayor cantidad de salidas dentro del período.
+    top_rows = db.execute(
+        """
+        SELECT producto_id, SUM(cantidad) AS total_salida_periodo, COUNT(*) AS n_movimientos
+        FROM movimientos
+        WHERE tipo = 'salida' AND fecha >= ?
+        GROUP BY producto_id
+        ORDER BY total_salida_periodo DESC
+        LIMIT 15
+        """,
+        (desde,),
+    ).fetchall()
+
+    mas_utilizados = []
+    ids_con_salida = set()
+    for r in top_rows:
+        prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (r["producto_id"],)).fetchone()
+        if prod:
+            d = row_to_dict(prod)
+            d["total_salida_periodo"] = r["total_salida_periodo"]
+            d["n_movimientos"] = r["n_movimientos"]
+            mas_utilizados.append(d)
+            ids_con_salida.add(prod["id"])
+
+    # ---- Baja rotación: sí tuvieron salida en el período, pero poca — las
+    # que aparecen al final del ranking general (no las que no tuvieron
+    # ninguna, esas son "inmovilizados").
+    todas_salidas = db.execute(
+        """
+        SELECT producto_id, SUM(cantidad) AS total_salida_periodo
+        FROM movimientos
+        WHERE tipo = 'salida' AND fecha >= ?
+        GROUP BY producto_id
+        """,
+        (desde,),
+    ).fetchall()
+
+    baja_rotacion = []
+    for r in todas_salidas:
+        prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (r["producto_id"],)).fetchone()
+        if prod:
+            d = row_to_dict(prod)
+            d["total_salida_periodo"] = r["total_salida_periodo"]
+            baja_rotacion.append(d)
+    baja_rotacion.sort(key=lambda d: d["total_salida_periodo"])
+    baja_rotacion = baja_rotacion[:15]
+
+    # ---- Inmovilizados: ninguna salida en el período (puede que nunca
+    # hayan tenido movimiento, o que su última salida sea más antigua).
+    inmovilizados_rows = db.execute(
+        f"""
+        {PRODUCTO_SELECT}
+        WHERE p.id NOT IN (
+            SELECT DISTINCT producto_id FROM movimientos
+            WHERE tipo = 'salida' AND fecha >= ?
+        )
+        AND (p.stock_disponible + p.stock_reservado) > 0
+        ORDER BY p.actualizado_en ASC
+        LIMIT 20
+        """,
+        (desde,),
+    ).fetchall()
+    inmovilizados = [row_to_dict(r) for r in inmovilizados_rows]
+
+    # ---- Tendencia: salidas totales agrupadas por semana dentro del período,
+    # para ver si el consumo general va subiendo o bajando.
+    tendencia_rows = db.execute(
+        """
+        SELECT strftime('%Y-%W', fecha) AS semana, SUM(cantidad) AS total
+        FROM movimientos
+        WHERE tipo = 'salida' AND fecha >= ?
+        GROUP BY semana
+        ORDER BY semana ASC
+        """,
+        (desde,),
+    ).fetchall()
+    tendencia = [{"semana": r["semana"], "total": r["total"]} for r in tendencia_rows]
+
+    return jsonify({
+        "dias": dias,
+        "mas_utilizados": mas_utilizados,
+        "baja_rotacion": baja_rotacion,
+        "inmovilizados": inmovilizados,
+        "tendencia": tendencia,
     })
 
 

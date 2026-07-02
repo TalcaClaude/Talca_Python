@@ -75,6 +75,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
     document.getElementById("vista-mermas").style.display = vista === "mermas" ? "block" : "none";
+    document.getElementById("vista-rotacion").style.display = vista === "rotacion" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
@@ -85,6 +86,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       proveedores: "Proveedores",
       movimientos: "Control de Movimientos",
       mermas: "Mermas",
+      rotacion: "Control de Rotación",
       usuarios: "Usuarios",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -94,6 +96,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "proveedores") cargarProveedores();
     if (vista === "movimientos") cargarMovimientos();
     if (vista === "mermas") cargarMermas();
+    if (vista === "rotacion") cargarRotacion();
     if (vista === "usuarios") cargarUsuarios();
   });
 });
@@ -1070,6 +1073,62 @@ async function cargarDashboard() {
 }
 
 // ---------------------------------------------------------------------------
+// Rotación (Módulo 8)
+// ---------------------------------------------------------------------------
+
+async function cargarRotacion() {
+  const dias = document.getElementById("rotacion-periodo").value;
+  try {
+    const d = await api(`/api/rotacion?dias=${dias}`);
+
+    const listaProducto = (items, cont, vacioMsg, extra) => {
+      cont.innerHTML = items.length
+        ? items.map(p => `
+          <div class="dash-item">
+            <span class="dash-item-nombre">#${p.id_sistema} — ${escapeHtml(p.nombre)}</span>
+            <span class="dash-item-valor">${extra(p)}</span>
+          </div>`).join("")
+        : `<p class="vacio">${vacioMsg}</p>`;
+    };
+
+    listaProducto(
+      d.mas_utilizados, document.getElementById("rot-mas-utilizados"),
+      "Todavía no hay suficientes salidas en este período.",
+      p => `${p.total_salida_periodo} salidas · ${p.n_movimientos} mov.`
+    );
+
+    listaProducto(
+      d.baja_rotacion, document.getElementById("rot-baja-rotacion"),
+      "No hay productos con baja rotación en este período.",
+      p => `${p.total_salida_periodo} salidas`
+    );
+
+    listaProducto(
+      d.inmovilizados, document.getElementById("rot-inmovilizados"),
+      "Todos los productos con stock han tenido salidas en este período.",
+      p => `${p.stock_total} en stock`
+    );
+
+    const cont = document.getElementById("rot-tendencia");
+    if (!d.tendencia.length) {
+      cont.innerHTML = `<p class="vacio">Todavía no hay suficientes salidas para ver una tendencia.</p>`;
+    } else {
+      const max = Math.max(...d.tendencia.map(t => t.total), 1);
+      cont.innerHTML = d.tendencia.map(t => `
+        <div class="rot-barra-fila">
+          <span class="rot-barra-label">${escapeHtml(t.semana)}</span>
+          <div class="rot-barra-pista">
+            <div class="rot-barra" style="width:${Math.max(4, Math.round((t.total / max) * 100))}%"></div>
+          </div>
+          <span class="rot-barra-valor">${t.total}</span>
+        </div>`).join("");
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Respaldo de datos
 // ---------------------------------------------------------------------------
 
@@ -1378,6 +1437,8 @@ document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
   document.getElementById("mov-filtro-hasta").value = "";
   cargarMovimientos();
 });
+
+document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
 
 // ---------------------------------------------------------------------------
 // Init

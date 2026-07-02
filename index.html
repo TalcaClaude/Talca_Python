@@ -36,6 +36,7 @@
     <button class="tab" data-vista="proveedores">Proveedores</button>
     <button class="tab" data-vista="movimientos">Movimientos</button>
     <button class="tab" data-vista="mermas">Mermas</button>
+    <button class="tab" data-vista="rotacion">Rotación</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
   </nav>
 
@@ -318,6 +319,44 @@
         <tr><td colspan="5" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-rotacion" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Análisis del comportamiento del inventario: qué se usa más, qué casi no se mueve, y qué no ha tenido salidas en el período.</p>
+    <select id="rotacion-periodo">
+      <option value="30">Últimos 30 días</option>
+      <option value="90" selected>Últimos 90 días</option>
+      <option value="180">Últimos 180 días</option>
+      <option value="365">Último año</option>
+    </select>
+  </section>
+
+  <section class="dash-grid">
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">Productos más utilizados</h3>
+      <div class="dash-lista" id="rot-mas-utilizados"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Baja rotación</h3>
+      <div class="dash-lista" id="rot-baja-rotacion"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Inmovilizados (sin salidas en el período)</h3>
+      <div class="dash-lista" id="rot-inmovilizados"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">Tendencia de consumo (salidas por semana)</h3>
+      <div class="rot-tendencia" id="rot-tendencia"><p class="vacio">Cargando…</p></div>
+    </div>
+
   </section>
 
   </section>

@@ -354,6 +354,12 @@ body::before { content: none; }
 
 .campo textarea { resize: vertical; }
 
+.campo input[readonly] {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  background: var(--bg);
+}
+
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-width: 0; }
 .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; min-width: 0; }
 .grid-2 > *, .grid-3 > * { min-width: 0; }

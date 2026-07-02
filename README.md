@@ -82,6 +82,31 @@ Sistema de logística y abastecimiento para el taller, basado en el documento
   usando tu Gmail. Se puede revisar el estado y mandar una prueba desde
   el botón "Respaldo".
 
+## Ajustes de esta ronda + Módulo 7 (Gestión de Stock)
+- **Mermas con fecha**: nueva sección "Historial de pérdidas" en la
+  pestaña Mermas, filtrable por rango de fechas (igual que Movimientos).
+- **"Salida"** ya no lleva la lista larga entre paréntesis en el selector.
+- **Responsable no editable**: siempre es la persona con sesión iniciada
+  — no se puede escribir otro nombre, ni siquiera mandando la petición
+  directamente a la API (se valida también en el servidor).
+- **Mayúsculas automáticas**: todo el texto que se ingresa (nombre de
+  productos, categorías, modelos, motivos, proveedores, etc.) queda en
+  mayúsculas, aunque se escriba en minúsculas. Se actualizó también todo
+  lo que ya tenías cargado. **Excepciones a propósito**: usuario/login y
+  contraseñas no se tocan (son credenciales, no datos del negocio).
+- **RUT de proveedores con formato automático**: escribe solo los números
+  (ej: `770893703`) y el sistema pone los puntos y el guión solo
+  (`77.089.370-3`). Los RUT que ya tenías cargados también se
+  reformatearon.
+- **Stock ideal** (Módulo 7): nuevo campo en cada producto, junto al
+  stock mínimo — el nivel al que te gustaría reponer. Sienta la base para
+  el futuro Módulo 9 (Planificación de Compras).
+- Nota sobre el resto del Módulo 7: las "diferencias de inventario" ya se
+  pueden revisar filtrando la pestaña Movimientos por categoría "Ajuste
+  de inventario"; y los "ajustes manuales autorizados" quedan cubiertos
+  porque todo movimiento ahora queda atado a un usuario real y autenticado
+  (no se puede hacer un ajuste anónimo).
+
 ## Ajustes según revisión del taller
 - **Tipos de movimiento simplificados**: ahora son solo **Entrada**,
   **Salida** y **Pérdida** (se quitó "Ajuste" como tipo — se logra igual

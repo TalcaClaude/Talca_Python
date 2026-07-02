@@ -8,6 +8,7 @@ para que sea fácil de instalar y correr en cualquier PC o servidor.
 """
 
 import os
+import re
 import sqlite3
 import time
 import threading
@@ -87,7 +88,7 @@ def respaldo_automatico_configurado():
     return bool(SMTP_USER and SMTP_PASSWORD and SMTP_DESTINATARIO)
 
 
-CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
+CATEGORIAS_INICIALES = ["CUERPO DE VÁLVULAS", "DISCOS DE HIERRO", "DISCOS DE FRICCIÓN", "KIT DE SELLOS"]
 MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
 
 # "Merma o pérdida" ya no es una categoría a elegir: es su propio tipo de
@@ -136,6 +137,7 @@ def init_db():
             stock_reservado INTEGER NOT NULL DEFAULT 0,
             stock_merma INTEGER NOT NULL DEFAULT 0,
             stock_minimo INTEGER NOT NULL DEFAULT 0,
+            stock_ideal INTEGER NOT NULL DEFAULT 0,
             costo_compra REAL NOT NULL DEFAULT 0,
             creado_en TEXT NOT NULL,
             actualizado_en TEXT NOT NULL
@@ -254,6 +256,9 @@ def init_db():
     if "stock_merma" not in columnas:
         db.execute("ALTER TABLE productos ADD COLUMN stock_merma INTEGER NOT NULL DEFAULT 0")
         db.commit()
+    if "stock_ideal" not in columnas:
+        db.execute("ALTER TABLE productos ADD COLUMN stock_ideal INTEGER NOT NULL DEFAULT 0")
+        db.commit()
 
     # ---- Migración 2: columnas nuevas en movimientos (costo_unitario, factura)
     columnas_mov = [c[1] for c in db.execute("PRAGMA table_info(movimientos)").fetchall()]
@@ -303,6 +308,7 @@ def init_db():
                 stock_reservado INTEGER NOT NULL DEFAULT 0,
                 stock_merma INTEGER NOT NULL DEFAULT 0,
                 stock_minimo INTEGER NOT NULL DEFAULT 0,
+                stock_ideal INTEGER NOT NULL DEFAULT 0,
                 costo_compra REAL NOT NULL DEFAULT 0,
                 creado_en TEXT NOT NULL,
                 actualizado_en TEXT NOT NULL
@@ -311,12 +317,12 @@ def init_db():
             INSERT INTO productos_nueva (
                 id, codigo_interno, nombre, descripcion, categoria, marca, modelo,
                 ubicacion, ubicacion_id, stock_disponible, stock_reservado, stock_merma,
-                stock_minimo, costo_compra, creado_en, actualizado_en
+                stock_minimo, stock_ideal, costo_compra, creado_en, actualizado_en
             )
             SELECT
                 id, codigo_interno, nombre, descripcion, categoria, marca, modelo,
                 ubicacion, ubicacion_id, stock_disponible, stock_reservado, stock_merma,
-                stock_minimo, costo_compra, creado_en, actualizado_en
+                stock_minimo, stock_ideal, costo_compra, creado_en, actualizado_en
             FROM productos;
 
             DROP TABLE productos;
@@ -417,6 +423,42 @@ def init_db():
         db.execute("UPDATE reservas SET estado = 'liberada' WHERE estado = 'activa'")
         db.commit()
 
+    # ---- Migración 8: todo el texto ingresado por las personas pasa a
+    # mayúsculas, para que quede consistente (a pedido del taller). Se
+    # protege con try/except por si algún caso raro chocara con una
+    # restricción UNIQUE al pasar a mayúsculas (no debería pasar en la
+    # práctica, pero así no se cae el arranque de la aplicación).
+    actualizaciones_mayusculas = [
+        "UPDATE productos SET codigo_interno = UPPER(codigo_interno), categoria = UPPER(categoria), "
+        "modelo = UPPER(modelo), descripcion = UPPER(descripcion)",
+        "UPDATE categorias SET nombre = UPPER(nombre)",
+        "UPDATE modelos SET nombre = UPPER(nombre)",
+        "UPDATE proveedores SET nombre = UPPER(nombre), direccion = UPPER(direccion)",
+        "UPDATE facturas SET numero = UPPER(numero)",
+        "UPDATE movimientos SET motivo = UPPER(motivo), usuario = UPPER(usuario)",
+        "UPDATE usuarios SET nombre = UPPER(nombre)",
+    ]
+    for sql in actualizaciones_mayusculas:
+        try:
+            db.execute(sql)
+            db.commit()
+        except sqlite3.IntegrityError:
+            db.rollback()
+
+    # Reformatea los RUT ya cargados (77089370-3 -> 77.089.370-3), por si
+    # se habían guardado sin el formato con puntos.
+    for r in db.execute("SELECT id, rut FROM proveedores WHERE rut IS NOT NULL AND rut != ''").fetchall():
+        formateado = formatear_rut(r["rut"])
+        if formateado and formateado != r["rut"]:
+            db.execute("UPDATE proveedores SET rut = ? WHERE id = ?", (formateado, r["id"]))
+    db.commit()
+
+    # Con categoría/modelo ya en mayúsculas, se recalcula el nombre automático.
+    for r in db.execute("SELECT id, codigo_interno, categoria, modelo FROM productos").fetchall():
+        nuevo_nombre = nombre_automatico(r["categoria"], r["modelo"], r["codigo_interno"], r["id"])
+        db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nuevo_nombre, r["id"]))
+    db.commit()
+
     db.close()
 
 
@@ -457,6 +499,30 @@ PRODUCTO_SELECT = """
 
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
+
+
+def usuario_actual():
+    """El responsable de cualquier acción SIEMPRE es quien tiene la sesión
+    iniciada; nunca se confía en un valor de 'usuario' mandado por el
+    cliente, para que no se pueda registrar algo a nombre de otra persona."""
+    return session.get("nombre") or session.get("username") or "Sistema"
+
+
+def formatear_rut(valor):
+    """Convierte '770893703' en '77.089.370-3'. Respaldo del servidor por
+    si el formateo automático del navegador no llegó a aplicarse."""
+    limpio = re.sub(r"[^0-9kK]", "", valor or "").upper()
+    if not limpio:
+        return ""
+    cuerpo, dv = limpio[:-1], limpio[-1]
+    partes = []
+    while len(cuerpo) > 3:
+        partes.insert(0, cuerpo[-3:])
+        cuerpo = cuerpo[:-3]
+    if cuerpo:
+        partes.insert(0, cuerpo)
+    cuerpo_formateado = ".".join(partes)
+    return f"{cuerpo_formateado}-{dv}" if cuerpo_formateado else dv
 
 
 def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra"):
@@ -640,9 +706,9 @@ def obtener_producto(producto_id):
 def crear_producto():
     data = request.get_json(force=True, silent=True) or {}
 
-    codigo_interno = (data.get("codigo_interno") or "").strip()
-    categoria = (data.get("categoria") or "").strip()
-    modelo = (data.get("modelo") or "").strip()
+    codigo_interno = (data.get("codigo_interno") or "").strip().upper()
+    categoria = (data.get("categoria") or "").strip().upper()
+    modelo = (data.get("modelo") or "").strip().upper()
 
     db = get_db()
 
@@ -669,6 +735,7 @@ def crear_producto():
         stock_disponible = int(data.get("stock_disponible") or 0)
         stock_reservado = int(data.get("stock_reservado") or 0)
         stock_minimo = int(data.get("stock_minimo") or 0)
+        stock_ideal = int(data.get("stock_ideal") or 0)
         costo_compra = float(data.get("costo_compra") or 0)
     except (TypeError, ValueError):
         return jsonify({"error": "Stock y costo deben ser números"}), 400
@@ -691,19 +758,20 @@ def crear_producto():
         """
         INSERT INTO productos (
             codigo_interno, nombre, descripcion, categoria, marca, modelo,
-            ubicacion_id, stock_disponible, stock_reservado, stock_minimo,
+            ubicacion_id, stock_disponible, stock_reservado, stock_minimo, stock_ideal,
             costo_compra, creado_en, actualizado_en
-        ) VALUES (?, '', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, '', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             codigo_interno,
-            (data.get("descripcion") or "").strip(),
+            (data.get("descripcion") or "").strip().upper(),
             categoria,
             modelo,
             ubicacion_id,
             stock_disponible,
             stock_reservado,
             stock_minimo,
+            stock_ideal,
             costo_compra,
             ts,
             ts,
@@ -720,7 +788,7 @@ def crear_producto():
             INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, costo_unitario, stock_resultante)
             VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, 'Stock inicial al crear producto', ?, ?, ?)
             """,
-            (nuevo_id, ts, stock_disponible, (data.get("usuario") or "Sistema"), costo_compra, stock_disponible),
+            (nuevo_id, ts, stock_disponible, usuario_actual(), costo_compra, stock_disponible),
         )
 
     db.commit()
@@ -743,7 +811,7 @@ def editar_producto(producto_id):
     data = request.get_json(force=True, silent=True) or {}
 
     codigo_interno = data.get("codigo_interno", row["codigo_interno"])
-    codigo_interno = (codigo_interno or "").strip()
+    codigo_interno = (codigo_interno or "").strip().upper()
 
     if codigo_interno:
         duplicado = db.execute(
@@ -755,9 +823,10 @@ def editar_producto(producto_id):
 
     try:
         stock_minimo = int(data.get("stock_minimo", row["stock_minimo"]))
+        stock_ideal = int(data.get("stock_ideal", row["stock_ideal"]))
         costo_compra = float(data.get("costo_compra", row["costo_compra"]))
     except (TypeError, ValueError):
-        return jsonify({"error": "Stock mínimo y costo deben ser números"}), 400
+        return jsonify({"error": "Stock mínimo, stock ideal y costo deben ser números"}), 400
 
     if "ubicacion_id" in data:
         ubicacion_id = data.get("ubicacion_id") or None
@@ -773,8 +842,8 @@ def editar_producto(producto_id):
     else:
         ubicacion_id = row["ubicacion_id"]
 
-    categoria = (data.get("categoria") if data.get("categoria") is not None else row["categoria"]).strip()
-    modelo = (data.get("modelo") if data.get("modelo") is not None else row["modelo"]).strip()
+    categoria = (data.get("categoria") if data.get("categoria") is not None else row["categoria"]).strip().upper()
+    modelo = (data.get("modelo") if data.get("modelo") is not None else row["modelo"]).strip().upper()
 
     if categoria or modelo:
         duplicado_pm = db.execute(
@@ -795,17 +864,18 @@ def editar_producto(producto_id):
         UPDATE productos SET
             codigo_interno = ?, nombre = ?, descripcion = ?, categoria = ?,
             marca = '', modelo = ?, ubicacion_id = ?,
-            stock_minimo = ?, costo_compra = ?, actualizado_en = ?
+            stock_minimo = ?, stock_ideal = ?, costo_compra = ?, actualizado_en = ?
         WHERE id = ?
         """,
         (
             codigo_interno,
             nombre,
-            (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip(),
+            (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip().upper(),
             categoria,
             modelo,
             ubicacion_id,
             stock_minimo,
+            stock_ideal,
             costo_compra,
             now_iso(),
             producto_id,
@@ -873,9 +943,9 @@ def registrar_movimiento(producto_id):
 
     data = request.get_json(force=True, silent=True) or {}
     tipo = (data.get("tipo") or "").strip().lower()
-    motivo = (data.get("motivo") or "").strip()
-    usuario = (data.get("usuario") or "").strip() or "Sin especificar"
-    factura_numero = (data.get("factura_numero") or "").strip()
+    motivo = (data.get("motivo") or "").strip().upper()
+    usuario = usuario_actual()
+    factura_numero = (data.get("factura_numero") or "").strip().upper()
 
     if tipo not in ("entrada", "salida", "perdida"):
         return jsonify({"error": "Tipo de movimiento inválido (usa entrada, salida o perdida)"}), 400
@@ -1070,13 +1140,13 @@ def eliminar_ubicacion(ubicacion_id):
 # ---------------------------------------------------------------------------
 
 def _asegurar_categoria(db, nombre):
-    nombre = (nombre or "").strip()
+    nombre = (nombre or "").strip().upper()
     if nombre:
         db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (nombre,))
 
 
 def _asegurar_modelo(db, nombre):
-    nombre = (nombre or "").strip()
+    nombre = (nombre or "").strip().upper()
     if nombre:
         db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (nombre,))
 
@@ -1091,7 +1161,7 @@ def listar_categorias():
 @app.route("/api/categorias", methods=["POST"])
 def crear_categoria():
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
     db = get_db()
@@ -1110,7 +1180,7 @@ def listar_modelos():
 @app.route("/api/modelos", methods=["POST"])
 def crear_modelo():
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
     db = get_db()
@@ -1141,7 +1211,7 @@ def listar_proveedores():
 @app.route("/api/proveedores", methods=["POST"])
 def crear_proveedor():
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre del proveedor es obligatorio"}), 400
 
@@ -1154,10 +1224,10 @@ def crear_proveedor():
         "INSERT INTO proveedores (nombre, rut, telefono, email, direccion, creado_en) VALUES (?, ?, ?, ?, ?, ?)",
         (
             nombre,
-            (data.get("rut") or "").strip(),
+            formatear_rut(data.get("rut")),
             (data.get("telefono") or "").strip(),
             (data.get("email") or "").strip(),
-            (data.get("direccion") or "").strip(),
+            (data.get("direccion") or "").strip().upper(),
             now_iso(),
         ),
     )
@@ -1174,7 +1244,7 @@ def editar_proveedor(proveedor_id):
         return jsonify({"error": "Proveedor no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or row["nombre"]).strip()
+    nombre = (data.get("nombre") or row["nombre"]).strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre del proveedor es obligatorio"}), 400
 
@@ -1184,14 +1254,16 @@ def editar_proveedor(proveedor_id):
     if duplicado:
         return jsonify({"error": f"Ya existe otro proveedor con el nombre '{nombre}'"}), 400
 
+    rut_nuevo = formatear_rut(data.get("rut")) if data.get("rut") is not None else row["rut"]
+
     db.execute(
         "UPDATE proveedores SET nombre = ?, rut = ?, telefono = ?, email = ?, direccion = ? WHERE id = ?",
         (
             nombre,
-            (data.get("rut") if data.get("rut") is not None else row["rut"]).strip(),
+            rut_nuevo,
             (data.get("telefono") if data.get("telefono") is not None else row["telefono"]).strip(),
             (data.get("email") if data.get("email") is not None else row["email"]).strip(),
-            (data.get("direccion") if data.get("direccion") is not None else row["direccion"]).strip(),
+            (data.get("direccion") if data.get("direccion") is not None else row["direccion"]).strip().upper(),
             proveedor_id,
         ),
     )
@@ -1250,7 +1322,7 @@ def crear_usuario():
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
 
     if not username or not password:
         return jsonify({"error": "Usuario y contraseña son obligatorios"}), 400
@@ -1279,7 +1351,7 @@ def editar_usuario(usuario_id):
         return jsonify({"error": "Usuario no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
-    nombre = data.get("nombre") if data.get("nombre") is not None else row["nombre"]
+    nombre = (data.get("nombre") if data.get("nombre") is not None else row["nombre"]).strip().upper()
     password = data.get("password") or ""
 
     if password and len(password) < 4:
@@ -1384,7 +1456,7 @@ def obtener_factura(factura_id):
 @app.route("/api/facturas/numero/<path:numero>", methods=["GET"])
 def obtener_factura_por_numero(numero):
     db = get_db()
-    row = db.execute(FACTURA_SELECT + " WHERE f.numero = ?", (numero,)).fetchone()
+    row = db.execute(FACTURA_SELECT + " WHERE f.numero = ?", (numero.strip().upper(),)).fetchone()
     if row is None:
         return jsonify({"error": "No existe una factura con ese número"}), 404
     return jsonify(_factura_detalle(db, row))
@@ -1393,12 +1465,12 @@ def obtener_factura_por_numero(numero):
 @app.route("/api/facturas", methods=["POST"])
 def crear_factura():
     data = request.get_json(force=True, silent=True) or {}
-    numero = (data.get("numero") or "").strip()
+    numero = (data.get("numero") or "").strip().upper()
     proveedor_id = data.get("proveedor_id") or None
     fecha = (data.get("fecha") or "").strip()
     lineas_in = data.get("lineas") or []
     aplicar_stock = data.get("aplicar_stock", True)
-    usuario = (data.get("usuario") or "").strip() or "Sistema"
+    usuario = usuario_actual()
 
     if not numero:
         return jsonify({"error": "El número de factura es obligatorio"}), 400
@@ -1489,7 +1561,7 @@ def eliminar_factura(factura_id):
 
     forzar = request.args.get("forzar") == "1"
     data = request.get_json(force=True, silent=True) or {}
-    usuario = (data.get("usuario") or "").strip() or "Sistema"
+    usuario = usuario_actual()
 
     lineas_aplicadas = db.execute(
         "SELECT * FROM factura_lineas WHERE factura_id = ? AND aplicada = 1", (factura_id,)

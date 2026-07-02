@@ -34,6 +34,7 @@
     <button class="tab" data-vista="bodega">Bodega</button>
     <button class="tab" data-vista="facturas">Facturas</button>
     <button class="tab" data-vista="proveedores">Proveedores</button>
+    <button class="tab" data-vista="movimientos">Movimientos</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
   </nav>
 
@@ -237,6 +238,49 @@
 
   </section>
 
+  <section class="vista" id="vista-movimientos" style="display:none">
+
+  <section class="toolbar">
+    <input type="text" id="mov-buscar" placeholder="Buscar por motivo, producto, factura o responsable…">
+    <select id="mov-filtro-tipo">
+      <option value="">Todos los tipos</option>
+      <option value="entrada">Entrada</option>
+      <option value="salida">Salida</option>
+      <option value="ajuste">Ajuste</option>
+    </select>
+    <select id="mov-filtro-categoria">
+      <option value="">Todas las categorías</option>
+    </select>
+  </section>
+  <section class="toolbar">
+    <label class="toggle-critico">Desde <input type="date" id="mov-filtro-desde"></label>
+    <label class="toggle-critico">Hasta <input type="date" id="mov-filtro-hasta"></label>
+    <button class="btn btn-secundario" id="mov-limpiar-filtros">Limpiar filtros</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Producto</th>
+          <th>Tipo</th>
+          <th>Categoría</th>
+          <th class="num">Cantidad</th>
+          <th class="num">Stock resultante</th>
+          <th>Factura</th>
+          <th>Responsable</th>
+          <th>Motivo</th>
+        </tr>
+      </thead>
+      <tbody id="tbody-movimientos">
+        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
 </div>
 
 <!-- Modal: Crear / Editar producto -->
@@ -329,6 +373,10 @@
               <option value="salida">Salida (consumo / venta / uso)</option>
               <option value="ajuste">Ajuste (fijar stock exacto)</option>
             </select>
+          </div>
+          <div class="campo">
+            <label>Categoría</label>
+            <select id="m-categoria"></select>
           </div>
           <div class="campo" id="m-factura-wrap">
             <label>N° de factura (opcional)</label>

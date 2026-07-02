@@ -17,18 +17,24 @@
       <span class="brand-tag">01</span>
       <div class="brand-text">
         <h1>Inventario<span>Taller</span></h1>
-        <p class="brand-sub" id="brand-sub">Administración de Inventario</p>
+        <p class="brand-sub" id="brand-sub">Dashboard</p>
       </div>
     </div>
-    <button class="btn btn-primary" id="btn-nuevo">+ Nuevo producto</button>
+    <div class="topbar-acciones">
+      <button class="btn btn-secundario" id="btn-respaldo">Respaldo</button>
+      <button class="btn btn-primary" id="btn-nuevo" style="display:none">+ Nuevo producto</button>
+    </div>
   </header>
 
   <nav class="tabs">
-    <button class="tab activo" data-vista="productos">Productos</button>
+    <button class="tab activo" data-vista="dashboard">Dashboard</button>
+    <button class="tab" data-vista="productos">Productos</button>
     <button class="tab" data-vista="bodega">Bodega</button>
     <button class="tab" data-vista="facturas">Facturas</button>
     <button class="tab" data-vista="proveedores">Proveedores</button>
   </nav>
+
+  <section class="vista" id="vista-dashboard">
 
   <section class="summary" id="summary">
     <div class="summary-card">
@@ -49,10 +55,46 @@
     </div>
   </section>
 
-  <section class="vista" id="vista-productos">
+  <section class="dash-grid">
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">⚠ Stock crítico</h3>
+      <div class="dash-lista" id="dash-stock-critico"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Últimos movimientos</h3>
+      <div class="dash-lista" id="dash-ultimos-movimientos"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Compras recientes</h3>
+      <div class="dash-lista" id="dash-compras-recientes"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Mayor rotación (salidas)</h3>
+      <div class="dash-lista" id="dash-mas-movidos"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Sin movimiento aún</h3>
+      <div class="dash-lista" id="dash-sin-movimiento"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">Estado general de la bodega</h3>
+      <div class="dash-bodega-resumen" id="dash-bodega-resumen"><p class="vacio">Cargando…</p></div>
+    </div>
+
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-productos" style="display:none">
 
   <section class="toolbar">
-    <input type="text" id="buscar" placeholder="Buscar por código, nombre, marca, modelo o ubicación…">
+    <input type="text" id="buscar" placeholder="Buscar por código, nombre, modelo o ubicación…">
     <select id="filtro-categoria">
       <option value="">Todas las categorías</option>
     </select>
@@ -187,7 +229,7 @@
         <label>Descripción</label>
         <textarea id="f-descripcion" rows="2" placeholder="Detalle adicional del producto"></textarea>
       </div>
-      <div class="grid-3">
+      <div class="grid-2">
         <div class="campo">
           <label>Categoría *</label>
           <div class="campo-select-mas">
@@ -202,15 +244,8 @@
             <button type="button" class="btn-link" data-nuevo="modelo">+ Nuevo</button>
           </div>
         </div>
-        <div class="campo">
-          <label>Marca</label>
-          <div class="campo-select-mas">
-            <select id="f-marca"><option value="">Sin marca</option></select>
-            <button type="button" class="btn-link" data-nuevo="marca">+ Nueva</button>
-          </div>
-        </div>
       </div>
-      <p class="ayuda-inline">La categoría y el modelo son los datos que identifican al producto en el sistema (no hay un campo de "nombre" aparte).</p>
+      <p class="ayuda-inline">La categoría y el modelo identifican al producto en el sistema: no puede haber dos productos con la misma combinación. Si necesitas más stock de algo que ya existe, ingrésalo con una factura en vez de crear un producto nuevo.</p>
       <div class="campo">
         <label>Ubicación física</label>
         <div class="campo-ubicacion">
@@ -443,6 +478,35 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-proveedor">Cancelar</button>
         <button type="submit" class="btn btn-primary">Guardar proveedor</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Respaldo -->
+<div class="modal-overlay" id="modal-respaldo">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Respaldo de datos</h2>
+      <button class="modal-close" data-close="modal-respaldo">&times;</button>
+    </div>
+
+    <div id="respaldo-diagnostico" class="ayuda">Cargando diagnóstico…</div>
+
+    <h3 class="subtitulo">Descargar respaldo</h3>
+    <p class="ayuda-inline">Guarda una copia de toda la base de datos en tu computador. Hazlo antes de cada actualización del sistema, por si algo sale mal.</p>
+    <div class="modal-actions modal-actions--start">
+      <a href="/api/backup/descargar" class="btn btn-primary" id="btn-descargar-respaldo">Descargar respaldo (.db)</a>
+    </div>
+
+    <h3 class="subtitulo">Restaurar desde un respaldo</h3>
+    <p class="ayuda-inline">⚠ Esto reemplaza TODOS los datos actuales por los del archivo que subas. Úsalo solo para recuperarte de una pérdida de datos.</p>
+    <form id="form-restaurar">
+      <div class="campo">
+        <input type="file" id="restaurar-archivo" accept=".db">
+      </div>
+      <div class="modal-actions modal-actions--start">
+        <button type="submit" class="btn btn-danger">Restaurar (reemplaza todo)</button>
       </div>
     </form>
   </div>

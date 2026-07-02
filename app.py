@@ -11,7 +11,7 @@ import os
 import sqlite3
 from datetime import datetime
 
-from flask import Flask, g, jsonify, request, render_template
+from flask import Flask, g, jsonify, request, render_template, send_file
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
@@ -1223,6 +1223,176 @@ def resumen():
         """
     ).fetchone()
     return jsonify(dict(row))
+
+
+# ---------------------------------------------------------------------------
+# API: Diagnóstico y respaldo (para verificar que el disco persistente de
+# Railway realmente está guardando los datos, y como red de seguridad)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/estado", methods=["GET"])
+def estado_sistema():
+    db = get_db()
+    existe_archivo = os.path.exists(DB_PATH)
+    tamano_kb = round(os.path.getsize(DB_PATH) / 1024, 1) if existe_archivo else 0
+    productos = db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+    facturas = db.execute("SELECT COUNT(*) FROM facturas").fetchone()[0]
+    movimientos = db.execute("SELECT COUNT(*) FROM movimientos").fetchone()[0]
+    return jsonify({
+        "db_path": DB_PATH,
+        "parece_disco_persistente": DB_PATH.startswith("/data"),
+        "archivo_existe": existe_archivo,
+        "tamano_kb": tamano_kb,
+        "cantidad_productos": productos,
+        "cantidad_facturas": facturas,
+        "cantidad_movimientos": movimientos,
+    })
+
+
+@app.route("/api/backup/descargar", methods=["GET"])
+def backup_descargar():
+    if not os.path.exists(DB_PATH):
+        return jsonify({"error": "Aún no existe base de datos que respaldar"}), 404
+    db = get_db()
+    db.commit()  # asegura que todo lo pendiente quede escrito en el archivo
+    fecha = datetime.now().strftime("%Y-%m-%d_%H%M")
+    return send_file(
+        DB_PATH,
+        as_attachment=True,
+        download_name=f"inventario_backup_{fecha}.db",
+        mimetype="application/octet-stream",
+    )
+
+
+@app.route("/api/backup/restaurar", methods=["POST"])
+def backup_restaurar():
+    archivo = request.files.get("archivo")
+    if not archivo or archivo.filename == "":
+        return jsonify({"error": "Selecciona un archivo de respaldo (.db)"}), 400
+
+    tmp_path = DB_PATH + ".subida_tmp"
+    archivo.save(tmp_path)
+
+    # Validar que sea una base de datos SQLite válida con la tabla esperada,
+    # antes de reemplazar nada.
+    try:
+        prueba = sqlite3.connect(tmp_path)
+        prueba.execute("SELECT COUNT(*) FROM productos")
+        prueba.close()
+    except sqlite3.Error:
+        os.remove(tmp_path)
+        return jsonify({"error": "El archivo no parece ser un respaldo válido de este sistema"}), 400
+
+    # Cierra la conexión de esta request y respalda el archivo actual antes de reemplazarlo.
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+    if os.path.exists(DB_PATH):
+        respaldo_previo = DB_PATH + ".antes_de_restaurar"
+        try:
+            os.replace(DB_PATH, respaldo_previo)
+        except OSError:
+            pass
+
+    os.replace(tmp_path, DB_PATH)
+
+    # Se corren las migraciones por si el respaldo es de una versión anterior.
+    init_db()
+
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# API: Dashboard (Módulo 1)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/dashboard", methods=["GET"])
+def dashboard():
+    db = get_db()
+
+    resumen_row = dict(db.execute(
+        """
+        SELECT
+            COUNT(*) AS total_productos,
+            COALESCE(SUM(stock_disponible + stock_reservado), 0) AS total_unidades,
+            COALESCE(SUM((stock_disponible + stock_reservado) * costo_compra), 0) AS valor_total,
+            COALESCE(SUM(CASE WHEN stock_disponible <= stock_minimo THEN 1 ELSE 0 END), 0) AS stock_critico
+        FROM productos
+        """
+    ).fetchone())
+
+    stock_critico = [row_to_dict(r) for r in db.execute(
+        PRODUCTO_SELECT + " WHERE p.stock_disponible <= p.stock_minimo ORDER BY (p.stock_disponible - p.stock_minimo) ASC LIMIT 8"
+    ).fetchall()]
+
+    sin_movimiento = [row_to_dict(r) for r in db.execute(
+        PRODUCTO_SELECT + """
+        WHERE p.id NOT IN (SELECT DISTINCT producto_id FROM movimientos)
+        ORDER BY p.creado_en DESC LIMIT 8
+        """
+    ).fetchall()]
+
+    mas_movidos_rows = db.execute(
+        """
+        SELECT m.producto_id, SUM(m.cantidad) AS total_salida
+        FROM movimientos m
+        WHERE m.tipo = 'salida'
+        GROUP BY m.producto_id
+        ORDER BY total_salida DESC
+        LIMIT 5
+        """
+    ).fetchall()
+    mas_movidos = []
+    for r in mas_movidos_rows:
+        prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (r["producto_id"],)).fetchone()
+        if prod:
+            d = row_to_dict(prod)
+            d["total_salida"] = r["total_salida"]
+            mas_movidos.append(d)
+
+    ultimos_movimientos = []
+    for m in db.execute(
+        "SELECT * FROM movimientos ORDER BY fecha DESC, id DESC LIMIT 10"
+    ).fetchall():
+        md = dict(m)
+        prod = db.execute("SELECT id, nombre FROM productos WHERE id = ?", (md["producto_id"],)).fetchone()
+        md["producto_nombre"] = prod["nombre"] if prod else "(producto eliminado)"
+        md["producto_id_sistema"] = f"{prod['id']:04d}" if prod else "----"
+        ultimos_movimientos.append(md)
+
+    compras_recientes = db.execute(
+        FACTURA_SELECT + " ORDER BY f.creado_en DESC LIMIT 5"
+    ).fetchall()
+    compras_recientes = [_factura_resumen(db, r) for r in compras_recientes]
+
+    total_ubicaciones = db.execute("SELECT COUNT(*) FROM ubicaciones").fetchone()[0]
+    ubicaciones_ocupadas = db.execute(
+        "SELECT COUNT(DISTINCT ubicacion_id) FROM productos WHERE ubicacion_id IS NOT NULL"
+    ).fetchone()[0]
+    total_proveedores = db.execute("SELECT COUNT(*) FROM proveedores").fetchone()[0]
+    facturas_pendientes = db.execute(
+        """
+        SELECT COUNT(DISTINCT f.id) FROM facturas f
+        JOIN factura_lineas fl ON fl.factura_id = f.id
+        WHERE fl.aplicada = 0
+        """
+    ).fetchone()[0]
+
+    return jsonify({
+        "resumen": resumen_row,
+        "stock_critico": stock_critico,
+        "sin_movimiento": sin_movimiento,
+        "mas_movidos": mas_movidos,
+        "ultimos_movimientos": ultimos_movimientos,
+        "compras_recientes": compras_recientes,
+        "bodega": {
+            "total_ubicaciones": total_ubicaciones,
+            "ubicaciones_ocupadas": ubicaciones_ocupadas,
+            "total_proveedores": total_proveedores,
+            "facturas_pendientes": facturas_pendientes,
+        },
+    })
 
 
 init_db()

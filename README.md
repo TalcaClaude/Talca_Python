@@ -49,6 +49,22 @@ Sistema de logística y abastecimiento para el taller, basado en el documento
     ese stock, no te deja eliminarla hasta que ajustes el stock a mano
     primero — para no dejar el inventario descuadrado.
 
+## Dashboard (Módulo 1)
+- Nueva pestaña "Dashboard" (ahora es la pantalla de inicio): valor total
+  del inventario, productos con stock crítico, últimos movimientos,
+  compras recientes, productos sin movimiento, productos con mayor
+  rotación (más salidas), y un resumen general de la bodega.
+
+## Respaldo de datos
+- Botón "Respaldo" arriba a la derecha:
+  - **Diagnóstico**: muestra si la base de datos está usando el disco
+    persistente de Railway (importante para confirmar que los datos no
+    se van a perder en la próxima actualización).
+  - **Descargar respaldo**: baja un archivo `.db` con todo lo cargado.
+    Hazlo antes de cada actualización, como hábito.
+  - **Restaurar**: sube un archivo de respaldo y reemplaza todos los
+    datos actuales por los de ese archivo (por si algo se pierde).
+
 ## Ajustes de esta ronda
 - **Se eliminó "Marca"** del sistema. La categoría + el modelo son
   suficientes para identificar cada producto. Si ya tenías productos con

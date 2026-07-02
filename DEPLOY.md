@@ -104,3 +104,32 @@ Como es solo para 2-3 personas de confianza en tu taller, por ahora está
 bien, pero si más adelante quieres restringir el acceso (usuario y
 contraseña, o que cada persona tenga su propio login), es el siguiente
 paso natural a construir — avísame cuando quieras eso.
+
+## Si en algún momento se te vuelven a borrar los datos
+
+Primero, entra a `https://tu-dominio.up.railway.app/api/estado` en el
+navegador (sí, directamente esa dirección). Te muestra algo como:
+
+```json
+{
+  "db_path": "/data/inventario.db",
+  "parece_disco_persistente": true,
+  "archivo_existe": true,
+  "cantidad_productos": 12
+}
+```
+
+- Si `db_path` **no** empieza con `/data`, la variable `DB_PATH` no está
+  bien configurada (revisa el Paso 5).
+- Si `parece_disco_persistente` da `false` aunque `db_path` diga
+  `/data/...`, probablemente el volumen no está realmente montado (revisa
+  el Paso 4 — a veces al editar el "Mount Path" Railway crea un volumen
+  nuevo en vez de reutilizar el que ya tenías).
+- Anota `cantidad_productos` antes y después de cada actualización, para
+  confirmar si los datos sobreviven.
+
+**Antes de cada actualización**, desde la aplicación misma, usa el botón
+**"Respaldo"** (arriba a la derecha) y descarga una copia. Si algo sale
+mal, desde ese mismo lugar puedes subir ese archivo y restaurar todo tal
+como estaba.
+

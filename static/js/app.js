@@ -5,7 +5,6 @@ const state = {
   ubicaciones: [],
   origenModalUbicacion: "producto", // "producto" | "bodega"
   categoriasDisponibles: [],
-  marcasDisponibles: [],
   modelosDisponibles: [],
   facturas: [],
   facturaActivaId: null,
@@ -67,18 +66,21 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.querySelectorAll(".tab").forEach(b => b.classList.remove("activo"));
     tabBtn.classList.add("activo");
     const vista = tabBtn.dataset.vista;
+    document.getElementById("vista-dashboard").style.display = vista === "dashboard" ? "block" : "none";
     document.getElementById("vista-productos").style.display = vista === "productos" ? "block" : "none";
     document.getElementById("vista-bodega").style.display = vista === "bodega" ? "block" : "none";
     document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
+      dashboard: "Dashboard",
       productos: "Administración de Inventario",
       bodega: "Organización Física de Bodega",
       facturas: "Facturas de compra",
       proveedores: "Proveedores",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
+    if (vista === "dashboard") cargarDashboard();
     if (vista === "bodega") cargarUbicaciones();
     if (vista === "facturas") cargarFacturas();
     if (vista === "proveedores") cargarProveedores();
@@ -135,24 +137,32 @@ function renderTablaUbicaciones() {
     tbody.innerHTML = `<tr><td colspan="7" class="vacio">Aún no hay ubicaciones creadas. Usa "+ Nueva ubicación" para empezar a mapear la bodega.</td></tr>`;
     return;
   }
-  tbody.innerHTML = state.ubicaciones.map(u => `
+  tbody.innerHTML = state.ubicaciones.map(u => {
+    const productosTexto = u.productos.length
+      ? u.productos.map(p => `<span class="codigo-pill">${p.codigo_interno ? escapeHtml(p.codigo_interno) : "#" + String(p.id).padStart(4, "0")}</span> ${escapeHtml(p.nombre)}`).join("<br>")
+      : "—";
+    return `
     <tr>
       <td class="mono">${escapeHtml(u.codigo)}</td>
       <td class="mono">${u.pasillo}</td>
       <td class="mono">${u.estanteria}</td>
       <td class="mono">${u.nivel}</td>
-      <td><span class="estado-pill estado-pill--${u.ocupada ? "ocupada" : "libre"}">${u.ocupada ? "Ocupada" : "Libre"}</span></td>
-      <td>${u.producto ? `<span class="codigo-pill">${u.producto.codigo_interno ? escapeHtml(u.producto.codigo_interno) : "#" + String(u.producto.id).padStart(4, "0")}</span> ${escapeHtml(u.producto.nombre)}` : "—"}</td>
-      <td>${u.ocupada ? "" : `<button class="btn-link" data-borrar-ubicacion="${u.id}">Eliminar</button>`}</td>
+      <td><span class="estado-pill estado-pill--${u.ocupada ? "ocupada" : "libre"}">${u.ocupada ? `${u.productos.length} producto(s)` : "Libre"}</span></td>
+      <td>${productosTexto}</td>
+      <td><button class="btn-link" data-borrar-ubicacion="${u.id}">Eliminar</button></td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
 
   tbody.querySelectorAll("[data-borrar-ubicacion]").forEach(btn => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.borrarUbicacion;
-      if (!confirm("¿Eliminar esta ubicación vacía?")) return;
       try {
-        await api(`/api/ubicaciones/${id}`, { method: "DELETE" });
+        const eliminado = await eliminarConReintento(
+          `/api/ubicaciones/${id}`,
+          "¿Eliminar esta ubicación?"
+        );
+        if (!eliminado) return;
         toast("Ubicación eliminada");
         await cargarUbicaciones();
       } catch (e) {
@@ -164,9 +174,8 @@ function renderTablaUbicaciones() {
 
 function renderSelectUbicaciones(seleccionActualId) {
   const select = document.getElementById("f-ubicacion-id");
-  const disponibles = state.ubicaciones.filter(u => !u.ocupada || u.id === seleccionActualId);
   select.innerHTML = '<option value="">Sin asignar</option>' +
-    disponibles.map(u => `<option value="${u.id}">${escapeHtml(u.codigo)}</option>`).join("");
+    state.ubicaciones.map(u => `<option value="${u.id}">${escapeHtml(u.codigo)}${u.ocupada ? ` (${u.productos.length} producto/s)` : ""}</option>`).join("");
   select.value = seleccionActualId || "";
 }
 
@@ -216,21 +225,18 @@ document.getElementById("form-ubicacion").addEventListener("submit", async (e) =
 });
 
 // ---------------------------------------------------------------------------
-// Categorías y marcas precargadas (con alta rápida desde el formulario)
+// Categorías y modelos precargados (con alta rápida desde el formulario)
 // ---------------------------------------------------------------------------
 
 async function cargarCategoriasYMarcas() {
   try {
-    const [cats, marcas, modelos] = await Promise.all([
+    const [cats, modelos] = await Promise.all([
       api("/api/categorias"),
-      api("/api/marcas"),
       api("/api/modelos"),
     ]);
     state.categoriasDisponibles = cats.categorias;
-    state.marcasDisponibles = marcas.marcas;
     state.modelosDisponibles = modelos.modelos;
     renderSelectCategoria();
-    renderSelectMarca();
     renderSelectModelo();
   } catch (e) {
     console.error(e);
@@ -245,14 +251,6 @@ function renderSelectCategoria(seleccionActual) {
   select.value = actual || "";
 }
 
-function renderSelectMarca(seleccionActual) {
-  const select = document.getElementById("f-marca");
-  const actual = seleccionActual !== undefined ? seleccionActual : select.value;
-  select.innerHTML = '<option value="">Sin marca</option>' +
-    state.marcasDisponibles.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
-  select.value = actual || "";
-}
-
 function renderSelectModelo(seleccionActual) {
   const select = document.getElementById("f-modelo");
   const actual = seleccionActual !== undefined ? seleccionActual : select.value;
@@ -263,13 +261,12 @@ function renderSelectModelo(seleccionActual) {
 
 const ETIQUETAS_ALTA_RAPIDA = {
   categoria: { texto: "categoría", render: renderSelectCategoria },
-  marca: { texto: "marca", render: renderSelectMarca },
   modelo: { texto: "modelo", render: renderSelectModelo },
 };
 
 document.querySelectorAll("[data-nuevo]").forEach(btn => {
   btn.addEventListener("click", async () => {
-    const tipo = btn.dataset.nuevo; // "categoria" | "marca" | "modelo"
+    const tipo = btn.dataset.nuevo; // "categoria" | "modelo"
     const info = ETIQUETAS_ALTA_RAPIDA[tipo];
     const nombre = prompt(`Nombre de la nueva ${info.texto}:`);
     if (!nombre || !nombre.trim()) return;
@@ -352,7 +349,7 @@ function renderTabla() {
         <td><span class="codigo-pill">#${escapeHtml(p.id_sistema)}</span></td>
         <td>
           <div class="nombre-producto">${escapeHtml(p.nombre)} ${critico ? '<span class="badge-critico">Crítico</span>' : ""}</div>
-          <div class="subtexto">${escapeHtml([p.codigo_interno, p.marca, p.modelo].filter(Boolean).join(" · ")) || "&nbsp;"}</div>
+          <div class="subtexto">${escapeHtml([p.codigo_interno, p.modelo].filter(Boolean).join(" · ")) || "&nbsp;"}</div>
         </td>
         <td>${escapeHtml(p.categoria) || "—"}</td>
         <td>${ubicacionTexto}</td>
@@ -410,7 +407,6 @@ document.getElementById("btn-nuevo").addEventListener("click", async () => {
   await Promise.all([cargarUbicaciones(), cargarCategoriasYMarcas()]);
   renderSelectUbicaciones(null);
   renderSelectCategoria("");
-  renderSelectMarca("");
   renderSelectModelo("");
   abrirModal("modal-producto");
 });
@@ -428,7 +424,6 @@ async function abrirEdicion(p) {
   await Promise.all([cargarUbicaciones(), cargarCategoriasYMarcas()]);
   renderSelectUbicaciones(p.ubicacion_id);
   renderSelectCategoria(p.categoria || "");
-  renderSelectMarca(p.marca || "");
   renderSelectModelo(p.modelo || "");
 
   const legacy = document.getElementById("f-ubicacion-legacy");
@@ -455,7 +450,6 @@ formProducto.addEventListener("submit", async (e) => {
     codigo_interno: document.getElementById("f-codigo").value,
     descripcion: document.getElementById("f-descripcion").value,
     categoria: document.getElementById("f-categoria").value,
-    marca: document.getElementById("f-marca").value,
     modelo: document.getElementById("f-modelo").value,
     ubicacion_id: document.getElementById("f-ubicacion-id").value,
     stock_minimo: document.getElementById("f-stock-minimo").value,
@@ -511,7 +505,7 @@ function renderDetalle(p) {
     <dt>N° de sistema</dt><dd class="mono">#${escapeHtml(p.id_sistema)}</dd>
     <dt>Código interno</dt><dd class="mono">${escapeHtml(p.codigo_interno) || "—"}</dd>
     <dt>Categoría</dt><dd>${escapeHtml(p.categoria) || "—"}</dd>
-    <dt>Marca / Modelo</dt><dd>${escapeHtml([p.marca, p.modelo].filter(Boolean).join(" · ")) || "—"}</dd>
+    <dt>Modelo</dt><dd>${escapeHtml(p.modelo) || "—"}</dd>
     <dt>Ubicación</dt><dd>${ubicacionTexto}</dd>
     <dt>Descripción</dt><dd>${escapeHtml(p.descripcion) || "—"}</dd>
     <dt>Disponible</dt><dd class="mono">${p.stock_disponible}</dd>
@@ -956,8 +950,126 @@ document.getElementById("form-proveedor").addEventListener("submit", async (e) =
 });
 
 // ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+async function cargarDashboard() {
+  try {
+    const d = await api("/api/dashboard");
+
+    document.getElementById("s-total-productos").textContent = d.resumen.total_productos;
+    document.getElementById("s-total-unidades").textContent = d.resumen.total_unidades;
+    document.getElementById("s-valor-total").textContent = fmtMoney(d.resumen.valor_total);
+    document.getElementById("s-criticos").textContent = d.resumen.stock_critico;
+
+    const contCritico = document.getElementById("dash-stock-critico");
+    contCritico.innerHTML = d.stock_critico.length
+      ? d.stock_critico.map(p => `
+        <div class="dash-item">
+          <span class="dash-item-nombre">#${p.id_sistema} — ${escapeHtml(p.nombre)}</span>
+          <span class="dash-item-valor">${p.stock_disponible} / mín. ${p.stock_minimo}</span>
+        </div>`).join("")
+      : `<p class="vacio">No hay productos en estado crítico. 👍</p>`;
+
+    const contMov = document.getElementById("dash-ultimos-movimientos");
+    contMov.innerHTML = d.ultimos_movimientos.length
+      ? d.ultimos_movimientos.map(m => `
+        <div class="dash-item">
+          <span>
+            <span class="mov-tipo mov-tipo--${m.tipo}">${m.tipo}</span>
+            <span class="dash-item-nombre">#${m.producto_id_sistema} ${escapeHtml(m.producto_nombre)}</span>
+            <div class="dash-item-detalle">${m.cantidad >= 0 ? "+" : ""}${m.cantidad} · ${fmtFecha(m.fecha)}</div>
+          </span>
+        </div>`).join("")
+      : `<p class="vacio">Aún no hay movimientos registrados.</p>`;
+
+    const contCompras = document.getElementById("dash-compras-recientes");
+    contCompras.innerHTML = d.compras_recientes.length
+      ? d.compras_recientes.map(f => `
+        <div class="dash-item">
+          <span>
+            <span class="dash-item-nombre mono">${escapeHtml(f.numero)}</span>
+            <div class="dash-item-detalle">${escapeHtml(f.proveedor_display) || "Sin proveedor"} · ${f.lineas_aplicadas}/${f.total_lineas} ingresado</div>
+          </span>
+        </div>`).join("")
+      : `<p class="vacio">Aún no hay facturas registradas.</p>`;
+
+    const contRotacion = document.getElementById("dash-mas-movidos");
+    contRotacion.innerHTML = d.mas_movidos.length
+      ? d.mas_movidos.map(p => `
+        <div class="dash-item">
+          <span class="dash-item-nombre">#${p.id_sistema} — ${escapeHtml(p.nombre)}</span>
+          <span class="dash-item-valor">${p.total_salida} salidas</span>
+        </div>`).join("")
+      : `<p class="vacio">Todavía no hay suficientes salidas para calcular rotación.</p>`;
+
+    const contSinMov = document.getElementById("dash-sin-movimiento");
+    contSinMov.innerHTML = d.sin_movimiento.length
+      ? d.sin_movimiento.map(p => `
+        <div class="dash-item">
+          <span class="dash-item-nombre">#${p.id_sistema} — ${escapeHtml(p.nombre)}</span>
+        </div>`).join("")
+      : `<p class="vacio">Todos los productos tienen movimientos registrados.</p>`;
+
+    document.getElementById("dash-bodega-resumen").innerHTML = `
+      <div class="dash-bodega-stat"><span class="valor">${d.bodega.total_ubicaciones}</span><span class="label">Ubicaciones</span></div>
+      <div class="dash-bodega-stat"><span class="valor">${d.bodega.ubicaciones_ocupadas}</span><span class="label">Con stock</span></div>
+      <div class="dash-bodega-stat"><span class="valor">${d.bodega.total_proveedores}</span><span class="label">Proveedores</span></div>
+      <div class="dash-bodega-stat"><span class="valor">${d.bodega.facturas_pendientes}</span><span class="label">Facturas pendientes</span></div>
+    `;
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Respaldo de datos
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-respaldo").addEventListener("click", async () => {
+  document.getElementById("respaldo-diagnostico").textContent = "Cargando diagnóstico…";
+  abrirModal("modal-respaldo");
+  try {
+    const info = await api("/api/estado");
+    const disco = info.parece_disco_persistente ? "✓ usando disco persistente (/data)" : "⚠ NO parece estar usando un disco persistente — revisa la variable DB_PATH en Railway";
+    document.getElementById("respaldo-diagnostico").innerHTML = `
+      Ruta de la base de datos: <span class="mono">${escapeHtml(info.db_path)}</span><br>
+      ${disco}<br>
+      Productos: ${info.cantidad_productos} · Facturas: ${info.cantidad_facturas} · Movimientos: ${info.cantidad_movimientos}
+      (${info.tamano_kb} KB)
+    `;
+  } catch (e) {
+    document.getElementById("respaldo-diagnostico").textContent = "No se pudo cargar el diagnóstico: " + e.message;
+  }
+});
+
+document.getElementById("form-restaurar").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = document.getElementById("restaurar-archivo");
+  if (!input.files.length) {
+    toast("Selecciona un archivo primero", true);
+    return;
+  }
+  if (!confirm("Esto reemplaza TODOS los datos actuales por los del archivo. ¿Continuar?")) return;
+
+  const formData = new FormData();
+  formData.append("archivo", input.files[0]);
+  try {
+    const res = await fetch("/api/backup/restaurar", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Error al restaurar");
+    toast("Datos restaurados correctamente");
+    cerrarModal("modal-respaldo");
+    input.value = "";
+    await Promise.all([cargarDashboard(), cargarProductos(), cargarResumen()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
-cargarResumen();
 cargarProductos();
+cargarDashboard();

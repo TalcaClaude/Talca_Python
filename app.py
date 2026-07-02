@@ -11,12 +11,17 @@ import os
 import sqlite3
 from datetime import datetime
 
-from flask import Flask, g, jsonify, request, render_template, send_file
+from flask import Flask, g, jsonify, request, render_template, send_file, session, redirect, url_for
+from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "cambia-esta-clave-en-produccion-usando-la-variable-SECRET_KEY")
+
+USUARIO_INICIAL = "admin"
+CLAVE_INICIAL = "taller2026"
 
 CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
 MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
@@ -120,6 +125,14 @@ def init_db():
             telefono TEXT DEFAULT '',
             email TEXT DEFAULT '',
             direccion TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            nombre TEXT DEFAULT '',
             creado_en TEXT NOT NULL
         );
 
@@ -249,6 +262,14 @@ def init_db():
         db.executemany("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", [(m,) for m in MODELOS_INICIALES])
     db.commit()
 
+    # ---- Semilla: usuario administrador inicial (solo si no hay ningún usuario)
+    if db.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0] == 0:
+        db.execute(
+            "INSERT INTO usuarios (username, password_hash, nombre, creado_en) VALUES (?, ?, ?, ?)",
+            (USUARIO_INICIAL, generate_password_hash(CLAVE_INICIAL), "Administrador", now_iso()),
+        )
+        db.commit()
+
     # ---- Migración 5: se elimina el campo "marca" del sistema (a pedido del
     # taller: la categoría + el modelo son suficientes para identificar el
     # producto). Se limpia en todos los productos ya cargados y se
@@ -322,6 +343,93 @@ def now_iso():
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None):
+    """Aplica una entrada de stock a un producto, recalculando el Costo
+    Promedio Ponderado si se informa costo_unitario, y deja el movimiento
+    registrado con la referencia a la factura si corresponde.
+    Devuelve el nuevo stock disponible.
+    """
+    stock_actual = producto_row["stock_disponible"]
+    costo_actual = producto_row["costo_compra"]
+    nuevo_stock = stock_actual + cantidad
+
+    nuevo_costo_promedio = costo_actual
+    if costo_unitario is not None:
+        valor_actual = stock_actual * costo_actual
+        valor_nuevo = cantidad * costo_unitario
+        nuevo_costo_promedio = (valor_actual + valor_nuevo) / nuevo_stock if nuevo_stock > 0 else costo_unitario
+
+    ts = now_iso()
+    db.execute(
+        "UPDATE productos SET stock_disponible = ?, costo_compra = ?, actualizado_en = ? WHERE id = ?",
+        (nuevo_stock, nuevo_costo_promedio, ts, producto_row["id"]),
+    )
+    db.execute(
+        """
+        INSERT INTO movimientos (
+            producto_id, fecha, tipo, cantidad, motivo, usuario,
+            costo_unitario, factura_id, factura_numero, stock_resultante
+        )
+        VALUES (?, ?, 'entrada', ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            producto_row["id"], ts, cantidad, motivo, usuario, costo_unitario,
+            factura["id"] if factura else None,
+            factura["numero"] if factura else None,
+            nuevo_stock,
+        ),
+    )
+    return nuevo_stock
+
+
+# ---------------------------------------------------------------------------
+# Autenticación
+# ---------------------------------------------------------------------------
+
+RUTAS_PUBLICAS = {"login", "static"}
+
+
+@app.before_request
+def exigir_login():
+    if request.endpoint in RUTAS_PUBLICAS or request.endpoint is None:
+        return None
+    if session.get("user_id"):
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Debes iniciar sesión"}), 401
+    return redirect(url_for("login"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        if session.get("user_id"):
+            return redirect(url_for("index"))
+        return render_template("login.html")
+
+    username = (request.form.get("username") or "").strip()
+    password = request.form.get("password") or ""
+
+    db = get_db()
+    usuario = db.execute("SELECT * FROM usuarios WHERE username = ?", (username,)).fetchone()
+
+    if usuario is None or not check_password_hash(usuario["password_hash"], password):
+        return render_template("login.html", error="Usuario o contraseña incorrectos."), 401
+
+    session.clear()
+    session["user_id"] = usuario["id"]
+    session["username"] = usuario["username"]
+    session["nombre"] = usuario["nombre"] or usuario["username"]
+    session.permanent = True
+    return redirect(url_for("index"))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
 # ---------------------------------------------------------------------------
 # Páginas
 # ---------------------------------------------------------------------------
@@ -329,6 +437,11 @@ def now_iso():
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/sesion", methods=["GET"])
+def sesion_actual():
+    return jsonify({"username": session.get("username"), "nombre": session.get("nombre")})
 
 
 # ---------------------------------------------------------------------------
@@ -683,52 +796,43 @@ def registrar_movimiento(producto_id):
         costo_unitario = linea["precio_unitario"]
 
     stock_actual = row["stock_disponible"]
-    costo_actual = row["costo_compra"]
-    nuevo_costo_promedio = costo_actual
 
     if tipo == "entrada":
-        nuevo_stock = stock_actual + cantidad
-        if costo_unitario is not None:
-            # Costo Promedio Ponderado: recalcula el costo de referencia del
-            # producto combinando lo que ya había con lo que se acaba de comprar.
-            valor_actual = stock_actual * costo_actual
-            valor_nuevo = cantidad * costo_unitario
-            nuevo_costo_promedio = (valor_actual + valor_nuevo) / nuevo_stock if nuevo_stock > 0 else costo_unitario
+        nuevo_stock = _aplicar_entrada_stock(db, row, cantidad, costo_unitario, motivo, usuario, factura)
     elif tipo == "salida":
         if cantidad > stock_actual:
             return jsonify({"error": f"No hay stock suficiente (disponible: {stock_actual})"}), 400
         nuevo_stock = stock_actual - cantidad
+        ts = now_iso()
+        db.execute(
+            "UPDATE productos SET stock_disponible = ?, actualizado_en = ? WHERE id = ?",
+            (nuevo_stock, ts, producto_id),
+        )
+        db.execute(
+            "INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, motivo, usuario, stock_resultante) "
+            "VALUES (?, ?, 'salida', ?, ?, ?, ?)",
+            (producto_id, ts, cantidad, motivo, usuario, nuevo_stock),
+        )
     else:  # ajuste -> cantidad es el nuevo stock disponible absoluto
         if cantidad < 0:
             return jsonify({"error": "El stock ajustado no puede ser negativo"}), 400
         nuevo_stock = cantidad
         cantidad = nuevo_stock - stock_actual  # delta real para el registro
-
-    ts = now_iso()
-    db.execute(
-        "UPDATE productos SET stock_disponible = ?, costo_compra = ?, actualizado_en = ? WHERE id = ?",
-        (nuevo_stock, nuevo_costo_promedio, ts, producto_id),
-    )
-    db.execute(
-        """
-        INSERT INTO movimientos (
-            producto_id, fecha, tipo, cantidad, motivo, usuario,
-            costo_unitario, factura_id, factura_numero, stock_resultante
+        ts = now_iso()
+        db.execute(
+            "UPDATE productos SET stock_disponible = ?, actualizado_en = ? WHERE id = ?",
+            (nuevo_stock, ts, producto_id),
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            producto_id, ts, tipo, cantidad, motivo, usuario, costo_unitario,
-            factura["id"] if factura else None,
-            factura["numero"] if factura else None,
-            nuevo_stock,
-        ),
-    )
+        db.execute(
+            "INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, motivo, usuario, stock_resultante) "
+            "VALUES (?, ?, 'ajuste', ?, ?, ?, ?)",
+            (producto_id, ts, cantidad, motivo, usuario, nuevo_stock),
+        )
 
     if linea:
         db.execute(
             "UPDATE factura_lineas SET aplicada = 1, aplicada_en = ? WHERE id = ?",
-            (ts, linea["id"]),
+            (now_iso(), linea["id"]),
         )
 
     db.commit()
@@ -996,6 +1100,92 @@ def eliminar_proveedor(proveedor_id):
 
 
 # ---------------------------------------------------------------------------
+# API: Usuarios
+# ---------------------------------------------------------------------------
+
+@app.route("/api/usuarios", methods=["GET"])
+def listar_usuarios():
+    db = get_db()
+    rows = db.execute("SELECT id, username, nombre, creado_en FROM usuarios ORDER BY username COLLATE NOCASE").fetchall()
+    return jsonify({"usuarios": [dict(r) for r in rows]})
+
+
+@app.route("/api/usuarios", methods=["POST"])
+def crear_usuario():
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip().lower()
+    password = data.get("password") or ""
+    nombre = (data.get("nombre") or "").strip()
+
+    if not username or not password:
+        return jsonify({"error": "Usuario y contraseña son obligatorios"}), 400
+    if len(password) < 4:
+        return jsonify({"error": "La contraseña debe tener al menos 4 caracteres"}), 400
+
+    db = get_db()
+    existe = db.execute("SELECT id FROM usuarios WHERE username = ?", (username,)).fetchone()
+    if existe:
+        return jsonify({"error": f"Ya existe un usuario '{username}'"}), 400
+
+    cur = db.execute(
+        "INSERT INTO usuarios (username, password_hash, nombre, creado_en) VALUES (?, ?, ?, ?)",
+        (username, generate_password_hash(password), nombre, now_iso()),
+    )
+    db.commit()
+    nuevo = db.execute("SELECT id, username, nombre, creado_en FROM usuarios WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nuevo)), 201
+
+
+@app.route("/api/usuarios/<int:usuario_id>", methods=["PUT"])
+def editar_usuario(usuario_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Usuario no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = data.get("nombre") if data.get("nombre") is not None else row["nombre"]
+    password = data.get("password") or ""
+
+    if password and len(password) < 4:
+        return jsonify({"error": "La contraseña debe tener al menos 4 caracteres"}), 400
+
+    if password:
+        db.execute(
+            "UPDATE usuarios SET nombre = ?, password_hash = ? WHERE id = ?",
+            (nombre, generate_password_hash(password), usuario_id),
+        )
+    else:
+        db.execute("UPDATE usuarios SET nombre = ? WHERE id = ?", (nombre, usuario_id))
+    db.commit()
+
+    if usuario_id == session.get("user_id"):
+        session["nombre"] = nombre or session.get("username")
+
+    actualizado = db.execute("SELECT id, username, nombre, creado_en FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    return jsonify(dict(actualizado))
+
+
+@app.route("/api/usuarios/<int:usuario_id>", methods=["DELETE"])
+def eliminar_usuario(usuario_id):
+    db = get_db()
+    row = db.execute("SELECT id FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Usuario no encontrado"}), 404
+
+    total_usuarios = db.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0]
+    if total_usuarios <= 1:
+        return jsonify({"error": "No puedes eliminar el único usuario que queda"}), 400
+
+    if usuario_id == session.get("user_id"):
+        return jsonify({"error": "No puedes eliminar el usuario con el que iniciaste sesión"}), 400
+
+    db.execute("DELETE FROM usuarios WHERE id = ?", (usuario_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # API: Facturas (primera pieza del Módulo 4 - Ingreso de Compras)
 # ---------------------------------------------------------------------------
 
@@ -1072,6 +1262,8 @@ def crear_factura():
     proveedor_id = data.get("proveedor_id") or None
     fecha = (data.get("fecha") or "").strip()
     lineas_in = data.get("lineas") or []
+    aplicar_stock = data.get("aplicar_stock", True)
+    usuario = (data.get("usuario") or "").strip() or "Sistema"
 
     if not numero:
         return jsonify({"error": "El número de factura es obligatorio"}), 400
@@ -1108,7 +1300,7 @@ def crear_factura():
         if precio_unitario < 0:
             return jsonify({"error": f"Línea {i}: el precio no puede ser negativo"}), 400
 
-        producto = db.execute("SELECT id FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
         if not producto:
             return jsonify({"error": f"Línea {i}: el producto seleccionado no existe"}), 400
 
@@ -1116,7 +1308,7 @@ def crear_factura():
             return jsonify({"error": f"Línea {i}: ese producto ya está agregado en otra línea de esta misma factura"}), 400
         productos_vistos.add(producto_id)
 
-        lineas_validadas.append((producto_id, cantidad, precio_unitario))
+        lineas_validadas.append((producto, cantidad, precio_unitario))
 
     ts = now_iso()
     cur = db.execute(
@@ -1124,15 +1316,28 @@ def crear_factura():
         (numero, proveedor_id, fecha, ts),
     )
     factura_id = cur.lastrowid
+    factura_row = {"id": factura_id, "numero": numero}
 
-    for producto_id, cantidad, precio_unitario in lineas_validadas:
-        db.execute(
+    for producto, cantidad, precio_unitario in lineas_validadas:
+        cur_linea = db.execute(
             """
             INSERT INTO factura_lineas (factura_id, producto_id, cantidad, precio_unitario)
             VALUES (?, ?, ?, ?)
             """,
-            (factura_id, producto_id, cantidad, precio_unitario),
+            (factura_id, producto["id"], cantidad, precio_unitario),
         )
+        if aplicar_stock:
+            # Ingresa el stock de inmediato, para no tener que repetir cada
+            # producto a mano después: la factura ya trae cantidad y precio.
+            _aplicar_entrada_stock(
+                db, producto, cantidad, precio_unitario,
+                f"Ingreso automático al registrar la factura '{numero}'",
+                usuario, factura_row,
+            )
+            db.execute(
+                "UPDATE factura_lineas SET aplicada = 1, aplicada_en = ? WHERE id = ?",
+                (now_iso(), cur_linea.lastrowid),
+            )
 
     db.commit()
 

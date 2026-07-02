@@ -65,6 +65,27 @@ Sistema de logística y abastecimiento para el taller, basado en el documento
   - **Restaurar**: sube un archivo de respaldo y reemplaza todos los
     datos actuales por los de ese archivo (por si algo se pierde).
 
+## Login (usuarios y contraseñas)
+- Ahora hay que iniciar sesión para usar el sistema.
+- **Usuario inicial creado automáticamente:**
+  - Usuario: `admin`
+  - Contraseña: `taller2026`
+  - **Cámbiala apenas puedas** desde la pestaña "Usuarios" → click en tu
+    usuario → escribe una nueva contraseña → Guardar.
+- Desde la pestaña "Usuarios" puedes crear una cuenta para cada persona
+  del taller (no se puede eliminar el último usuario que queda, para no
+  quedar bloqueados).
+- **Importante para Railway**: agrega una variable de entorno `SECRET_KEY`
+  con un texto largo y aleatorio (esto firma las sesiones de login; sin
+  esto, cualquiera que vea el código podría falsificar una sesión).
+
+## Facturas: ingreso automático de stock
+- Al crear una factura, el stock de cada producto se ingresa
+  **automáticamente** (cantidad y precio exactos de la factura), sin
+  tener que repetir el proceso producto por producto.
+- Hay un check para desactivar esto en una factura puntual, por si la
+  registras antes de que llegue físicamente la mercadería.
+
 ## Ajustes de esta ronda
 - **Se eliminó "Marca"** del sistema. La categoría + el modelo son
   suficientes para identificar cada producto. Si ya tenías productos con

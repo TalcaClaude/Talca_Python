@@ -57,9 +57,11 @@ datos.
 ## Paso 5: Configurar la variable de entorno de la base de datos
 
 1. En el mismo servicio, ve a la pestaña "Variables".
-2. Agrega una nueva variable:
-   - Nombre: `DB_PATH`
-   - Valor: `/data/inventario.db`
+2. Agrega estas dos variables:
+   - Nombre: `DB_PATH` — Valor: `/data/inventario.db`
+   - Nombre: `SECRET_KEY` — Valor: cualquier texto largo y aleatorio (por
+     ejemplo, 40 caracteres al azar). Esto firma las sesiones de login;
+     sin esto, el sistema de usuarios no es seguro.
 3. Guarda. Railway va a reiniciar la app sola con este cambio.
 
 ## Paso 6: Obtener tu dirección web pública
@@ -96,14 +98,16 @@ te pide una tarjeta de crédito para continuar, es porque superaste el
 plan gratuito — puedo ayudarte a estimar el costo real cuando llegue ese
 momento.
 
-## Seguridad (léelo antes de compartir la dirección)
+## Seguridad
 
-Esta primera versión **no tiene sistema de usuarios/contraseña**:
-cualquiera que tenga la dirección web puede entrar y modificar datos.
-Como es solo para 2-3 personas de confianza en tu taller, por ahora está
-bien, pero si más adelante quieres restringir el acceso (usuario y
-contraseña, o que cada persona tenga su propio login), es el siguiente
-paso natural a construir — avísame cuando quieras eso.
+Esta versión **ya tiene login** (usuario y contraseña). Antes de compartir
+la dirección con el resto del taller:
+1. Cambia la contraseña del usuario `admin` (ver sección de arriba).
+2. Crea una cuenta para cada persona desde la pestaña "Usuarios", en vez
+   de compartir una sola cuenta entre todos — así cada movimiento queda
+   asociado a quién lo hizo de verdad.
+3. No olvides la variable `SECRET_KEY` del Paso 5: sin ella, el login
+   funciona pero no es seguro.
 
 ## Si en algún momento se te vuelven a borrar los datos
 

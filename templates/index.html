@@ -37,6 +37,7 @@
     <button class="tab" data-vista="movimientos">Movimientos</button>
     <button class="tab" data-vista="mermas">Mermas</button>
     <button class="tab" data-vista="rotacion">Rotación</button>
+    <button class="tab" data-vista="reportes">Reportes</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
   </nav>
 
@@ -360,6 +361,42 @@
       <p class="bodega-intro">Total general y los productos más utilizados, semana a semana — para ver qué viene subiendo y qué ha ido dejando de salir.</p>
       <div class="rot-tendencia-chart" id="rot-tendencia-chart"><p class="vacio">Cargando…</p></div>
       <div class="rot-tendencia-leyenda" id="rot-tendencia-leyenda"></div>
+    </div>
+
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-reportes" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Descarga los datos del sistema en Excel — para revisarlos, filtrarlos o compartirlos fuera del sistema.</p>
+  </section>
+
+  <section class="dash-grid">
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Inventario completo y valorizado</h3>
+      <p class="bodega-intro">Todos los productos con su stock, costo promedio y valor total — más una hoja aparte con el valor agrupado por categoría.</p>
+      <a class="btn btn-secundario" href="/api/reportes/inventario">Descargar Excel</a>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Stock crítico y sin movimiento</h3>
+      <p class="bodega-intro">Los productos que hay que reponer pronto, y los que llevan tiempo sin tener ninguna salida — en dos hojas separadas.</p>
+      <a class="btn btn-secundario" href="/api/reportes/stock">Descargar Excel</a>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Rotación y consumo por período</h3>
+      <p class="bodega-intro">Más utilizados, baja rotación, inmovilizados y la tendencia semanal — el mismo análisis de la pestaña Rotación, en Excel.</p>
+      <select id="reportes-rotacion-periodo">
+        <option value="30">Últimos 30 días</option>
+        <option value="90" selected>Últimos 90 días</option>
+        <option value="180">Últimos 180 días</option>
+        <option value="365">Último año</option>
+      </select>
+      <button class="btn btn-secundario" id="btn-reporte-rotacion">Descargar Excel</button>
     </div>
 
   </section>

@@ -2040,22 +2040,18 @@ def dashboard():
 # API: Rotación (Módulo 8 - Control de Rotación)
 # ---------------------------------------------------------------------------
 
-@app.route("/api/rotacion", methods=["GET"])
-def rotacion():
+def _calcular_rotacion(dias):
     """Módulo 8: Control de Rotación.
 
     En este taller casi no hay venta directa (todo es consumo interno), así
     que no se distingue "más vendidos" de "más utilizados": se mide toda
     salida de stock por igual (tipo = 'salida'), sin importar la categoría,
     dentro de la ventana de días que pida el usuario.
+
+    Se separó del endpoint /api/rotacion para poder reutilizar el mismo
+    cálculo también en el reporte exportable a Excel (Módulo 11).
     """
     db = get_db()
-
-    try:
-        dias = int(request.args.get("dias", 90))
-    except (TypeError, ValueError):
-        dias = 90
-    dias = max(7, min(dias, 730))
     desde = (datetime.now() - timedelta(days=dias)).isoformat(timespec="seconds")
 
     # ---- Más utilizados: mayor cantidad de salidas dentro del período.
@@ -2217,13 +2213,204 @@ def rotacion():
         "productos": tendencia_productos,
     }
 
-    return jsonify({
+    return {
         "dias": dias,
         "mas_utilizados": mas_utilizados,
         "baja_rotacion": baja_rotacion,
         "inmovilizados": inmovilizados,
         "tendencia": tendencia,
-    })
+    }
+
+
+@app.route("/api/rotacion", methods=["GET"])
+def rotacion():
+    try:
+        dias = int(request.args.get("dias", 90))
+    except (TypeError, ValueError):
+        dias = 90
+    dias = max(7, min(dias, 730))
+    return jsonify(_calcular_rotacion(dias))
+
+
+# ---------------------------------------------------------------------------
+# API: Reportes y Exportaciones (Módulo 11)
+# ---------------------------------------------------------------------------
+
+def _crear_libro_excel():
+    from openpyxl import Workbook
+    return Workbook()
+
+
+def _estilo_encabezado(ws, fila=1):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    for celda in ws[fila]:
+        celda.font = Font(bold=True, color="FFFFFF")
+        celda.fill = PatternFill(start_color="1F2430", end_color="1F2430", fill_type="solid")
+        celda.alignment = Alignment(vertical="center")
+
+
+def _autoancho(ws):
+    for columna in ws.columns:
+        letra = columna[0].column_letter
+        largo = max((len(str(c.value)) if c.value is not None else 0) for c in columna)
+        ws.column_dimensions[letra].width = min(48, max(10, largo + 2))
+
+
+def _excel_response(wb, nombre_archivo):
+    import io
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=nombre_archivo,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/api/reportes/inventario", methods=["GET"])
+def reporte_inventario():
+    """Módulo 11: Inventario completo y valorizado, exportado a Excel."""
+    db = get_db()
+    rows = db.execute(PRODUCTO_SELECT + " ORDER BY p.nombre COLLATE NOCASE").fetchall()
+    productos = [row_to_dict(r) for r in rows]
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Inventario valorizado"
+
+    encabezados = [
+        "N° sistema", "Código interno", "Categoría", "Modelo", "Ubicación",
+        "Stock disponible", "Stock reservado", "Stock en merma", "Stock total",
+        "Stock mínimo", "Costo promedio", "Valor total",
+    ]
+    ws.append(encabezados)
+
+    valor_general = 0
+    for p in productos:
+        valor = p["stock_total"] * p["costo_compra"]
+        valor_general += valor
+        ws.append([
+            p["id_sistema"], p["codigo_interno"], p["categoria"], p["modelo"],
+            p["ubicacion_codigo"] or "", p["stock_disponible"], p["stock_reservado"],
+            p["stock_merma"], p["stock_total"], p["stock_minimo"],
+            round(p["costo_compra"], 2), round(valor, 2),
+        ])
+
+    ws.append([])
+    ws.append(["", "", "", "", "", "", "", "", "", "", "TOTAL", round(valor_general, 2)])
+    _estilo_encabezado(ws)
+    _autoancho(ws)
+
+    # Segunda hoja: valorizado agrupado por categoría, para ver dónde está
+    # concentrado el dinero invertido en inventario.
+    ws2 = wb.create_sheet("Por categoría")
+    ws2.append(["Categoría", "N° de productos", "Unidades totales", "Valor total"])
+    por_categoria = {}
+    for p in productos:
+        cat = p["categoria"] or "(sin categoría)"
+        acc = por_categoria.setdefault(cat, {"n": 0, "unidades": 0, "valor": 0})
+        acc["n"] += 1
+        acc["unidades"] += p["stock_total"]
+        acc["valor"] += p["stock_total"] * p["costo_compra"]
+    for cat, acc in sorted(por_categoria.items(), key=lambda kv: kv[1]["valor"], reverse=True):
+        ws2.append([cat, acc["n"], acc["unidades"], round(acc["valor"], 2)])
+    _estilo_encabezado(ws2)
+    _autoancho(ws2)
+
+    nombre = f"inventario_valorizado_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)
+
+
+@app.route("/api/reportes/stock", methods=["GET"])
+def reporte_stock():
+    """Módulo 11: Stock crítico y productos sin movimiento, a Excel."""
+    db = get_db()
+
+    criticos = [row_to_dict(r) for r in db.execute(
+        PRODUCTO_SELECT + " WHERE p.stock_disponible <= p.stock_minimo ORDER BY (p.stock_disponible - p.stock_minimo) ASC"
+    ).fetchall()]
+
+    sin_movimiento = [row_to_dict(r) for r in db.execute(
+        PRODUCTO_SELECT + """
+        WHERE p.id NOT IN (SELECT DISTINCT producto_id FROM movimientos)
+        ORDER BY p.creado_en DESC
+        """
+    ).fetchall()]
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Stock crítico"
+    ws.append(["N° sistema", "Producto", "Categoría", "Stock disponible", "Stock mínimo", "Diferencia", "Ubicación"])
+    for p in criticos:
+        ws.append([
+            p["id_sistema"], p["nombre"], p["categoria"], p["stock_disponible"],
+            p["stock_minimo"], p["stock_disponible"] - p["stock_minimo"], p["ubicacion_codigo"] or "",
+        ])
+    _estilo_encabezado(ws)
+    _autoancho(ws)
+
+    ws2 = wb.create_sheet("Sin movimiento")
+    ws2.append(["N° sistema", "Producto", "Categoría", "Stock total", "Valor", "Creado el"])
+    for p in sin_movimiento:
+        ws2.append([
+            p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"],
+            round(p["stock_total"] * p["costo_compra"], 2), p["creado_en"],
+        ])
+    _estilo_encabezado(ws2)
+    _autoancho(ws2)
+
+    nombre = f"stock_critico_sin_movimiento_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)
+
+
+@app.route("/api/reportes/rotacion", methods=["GET"])
+def reporte_rotacion():
+    """Módulo 11: Rotación y consumo por período, a Excel (Módulo 8 + 11)."""
+    try:
+        dias = int(request.args.get("dias", 90))
+    except (TypeError, ValueError):
+        dias = 90
+    dias = max(7, min(dias, 730))
+    datos = _calcular_rotacion(dias)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Más utilizados"
+    ws.append(["N° sistema", "Producto", "Categoría", "Salidas en el período", "N° movimientos", "Tendencia"])
+    for p in datos["mas_utilizados"]:
+        ws.append([p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"], p["n_movimientos"], p["tendencia"]])
+    _estilo_encabezado(ws)
+    _autoancho(ws)
+
+    ws2 = wb.create_sheet("Baja rotación")
+    ws2.append(["N° sistema", "Producto", "Categoría", "Salidas en el período"])
+    for p in datos["baja_rotacion"]:
+        ws2.append([p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"]])
+    _estilo_encabezado(ws2)
+    _autoancho(ws2)
+
+    ws3 = wb.create_sheet("Inmovilizados")
+    ws3.append(["N° sistema", "Producto", "Categoría", "Stock total", "Valor"])
+    for p in datos["inmovilizados"]:
+        ws3.append([p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"], round(p["stock_total"] * p["costo_compra"], 2)])
+    _estilo_encabezado(ws3)
+    _autoancho(ws3)
+
+    ws4 = wb.create_sheet("Tendencia semanal")
+    encabezado4 = ["Semana", "Total general"] + [f"#{p['id_sistema']} {p['nombre']}" for p in datos["tendencia"]["productos"]]
+    ws4.append(encabezado4)
+    semanas = datos["tendencia"]["semanas"]
+    total = datos["tendencia"]["total"]
+    for i, semana in enumerate(semanas):
+        fila = [semana, total[i]] + [p["valores"][i] for p in datos["tendencia"]["productos"]]
+        ws4.append(fila)
+    _estilo_encabezado(ws4)
+    _autoancho(ws4)
+
+    nombre = f"rotacion_{dias}dias_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)
 
 
 init_db()

@@ -76,6 +76,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
     document.getElementById("vista-mermas").style.display = vista === "mermas" ? "block" : "none";
     document.getElementById("vista-rotacion").style.display = vista === "rotacion" ? "block" : "none";
+    document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
@@ -87,6 +88,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       movimientos: "Control de Movimientos",
       mermas: "Mermas",
       rotacion: "Control de Rotación",
+      reportes: "Reportes y Exportaciones",
       usuarios: "Usuarios",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -1586,6 +1588,15 @@ document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
 });
 
 document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
+
+// ---------------------------------------------------------------------------
+// Reportes y Exportaciones (Módulo 11)
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-reporte-rotacion").addEventListener("click", () => {
+  const dias = document.getElementById("reportes-rotacion-periodo").value;
+  window.location.href = `/api/reportes/rotacion?dias=${dias}`;
+});
 
 // ---------------------------------------------------------------------------
 // Init

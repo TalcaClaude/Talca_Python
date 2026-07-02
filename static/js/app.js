@@ -75,6 +75,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
     document.getElementById("vista-mermas").style.display = vista === "mermas" ? "block" : "none";
+    document.getElementById("vista-rotacion").style.display = vista === "rotacion" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
@@ -85,6 +86,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       proveedores: "Proveedores",
       movimientos: "Control de Movimientos",
       mermas: "Mermas",
+      rotacion: "Control de Rotación",
       usuarios: "Usuarios",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -94,6 +96,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "proveedores") cargarProveedores();
     if (vista === "movimientos") cargarMovimientos();
     if (vista === "mermas") cargarMermas();
+    if (vista === "rotacion") cargarRotacion();
     if (vista === "usuarios") cargarUsuarios();
   });
 });
@@ -281,11 +284,10 @@ document.querySelectorAll("[data-nuevo]").forEach(btn => {
     const info = ETIQUETAS_ALTA_RAPIDA[tipo];
     const nombre = prompt(`Nombre de la nueva ${info.texto}:`);
     if (!nombre || !nombre.trim()) return;
-    const nombreMayus = nombre.trim().toUpperCase();
     try {
-      await api(`/api/${tipo}s`, { method: "POST", body: JSON.stringify({ nombre: nombreMayus }) });
+      await api(`/api/${tipo}s`, { method: "POST", body: JSON.stringify({ nombre: nombre.trim() }) });
       await cargarCategoriasYMarcas();
-      info.render(nombreMayus);
+      info.render(nombre.trim());
       toast(`${info.texto[0].toUpperCase() + info.texto.slice(1)} agregada`);
     } catch (e) {
       toast(e.message, true);
@@ -430,7 +432,6 @@ async function abrirEdicion(p) {
   document.getElementById("f-codigo").value = p.codigo_interno || "";
   document.getElementById("f-descripcion").value = p.descripcion || "";
   document.getElementById("f-stock-minimo").value = p.stock_minimo;
-  document.getElementById("f-stock-ideal").value = p.stock_ideal;
   document.getElementById("f-costo").value = p.costo_compra;
   document.getElementById("f-costo-label").textContent = "Costo promedio actual ($ CLP)";
 
@@ -466,7 +467,6 @@ formProducto.addEventListener("submit", async (e) => {
     modelo: document.getElementById("f-modelo").value,
     ubicacion_id: document.getElementById("f-ubicacion-id").value,
     stock_minimo: document.getElementById("f-stock-minimo").value,
-    stock_ideal: document.getElementById("f-stock-ideal").value,
     costo_compra: document.getElementById("f-costo").value,
   };
 
@@ -506,7 +506,6 @@ async function abrirDetalle(id) {
     document.getElementById("m-factura-wrap").style.display = "flex";
     document.getElementById("m-categoria-wrap").style.display = "flex";
     poblarSelectCategoriaMovimiento(CATEGORIAS_ENTRADA, "Compra");
-    document.getElementById("m-usuario").value = state.sesion.nombre || state.sesion.username || "";
     abrirModal("modal-detalle");
   } catch (e) {
     toast(e.message, true);
@@ -534,7 +533,6 @@ function renderDetalle(p) {
     <dt>Total</dt><dd class="mono">${p.stock_total}</dd>
     <dt>En merma</dt><dd class="mono">${p.stock_merma}${p.stock_merma > 0 ? " <span class=\"subtexto\">(ver pestaña Mermas)</span>" : ""}</dd>
     <dt>Stock mínimo</dt><dd class="mono">${p.stock_minimo}</dd>
-    <dt>Stock ideal</dt><dd class="mono">${p.stock_ideal}</dd>
     <dt>Costo promedio</dt><dd class="mono">${fmtMoney(p.costo_compra)}</dd>
   `;
 
@@ -656,7 +654,6 @@ document.getElementById("form-movimiento").addEventListener("submit", async (e) 
     await api(`/api/productos/${id}/movimiento`, { method: "POST", body: JSON.stringify(payload) });
     toast("Movimiento registrado");
     document.getElementById("form-movimiento").reset();
-    document.getElementById("m-usuario").value = state.sesion.nombre || state.sesion.username || "";
     document.getElementById("m-costo-wrap").style.display = "flex";
     document.getElementById("m-factura-wrap").style.display = "flex";
     document.getElementById("m-categoria-wrap").style.display = "flex";
@@ -1076,6 +1073,62 @@ async function cargarDashboard() {
 }
 
 // ---------------------------------------------------------------------------
+// Rotación (Módulo 8)
+// ---------------------------------------------------------------------------
+
+async function cargarRotacion() {
+  const dias = document.getElementById("rotacion-periodo").value;
+  try {
+    const d = await api(`/api/rotacion?dias=${dias}`);
+
+    const listaProducto = (items, cont, vacioMsg, extra) => {
+      cont.innerHTML = items.length
+        ? items.map(p => `
+          <div class="dash-item">
+            <span class="dash-item-nombre">#${p.id_sistema} — ${escapeHtml(p.nombre)}</span>
+            <span class="dash-item-valor">${extra(p)}</span>
+          </div>`).join("")
+        : `<p class="vacio">${vacioMsg}</p>`;
+    };
+
+    listaProducto(
+      d.mas_utilizados, document.getElementById("rot-mas-utilizados"),
+      "Todavía no hay suficientes salidas en este período.",
+      p => `${p.total_salida_periodo} salidas · ${p.n_movimientos} mov.`
+    );
+
+    listaProducto(
+      d.baja_rotacion, document.getElementById("rot-baja-rotacion"),
+      "No hay productos con baja rotación en este período.",
+      p => `${p.total_salida_periodo} salidas`
+    );
+
+    listaProducto(
+      d.inmovilizados, document.getElementById("rot-inmovilizados"),
+      "Todos los productos con stock han tenido salidas en este período.",
+      p => `${p.stock_total} en stock`
+    );
+
+    const cont = document.getElementById("rot-tendencia");
+    if (!d.tendencia.length) {
+      cont.innerHTML = `<p class="vacio">Todavía no hay suficientes salidas para ver una tendencia.</p>`;
+    } else {
+      const max = Math.max(...d.tendencia.map(t => t.total), 1);
+      cont.innerHTML = d.tendencia.map(t => `
+        <div class="rot-barra-fila">
+          <span class="rot-barra-label">${escapeHtml(t.semana)}</span>
+          <div class="rot-barra-pista">
+            <div class="rot-barra" style="width:${Math.max(4, Math.round((t.total / max) * 100))}%"></div>
+          </div>
+          <span class="rot-barra-valor">${t.total}</span>
+        </div>`).join("");
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Respaldo de datos
 // ---------------------------------------------------------------------------
 
@@ -1280,77 +1333,39 @@ async function cargarMermas() {
 
     if (data.productos.length === 0) {
       tbody.innerHTML = `<tr><td colspan="5" class="vacio">No hay productos en merma actualmente. 👍</td></tr>`;
-    } else {
-      tbody.innerHTML = data.productos.map(p => `
-        <tr>
-          <td>#${escapeHtml(p.id_sistema)} ${escapeHtml(p.nombre)}</td>
-          <td>${escapeHtml(p.categoria) || "—"}</td>
-          <td class="num mono">${p.stock_merma}</td>
-          <td class="num mono">${fmtMoney(p.stock_merma * p.costo_compra)}</td>
-          <td><button class="btn-link" data-descartar="${p.id}" data-max="${p.stock_merma}">Descartar</button></td>
-        </tr>
-      `).join("");
-
-      tbody.querySelectorAll("[data-descartar]").forEach(btn => {
-        btn.addEventListener("click", async () => {
-          const max = btn.dataset.max;
-          const cantidad = prompt(`¿Cuántas unidades quieres descartar definitivamente? (máximo ${max})`, max);
-          if (!cantidad) return;
-          try {
-            await api(`/api/productos/${btn.dataset.descartar}/merma/descartar`, {
-              method: "POST",
-              body: JSON.stringify({ cantidad }),
-            });
-            toast("Descartado de la cuenta de merma");
-            await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
-          } catch (e) {
-            toast(e.message, true);
-          }
-        });
-      });
+      return;
     }
+    tbody.innerHTML = data.productos.map(p => `
+      <tr>
+        <td>#${escapeHtml(p.id_sistema)} ${escapeHtml(p.nombre)}</td>
+        <td>${escapeHtml(p.categoria) || "—"}</td>
+        <td class="num mono">${p.stock_merma}</td>
+        <td class="num mono">${fmtMoney(p.stock_merma * p.costo_compra)}</td>
+        <td><button class="btn-link" data-descartar="${p.id}" data-max="${p.stock_merma}">Descartar</button></td>
+      </tr>
+    `).join("");
+
+    tbody.querySelectorAll("[data-descartar]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const max = btn.dataset.max;
+        const cantidad = prompt(`¿Cuántas unidades quieres descartar definitivamente? (máximo ${max})`, max);
+        if (!cantidad) return;
+        try {
+          await api(`/api/productos/${btn.dataset.descartar}/merma/descartar`, {
+            method: "POST",
+            body: JSON.stringify({ cantidad }),
+          });
+          toast("Descartado de la cuenta de merma");
+          await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      });
+    });
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar mermas: ${e.message}</td></tr>`;
   }
-
-  await cargarHistorialMermas();
 }
-
-async function cargarHistorialMermas() {
-  const tbody = document.getElementById("tbody-mermas-historial");
-  const params = new URLSearchParams({ tipo: "perdida" });
-  const desde = document.getElementById("mermas-filtro-desde").value;
-  const hasta = document.getElementById("mermas-filtro-hasta").value;
-  if (desde) params.set("desde", desde);
-  if (hasta) params.set("hasta", hasta);
-
-  try {
-    const data = await api("/api/movimientos?" + params.toString());
-    if (data.movimientos.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" class="vacio">No hay pérdidas registradas con ese filtro.</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = data.movimientos.map(m => `
-      <tr>
-        <td class="mono">${fmtFecha(m.fecha)}</td>
-        <td>#${escapeHtml(m.producto_id_sistema)} ${escapeHtml(m.producto_nombre)}</td>
-        <td class="num mono">${m.cantidad}</td>
-        <td>${escapeHtml(m.motivo) || "—"}</td>
-        <td>${escapeHtml(m.usuario) || "—"}</td>
-      </tr>
-    `).join("");
-  } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar historial: ${e.message}</td></tr>`;
-  }
-}
-
-document.getElementById("mermas-filtro-desde").addEventListener("change", cargarHistorialMermas);
-document.getElementById("mermas-filtro-hasta").addEventListener("change", cargarHistorialMermas);
-document.getElementById("mermas-limpiar-filtros").addEventListener("click", () => {
-  document.getElementById("mermas-filtro-desde").value = "";
-  document.getElementById("mermas-filtro-hasta").value = "";
-  cargarHistorialMermas();
-});
 
 // ---------------------------------------------------------------------------
 // Movimientos (Módulo 5 - bitácora completa con filtros)
@@ -1423,29 +1438,7 @@ document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
   cargarMovimientos();
 });
 
-// ---------------------------------------------------------------------------
-// Mayúsculas automáticas + formato de RUT chileno
-// ---------------------------------------------------------------------------
-
-document.addEventListener("input", (e) => {
-  if (!e.target.matches(".uppercase-input")) return;
-  const pos = e.target.selectionStart;
-  e.target.value = e.target.value.toUpperCase();
-  if (pos !== null) e.target.setSelectionRange(pos, pos);
-});
-
-function formatearRut(valor) {
-  const limpio = (valor || "").replace(/[^0-9kK]/g, "").toUpperCase();
-  if (!limpio) return "";
-  const cuerpo = limpio.slice(0, -1);
-  const dv = limpio.slice(-1);
-  const cuerpoFormateado = cuerpo.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-  return cuerpoFormateado ? `${cuerpoFormateado}-${dv}` : dv;
-}
-
-document.getElementById("pv-rut").addEventListener("input", (e) => {
-  e.target.value = formatearRut(e.target.value);
-});
+document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
 
 // ---------------------------------------------------------------------------
 // Init

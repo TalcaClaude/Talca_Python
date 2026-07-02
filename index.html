@@ -35,7 +35,7 @@
     <button class="tab" data-vista="facturas">Facturas</button>
     <button class="tab" data-vista="proveedores">Proveedores</button>
     <button class="tab" data-vista="movimientos">Movimientos</button>
-    <button class="tab" data-vista="reservas">Reservas</button>
+    <button class="tab" data-vista="mermas">Mermas</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
   </nav>
 
@@ -57,6 +57,10 @@
     <div class="summary-card summary-card--warn" id="s-criticos-card">
       <span class="summary-label">Stock crítico</span>
       <span class="summary-value" id="s-criticos">—</span>
+    </div>
+    <div class="summary-card summary-card--warn" id="s-merma-card">
+      <span class="summary-label">En merma</span>
+      <span class="summary-value" id="s-merma">—</span>
     </div>
   </section>
 
@@ -247,7 +251,7 @@
       <option value="">Todos los tipos</option>
       <option value="entrada">Entrada</option>
       <option value="salida">Salida</option>
-      <option value="ajuste">Ajuste</option>
+      <option value="perdida">Pérdida</option>
     </select>
     <select id="mov-filtro-categoria">
       <option value="">Todas las categorías</option>
@@ -282,16 +286,21 @@
 
   </section>
 
-  <section class="vista" id="vista-reservas" style="display:none">
+  <section class="vista" id="vista-mermas" style="display:none">
 
   <section class="toolbar">
-    <p class="bodega-intro">Stock apartado para trabajos futuros. Para reservar, entra al producto desde la pestaña "Productos".</p>
-    <select id="res-filtro-estado">
-      <option value="activa">Activas</option>
-      <option value="consumida">Consumidas</option>
-      <option value="liberada">Liberadas</option>
-      <option value="">Todas</option>
-    </select>
+    <p class="bodega-intro">Productos marcados como "pérdida" — quedan aquí guardados para revisión antes de descartarlos definitivamente.</p>
+  </section>
+
+  <section class="summary" id="mermas-summary">
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">Unidades en merma</span>
+      <span class="summary-value" id="mermas-total-unidades">—</span>
+    </div>
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">Valor en merma</span>
+      <span class="summary-value" id="mermas-total-valor">—</span>
+    </div>
   </section>
 
   <section class="tabla-wrap">
@@ -299,17 +308,14 @@
       <thead>
         <tr>
           <th>Producto</th>
-          <th class="num">Cantidad</th>
-          <th>Orden de trabajo</th>
-          <th>Motivo</th>
-          <th>Responsable</th>
-          <th>Fecha</th>
-          <th>Estado</th>
+          <th>Categoría</th>
+          <th class="num">En merma</th>
+          <th class="num">Valor</th>
           <th></th>
         </tr>
       </thead>
-      <tbody id="tbody-reservas">
-        <tr><td colspan="8" class="vacio">Cargando…</td></tr>
+      <tbody id="tbody-mermas">
+        <tr><td colspan="5" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -405,11 +411,11 @@
             <label>Tipo</label>
             <select id="m-tipo">
               <option value="entrada">Entrada (ingreso de stock)</option>
-              <option value="salida">Salida (consumo / venta / uso)</option>
-              <option value="ajuste">Ajuste (fijar stock exacto)</option>
+              <option value="salida">Salida (consumo / venta / reserva / uso)</option>
+              <option value="perdida">Pérdida (merma)</option>
             </select>
           </div>
-          <div class="campo">
+          <div class="campo" id="m-categoria-wrap">
             <label>Categoría</label>
             <select id="m-categoria"></select>
           </div>
@@ -438,36 +444,12 @@
             <button type="submit" class="btn btn-primary">Registrar movimiento</button>
           </div>
         </form>
-
-        <h3 class="subtitulo">Reservar stock</h3>
-        <form id="form-reservar">
-          <div class="campo">
-            <label>Cantidad a reservar</label>
-            <input type="number" id="res-cantidad" min="1" required>
-          </div>
-          <div class="campo">
-            <label>Orden de trabajo</label>
-            <input type="text" id="res-ot" placeholder="Ej: OT-2201">
-          </div>
-          <div class="campo">
-            <label>Motivo / notas</label>
-            <input type="text" id="res-motivo" placeholder="Ej: Reparación caja cliente X">
-          </div>
-          <div class="modal-actions modal-actions--start">
-            <button type="submit" class="btn btn-secundario">Reservar</button>
-          </div>
-        </form>
       </div>
 
       <div class="detalle-historial">
         <h3 class="subtitulo">Historial de movimientos</h3>
         <div class="historial-lista" id="historial-lista">
           <p class="vacio">Sin movimientos aún.</p>
-        </div>
-
-        <h3 class="subtitulo">Reservas activas</h3>
-        <div class="historial-lista" id="reservas-lista">
-          <p class="vacio">Sin reservas activas.</p>
         </div>
       </div>
     </div>

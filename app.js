@@ -74,7 +74,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
-    document.getElementById("vista-reservas").style.display = vista === "reservas" ? "block" : "none";
+    document.getElementById("vista-mermas").style.display = vista === "mermas" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
@@ -84,7 +84,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       facturas: "Facturas de compra",
       proveedores: "Proveedores",
       movimientos: "Control de Movimientos",
-      reservas: "Reserva de Productos",
+      mermas: "Mermas",
       usuarios: "Usuarios",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -93,7 +93,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "facturas") cargarFacturas();
     if (vista === "proveedores") cargarProveedores();
     if (vista === "movimientos") cargarMovimientos();
-    if (vista === "reservas") cargarReservas();
+    if (vista === "mermas") cargarMermas();
     if (vista === "usuarios") cargarUsuarios();
   });
 });
@@ -501,86 +501,13 @@ async function abrirDetalle(id) {
     document.getElementById("m-cantidad-label").textContent = "Cantidad";
     document.getElementById("m-costo-wrap").style.display = "flex";
     document.getElementById("m-factura-wrap").style.display = "flex";
-    poblarSelectCategoriaMovimiento("Compra");
-    document.getElementById("form-reservar").reset();
-    await cargarReservasDelProducto(id);
+    document.getElementById("m-categoria-wrap").style.display = "flex";
+    poblarSelectCategoriaMovimiento(CATEGORIAS_ENTRADA, "Compra");
     abrirModal("modal-detalle");
   } catch (e) {
     toast(e.message, true);
   }
 }
-
-async function cargarReservasDelProducto(productoId) {
-  const cont = document.getElementById("reservas-lista");
-  try {
-    const data = await api(`/api/reservas?producto_id=${productoId}&estado=activa`);
-    if (data.reservas.length === 0) {
-      cont.innerHTML = `<p class="vacio">Sin reservas activas.</p>`;
-      return;
-    }
-    cont.innerHTML = data.reservas.map(r => `
-      <div class="mov-item">
-        <span class="mov-tipo mov-tipo--ajuste">${r.cantidad}</span>
-        <span class="mov-detalle">
-          ${escapeHtml(r.orden_trabajo) || "Sin OT"} ${r.motivo ? " · " + escapeHtml(r.motivo) : ""}
-          · ${escapeHtml(r.usuario)} · ${fmtFecha(r.creado_en)}
-        </span>
-        <button type="button" class="btn-link" data-consumir="${r.id}">Consumir</button>
-        <button type="button" class="btn-link" data-liberar="${r.id}">Liberar</button>
-      </div>
-    `).join("");
-
-    cont.querySelectorAll("[data-liberar]").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        try {
-          await api(`/api/reservas/${btn.dataset.liberar}/liberar`, { method: "POST" });
-          toast("Reserva liberada");
-          await Promise.all([cargarReservasDelProducto(productoId), abrirDetalle(productoId), cargarProductos(), cargarResumen()]);
-        } catch (e) {
-          toast(e.message, true);
-        }
-      });
-    });
-    cont.querySelectorAll("[data-consumir]").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        if (!confirm("¿Marcar esta reserva como consumida? El stock reservado se descuenta del inventario.")) return;
-        try {
-          await api(`/api/reservas/${btn.dataset.consumir}/consumir`, {
-            method: "POST",
-            body: JSON.stringify({ usuario: state.sesion.nombre || state.sesion.username }),
-          });
-          toast("Reserva consumida");
-          await Promise.all([cargarReservasDelProducto(productoId), abrirDetalle(productoId), cargarProductos(), cargarResumen()]);
-        } catch (e) {
-          toast(e.message, true);
-        }
-      });
-    });
-  } catch (e) {
-    cont.innerHTML = `<p class="vacio">Error al cargar reservas: ${e.message}</p>`;
-  }
-}
-
-document.getElementById("form-reservar").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const p = state.productoActivo;
-  if (!p) return;
-  const payload = {
-    cantidad: document.getElementById("res-cantidad").value,
-    orden_trabajo: document.getElementById("res-ot").value,
-    motivo: document.getElementById("res-motivo").value,
-    usuario: state.sesion.nombre || state.sesion.username,
-  };
-  try {
-    await api(`/api/productos/${p.id}/reservar`, { method: "POST", body: JSON.stringify(payload) });
-    toast("Stock reservado");
-    document.getElementById("form-reservar").reset();
-    await Promise.all([cargarProductos(), cargarResumen()]);
-    await abrirDetalle(p.id);
-  } catch (e) {
-    toast(e.message, true);
-  }
-});
 
 function renderDetalle(p) {
   document.getElementById("detalle-nombre").textContent = `${p.nombre}`;
@@ -601,6 +528,7 @@ function renderDetalle(p) {
     <dt>Disponible</dt><dd class="mono">${p.stock_disponible}</dd>
     <dt>Reservado</dt><dd class="mono">${p.stock_reservado}</dd>
     <dt>Total</dt><dd class="mono">${p.stock_total}</dd>
+    <dt>En merma</dt><dd class="mono">${p.stock_merma}${p.stock_merma > 0 ? " <span class=\"subtexto\">(ver pestaña Mermas)</span>" : ""}</dd>
     <dt>Stock mínimo</dt><dd class="mono">${p.stock_minimo}</dd>
     <dt>Costo promedio</dt><dd class="mono">${fmtMoney(p.costo_compra)}</dd>
   `;
@@ -683,22 +611,27 @@ document.getElementById("m-factura").addEventListener("input", () => {
   facturaLookupTimeout = setTimeout(buscarFacturaParaMovimiento, 400);
 });
 
-const CATEGORIAS_MOVIMIENTO = ["Compra", "Venta", "Consumo interno", "Reserva", "Ajuste de inventario", "Devolución", "Traslado interno", "Merma o pérdida"];
-const CATEGORIA_POR_DEFECTO = { entrada: "Compra", salida: "Consumo interno", ajuste: "Ajuste de inventario" };
+const CATEGORIAS_ENTRADA = ["Compra", "Ajuste de inventario", "Devolución"];
+const CATEGORIAS_SALIDA = ["Venta", "Consumo interno", "Reserva", "Ajuste de inventario", "Devolución"];
+const CATEGORIA_POR_DEFECTO = { entrada: "Compra", salida: "Consumo interno" };
 
-function poblarSelectCategoriaMovimiento(seleccion) {
+function poblarSelectCategoriaMovimiento(lista, seleccion) {
   const select = document.getElementById("m-categoria");
-  select.innerHTML = CATEGORIAS_MOVIMIENTO.map(c => `<option value="${c}">${c}</option>`).join("");
+  select.innerHTML = lista.map(c => `<option value="${c}">${c}</option>`).join("");
   select.value = seleccion;
 }
 
 document.getElementById("m-tipo").addEventListener("change", (e) => {
-  const label = document.getElementById("m-cantidad-label");
-  const esEntrada = e.target.value === "entrada";
-  label.textContent = e.target.value === "ajuste" ? "Nuevo stock disponible (valor final)" : "Cantidad";
+  const tipo = e.target.value;
+  const esEntrada = tipo === "entrada";
+  const esPerdida = tipo === "perdida";
+  document.getElementById("m-cantidad-label").textContent = "Cantidad";
   document.getElementById("m-costo-wrap").style.display = esEntrada ? "flex" : "none";
   document.getElementById("m-factura-wrap").style.display = esEntrada ? "flex" : "none";
-  poblarSelectCategoriaMovimiento(CATEGORIA_POR_DEFECTO[e.target.value]);
+  document.getElementById("m-categoria-wrap").style.display = esPerdida ? "none" : "flex";
+  if (!esPerdida) {
+    poblarSelectCategoriaMovimiento(esEntrada ? CATEGORIAS_ENTRADA : CATEGORIAS_SALIDA, CATEGORIA_POR_DEFECTO[tipo]);
+  }
   if (!esEntrada) resetearCampoFactura();
 });
 
@@ -720,8 +653,10 @@ document.getElementById("form-movimiento").addEventListener("submit", async (e) 
     document.getElementById("form-movimiento").reset();
     document.getElementById("m-costo-wrap").style.display = "flex";
     document.getElementById("m-factura-wrap").style.display = "flex";
+    document.getElementById("m-categoria-wrap").style.display = "flex";
     document.getElementById("m-cantidad-label").textContent = "Cantidad";
-    poblarSelectCategoriaMovimiento("Compra");
+    document.getElementById("m-tipo").value = "entrada";
+    poblarSelectCategoriaMovimiento(CATEGORIAS_ENTRADA, "Compra");
     resetearCampoFactura();
     await Promise.all([cargarProductos(), cargarResumen()]);
     await abrirDetalle(id);
@@ -1072,6 +1007,7 @@ async function cargarDashboard() {
     document.getElementById("s-total-unidades").textContent = d.resumen.total_unidades;
     document.getElementById("s-valor-total").textContent = fmtMoney(d.resumen.valor_total);
     document.getElementById("s-criticos").textContent = d.resumen.stock_critico;
+    document.getElementById("s-merma").textContent = d.merma.unidades;
 
     const contCritico = document.getElementById("dash-stock-critico");
     contCritico.innerHTML = d.stock_critico.length
@@ -1326,70 +1262,51 @@ document.getElementById("btn-eliminar-usuario").addEventListener("click", async 
 });
 
 // ---------------------------------------------------------------------------
-// Reservas (Módulo 6 - vista general)
+// Mermas (cuenta separada de pérdidas)
 // ---------------------------------------------------------------------------
 
-async function cargarReservas() {
-  const tbody = document.getElementById("tbody-reservas");
-  const estado = document.getElementById("res-filtro-estado").value;
-  const params = estado ? `?estado=${estado}` : "";
+async function cargarMermas() {
+  const tbody = document.getElementById("tbody-mermas");
   try {
-    const data = await api("/api/reservas" + params);
-    if (data.reservas.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="vacio">No hay reservas con ese filtro.</td></tr>`;
+    const data = await api("/api/mermas");
+    document.getElementById("mermas-total-unidades").textContent = data.total_unidades;
+    document.getElementById("mermas-total-valor").textContent = fmtMoney(data.total_valor);
+
+    if (data.productos.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="vacio">No hay productos en merma actualmente. 👍</td></tr>`;
       return;
     }
-    tbody.innerHTML = data.reservas.map(r => {
-      const estadoClase = r.estado === "activa" ? "ocupada" : (r.estado === "consumida" ? "libre" : "pendiente");
-      const acciones = r.estado === "activa"
-        ? `<button class="btn-link" data-consumir-tab="${r.id}">Consumir</button> <button class="btn-link" data-liberar-tab="${r.id}">Liberar</button>`
-        : "";
-      return `
-        <tr>
-          <td>#${escapeHtml(r.producto_id_sistema)} ${escapeHtml(r.producto_nombre)}</td>
-          <td class="num mono">${r.cantidad}</td>
-          <td class="mono">${escapeHtml(r.orden_trabajo) || "—"}</td>
-          <td>${escapeHtml(r.motivo) || "—"}</td>
-          <td>${escapeHtml(r.usuario) || "—"}</td>
-          <td class="mono">${fmtFecha(r.creado_en)}</td>
-          <td><span class="estado-pill estado-pill--${estadoClase}">${r.estado}</span></td>
-          <td>${acciones}</td>
-        </tr>
-      `;
-    }).join("");
+    tbody.innerHTML = data.productos.map(p => `
+      <tr>
+        <td>#${escapeHtml(p.id_sistema)} ${escapeHtml(p.nombre)}</td>
+        <td>${escapeHtml(p.categoria) || "—"}</td>
+        <td class="num mono">${p.stock_merma}</td>
+        <td class="num mono">${fmtMoney(p.stock_merma * p.costo_compra)}</td>
+        <td><button class="btn-link" data-descartar="${p.id}" data-max="${p.stock_merma}">Descartar</button></td>
+      </tr>
+    `).join("");
 
-    tbody.querySelectorAll("[data-liberar-tab]").forEach(btn => {
+    tbody.querySelectorAll("[data-descartar]").forEach(btn => {
       btn.addEventListener("click", async () => {
+        const max = btn.dataset.max;
+        const cantidad = prompt(`¿Cuántas unidades quieres descartar definitivamente? (máximo ${max})`, max);
+        if (!cantidad) return;
         try {
-          await api(`/api/reservas/${btn.dataset.liberarTab}/liberar`, { method: "POST" });
-          toast("Reserva liberada");
-          await Promise.all([cargarReservas(), cargarProductos(), cargarResumen()]);
-        } catch (e) {
-          toast(e.message, true);
-        }
-      });
-    });
-    tbody.querySelectorAll("[data-consumir-tab]").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        if (!confirm("¿Marcar esta reserva como consumida?")) return;
-        try {
-          await api(`/api/reservas/${btn.dataset.consumirTab}/consumir`, {
+          await api(`/api/productos/${btn.dataset.descartar}/merma/descartar`, {
             method: "POST",
-            body: JSON.stringify({ usuario: state.sesion.nombre || state.sesion.username }),
+            body: JSON.stringify({ cantidad }),
           });
-          toast("Reserva consumida");
-          await Promise.all([cargarReservas(), cargarProductos(), cargarResumen()]);
+          toast("Descartado de la cuenta de merma");
+          await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
         } catch (e) {
           toast(e.message, true);
         }
       });
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar reservas: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar mermas: ${e.message}</td></tr>`;
   }
 }
-
-document.getElementById("res-filtro-estado").addEventListener("change", cargarReservas);
 
 // ---------------------------------------------------------------------------
 // Movimientos (Módulo 5 - bitácora completa con filtros)

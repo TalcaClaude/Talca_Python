@@ -12,15 +12,24 @@ import sqlite3
 import time
 import threading
 import smtplib
+import uuid
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
 from flask import Flask, g, jsonify, request, render_template, send_file, session, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.utils import secure_filename
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
+
+# Los comprobantes de Caja Chica (Módulo 10) se guardan junto a la base de
+# datos — así, en Railway, quedan en el mismo disco persistente que
+# inventario.db y no se pierden con cada actualización.
+COMPROBANTES_DIR = os.path.join(os.path.dirname(DB_PATH), "comprobantes")
+os.makedirs(COMPROBANTES_DIR, exist_ok=True)
+EXTENSIONES_COMPROBANTE_PERMITIDAS = {".jpg", ".jpeg", ".png", ".pdf", ".webp", ".heic"}
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "cambia-esta-clave-en-produccion-usando-la-variable-SECRET_KEY")
@@ -241,6 +250,32 @@ def init_db():
             FOREIGN KEY (factura_id) REFERENCES facturas (id) ON DELETE CASCADE,
             FOREIGN KEY (producto_id) REFERENCES productos (id)
         );
+
+        CREATE TABLE IF NOT EXISTS caja_rendiciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT NOT NULL,
+            usuario TEXT DEFAULT '',
+            total REAL NOT NULL DEFAULT 0,
+            nota TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS caja_movimientos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tipo TEXT NOT NULL,               -- 'aporte' | 'gasto'
+            fecha TEXT NOT NULL,
+            monto REAL NOT NULL,
+            categoria TEXT DEFAULT '',        -- solo gasto; texto libre (a pedido del taller)
+            descripcion TEXT DEFAULT '',
+            proveedor TEXT DEFAULT '',        -- lugar o proveedor, opcional
+            usuario TEXT DEFAULT '',
+            comprobante_archivo TEXT DEFAULT '',
+            rendicion_id INTEGER REFERENCES caja_rendiciones(id),
+            rendicion_origen_id INTEGER REFERENCES caja_rendiciones(id),
+            producto_id INTEGER REFERENCES productos(id),
+            movimiento_inventario_id INTEGER REFERENCES movimientos(id),
+            creado_en TEXT NOT NULL
+        );
         """
     )
     db.commit()
@@ -457,6 +492,13 @@ PRODUCTO_SELECT = """
 
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
+
+
+def usuario_actual():
+    """El responsable de un movimiento de Caja Chica siempre es quien tiene
+    la sesión iniciada (nunca un valor mandado por el cliente), para que no
+    se pueda registrar un gasto o aporte a nombre de otra persona."""
+    return session.get("nombre") or session.get("username") or "Sistema"
 
 
 def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra"):
@@ -1932,6 +1974,334 @@ def descartar_merma(producto_id):
 
     actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
     return jsonify(row_to_dict(actualizado))
+
+
+# ---------------------------------------------------------------------------
+# API: Caja Chica (Módulo 10)
+# ---------------------------------------------------------------------------
+
+def _guardar_comprobante(archivo):
+    """Guarda el archivo subido (boleta/comprobante) en COMPROBANTES_DIR con
+    un nombre único, y devuelve el nombre guardado (o '' si no venía nada).
+    Valida la extensión para no aceptar cualquier tipo de archivo."""
+    if not archivo or not archivo.filename:
+        return ""
+    nombre_original = secure_filename(archivo.filename)
+    ext = os.path.splitext(nombre_original)[1].lower()
+    if ext not in EXTENSIONES_COMPROBANTE_PERMITIDAS:
+        raise ValueError(f"Tipo de archivo no permitido para comprobantes ({ext or 'sin extensión'}). Usa foto (jpg/png/webp/heic) o PDF.")
+    nombre_guardado = f"{uuid.uuid4().hex}{ext}"
+    archivo.save(os.path.join(COMPROBANTES_DIR, nombre_guardado))
+    return nombre_guardado
+
+
+def _caja_movimiento_dict(row):
+    d = dict(row)
+    d["tiene_comprobante"] = bool(d.get("comprobante_archivo"))
+    d["rendido"] = d.get("rendicion_id") is not None
+    return d
+
+
+@app.route("/api/caja/resumen", methods=["GET"])
+def caja_resumen():
+    db = get_db()
+    total_aportado = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'aporte'"
+    ).fetchone()[0]
+    total_gastado = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto'"
+    ).fetchone()[0]
+    pendiente_rendir = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL"
+    ).fetchone()[0]
+
+    inicio_mes = datetime.now().strftime("%Y-%m") + "-01"
+    gastado_mes = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND fecha >= ?",
+        (inicio_mes,),
+    ).fetchone()[0]
+
+    return jsonify({
+        "saldo_disponible": total_aportado - total_gastado,
+        "total_aportado": total_aportado,
+        "total_gastado": total_gastado,
+        "pendiente_rendir": pendiente_rendir,
+        "gastado_mes": gastado_mes,
+    })
+
+
+@app.route("/api/caja/movimientos", methods=["GET"])
+def caja_listar_movimientos():
+    db = get_db()
+
+    tipo = request.args.get("tipo", "").strip()
+    estado = request.args.get("estado", "").strip()  # 'pendiente' | 'rendido' (solo aplica a gasto)
+    desde = request.args.get("desde", "").strip()
+    hasta = request.args.get("hasta", "").strip()
+    q = request.args.get("q", "").strip()
+
+    sql = "SELECT * FROM caja_movimientos WHERE 1=1"
+    params = []
+    if tipo:
+        sql += " AND tipo = ?"
+        params.append(tipo)
+    if estado == "pendiente":
+        sql += " AND tipo = 'gasto' AND rendicion_id IS NULL"
+    elif estado == "rendido":
+        sql += " AND tipo = 'gasto' AND rendicion_id IS NOT NULL"
+    if desde:
+        sql += " AND fecha >= ?"
+        params.append(desde)
+    if hasta:
+        sql += " AND fecha <= ?"
+        params.append(hasta + "T23:59:59")
+    if q:
+        sql += " AND (categoria LIKE ? OR descripcion LIKE ? OR proveedor LIKE ? OR usuario LIKE ?)"
+        like = f"%{q}%"
+        params += [like, like, like, like]
+
+    sql += " ORDER BY fecha DESC, id DESC LIMIT 500"
+    rows = db.execute(sql, params).fetchall()
+    movimientos = [_caja_movimiento_dict(r) for r in rows]
+
+    return jsonify({"movimientos": movimientos, "total": len(movimientos)})
+
+
+@app.route("/api/caja/gasto", methods=["POST"])
+def caja_crear_gasto():
+    db = get_db()
+    data = request.form
+
+    try:
+        monto = float(data.get("monto"))
+        if monto <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
+
+    fecha = (data.get("fecha") or "").strip()
+    fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
+
+    categoria = (data.get("categoria") or "").strip().upper()
+    descripcion = (data.get("descripcion") or "").strip().upper()
+    proveedor = (data.get("proveedor") or "").strip().upper()
+
+    try:
+        comprobante = _guardar_comprobante(request.files.get("comprobante"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    # ---- Compra de emergencia asociada al inventario: si viene un producto
+    # y una cantidad, además de registrar el gasto se ingresa el stock como
+    # una entrada normal (igual que una factura), dejando ambos registros
+    # enlazados para que se pueda seguir el rastro del dinero al producto.
+    producto_id = (data.get("producto_id") or "").strip()
+    movimiento_inventario_id = None
+    if producto_id:
+        try:
+            producto_id = int(producto_id)
+            cantidad = int(data.get("cantidad") or 0)
+            if cantidad <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"error": "Para asociar una compra de emergencia, indica un producto y una cantidad válida"}), 400
+
+        producto_row = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        if producto_row is None:
+            return jsonify({"error": "El producto seleccionado no existe"}), 400
+
+        costo_unitario = monto / cantidad
+        nuevo_stock = _aplicar_entrada_stock(
+            db, producto_row, cantidad, costo_unitario,
+            motivo=f"COMPRA DE EMERGENCIA (CAJA CHICA){' - ' + descripcion if descripcion else ''}",
+            usuario=usuario_actual(), factura=None, categoria="Compra",
+        )
+        movimiento_inventario_id = db.execute(
+            "SELECT id FROM movimientos WHERE producto_id = ? ORDER BY id DESC LIMIT 1", (producto_id,)
+        ).fetchone()[0]
+    else:
+        producto_id = None
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO caja_movimientos (
+            tipo, fecha, monto, categoria, descripcion, proveedor, usuario,
+            comprobante_archivo, producto_id, movimiento_inventario_id, creado_en
+        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (fecha, monto, categoria, descripcion, proveedor, usuario_actual(),
+         comprobante, producto_id, movimiento_inventario_id, ts),
+    )
+    db.commit()
+    nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(_caja_movimiento_dict(nuevo)), 201
+
+
+@app.route("/api/caja/aporte", methods=["POST"])
+def caja_crear_aporte():
+    db = get_db()
+    data = request.form
+
+    try:
+        monto = float(data.get("monto"))
+        if monto <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
+
+    fecha = (data.get("fecha") or "").strip()
+    fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
+    descripcion = (data.get("descripcion") or "").strip().upper()
+
+    try:
+        comprobante = _guardar_comprobante(request.files.get("comprobante"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO caja_movimientos (tipo, fecha, monto, descripcion, usuario, comprobante_archivo, creado_en)
+        VALUES ('aporte', ?, ?, ?, ?, ?, ?)
+        """,
+        (fecha, monto, descripcion, usuario_actual(), comprobante, ts),
+    )
+    db.commit()
+    nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(_caja_movimiento_dict(nuevo)), 201
+
+
+@app.route("/api/caja/movimiento/<int:mov_id>", methods=["DELETE"])
+def caja_eliminar_movimiento(mov_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Movimiento no encontrado"}), 404
+
+    if row["rendicion_id"] is not None:
+        return jsonify({"error": "Este gasto ya fue incluido en una rendición y no se puede eliminar."}), 409
+
+    if row["rendicion_origen_id"] is not None:
+        return jsonify({
+            "error": "Este aporte lo generó automáticamente una rendición y no se puede eliminar suelto "
+                     "(dejaría el saldo descuadrado respecto a los gastos que ya quedaron marcados como rendidos).",
+        }), 409
+
+    if row["movimiento_inventario_id"] is not None:
+        return jsonify({
+            "error": "Este gasto ingresó stock al inventario (compra de emergencia). "
+                     "Ajusta el stock manualmente primero si corresponde, y luego elimina el gasto.",
+        }), 409
+
+    if row["comprobante_archivo"]:
+        ruta = os.path.join(COMPROBANTES_DIR, row["comprobante_archivo"])
+        if os.path.exists(ruta):
+            try:
+                os.remove(ruta)
+            except OSError:
+                pass
+
+    db.execute("DELETE FROM caja_movimientos WHERE id = ?", (mov_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/caja/comprobante/<path:nombre_archivo>", methods=["GET"])
+def caja_ver_comprobante(nombre_archivo):
+    nombre_seguro = secure_filename(nombre_archivo)
+    ruta = os.path.join(COMPROBANTES_DIR, nombre_seguro)
+    if not os.path.isfile(ruta):
+        return jsonify({"error": "Comprobante no encontrado"}), 404
+    return send_file(ruta)
+
+
+@app.route("/api/caja/pendientes", methods=["GET"])
+def caja_gastos_pendientes():
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL ORDER BY fecha ASC"
+    ).fetchall()
+    return jsonify({"gastos": [_caja_movimiento_dict(r) for r in rows]})
+
+
+@app.route("/api/caja/rendicion", methods=["POST"])
+def caja_crear_rendicion():
+    db = get_db()
+    data = request.get_json(force=True, silent=True) or {}
+    gasto_ids = data.get("gasto_ids") or []
+    nota = (data.get("nota") or "").strip().upper()
+
+    if not gasto_ids:
+        return jsonify({"error": "Selecciona al menos un gasto para rendir"}), 400
+
+    placeholders = ",".join("?" for _ in gasto_ids)
+    gastos = db.execute(
+        f"SELECT * FROM caja_movimientos WHERE id IN ({placeholders}) AND tipo = 'gasto'",
+        gasto_ids,
+    ).fetchall()
+    if len(gastos) != len(gasto_ids):
+        return jsonify({"error": "Alguno de los gastos seleccionados no existe"}), 400
+    if any(g["rendicion_id"] is not None for g in gastos):
+        return jsonify({"error": "Alguno de los gastos seleccionados ya fue rendido antes"}), 400
+
+    total = sum(g["monto"] for g in gastos)
+    ts = now_iso()
+    cur = db.execute(
+        "INSERT INTO caja_rendiciones (fecha, usuario, total, nota, creado_en) VALUES (?, ?, ?, ?, ?)",
+        (ts, usuario_actual(), total, nota, ts),
+    )
+    rendicion_id = cur.lastrowid
+
+    db.execute(
+        f"UPDATE caja_movimientos SET rendicion_id = ? WHERE id IN ({placeholders})",
+        [rendicion_id] + gasto_ids,
+    )
+
+    # Reposición automática: el saldo vuelve a subir de inmediato por el
+    # total rendido (a pedido del taller — se asume que la plata vuelve
+    # junto con la rendición). Queda marcada con rendicion_origen_id para
+    # que no se pueda borrar suelta y dejar el saldo descuadrado respecto a
+    # los gastos que ya quedaron marcados como rendidos.
+    db.execute(
+        """
+        INSERT INTO caja_movimientos (tipo, fecha, monto, descripcion, usuario, rendicion_origen_id, creado_en)
+        VALUES ('aporte', ?, ?, ?, ?, ?, ?)
+        """,
+        (ts, total, f"REPOSICIÓN AUTOMÁTICA - RENDICIÓN #{rendicion_id}", usuario_actual(), rendicion_id, ts),
+    )
+
+    db.commit()
+    nueva = db.execute("SELECT * FROM caja_rendiciones WHERE id = ?", (rendicion_id,)).fetchone()
+    return jsonify(dict(nueva)), 201
+
+
+@app.route("/api/caja/rendiciones", methods=["GET"])
+def caja_listar_rendiciones():
+    db = get_db()
+    rows = db.execute("SELECT * FROM caja_rendiciones ORDER BY fecha DESC, id DESC").fetchall()
+    rendiciones = []
+    for r in rows:
+        d = dict(r)
+        d["n_gastos"] = db.execute(
+            "SELECT COUNT(*) FROM caja_movimientos WHERE rendicion_id = ?", (r["id"],)
+        ).fetchone()[0]
+        rendiciones.append(d)
+    return jsonify({"rendiciones": rendiciones})
+
+
+@app.route("/api/caja/rendicion/<int:rendicion_id>", methods=["GET"])
+def caja_detalle_rendicion(rendicion_id):
+    db = get_db()
+    rendicion = db.execute("SELECT * FROM caja_rendiciones WHERE id = ?", (rendicion_id,)).fetchone()
+    if rendicion is None:
+        return jsonify({"error": "Rendición no encontrada"}), 404
+    gastos = db.execute(
+        "SELECT * FROM caja_movimientos WHERE rendicion_id = ? ORDER BY fecha ASC", (rendicion_id,)
+    ).fetchall()
+    d = dict(rendicion)
+    d["gastos"] = [_caja_movimiento_dict(g) for g in gastos]
+    return jsonify(d)
 
 
 # ---------------------------------------------------------------------------

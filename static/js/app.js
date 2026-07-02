@@ -14,6 +14,8 @@ const state = {
   proveedorActivoId: null,
   sesion: { username: null, nombre: null },
   usuarios: [],
+  cajaCategoriasVistas: [],
+  cajaPendientesSeleccionados: new Set(),
 };
 
 // ---------------------------------------------------------------------------
@@ -76,6 +78,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
     document.getElementById("vista-mermas").style.display = vista === "mermas" ? "block" : "none";
     document.getElementById("vista-rotacion").style.display = vista === "rotacion" ? "block" : "none";
+    document.getElementById("vista-caja").style.display = vista === "caja" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
@@ -88,6 +91,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       movimientos: "Control de Movimientos",
       mermas: "Mermas",
       rotacion: "Control de Rotación",
+      caja: "Caja Chica",
       reportes: "Reportes y Exportaciones",
       usuarios: "Usuarios",
     };
@@ -99,6 +103,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "movimientos") cargarMovimientos();
     if (vista === "mermas") cargarMermas();
     if (vista === "rotacion") cargarRotacion();
+    if (vista === "caja") cargarCaja();
     if (vista === "usuarios") cargarUsuarios();
   });
 });
@@ -1588,6 +1593,283 @@ document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
 });
 
 document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
+
+// ---------------------------------------------------------------------------
+// Caja Chica (Módulo 10)
+// ---------------------------------------------------------------------------
+
+async function cargarCaja() {
+  await Promise.all([cargarCajaResumen(), cargarCajaMovimientos()]);
+}
+
+async function cargarCajaResumen() {
+  try {
+    const d = await api("/api/caja/resumen");
+    document.getElementById("caja-saldo").textContent = fmtMoney(d.saldo_disponible);
+    document.getElementById("caja-pendiente").textContent = fmtMoney(d.pendiente_rendir);
+    document.getElementById("caja-gastado-mes").textContent = fmtMoney(d.gastado_mes);
+    document.getElementById("caja-total-aportado").textContent = fmtMoney(d.total_aportado);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function cargarCajaMovimientos() {
+  const tbody = document.getElementById("tbody-caja");
+  const params = new URLSearchParams();
+  const q = document.getElementById("caja-buscar").value.trim();
+  const tipo = document.getElementById("caja-filtro-tipo").value;
+  const estado = document.getElementById("caja-filtro-estado").value;
+  const desde = document.getElementById("caja-filtro-desde").value;
+  const hasta = document.getElementById("caja-filtro-hasta").value;
+  if (q) params.set("q", q);
+  if (tipo) params.set("tipo", tipo);
+  if (estado) params.set("estado", estado);
+  if (desde) params.set("desde", desde);
+  if (hasta) params.set("hasta", hasta);
+
+  try {
+    const data = await api("/api/caja/movimientos?" + params.toString());
+
+    state.cajaCategoriasVistas = [...new Set(
+      data.movimientos.filter(m => m.tipo === "gasto" && m.categoria).map(m => m.categoria)
+    )];
+    document.getElementById("cg-categorias-usadas").innerHTML =
+      state.cajaCategoriasVistas.map(c => `<option value="${escapeHtml(c)}"></option>`).join("");
+
+    if (data.movimientos.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="9" class="vacio">No se encontraron movimientos con esos filtros.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = data.movimientos.map(m => {
+      const esGasto = m.tipo === "gasto";
+      const catDesc = [m.categoria, m.descripcion].filter(Boolean).join(" — ") || "—";
+      const comprobante = m.tiene_comprobante
+        ? `<a href="/api/caja/comprobante/${encodeURIComponent(m.comprobante_archivo)}" target="_blank" rel="noopener">Ver</a>`
+        : "—";
+      const estadoTxt = esGasto ? (m.rendido ? `<span class="mov-tipo mov-tipo--entrada">rendido</span>` : `<span class="mov-tipo mov-tipo--perdida">pendiente</span>`) : "—";
+      const puedeEliminar = !m.rendicion_id && !m.movimiento_inventario_id && !m.rendicion_origen_id;
+      const accion = puedeEliminar ? `<button class="btn-link" data-caja-eliminar="${m.id}">Eliminar</button>` : "";
+      return `
+      <tr>
+        <td class="mono">${fmtFecha(m.fecha)}</td>
+        <td><span class="mov-tipo mov-tipo--${esGasto ? "salida" : "entrada"}">${esGasto ? "gasto" : "aporte"}</span></td>
+        <td>${escapeHtml(catDesc)}</td>
+        <td>${escapeHtml(m.proveedor) || "—"}</td>
+        <td class="num mono">${esGasto ? "-" : "+"}${fmtMoney(m.monto)}</td>
+        <td>${comprobante}</td>
+        <td>${estadoTxt}</td>
+        <td>${escapeHtml(m.usuario) || "—"}</td>
+        <td>${accion}</td>
+      </tr>`;
+    }).join("");
+
+    tbody.querySelectorAll("[data-caja-eliminar]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const ok = await eliminarConReintento(`/api/caja/movimiento/${btn.dataset.cajaEliminar}`, "¿Eliminar este movimiento de Caja Chica?");
+        if (ok) {
+          toast("Movimiento eliminado");
+          await cargarCaja();
+        }
+      });
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar Caja Chica: ${e.message}</td></tr>`;
+  }
+}
+
+let cajaBuscarTimeout;
+document.getElementById("caja-buscar").addEventListener("input", () => {
+  clearTimeout(cajaBuscarTimeout);
+  cajaBuscarTimeout = setTimeout(cargarCajaMovimientos, 250);
+});
+document.getElementById("caja-filtro-tipo").addEventListener("change", cargarCajaMovimientos);
+document.getElementById("caja-filtro-estado").addEventListener("change", cargarCajaMovimientos);
+document.getElementById("caja-filtro-desde").addEventListener("change", cargarCajaMovimientos);
+document.getElementById("caja-filtro-hasta").addEventListener("change", cargarCajaMovimientos);
+document.getElementById("caja-limpiar-filtros").addEventListener("click", () => {
+  document.getElementById("caja-buscar").value = "";
+  document.getElementById("caja-filtro-tipo").value = "";
+  document.getElementById("caja-filtro-estado").value = "";
+  document.getElementById("caja-filtro-desde").value = "";
+  document.getElementById("caja-filtro-hasta").value = "";
+  cargarCajaMovimientos();
+});
+
+// ---- Nuevo gasto ----
+
+document.getElementById("btn-nuevo-gasto").addEventListener("click", async () => {
+  document.getElementById("form-caja-gasto").reset();
+  document.getElementById("cg-emergencia-campos").style.display = "none";
+  try {
+    const data = await api("/api/productos");
+    const select = document.getElementById("cg-producto-id");
+    select.innerHTML = '<option value="">Selecciona un producto…</option>' +
+      data.productos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("");
+  } catch (e) {
+    toast(e.message, true);
+  }
+  abrirModal("modal-caja-gasto");
+});
+
+document.getElementById("cg-emergencia").addEventListener("change", (e) => {
+  document.getElementById("cg-emergencia-campos").style.display = e.target.checked ? "block" : "none";
+});
+
+document.getElementById("form-caja-gasto").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const formData = new FormData();
+  formData.append("monto", document.getElementById("cg-monto").value);
+  formData.append("fecha", document.getElementById("cg-fecha").value);
+  formData.append("categoria", document.getElementById("cg-categoria").value);
+  formData.append("proveedor", document.getElementById("cg-proveedor").value);
+  formData.append("descripcion", document.getElementById("cg-descripcion").value);
+  const archivo = document.getElementById("cg-comprobante").files[0];
+  if (archivo) formData.append("comprobante", archivo);
+  if (document.getElementById("cg-emergencia").checked) {
+    formData.append("producto_id", document.getElementById("cg-producto-id").value);
+    formData.append("cantidad", document.getElementById("cg-cantidad").value);
+  }
+
+  try {
+    const res = await fetch("/api/caja/gasto", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Error al guardar el gasto");
+    toast("Gasto registrado");
+    cerrarModal("modal-caja-gasto");
+    await Promise.all([cargarCaja(), cargarProductos()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---- Nuevo aporte ----
+
+document.getElementById("btn-nuevo-aporte").addEventListener("click", () => {
+  document.getElementById("form-caja-aporte").reset();
+  abrirModal("modal-caja-aporte");
+});
+
+document.getElementById("form-caja-aporte").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const formData = new FormData();
+  formData.append("monto", document.getElementById("ca-monto").value);
+  formData.append("fecha", document.getElementById("ca-fecha").value);
+  formData.append("descripcion", document.getElementById("ca-descripcion").value);
+  const archivo = document.getElementById("ca-comprobante").files[0];
+  if (archivo) formData.append("comprobante", archivo);
+
+  try {
+    const res = await fetch("/api/caja/aporte", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Error al guardar el aporte");
+    toast("Aporte registrado");
+    cerrarModal("modal-caja-aporte");
+    await cargarCaja();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---- Generar rendición ----
+
+function actualizarTotalSeleccionadoRendicion() {
+  const total = [...state.cajaPendientesSeleccionados].reduce((suma, id) => {
+    const chk = document.querySelector(`[data-pendiente-id="${id}"]`);
+    return suma + (chk ? Number(chk.dataset.monto) : 0);
+  }, 0);
+  document.getElementById("cr-total-seleccionado").textContent = fmtMoney(total);
+}
+
+document.getElementById("btn-generar-rendicion").addEventListener("click", async () => {
+  state.cajaPendientesSeleccionados = new Set();
+  document.getElementById("cr-nota").value = "";
+  const cont = document.getElementById("cr-lista-pendientes");
+  cont.innerHTML = `<p class="vacio">Cargando…</p>`;
+  abrirModal("modal-caja-rendicion");
+
+  try {
+    const data = await api("/api/caja/pendientes");
+    if (data.gastos.length === 0) {
+      cont.innerHTML = `<p class="vacio">No hay gastos pendientes de rendir. 👍</p>`;
+      actualizarTotalSeleccionadoRendicion();
+      return;
+    }
+    cont.innerHTML = `
+      <table class="tabla">
+        <thead>
+          <tr><th></th><th>Fecha</th><th>Categoría / Descripción</th><th class="num">Monto</th></tr>
+        </thead>
+        <tbody>
+          ${data.gastos.map(g => `
+            <tr>
+              <td><input type="checkbox" data-pendiente-id="${g.id}" data-monto="${g.monto}"></td>
+              <td class="mono">${fmtFecha(g.fecha)}</td>
+              <td>${escapeHtml([g.categoria, g.descripcion].filter(Boolean).join(" — ") || "—")}</td>
+              <td class="num mono">${fmtMoney(g.monto)}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    `;
+    cont.querySelectorAll("[data-pendiente-id]").forEach(chk => {
+      chk.addEventListener("change", () => {
+        const id = Number(chk.dataset.pendienteId);
+        if (chk.checked) state.cajaPendientesSeleccionados.add(id);
+        else state.cajaPendientesSeleccionados.delete(id);
+        actualizarTotalSeleccionadoRendicion();
+      });
+    });
+    actualizarTotalSeleccionadoRendicion();
+  } catch (e) {
+    cont.innerHTML = `<p class="vacio">Error al cargar gastos pendientes: ${e.message}</p>`;
+  }
+});
+
+document.getElementById("btn-confirmar-rendicion").addEventListener("click", async () => {
+  const gastoIds = [...state.cajaPendientesSeleccionados];
+  if (gastoIds.length === 0) {
+    toast("Selecciona al menos un gasto", true);
+    return;
+  }
+  try {
+    await api("/api/caja/rendicion", {
+      method: "POST",
+      body: JSON.stringify({ gasto_ids: gastoIds, nota: document.getElementById("cr-nota").value }),
+    });
+    toast("Rendición generada — el saldo ya se repuso");
+    cerrarModal("modal-caja-rendicion");
+    await cargarCaja();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---- Historial de rendiciones ----
+
+document.getElementById("btn-ver-rendiciones").addEventListener("click", async () => {
+  const tbody = document.getElementById("tbody-caja-rendiciones");
+  tbody.innerHTML = `<tr><td colspan="5" class="vacio">Cargando…</td></tr>`;
+  abrirModal("modal-caja-rendiciones-historial");
+  try {
+    const data = await api("/api/caja/rendiciones");
+    if (data.rendiciones.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="vacio">Todavía no se ha generado ninguna rendición.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.rendiciones.map(r => `
+      <tr>
+        <td class="mono">${fmtFecha(r.fecha)}</td>
+        <td class="num mono">${r.n_gastos}</td>
+        <td class="num mono">${fmtMoney(r.total)}</td>
+        <td>${escapeHtml(r.nota) || "—"}</td>
+        <td>${escapeHtml(r.usuario) || "—"}</td>
+      </tr>
+    `).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Reportes y Exportaciones (Módulo 11)

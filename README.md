@@ -223,14 +223,7 @@ taller-inventario/
     └── js/app.js          -> Lógica de la interfaz (conecta con el backend)
 ```
 
-## Próximos pasos (los vamos armando juntos)
-
-1. Subir esto a internet para que lo usen 2-3 personas del taller desde
-   cualquier lugar.
-2. Completar el Módulo 4 (proveedores como entidad propia, carga masiva
-   desde Excel, adjuntar el PDF/foto de la factura).
-3. Dashboard visual.
-4. El resto de los módulos del documento original.
+##
 
 
 

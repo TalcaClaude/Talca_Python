@@ -290,29 +290,32 @@
   <section class="vista" id="vista-mermas" style="display:none">
 
   <section class="toolbar">
-    <p class="bodega-intro">Productos marcados como "pérdida" — quedan aquí guardados para revisión antes de descartarlos definitivamente.</p>
+    <p class="bodega-intro" id="mermas-intro">Productos marcados como "pérdida" — quedan aquí guardados para revisión antes de descartarlos definitivamente.</p>
+    <select id="mermas-filtro-mes">
+      <option value="">Actual (pendiente de revisión)</option>
+    </select>
   </section>
 
   <section class="summary" id="mermas-summary">
     <div class="summary-card summary-card--warn">
-      <span class="summary-label">Unidades en merma</span>
+      <span class="summary-label" id="mermas-label-unidades">Unidades en merma</span>
       <span class="summary-value" id="mermas-total-unidades">—</span>
     </div>
     <div class="summary-card summary-card--warn">
-      <span class="summary-label">Valor en merma</span>
+      <span class="summary-label" id="mermas-label-valor">Valor en merma</span>
       <span class="summary-value" id="mermas-total-valor">—</span>
     </div>
   </section>
 
   <section class="tabla-wrap">
     <table class="tabla">
-      <thead>
+      <thead id="thead-mermas">
         <tr>
           <th>Producto</th>
           <th>Categoría</th>
-          <th class="num">En merma</th>
-          <th class="num">Valor</th>
-          <th></th>
+          <th class="num" id="mermas-th-cantidad">En merma</th>
+          <th class="num" id="mermas-th-valor">Valor</th>
+          <th class="mermas-col-accion"></th>
         </tr>
       </thead>
       <tbody id="tbody-mermas">
@@ -354,7 +357,9 @@
 
     <div class="dash-panel dash-panel--ancho">
       <h3 class="dash-titulo">Tendencia de consumo (salidas por semana)</h3>
-      <div class="rot-tendencia" id="rot-tendencia"><p class="vacio">Cargando…</p></div>
+      <p class="bodega-intro">Total general y los productos más utilizados, semana a semana — para ver qué viene subiendo y qué ha ido dejando de salir.</p>
+      <div class="rot-tendencia-chart" id="rot-tendencia-chart"><p class="vacio">Cargando…</p></div>
+      <div class="rot-tendencia-leyenda" id="rot-tendencia-leyenda"></div>
     </div>
 
   </section>

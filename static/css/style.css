@@ -675,48 +675,58 @@ body::before { content: none; }
 
 /* ---------- Rotación (Módulo 8) ---------- */
 
-.rot-tendencia {
+.rot-tendencia-chart {
+  width: 100%;
+  min-height: 200px;
+}
+
+.rot-svg {
+  width: 100%;
+  height: 260px;
+  display: block;
+}
+
+.rot-tendencia-leyenda {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
-.rot-barra-fila {
-  display: grid;
-  grid-template-columns: 90px 1fr 50px;
+.rot-leyenda-item {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-}
-
-.rot-barra-label {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+  gap: 6px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
-.rot-barra-pista {
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  height: 14px;
-  overflow: hidden;
+.rot-leyenda-color {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
 }
 
-.rot-barra {
-  height: 100%;
-  background: var(--accent-2);
+.tendencia-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
-.rot-barra-valor {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  text-align: right;
-}
+.tendencia--subiendo { background: rgba(126, 208, 140, 0.15); color: #7ED08C; }
+.tendencia--bajando { background: rgba(227, 111, 111, 0.15); color: #E36F6F; }
+.tendencia--estable { background: rgba(138, 147, 166, 0.15); color: #8A93A6; }
 
 @media (max-width: 760px) {
   .dash-grid { grid-template-columns: 1fr; }
   .dash-bodega-resumen { grid-template-columns: 1fr 1fr; }
-  .rot-barra-fila { grid-template-columns: 60px 1fr 40px; }
 }
 
 /* ---------- Responsive ---------- */

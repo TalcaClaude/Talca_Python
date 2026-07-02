@@ -1816,6 +1816,14 @@ def listar_movimientos():
         "movimientos": movimientos,
         "total": len(movimientos),
         "categorias": sorted(set(CATEGORIAS_MOVIMIENTO) | {"Merma o pérdida"}),
+        # Mismo criterio que usa el formulario de "Registrar movimiento": una
+        # entrada no puede tener una categoría que es solo de salida (y
+        # viceversa). El filtro de esta pantalla usa las mismas listas.
+        "categorias_por_tipo": {
+            "entrada": CATEGORIAS_ENTRADA,
+            "salida": CATEGORIAS_SALIDA,
+            "perdida": ["Merma o pérdida"],
+        },
     })
 
 
@@ -1825,7 +1833,63 @@ def listar_movimientos():
 
 @app.route("/api/mermas", methods=["GET"])
 def listar_mermas():
+    """Módulo 7: Mermas.
+
+    Sin filtro (modo "actual"): muestra el saldo pendiente de revisión hoy
+    (stock_merma > 0 en cada producto) — es lo que hay guardado esperando
+    que alguien lo descarte.
+
+    Con ?mes=YYYY-MM (modo "mes"): muestra el historial real de pérdidas
+    registradas ese mes (movimientos tipo 'perdida'), aunque ya se hayan
+    descartado después. El valor se calcula con el costo promedio actual
+    del producto, porque no se guarda el costo exacto al momento de la
+    pérdida.
+    """
     db = get_db()
+
+    meses_disponibles = [
+        r[0] for r in db.execute(
+            "SELECT DISTINCT substr(fecha, 1, 7) AS mes FROM movimientos "
+            "WHERE tipo = 'perdida' ORDER BY mes DESC"
+        ).fetchall()
+    ]
+
+    mes = (request.args.get("mes") or "").strip()
+
+    if mes:
+        filas = db.execute(
+            """
+            SELECT producto_id, SUM(cantidad) AS cantidad_mes, COUNT(*) AS n_movimientos
+            FROM movimientos
+            WHERE tipo = 'perdida' AND substr(fecha, 1, 7) = ?
+            GROUP BY producto_id
+            """,
+            (mes,),
+        ).fetchall()
+
+        productos = []
+        for r in filas:
+            prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (r["producto_id"],)).fetchone()
+            if prod is None:
+                continue
+            d = row_to_dict(prod)
+            d["cantidad_mes"] = r["cantidad_mes"]
+            d["n_movimientos"] = r["n_movimientos"]
+            d["valor_mes"] = r["cantidad_mes"] * d["costo_compra"]
+            productos.append(d)
+        productos.sort(key=lambda d: d["cantidad_mes"], reverse=True)
+
+        total_unidades = sum(p["cantidad_mes"] for p in productos)
+        total_valor = sum(p["valor_mes"] for p in productos)
+        return jsonify({
+            "modo": "mes",
+            "mes": mes,
+            "meses_disponibles": meses_disponibles,
+            "productos": productos,
+            "total_unidades": total_unidades,
+            "total_valor": total_valor,
+        })
+
     rows = db.execute(
         PRODUCTO_SELECT + " WHERE p.stock_merma > 0 ORDER BY p.nombre COLLATE NOCASE"
     ).fetchall()
@@ -1833,6 +1897,9 @@ def listar_mermas():
     total_unidades = sum(p["stock_merma"] for p in productos)
     total_valor = sum(p["stock_merma"] * p["costo_compra"] for p in productos)
     return jsonify({
+        "modo": "actual",
+        "mes": "",
+        "meses_disponibles": meses_disponibles,
         "productos": productos,
         "total_unidades": total_unidades,
         "total_valor": total_valor,
@@ -2055,19 +2122,100 @@ def rotacion():
     ).fetchall()
     inmovilizados = [row_to_dict(r) for r in inmovilizados_rows]
 
-    # ---- Tendencia: salidas totales agrupadas por semana dentro del período,
-    # para ver si el consumo general va subiendo o bajando.
+    # ---- Tendencia: salidas agrupadas por semana dentro del período, para
+    # graficar. Se arma primero la lista completa de semanas del período
+    # (aunque no hayan tenido salidas, quedan en 0) para que el total y cada
+    # producto compartan el mismo eje horizontal y las líneas se vean
+    # continuas en el gráfico.
+    semanas = []
+    vistas = set()
+    cursor = datetime.now() - timedelta(days=dias)
+    fin = datetime.now()
+    while cursor <= fin:
+        clave = cursor.strftime("%Y-%W")
+        if clave not in vistas:
+            vistas.add(clave)
+            semanas.append(clave)
+        cursor += timedelta(days=7)
+    clave_fin = fin.strftime("%Y-%W")
+    if clave_fin not in vistas:
+        semanas.append(clave_fin)
+
     tendencia_rows = db.execute(
         """
         SELECT strftime('%Y-%W', fecha) AS semana, SUM(cantidad) AS total
         FROM movimientos
         WHERE tipo = 'salida' AND fecha >= ?
         GROUP BY semana
-        ORDER BY semana ASC
         """,
         (desde,),
     ).fetchall()
-    tendencia = [{"semana": r["semana"], "total": r["total"]} for r in tendencia_rows]
+    totales_por_semana = {r["semana"]: r["total"] for r in tendencia_rows}
+
+    def _valores_semanales(producto_id):
+        filas = db.execute(
+            """
+            SELECT strftime('%Y-%W', fecha) AS semana, SUM(cantidad) AS total
+            FROM movimientos
+            WHERE tipo = 'salida' AND producto_id = ? AND fecha >= ?
+            GROUP BY semana
+            """,
+            (producto_id, desde),
+        ).fetchall()
+        mapa = {r["semana"]: r["total"] for r in filas}
+        return [mapa.get(s, 0) for s in semanas]
+
+    def _tendencia_desde_valores(valores):
+        """Compara las últimas semanas con movimiento contra el bloque
+        anterior de igual tamaño (una ventana reciente, no la mitad completa
+        del período): si el período elegido es largo pero el producto solo
+        tuvo salidas hace poco, comparar por mitades diluye esa señal con
+        semanas vacías del principio. Con la ventana reciente se detecta
+        igual tanto lo que viene subiendo como lo que ha ido dejando de
+        salir últimamente."""
+        n = len(valores)
+        if n < 2:
+            return "estable"
+        ventana = max(1, min(4, n // 2))
+        reciente = sum(valores[-ventana:])
+        anterior = sum(valores[-2 * ventana:-ventana])
+        if anterior == 0 and reciente == 0:
+            return "estable"
+        if reciente == 0 and anterior > 0:
+            return "bajando"
+        if anterior == 0 and reciente > 0:
+            return "subiendo"
+        if reciente >= anterior * 1.15:
+            return "subiendo"
+        if reciente <= anterior * 0.85:
+            return "bajando"
+        return "estable"
+
+    # Se calcula la serie semanal de cada producto "más utilizado" una sola
+    # vez: sirve tanto para el badge de tendencia como para las líneas del
+    # gráfico (los 5 primeros).
+    for d in mas_utilizados:
+        valores = _valores_semanales(d["id"])
+        d["tendencia"] = _tendencia_desde_valores(valores)
+        d["_valores_semanales"] = valores
+
+    tendencia_productos = [
+        {
+            "producto_id": p["id"],
+            "id_sistema": p["id_sistema"],
+            "nombre": p["nombre"],
+            "valores": p["_valores_semanales"],
+        }
+        for p in mas_utilizados[:5]
+    ]
+    for p in mas_utilizados:
+        p.pop("_valores_semanales", None)
+
+    tendencia = {
+        "semanas": semanas,
+        "total": [totales_por_semana.get(s, 0) for s in semanas],
+        "productos": tendencia_productos,
+    }
 
     return jsonify({
         "dias": dias,

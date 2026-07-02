@@ -1076,6 +1076,20 @@ async function cargarDashboard() {
 // Rotación (Módulo 8)
 // ---------------------------------------------------------------------------
 
+const TENDENCIA_BADGE = {
+  subiendo: { icono: "▲", texto: "subiendo", clase: "tendencia--subiendo" },
+  bajando: { icono: "▼", texto: "bajando", clase: "tendencia--bajando" },
+  estable: { icono: "■", texto: "estable", clase: "tendencia--estable" },
+};
+
+const ROT_COLORES = ["#F5A623", "#4FA3E3", "#7ED08C", "#E36F9D", "#B98CF5"];
+
+function fmtSemana(clave) {
+  // "2026-27" (año-semana ISO simplificada) -> "Sem 27"
+  const partes = String(clave).split("-");
+  return partes.length === 2 ? `Sem ${parseInt(partes[1], 10)}` : clave;
+}
+
 async function cargarRotacion() {
   const dias = document.getElementById("rotacion-periodo").value;
   try {
@@ -1094,7 +1108,11 @@ async function cargarRotacion() {
     listaProducto(
       d.mas_utilizados, document.getElementById("rot-mas-utilizados"),
       "Todavía no hay suficientes salidas en este período.",
-      p => `${p.total_salida_periodo} salidas · ${p.n_movimientos} mov.`
+      p => {
+        const b = TENDENCIA_BADGE[p.tendencia] || TENDENCIA_BADGE.estable;
+        return `${p.total_salida_periodo} salidas · ${p.n_movimientos} mov.
+          <span class="tendencia-badge ${b.clase}" title="Comparado con la primera mitad del período">${b.icono} ${b.texto}</span>`;
+      }
     );
 
     listaProducto(
@@ -1109,23 +1127,85 @@ async function cargarRotacion() {
       p => `${p.stock_total} en stock`
     );
 
-    const cont = document.getElementById("rot-tendencia");
-    if (!d.tendencia.length) {
-      cont.innerHTML = `<p class="vacio">Todavía no hay suficientes salidas para ver una tendencia.</p>`;
-    } else {
-      const max = Math.max(...d.tendencia.map(t => t.total), 1);
-      cont.innerHTML = d.tendencia.map(t => `
-        <div class="rot-barra-fila">
-          <span class="rot-barra-label">${escapeHtml(t.semana)}</span>
-          <div class="rot-barra-pista">
-            <div class="rot-barra" style="width:${Math.max(4, Math.round((t.total / max) * 100))}%"></div>
-          </div>
-          <span class="rot-barra-valor">${t.total}</span>
-        </div>`).join("");
-    }
+    renderTendenciaChart(d.tendencia);
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+function renderTendenciaChart(tendencia) {
+  const contChart = document.getElementById("rot-tendencia-chart");
+  const contLeyenda = document.getElementById("rot-tendencia-leyenda");
+  const semanas = tendencia.semanas || [];
+  const total = tendencia.total || [];
+  const productos = tendencia.productos || [];
+
+  const hayDatos = total.some(v => v > 0) || productos.some(p => p.valores.some(v => v > 0));
+  if (!semanas.length || !hayDatos) {
+    contChart.innerHTML = `<p class="vacio">Todavía no hay suficientes salidas para ver una tendencia.</p>`;
+    contLeyenda.innerHTML = "";
+    return;
+  }
+
+  // Series a dibujar: el total general (línea gris de fondo) + hasta 5
+  // productos con color propio.
+  const series = [
+    { nombre: "Total general", valores: total, color: "#8A93A6", ancho: 3, esTotal: true },
+    ...productos.map((p, i) => ({
+      nombre: `#${p.id_sistema} ${p.nombre}`,
+      valores: p.valores,
+      color: ROT_COLORES[i % ROT_COLORES.length],
+      ancho: 2,
+      esTotal: false,
+    })),
+  ];
+
+  const maxValor = Math.max(1, ...series.flatMap(s => s.valores));
+  const W = 900, H = 260;
+  const padL = 36, padR = 12, padT = 14, padB = 28;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const n = semanas.length;
+  const x = i => padL + (n === 1 ? innerW / 2 : (innerW * i) / (n - 1));
+  const y = v => padT + innerH - (v / maxValor) * innerH;
+
+  const lineas = series.map(s => {
+    const puntos = s.valores.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    const puntosCirculo = s.esTotal ? "" : s.valores.map((v, i) =>
+      `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2.6" fill="${s.color}"><title>${escapeHtml(s.nombre)} · ${fmtSemana(semanas[i])}: ${v}</title></circle>`
+    ).join("");
+    return `<polyline points="${puntos}" fill="none" stroke="${s.color}" stroke-width="${s.ancho}" stroke-linejoin="round" stroke-linecap="round" opacity="${s.esTotal ? 0.55 : 0.95}" />${puntosCirculo}`;
+  }).join("");
+
+  // Etiquetas del eje X: si hay muchas semanas, se muestran salteadas para no amontonarse.
+  const paso = Math.max(1, Math.ceil(n / 10));
+  const etiquetas = semanas.map((sem, i) => (i % paso !== 0 && i !== n - 1) ? "" : `
+    <text x="${x(i).toFixed(1)}" y="${H - 8}" font-size="10" fill="var(--text-muted)" text-anchor="middle">${escapeHtml(fmtSemana(sem))}</text>
+  `).join("");
+
+  // Líneas guía horizontales (0, mitad, máximo).
+  const guias = [0, 0.5, 1].map(f => {
+    const val = Math.round(maxValor * f);
+    const yy = y(val).toFixed(1);
+    return `
+      <line x1="${padL}" y1="${yy}" x2="${W - padR}" y2="${yy}" stroke="var(--line)" stroke-width="1" />
+      <text x="${padL - 6}" y="${Number(yy) + 3}" font-size="10" fill="var(--text-muted)" text-anchor="end">${val}</text>
+    `;
+  }).join("");
+
+  contChart.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="rot-svg">
+      ${guias}
+      ${lineas}
+      ${etiquetas}
+    </svg>
+  `;
+
+  contLeyenda.innerHTML = series.map(s => `
+    <span class="rot-leyenda-item">
+      <span class="rot-leyenda-color" style="background:${s.color}"></span>
+      ${escapeHtml(s.nombre)}
+    </span>
+  `).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,26 +1404,66 @@ document.getElementById("btn-eliminar-usuario").addEventListener("click", async 
 // Mermas (cuenta separada de pérdidas)
 // ---------------------------------------------------------------------------
 
+const MESES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+function fmtMes(clave) {
+  // "2026-07" -> "Julio 2026"
+  const [anio, mes] = String(clave).split("-").map(Number);
+  if (!anio || !mes) return clave;
+  return `${MESES_ES[mes - 1]} ${anio}`;
+}
+
 async function cargarMermas() {
   const tbody = document.getElementById("tbody-mermas");
+  const mes = document.getElementById("mermas-filtro-mes").value;
   try {
-    const data = await api("/api/mermas");
+    const params = mes ? `?mes=${encodeURIComponent(mes)}` : "";
+    const data = await api("/api/mermas" + params);
+
+    // Rellena el selector de meses una sola vez por carga (conserva la selección actual).
+    const selectMes = document.getElementById("mermas-filtro-mes");
+    if (selectMes.dataset.cargado !== "1") {
+      selectMes.innerHTML = '<option value="">Actual (pendiente de revisión)</option>' +
+        data.meses_disponibles.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(fmtMes(m))}</option>`).join("");
+      selectMes.value = mes;
+      selectMes.dataset.cargado = "1";
+    }
+
+    const esMes = data.modo === "mes";
+    document.getElementById("mermas-intro").textContent = esMes
+      ? `Historial de pérdidas registradas en ${fmtMes(data.mes)} (aunque ya se hayan descartado después).`
+      : `Productos marcados como "pérdida" — quedan aquí guardados para revisión antes de descartarlos definitivamente.`;
+    document.getElementById("mermas-label-unidades").textContent = esMes ? "Unidades perdidas el mes" : "Unidades en merma";
+    document.getElementById("mermas-label-valor").textContent = esMes ? "Valor perdido el mes" : "Valor en merma";
+
     document.getElementById("mermas-total-unidades").textContent = data.total_unidades;
     document.getElementById("mermas-total-valor").textContent = fmtMoney(data.total_valor);
 
+    // En modo "mes" no se puede descartar (es historial, no el saldo vivo),
+    // así que esa columna de acción se oculta.
+    document.querySelectorAll("#thead-mermas th.mermas-col-accion").forEach(th => th.style.display = esMes ? "none" : "");
+
     if (data.productos.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" class="vacio">No hay productos en merma actualmente. 👍</td></tr>`;
+      const msg = esMes ? `No hubo pérdidas registradas en ${fmtMes(data.mes)}. 👍` : "No hay productos en merma actualmente. 👍";
+      tbody.innerHTML = `<tr><td colspan="5" class="vacio">${msg}</td></tr>`;
       return;
     }
-    tbody.innerHTML = data.productos.map(p => `
+
+    tbody.innerHTML = data.productos.map(p => {
+      const cantidad = esMes ? p.cantidad_mes : p.stock_merma;
+      const valor = esMes ? p.valor_mes : p.stock_merma * p.costo_compra;
+      const accion = esMes
+        ? ""
+        : `<td><button class="btn-link" data-descartar="${p.id}" data-max="${p.stock_merma}">Descartar</button></td>`;
+      return `
       <tr>
         <td>#${escapeHtml(p.id_sistema)} ${escapeHtml(p.nombre)}</td>
         <td>${escapeHtml(p.categoria) || "—"}</td>
-        <td class="num mono">${p.stock_merma}</td>
-        <td class="num mono">${fmtMoney(p.stock_merma * p.costo_compra)}</td>
-        <td><button class="btn-link" data-descartar="${p.id}" data-max="${p.stock_merma}">Descartar</button></td>
-      </tr>
-    `).join("");
+        <td class="num mono">${cantidad}</td>
+        <td class="num mono">${fmtMoney(valor)}</td>
+        ${accion || "<td></td>"}
+      </tr>`;
+    }).join("");
 
     tbody.querySelectorAll("[data-descartar]").forEach(btn => {
       btn.addEventListener("click", async () => {
@@ -1367,11 +1487,36 @@ async function cargarMermas() {
   }
 }
 
+document.getElementById("mermas-filtro-mes").addEventListener("change", cargarMermas);
+
 // ---------------------------------------------------------------------------
 // Movimientos (Módulo 5 - bitácora completa con filtros)
 // ---------------------------------------------------------------------------
 
 let categoriasMovFiltroCargadas = false;
+// Igual criterio que el formulario "Registrar movimiento": qué categorías
+// corresponden a cada tipo, para que el filtro no deje elegir combinaciones
+// sin sentido (ej. Entrada + Venta).
+state.categoriasPorTipoMov = null;
+
+function actualizarOpcionesCategoriaMov() {
+  if (!state.categoriasPorTipoMov) return;
+  const tipo = document.getElementById("mov-filtro-tipo").value;
+  const select = document.getElementById("mov-filtro-categoria");
+  const seleccionActual = select.value;
+
+  const opciones = tipo
+    ? (state.categoriasPorTipoMov[tipo] || [])
+    : Object.values(state.categoriasPorTipoMov).flat();
+  const opcionesUnicas = [...new Set(opciones)].sort((a, b) => a.localeCompare(b, "es"));
+
+  select.innerHTML = '<option value="">Todas las categorías</option>' +
+    opcionesUnicas.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+
+  // Si la categoría que tenías elegida ya no tiene sentido para el tipo
+  // nuevo (ej. tenías "Venta" y cambiaste a "Entrada"), se limpia sola.
+  select.value = opcionesUnicas.includes(seleccionActual) ? seleccionActual : "";
+}
 
 async function cargarMovimientos() {
   const tbody = document.getElementById("tbody-movimientos");
@@ -1391,9 +1536,8 @@ async function cargarMovimientos() {
     const data = await api("/api/movimientos?" + params.toString());
 
     if (!categoriasMovFiltroCargadas) {
-      const select = document.getElementById("mov-filtro-categoria");
-      select.innerHTML = '<option value="">Todas las categorías</option>' +
-        data.categorias.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+      state.categoriasPorTipoMov = data.categorias_por_tipo;
+      actualizarOpcionesCategoriaMov();
       categoriasMovFiltroCargadas = true;
     }
 
@@ -1425,7 +1569,10 @@ document.getElementById("mov-buscar").addEventListener("input", () => {
   clearTimeout(movBuscarTimeout);
   movBuscarTimeout = setTimeout(cargarMovimientos, 250);
 });
-document.getElementById("mov-filtro-tipo").addEventListener("change", cargarMovimientos);
+document.getElementById("mov-filtro-tipo").addEventListener("change", () => {
+  actualizarOpcionesCategoriaMov();
+  cargarMovimientos();
+});
 document.getElementById("mov-filtro-categoria").addEventListener("change", cargarMovimientos);
 document.getElementById("mov-filtro-desde").addEventListener("change", cargarMovimientos);
 document.getElementById("mov-filtro-hasta").addEventListener("change", cargarMovimientos);

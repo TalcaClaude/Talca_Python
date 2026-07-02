@@ -73,6 +73,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-bodega").style.display = vista === "bodega" ? "block" : "none";
     document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
+    document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
@@ -81,6 +82,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       bodega: "Organización Física de Bodega",
       facturas: "Facturas de compra",
       proveedores: "Proveedores",
+      movimientos: "Control de Movimientos",
       usuarios: "Usuarios",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -88,6 +90,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "bodega") cargarUbicaciones();
     if (vista === "facturas") cargarFacturas();
     if (vista === "proveedores") cargarProveedores();
+    if (vista === "movimientos") cargarMovimientos();
     if (vista === "usuarios") cargarUsuarios();
   });
 });
@@ -491,6 +494,11 @@ async function abrirDetalle(id) {
     state.productoActivo = p;
     renderDetalle(p);
     resetearCampoFactura();
+    document.getElementById("m-tipo").value = "entrada";
+    document.getElementById("m-cantidad-label").textContent = "Cantidad";
+    document.getElementById("m-costo-wrap").style.display = "flex";
+    document.getElementById("m-factura-wrap").style.display = "flex";
+    poblarSelectCategoriaMovimiento("Compra");
     abrirModal("modal-detalle");
   } catch (e) {
     toast(e.message, true);
@@ -529,6 +537,7 @@ function renderDetalle(p) {
         <span class="mov-tipo mov-tipo--${m.tipo}">${m.tipo}</span>
         <span class="mov-detalle">
           ${m.cantidad >= 0 ? "+" : ""}${m.cantidad} → stock: ${m.stock_resultante}
+          ${m.categoria ? " · " + escapeHtml(m.categoria) : ""}
           ${m.costo_unitario !== null && m.costo_unitario !== undefined ? " · " + fmtMoney(m.costo_unitario) + " c/u" : ""}
           ${m.factura_numero ? " · factura " + escapeHtml(m.factura_numero) : ""}
           ${m.motivo ? " · " + escapeHtml(m.motivo) : ""}
@@ -597,12 +606,22 @@ document.getElementById("m-factura").addEventListener("input", () => {
   facturaLookupTimeout = setTimeout(buscarFacturaParaMovimiento, 400);
 });
 
+const CATEGORIAS_MOVIMIENTO = ["Compra", "Venta", "Consumo interno", "Reserva", "Ajuste de inventario", "Devolución", "Traslado interno", "Merma o pérdida"];
+const CATEGORIA_POR_DEFECTO = { entrada: "Compra", salida: "Consumo interno", ajuste: "Ajuste de inventario" };
+
+function poblarSelectCategoriaMovimiento(seleccion) {
+  const select = document.getElementById("m-categoria");
+  select.innerHTML = CATEGORIAS_MOVIMIENTO.map(c => `<option value="${c}">${c}</option>`).join("");
+  select.value = seleccion;
+}
+
 document.getElementById("m-tipo").addEventListener("change", (e) => {
   const label = document.getElementById("m-cantidad-label");
   const esEntrada = e.target.value === "entrada";
   label.textContent = e.target.value === "ajuste" ? "Nuevo stock disponible (valor final)" : "Cantidad";
   document.getElementById("m-costo-wrap").style.display = esEntrada ? "flex" : "none";
   document.getElementById("m-factura-wrap").style.display = esEntrada ? "flex" : "none";
+  poblarSelectCategoriaMovimiento(CATEGORIA_POR_DEFECTO[e.target.value]);
   if (!esEntrada) resetearCampoFactura();
 });
 
@@ -611,6 +630,7 @@ document.getElementById("form-movimiento").addEventListener("submit", async (e) 
   const id = document.getElementById("m-producto-id").value;
   const payload = {
     tipo: document.getElementById("m-tipo").value,
+    categoria: document.getElementById("m-categoria").value,
     cantidad: document.getElementById("m-cantidad").value,
     costo_unitario: document.getElementById("m-costo").value,
     factura_numero: document.getElementById("m-factura").value,
@@ -624,6 +644,7 @@ document.getElementById("form-movimiento").addEventListener("submit", async (e) 
     document.getElementById("m-costo-wrap").style.display = "flex";
     document.getElementById("m-factura-wrap").style.display = "flex";
     document.getElementById("m-cantidad-label").textContent = "Cantidad";
+    poblarSelectCategoriaMovimiento("Compra");
     resetearCampoFactura();
     await Promise.all([cargarProductos(), cargarResumen()]);
     await abrirDetalle(id);
@@ -1188,6 +1209,77 @@ document.getElementById("btn-eliminar-usuario").addEventListener("click", async 
   } catch (e) {
     toast(e.message, true);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Movimientos (Módulo 5 - bitácora completa con filtros)
+// ---------------------------------------------------------------------------
+
+let categoriasMovFiltroCargadas = false;
+
+async function cargarMovimientos() {
+  const tbody = document.getElementById("tbody-movimientos");
+  const params = new URLSearchParams();
+  const q = document.getElementById("mov-buscar").value.trim();
+  const tipo = document.getElementById("mov-filtro-tipo").value;
+  const categoria = document.getElementById("mov-filtro-categoria").value;
+  const desde = document.getElementById("mov-filtro-desde").value;
+  const hasta = document.getElementById("mov-filtro-hasta").value;
+  if (q) params.set("q", q);
+  if (tipo) params.set("tipo", tipo);
+  if (categoria) params.set("categoria", categoria);
+  if (desde) params.set("desde", desde);
+  if (hasta) params.set("hasta", hasta);
+
+  try {
+    const data = await api("/api/movimientos?" + params.toString());
+
+    if (!categoriasMovFiltroCargadas) {
+      const select = document.getElementById("mov-filtro-categoria");
+      select.innerHTML = '<option value="">Todas las categorías</option>' +
+        data.categorias.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+      categoriasMovFiltroCargadas = true;
+    }
+
+    if (data.movimientos.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="9" class="vacio">No se encontraron movimientos con esos filtros.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = data.movimientos.map(m => `
+      <tr>
+        <td class="mono">${fmtFecha(m.fecha)}</td>
+        <td>#${escapeHtml(m.producto_id_sistema)} ${escapeHtml(m.producto_nombre)}</td>
+        <td><span class="mov-tipo mov-tipo--${m.tipo}">${m.tipo}</span></td>
+        <td>${escapeHtml(m.categoria) || "—"}</td>
+        <td class="num mono">${m.cantidad >= 0 ? "+" : ""}${m.cantidad}</td>
+        <td class="num mono">${m.stock_resultante}</td>
+        <td class="mono">${escapeHtml(m.factura_numero) || "—"}</td>
+        <td>${escapeHtml(m.usuario) || "—"}</td>
+        <td>${escapeHtml(m.motivo) || "—"}</td>
+      </tr>
+    `).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar movimientos: ${e.message}</td></tr>`;
+  }
+}
+
+let movBuscarTimeout;
+document.getElementById("mov-buscar").addEventListener("input", () => {
+  clearTimeout(movBuscarTimeout);
+  movBuscarTimeout = setTimeout(cargarMovimientos, 250);
+});
+document.getElementById("mov-filtro-tipo").addEventListener("change", cargarMovimientos);
+document.getElementById("mov-filtro-categoria").addEventListener("change", cargarMovimientos);
+document.getElementById("mov-filtro-desde").addEventListener("change", cargarMovimientos);
+document.getElementById("mov-filtro-hasta").addEventListener("change", cargarMovimientos);
+document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
+  document.getElementById("mov-buscar").value = "";
+  document.getElementById("mov-filtro-tipo").value = "";
+  document.getElementById("mov-filtro-categoria").value = "";
+  document.getElementById("mov-filtro-desde").value = "";
+  document.getElementById("mov-filtro-hasta").value = "";
+  cargarMovimientos();
 });
 
 // ---------------------------------------------------------------------------

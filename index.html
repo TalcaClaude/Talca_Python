@@ -36,6 +36,7 @@
     <button class="tab" data-vista="proveedores">Proveedores</button>
     <button class="tab" data-vista="movimientos">Movimientos</button>
     <button class="tab" data-vista="mermas">Mermas</button>
+    <button class="tab" data-vista="rotacion">Rotación</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
   </nav>
 
@@ -341,6 +342,46 @@
         <tr><td colspan="5" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-rotacion" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Cómo se mueve realmente el inventario: qué se usa mucho, qué casi no se toca, y qué lleva tiempo parado. Como en el taller casi todo es consumo interno (no venta directa), aquí se mide toda salida de stock por igual.</p>
+    <label class="toggle-critico">Período
+      <select id="rotacion-periodo">
+        <option value="30">Últimos 30 días</option>
+        <option value="90" selected>Últimos 90 días</option>
+        <option value="180">Últimos 180 días</option>
+        <option value="365">Último año</option>
+      </select>
+    </label>
+  </section>
+
+  <section class="dash-grid">
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Más utilizados</h3>
+      <div class="dash-lista" id="rot-mas-utilizados"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Baja rotación</h3>
+      <div class="dash-lista" id="rot-baja-rotacion"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Inmovilizados</h3>
+      <div class="dash-lista" id="rot-inmovilizados"><p class="vacio">Cargando…</p></div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Tendencia de consumo (6 meses)</h3>
+      <div class="rot-tendencia" id="rot-tendencia"><p class="vacio">Cargando…</p></div>
+    </div>
+
   </section>
 
   </section>

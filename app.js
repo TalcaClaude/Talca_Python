@@ -75,6 +75,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
     document.getElementById("vista-mermas").style.display = vista === "mermas" ? "block" : "none";
+    document.getElementById("vista-rotacion").style.display = vista === "rotacion" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
@@ -85,6 +86,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       proveedores: "Proveedores",
       movimientos: "Control de Movimientos",
       mermas: "Mermas",
+      rotacion: "Control de Rotación",
       usuarios: "Usuarios",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -94,6 +96,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "proveedores") cargarProveedores();
     if (vista === "movimientos") cargarMovimientos();
     if (vista === "mermas") cargarMermas();
+    if (vista === "rotacion") cargarRotacion();
     if (vista === "usuarios") cargarUsuarios();
   });
 });
@@ -1446,6 +1449,75 @@ function formatearRut(valor) {
 document.getElementById("pv-rut").addEventListener("input", (e) => {
   e.target.value = formatearRut(e.target.value);
 });
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Rotación (Módulo 8)
+// ---------------------------------------------------------------------------
+
+const MESES_CORTOS = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
+
+function renderRotItem(contenedorId, lista, vacioTexto, valorFn) {
+  const cont = document.getElementById(contenedorId);
+  cont.innerHTML = lista.length
+    ? lista.map(p => `
+      <div class="dash-item">
+        <span class="dash-item-nombre">#${escapeHtml(p.id_sistema)} — ${escapeHtml(p.nombre)}</span>
+        <span class="dash-item-valor">${valorFn(p)}</span>
+      </div>
+    `).join("")
+    : `<p class="vacio">${vacioTexto}</p>`;
+}
+
+async function cargarRotacion() {
+  const dias = document.getElementById("rotacion-periodo").value;
+  try {
+    const d = await api(`/api/rotacion?dias=${dias}`);
+
+    renderRotItem(
+      "rot-mas-utilizados", d.mas_utilizados,
+      "Todavía no hay salidas registradas en este período.",
+      p => `${p.total_salida} unid. · ${p.n_movimientos} mov.`
+    );
+
+    renderRotItem(
+      "rot-baja-rotacion", d.baja_rotacion,
+      "No hay productos con salidas bajas en este período.",
+      p => `${p.total_salida_periodo} unid.`
+    );
+
+    renderRotItem(
+      "rot-inmovilizados", d.inmovilizados,
+      "No hay productos inmovilizados. 👍",
+      p => p.ultima_salida ? `Última salida: ${fmtFecha(p.ultima_salida)}` : "Nunca ha tenido salidas"
+    );
+
+    const contTendencia = document.getElementById("rot-tendencia");
+    if (d.tendencias.length === 0) {
+      contTendencia.innerHTML = `<p class="vacio">Todavía no hay suficiente historial para ver una tendencia.</p>`;
+    } else {
+      const max = Math.max(...d.tendencias.map(t => t.total), 1);
+      contTendencia.innerHTML = d.tendencias.map(t => {
+        const [anio, mes] = t.mes.split("-");
+        const alturaPct = Math.max((t.total / max) * 100, 3);
+        return `
+          <div class="rot-barra-col">
+            <span class="rot-barra-valor">${t.total}</span>
+            <div class="rot-barra" style="height:${alturaPct}%"></div>
+            <span class="rot-barra-mes">${MESES_CORTOS[parseInt(mes, 10) - 1]}</span>
+          </div>
+        `;
+      }).join("");
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
 
 // ---------------------------------------------------------------------------
 // Init

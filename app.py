@@ -14,7 +14,7 @@ import time
 import threading
 import smtplib
 from email.message import EmailMessage
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Flask, g, jsonify, request, render_template, send_file, session, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -2038,6 +2038,111 @@ def dashboard():
             "total_proveedores": total_proveedores,
             "facturas_pendientes": facturas_pendientes,
         },
+    })
+
+
+@app.route("/api/rotacion", methods=["GET"])
+def rotacion():
+    """Módulo 8: Control de Rotación.
+
+    En este taller casi no hay venta directa (todo es consumo interno), así
+    que no se distingue "más vendidos" de "más utilizados": se mide todo
+    salida de stock por igual (tipo = 'salida'), sin importar la categoría.
+    """
+    db = get_db()
+
+    try:
+        dias = int(request.args.get("dias", 90))
+    except (TypeError, ValueError):
+        dias = 90
+    dias = max(7, min(dias, 730))
+    desde = (datetime.now() - timedelta(days=dias)).isoformat(timespec="seconds")
+
+    # ---- Más utilizados: mayor cantidad de salidas dentro del período.
+    top_rows = db.execute(
+        """
+        SELECT producto_id, SUM(cantidad) AS total, COUNT(*) AS n_movimientos
+        FROM movimientos
+        WHERE tipo = 'salida' AND fecha >= ?
+        GROUP BY producto_id
+        ORDER BY total DESC
+        LIMIT 12
+        """,
+        (desde,),
+    ).fetchall()
+    mas_utilizados = []
+    for r in top_rows:
+        prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (r["producto_id"],)).fetchone()
+        if not prod:
+            continue
+        d = row_to_dict(prod)
+        d["total_salida"] = r["total"]
+        d["n_movimientos"] = r["n_movimientos"]
+        mas_utilizados.append(d)
+
+    # ---- Mapas de apoyo: total de salidas en el período y fecha de la
+    # última salida de cada producto (esta última sin límite de período,
+    # para saber hace cuánto tiempo real que no se mueve).
+    totales_periodo = {
+        r["producto_id"]: r["total"]
+        for r in db.execute(
+            "SELECT producto_id, SUM(cantidad) AS total FROM movimientos "
+            "WHERE tipo = 'salida' AND fecha >= ? GROUP BY producto_id",
+            (desde,),
+        ).fetchall()
+    }
+    ultima_salida = {
+        r["producto_id"]: r["ultima"]
+        for r in db.execute(
+            "SELECT producto_id, MAX(fecha) AS ultima FROM movimientos "
+            "WHERE tipo = 'salida' GROUP BY producto_id"
+        ).fetchall()
+    }
+
+    baja_rotacion = []
+    inmovilizados = []
+    for p in db.execute(PRODUCTO_SELECT).fetchall():
+        pid = p["id"]
+        total_periodo = totales_periodo.get(pid, 0)
+        d = row_to_dict(p)
+        if total_periodo > 0:
+            d["total_salida_periodo"] = total_periodo
+            baja_rotacion.append(d)
+        else:
+            d["ultima_salida"] = ultima_salida.get(pid)
+            inmovilizados.append(d)
+
+    # Baja rotación: sí tuvieron salida en el período, pero poca — las que
+    # menos se movieron primero.
+    baja_rotacion.sort(key=lambda d: d["total_salida_periodo"])
+    baja_rotacion = baja_rotacion[:15]
+
+    # Inmovilizados: cero salidas en el período. Primero los que nunca han
+    # tenido ninguna salida, luego los que llevan más tiempo sin una.
+    inmovilizados.sort(key=lambda d: (d["ultima_salida"] is not None, d["ultima_salida"] or ""))
+    inmovilizados = inmovilizados[:15]
+
+    # ---- Tendencias de consumo: total de salidas por mes, últimos 6 meses.
+    desde_tendencia = (datetime.now() - timedelta(days=180)).isoformat(timespec="seconds")
+    tendencias = [
+        dict(r)
+        for r in db.execute(
+            """
+            SELECT strftime('%Y-%m', fecha) AS mes, SUM(cantidad) AS total
+            FROM movimientos
+            WHERE tipo = 'salida' AND fecha >= ?
+            GROUP BY mes ORDER BY mes ASC
+            """,
+            (desde_tendencia,),
+        ).fetchall()
+    ]
+
+    return jsonify({
+        "periodo_dias": dias,
+        "mas_utilizados": mas_utilizados,
+        "baja_rotacion": baja_rotacion,
+        "inmovilizados": inmovilizados,
+        "tendencias": tendencias,
     })
 
 

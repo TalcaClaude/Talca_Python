@@ -89,10 +89,12 @@ def respaldo_automatico_configurado():
 
 CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
 MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
-CATEGORIAS_MOVIMIENTO = [
-    "Compra", "Venta", "Consumo interno", "Reserva",
-    "Ajuste de inventario", "Devolución", "Traslado interno", "Merma o pérdida",
-]
+
+# "Merma o pérdida" ya no es una categoría a elegir: es su propio tipo de
+# movimiento ("perdida"). "Traslado interno" se quitó por no usarse.
+CATEGORIAS_ENTRADA = ["Compra", "Ajuste de inventario", "Devolución"]
+CATEGORIAS_SALIDA = ["Venta", "Consumo interno", "Reserva", "Ajuste de inventario", "Devolución"]
+CATEGORIAS_MOVIMIENTO = sorted(set(CATEGORIAS_ENTRADA) | set(CATEGORIAS_SALIDA))
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +118,7 @@ def close_db(exception=None):
 
 def init_db():
     db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
 
     db.executescript(
         """
@@ -131,6 +134,7 @@ def init_db():
             ubicacion_id INTEGER REFERENCES ubicaciones(id),
             stock_disponible INTEGER NOT NULL DEFAULT 0,
             stock_reservado INTEGER NOT NULL DEFAULT 0,
+            stock_merma INTEGER NOT NULL DEFAULT 0,
             stock_minimo INTEGER NOT NULL DEFAULT 0,
             costo_compra REAL NOT NULL DEFAULT 0,
             creado_en TEXT NOT NULL,
@@ -247,6 +251,9 @@ def init_db():
     if "ubicacion_id" not in columnas:
         db.execute("ALTER TABLE productos ADD COLUMN ubicacion_id INTEGER REFERENCES ubicaciones(id)")
         db.commit()
+    if "stock_merma" not in columnas:
+        db.execute("ALTER TABLE productos ADD COLUMN stock_merma INTEGER NOT NULL DEFAULT 0")
+        db.commit()
 
     # ---- Migración 2: columnas nuevas en movimientos (costo_unitario, factura)
     columnas_mov = [c[1] for c in db.execute("PRAGMA table_info(movimientos)").fetchall()]
@@ -294,6 +301,7 @@ def init_db():
                 ubicacion_id INTEGER REFERENCES ubicaciones(id),
                 stock_disponible INTEGER NOT NULL DEFAULT 0,
                 stock_reservado INTEGER NOT NULL DEFAULT 0,
+                stock_merma INTEGER NOT NULL DEFAULT 0,
                 stock_minimo INTEGER NOT NULL DEFAULT 0,
                 costo_compra REAL NOT NULL DEFAULT 0,
                 creado_en TEXT NOT NULL,
@@ -302,12 +310,12 @@ def init_db():
 
             INSERT INTO productos_nueva (
                 id, codigo_interno, nombre, descripcion, categoria, marca, modelo,
-                ubicacion, ubicacion_id, stock_disponible, stock_reservado,
+                ubicacion, ubicacion_id, stock_disponible, stock_reservado, stock_merma,
                 stock_minimo, costo_compra, creado_en, actualizado_en
             )
             SELECT
                 id, codigo_interno, nombre, descripcion, categoria, marca, modelo,
-                ubicacion, ubicacion_id, stock_disponible, stock_reservado,
+                ubicacion, ubicacion_id, stock_disponible, stock_reservado, stock_merma,
                 stock_minimo, costo_compra, creado_en, actualizado_en
             FROM productos;
 
@@ -393,6 +401,21 @@ def init_db():
             (nombre, nombre),
         )
     db.commit()
+
+    # ---- Migración 7: se retira el apartado separado de "Reservas" (ahora
+    # una reserva es simplemente un movimiento de salida con categoría
+    # "Reserva"). Cualquier reserva que haya quedado activa de la versión
+    # anterior se libera automáticamente para no dejar stock atrapado.
+    tablas = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()]
+    if "reservas" in tablas:
+        activas = db.execute("SELECT * FROM reservas WHERE estado = 'activa'").fetchall()
+        for r in activas:
+            db.execute(
+                "UPDATE productos SET stock_disponible = stock_disponible + ?, stock_reservado = stock_reservado - ? WHERE id = ?",
+                (r["cantidad"], r["cantidad"], r["producto_id"]),
+            )
+        db.execute("UPDATE reservas SET estado = 'liberada' WHERE estado = 'activa'")
+        db.commit()
 
     db.close()
 
@@ -854,13 +877,19 @@ def registrar_movimiento(producto_id):
     usuario = (data.get("usuario") or "").strip() or "Sin especificar"
     factura_numero = (data.get("factura_numero") or "").strip()
 
-    if tipo not in ("entrada", "salida", "ajuste"):
-        return jsonify({"error": "Tipo de movimiento inválido (usa entrada, salida o ajuste)"}), 400
+    if tipo not in ("entrada", "salida", "perdida"):
+        return jsonify({"error": "Tipo de movimiento inválido (usa entrada, salida o perdida)"}), 400
 
-    categoria_por_defecto = {"entrada": "Compra", "salida": "Consumo interno", "ajuste": "Ajuste de inventario"}
-    categoria = (data.get("categoria") or "").strip() or categoria_por_defecto[tipo]
-    if categoria not in CATEGORIAS_MOVIMIENTO:
-        return jsonify({"error": f"Categoría inválida. Usa una de: {', '.join(CATEGORIAS_MOVIMIENTO)}"}), 400
+    if tipo == "perdida":
+        categoria = "Merma o pérdida"
+    else:
+        categorias_permitidas = CATEGORIAS_ENTRADA if tipo == "entrada" else CATEGORIAS_SALIDA
+        categoria_por_defecto = "Compra" if tipo == "entrada" else "Consumo interno"
+        categoria = (data.get("categoria") or "").strip() or categoria_por_defecto
+        if categoria not in categorias_permitidas:
+            return jsonify({
+                "error": f"Para {tipo}, la categoría debe ser una de: {', '.join(categorias_permitidas)}"
+            }), 400
 
     if factura_numero and tipo != "entrada":
         return jsonify({"error": "El número de factura solo aplica a movimientos de entrada"}), 400
@@ -869,8 +898,7 @@ def registrar_movimiento(producto_id):
         cantidad = int(data.get("cantidad"))
     except (TypeError, ValueError):
         return jsonify({"error": "La cantidad debe ser un número entero"}), 400
-
-    if tipo in ("entrada", "salida") and cantidad <= 0:
+    if cantidad <= 0:
         return jsonify({"error": "La cantidad debe ser mayor a 0"}), 400
 
     costo_unitario = None
@@ -920,19 +948,19 @@ def registrar_movimiento(producto_id):
             "VALUES (?, ?, 'salida', ?, ?, ?, ?, ?)",
             (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock),
         )
-    else:  # ajuste -> cantidad es el nuevo stock disponible absoluto
-        if cantidad < 0:
-            return jsonify({"error": "El stock ajustado no puede ser negativo"}), 400
-        nuevo_stock = cantidad
-        cantidad = nuevo_stock - stock_actual  # delta real para el registro
+    else:  # perdida -> el stock sale de "disponible" pero no desaparece: pasa a la cuenta de merma
+        if cantidad > stock_actual:
+            return jsonify({"error": f"No hay stock disponible suficiente para marcar como pérdida (disponible: {stock_actual})"}), 400
+        nuevo_stock = stock_actual - cantidad
+        nuevo_merma = row["stock_merma"] + cantidad
         ts = now_iso()
         db.execute(
-            "UPDATE productos SET stock_disponible = ?, actualizado_en = ? WHERE id = ?",
-            (nuevo_stock, ts, producto_id),
+            "UPDATE productos SET stock_disponible = ?, stock_merma = ?, actualizado_en = ? WHERE id = ?",
+            (nuevo_stock, nuevo_merma, ts, producto_id),
         )
         db.execute(
             "INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, stock_resultante) "
-            "VALUES (?, ?, 'ajuste', ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, 'perdida', ?, ?, ?, ?, ?)",
             (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock),
         )
 
@@ -1728,145 +1756,6 @@ def backup_probar_automatico():
 
 
 # ---------------------------------------------------------------------------
-# API: Reservas (Módulo 6 - Reserva de Productos)
-# ---------------------------------------------------------------------------
-
-RESERVA_SELECT = """
-    SELECT r.*, p.nombre AS producto_nombre, p.codigo_interno AS producto_codigo_interno
-    FROM reservas r
-    JOIN productos p ON p.id = r.producto_id
-"""
-
-
-def _reserva_a_dict(row):
-    d = dict(row)
-    d["producto_id_sistema"] = f"{d['producto_id']:04d}"
-    return d
-
-
-@app.route("/api/reservas", methods=["GET"])
-def listar_reservas():
-    db = get_db()
-    estado = request.args.get("estado", "").strip()
-    producto_id = request.args.get("producto_id", "").strip()
-
-    sql = RESERVA_SELECT + " WHERE 1=1"
-    params = []
-    if estado:
-        sql += " AND r.estado = ?"
-        params.append(estado)
-    if producto_id:
-        sql += " AND r.producto_id = ?"
-        params.append(producto_id)
-    sql += " ORDER BY r.creado_en DESC"
-
-    rows = db.execute(sql, params).fetchall()
-    return jsonify({"reservas": [_reserva_a_dict(r) for r in rows]})
-
-
-@app.route("/api/productos/<int:producto_id>/reservar", methods=["POST"])
-def reservar_stock(producto_id):
-    db = get_db()
-    producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
-    if producto is None:
-        return jsonify({"error": "Producto no encontrado"}), 404
-
-    data = request.get_json(force=True, silent=True) or {}
-    try:
-        cantidad = int(data.get("cantidad"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "La cantidad debe ser un número entero"}), 400
-    if cantidad <= 0:
-        return jsonify({"error": "La cantidad debe ser mayor a 0"}), 400
-    if cantidad > producto["stock_disponible"]:
-        return jsonify({"error": f"No hay stock disponible suficiente (disponible: {producto['stock_disponible']})"}), 400
-
-    orden_trabajo = (data.get("orden_trabajo") or "").strip()
-    motivo = (data.get("motivo") or "").strip()
-    usuario = (data.get("usuario") or "").strip() or "Sin especificar"
-    ts = now_iso()
-
-    db.execute(
-        "UPDATE productos SET stock_disponible = stock_disponible - ?, stock_reservado = stock_reservado + ?, actualizado_en = ? WHERE id = ?",
-        (cantidad, cantidad, ts, producto_id),
-    )
-    cur = db.execute(
-        """
-        INSERT INTO reservas (producto_id, cantidad, orden_trabajo, motivo, usuario, estado, creado_en, actualizado_en)
-        VALUES (?, ?, ?, ?, ?, 'activa', ?, ?)
-        """,
-        (producto_id, cantidad, orden_trabajo, motivo, usuario, ts, ts),
-    )
-    db.commit()
-
-    nueva = db.execute(RESERVA_SELECT + " WHERE r.id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(_reserva_a_dict(nueva)), 201
-
-
-@app.route("/api/reservas/<int:reserva_id>/liberar", methods=["POST"])
-def liberar_reserva(reserva_id):
-    db = get_db()
-    reserva = db.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
-    if reserva is None:
-        return jsonify({"error": "Reserva no encontrada"}), 404
-    if reserva["estado"] != "activa":
-        return jsonify({"error": f"Esta reserva ya está '{reserva['estado']}', no se puede liberar de nuevo"}), 400
-
-    ts = now_iso()
-    db.execute(
-        "UPDATE productos SET stock_disponible = stock_disponible + ?, stock_reservado = stock_reservado - ?, actualizado_en = ? WHERE id = ?",
-        (reserva["cantidad"], reserva["cantidad"], ts, reserva["producto_id"]),
-    )
-    db.execute(
-        "UPDATE reservas SET estado = 'liberada', actualizado_en = ? WHERE id = ?",
-        (ts, reserva_id),
-    )
-    db.commit()
-
-    actualizada = db.execute(RESERVA_SELECT + " WHERE r.id = ?", (reserva_id,)).fetchone()
-    return jsonify(_reserva_a_dict(actualizada))
-
-
-@app.route("/api/reservas/<int:reserva_id>/consumir", methods=["POST"])
-def consumir_reserva(reserva_id):
-    db = get_db()
-    reserva = db.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
-    if reserva is None:
-        return jsonify({"error": "Reserva no encontrada"}), 404
-    if reserva["estado"] != "activa":
-        return jsonify({"error": f"Esta reserva ya está '{reserva['estado']}', no se puede consumir de nuevo"}), 400
-
-    data = request.get_json(force=True, silent=True) or {}
-    usuario = (data.get("usuario") or reserva["usuario"] or "Sin especificar").strip()
-
-    producto = db.execute("SELECT * FROM productos WHERE id = ?", (reserva["producto_id"],)).fetchone()
-    ts = now_iso()
-    nuevo_reservado = producto["stock_reservado"] - reserva["cantidad"]
-
-    db.execute(
-        "UPDATE productos SET stock_reservado = ?, actualizado_en = ? WHERE id = ?",
-        (nuevo_reservado, ts, producto["id"]),
-    )
-    motivo = f"Consumo de reserva" + (f" — OT {reserva['orden_trabajo']}" if reserva["orden_trabajo"] else "")
-    nuevo_total = producto["stock_disponible"] + nuevo_reservado
-    db.execute(
-        """
-        INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, stock_resultante)
-        VALUES (?, ?, 'salida', 'Reserva', ?, ?, ?, ?)
-        """,
-        (producto["id"], ts, reserva["cantidad"], motivo, usuario, nuevo_total),
-    )
-    db.execute(
-        "UPDATE reservas SET estado = 'consumida', actualizado_en = ? WHERE id = ?",
-        (ts, reserva_id),
-    )
-    db.commit()
-
-    actualizada = db.execute(RESERVA_SELECT + " WHERE r.id = ?", (reserva_id,)).fetchone()
-    return jsonify(_reserva_a_dict(actualizada))
-
-
-# ---------------------------------------------------------------------------
 # API: Movimientos - bitácora completa (Módulo 5)
 # ---------------------------------------------------------------------------
 
@@ -1923,7 +1812,59 @@ def listar_movimientos():
         d["producto_nombre"] = d["producto_nombre"] or "(producto eliminado)"
         movimientos.append(d)
 
-    return jsonify({"movimientos": movimientos, "total": len(movimientos), "categorias": CATEGORIAS_MOVIMIENTO})
+    return jsonify({
+        "movimientos": movimientos,
+        "total": len(movimientos),
+        "categorias": sorted(set(CATEGORIAS_MOVIMIENTO) | {"Merma o pérdida"}),
+    })
+
+
+# ---------------------------------------------------------------------------
+# API: Mermas (cuenta separada de pérdidas)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/mermas", methods=["GET"])
+def listar_mermas():
+    db = get_db()
+    rows = db.execute(
+        PRODUCTO_SELECT + " WHERE p.stock_merma > 0 ORDER BY p.nombre COLLATE NOCASE"
+    ).fetchall()
+    productos = [row_to_dict(r) for r in rows]
+    total_unidades = sum(p["stock_merma"] for p in productos)
+    total_valor = sum(p["stock_merma"] * p["costo_compra"] for p in productos)
+    return jsonify({
+        "productos": productos,
+        "total_unidades": total_unidades,
+        "total_valor": total_valor,
+    })
+
+
+@app.route("/api/productos/<int:producto_id>/merma/descartar", methods=["POST"])
+def descartar_merma(producto_id):
+    db = get_db()
+    producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        cantidad = int(data.get("cantidad"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "La cantidad debe ser un número entero"}), 400
+    if cantidad <= 0:
+        return jsonify({"error": "La cantidad debe ser mayor a 0"}), 400
+    if cantidad > producto["stock_merma"]:
+        return jsonify({"error": f"Solo hay {producto['stock_merma']} unidad(es) en merma para este producto"}), 400
+
+    nuevo_merma = producto["stock_merma"] - cantidad
+    db.execute(
+        "UPDATE productos SET stock_merma = ?, actualizado_en = ? WHERE id = ?",
+        (nuevo_merma, now_iso(), producto_id),
+    )
+    db.commit()
+
+    actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
+    return jsonify(row_to_dict(actualizado))
 
 
 # ---------------------------------------------------------------------------
@@ -2002,6 +1943,15 @@ def dashboard():
         """
     ).fetchone()[0]
 
+    merma_row = db.execute(
+        """
+        SELECT
+            COALESCE(SUM(stock_merma), 0) AS unidades,
+            COALESCE(SUM(stock_merma * costo_compra), 0) AS valor
+        FROM productos WHERE stock_merma > 0
+        """
+    ).fetchone()
+
     return jsonify({
         "resumen": resumen_row,
         "stock_critico": stock_critico,
@@ -2009,6 +1959,7 @@ def dashboard():
         "mas_movidos": mas_movidos,
         "ultimos_movimientos": ultimos_movimientos,
         "compras_recientes": compras_recientes,
+        "merma": {"unidades": merma_row["unidades"], "valor": merma_row["valor"]},
         "bodega": {
             "total_ubicaciones": total_ubicaciones,
             "ubicaciones_ocupadas": ubicaciones_ocupadas,

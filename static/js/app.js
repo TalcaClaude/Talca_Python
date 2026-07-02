@@ -74,6 +74,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
+    document.getElementById("vista-reservas").style.display = vista === "reservas" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
@@ -83,6 +84,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       facturas: "Facturas de compra",
       proveedores: "Proveedores",
       movimientos: "Control de Movimientos",
+      reservas: "Reserva de Productos",
       usuarios: "Usuarios",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -91,6 +93,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "facturas") cargarFacturas();
     if (vista === "proveedores") cargarProveedores();
     if (vista === "movimientos") cargarMovimientos();
+    if (vista === "reservas") cargarReservas();
     if (vista === "usuarios") cargarUsuarios();
   });
 });
@@ -499,11 +502,85 @@ async function abrirDetalle(id) {
     document.getElementById("m-costo-wrap").style.display = "flex";
     document.getElementById("m-factura-wrap").style.display = "flex";
     poblarSelectCategoriaMovimiento("Compra");
+    document.getElementById("form-reservar").reset();
+    await cargarReservasDelProducto(id);
     abrirModal("modal-detalle");
   } catch (e) {
     toast(e.message, true);
   }
 }
+
+async function cargarReservasDelProducto(productoId) {
+  const cont = document.getElementById("reservas-lista");
+  try {
+    const data = await api(`/api/reservas?producto_id=${productoId}&estado=activa`);
+    if (data.reservas.length === 0) {
+      cont.innerHTML = `<p class="vacio">Sin reservas activas.</p>`;
+      return;
+    }
+    cont.innerHTML = data.reservas.map(r => `
+      <div class="mov-item">
+        <span class="mov-tipo mov-tipo--ajuste">${r.cantidad}</span>
+        <span class="mov-detalle">
+          ${escapeHtml(r.orden_trabajo) || "Sin OT"} ${r.motivo ? " · " + escapeHtml(r.motivo) : ""}
+          · ${escapeHtml(r.usuario)} · ${fmtFecha(r.creado_en)}
+        </span>
+        <button type="button" class="btn-link" data-consumir="${r.id}">Consumir</button>
+        <button type="button" class="btn-link" data-liberar="${r.id}">Liberar</button>
+      </div>
+    `).join("");
+
+    cont.querySelectorAll("[data-liberar]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        try {
+          await api(`/api/reservas/${btn.dataset.liberar}/liberar`, { method: "POST" });
+          toast("Reserva liberada");
+          await Promise.all([cargarReservasDelProducto(productoId), abrirDetalle(productoId), cargarProductos(), cargarResumen()]);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      });
+    });
+    cont.querySelectorAll("[data-consumir]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("¿Marcar esta reserva como consumida? El stock reservado se descuenta del inventario.")) return;
+        try {
+          await api(`/api/reservas/${btn.dataset.consumir}/consumir`, {
+            method: "POST",
+            body: JSON.stringify({ usuario: state.sesion.nombre || state.sesion.username }),
+          });
+          toast("Reserva consumida");
+          await Promise.all([cargarReservasDelProducto(productoId), abrirDetalle(productoId), cargarProductos(), cargarResumen()]);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      });
+    });
+  } catch (e) {
+    cont.innerHTML = `<p class="vacio">Error al cargar reservas: ${e.message}</p>`;
+  }
+}
+
+document.getElementById("form-reservar").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const p = state.productoActivo;
+  if (!p) return;
+  const payload = {
+    cantidad: document.getElementById("res-cantidad").value,
+    orden_trabajo: document.getElementById("res-ot").value,
+    motivo: document.getElementById("res-motivo").value,
+    usuario: state.sesion.nombre || state.sesion.username,
+  };
+  try {
+    await api(`/api/productos/${p.id}/reservar`, { method: "POST", body: JSON.stringify(payload) });
+    toast("Stock reservado");
+    document.getElementById("form-reservar").reset();
+    await Promise.all([cargarProductos(), cargarResumen()]);
+    await abrirDetalle(p.id);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
 
 function renderDetalle(p) {
   document.getElementById("detalle-nombre").textContent = `${p.nombre}`;
@@ -1075,6 +1152,43 @@ document.getElementById("btn-respaldo").addEventListener("click", async () => {
   } catch (e) {
     document.getElementById("respaldo-diagnostico").textContent = "No se pudo cargar el diagnóstico: " + e.message;
   }
+  await cargarEstadoRespaldoAutomatico();
+});
+
+async function cargarEstadoRespaldoAutomatico() {
+  const cont = document.getElementById("respaldo-auto-estado");
+  cont.textContent = "Cargando…";
+  try {
+    const info = await api("/api/backup/estado-automatico");
+    if (!info.configurado) {
+      cont.innerHTML = `⚠ No está configurado todavía. Se necesita agregar las variables <span class="mono">SMTP_USER</span> y <span class="mono">SMTP_PASSWORD</span> en Railway (ver guía DEPLOY.md).`;
+      return;
+    }
+    const ultimo = info.historial.find(h => h.exito);
+    const ultimoTexto = ultimo ? `Último envío exitoso: ${fmtFecha(ultimo.fecha)}` : "Todavía no se ha enviado ningún respaldo exitoso.";
+    cont.innerHTML = `
+      ✓ Configurado — se envía a <span class="mono">${escapeHtml(info.destinatario)}</span> cada ${info.intervalo_horas}h.<br>
+      ${ultimoTexto}
+    `;
+  } catch (e) {
+    cont.textContent = "No se pudo cargar: " + e.message;
+  }
+}
+
+document.getElementById("btn-probar-respaldo-auto").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-probar-respaldo-auto");
+  btn.disabled = true;
+  btn.textContent = "Enviando…";
+  try {
+    await api("/api/backup/probar-automatico", { method: "POST" });
+    toast("Respaldo de prueba enviado. Revisa tu correo.");
+    await cargarEstadoRespaldoAutomatico();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Enviar un respaldo de prueba ahora";
+  }
 });
 
 document.getElementById("form-restaurar").addEventListener("submit", async (e) => {
@@ -1210,6 +1324,72 @@ document.getElementById("btn-eliminar-usuario").addEventListener("click", async 
     toast(e.message, true);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Reservas (Módulo 6 - vista general)
+// ---------------------------------------------------------------------------
+
+async function cargarReservas() {
+  const tbody = document.getElementById("tbody-reservas");
+  const estado = document.getElementById("res-filtro-estado").value;
+  const params = estado ? `?estado=${estado}` : "";
+  try {
+    const data = await api("/api/reservas" + params);
+    if (data.reservas.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" class="vacio">No hay reservas con ese filtro.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.reservas.map(r => {
+      const estadoClase = r.estado === "activa" ? "ocupada" : (r.estado === "consumida" ? "libre" : "pendiente");
+      const acciones = r.estado === "activa"
+        ? `<button class="btn-link" data-consumir-tab="${r.id}">Consumir</button> <button class="btn-link" data-liberar-tab="${r.id}">Liberar</button>`
+        : "";
+      return `
+        <tr>
+          <td>#${escapeHtml(r.producto_id_sistema)} ${escapeHtml(r.producto_nombre)}</td>
+          <td class="num mono">${r.cantidad}</td>
+          <td class="mono">${escapeHtml(r.orden_trabajo) || "—"}</td>
+          <td>${escapeHtml(r.motivo) || "—"}</td>
+          <td>${escapeHtml(r.usuario) || "—"}</td>
+          <td class="mono">${fmtFecha(r.creado_en)}</td>
+          <td><span class="estado-pill estado-pill--${estadoClase}">${r.estado}</span></td>
+          <td>${acciones}</td>
+        </tr>
+      `;
+    }).join("");
+
+    tbody.querySelectorAll("[data-liberar-tab]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        try {
+          await api(`/api/reservas/${btn.dataset.liberarTab}/liberar`, { method: "POST" });
+          toast("Reserva liberada");
+          await Promise.all([cargarReservas(), cargarProductos(), cargarResumen()]);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      });
+    });
+    tbody.querySelectorAll("[data-consumir-tab]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm("¿Marcar esta reserva como consumida?")) return;
+        try {
+          await api(`/api/reservas/${btn.dataset.consumirTab}/consumir`, {
+            method: "POST",
+            body: JSON.stringify({ usuario: state.sesion.nombre || state.sesion.username }),
+          });
+          toast("Reserva consumida");
+          await Promise.all([cargarReservas(), cargarProductos(), cargarResumen()]);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      });
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar reservas: ${e.message}</td></tr>`;
+  }
+}
+
+document.getElementById("res-filtro-estado").addEventListener("change", cargarReservas);
 
 // ---------------------------------------------------------------------------
 // Movimientos (Módulo 5 - bitácora completa con filtros)

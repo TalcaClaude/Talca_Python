@@ -9,10 +9,15 @@ para que sea fácil de instalar y correr en cualquier PC o servidor.
 
 import os
 import sqlite3
+import time
+import threading
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime
 
 from flask import Flask, g, jsonify, request, render_template, send_file, session, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
@@ -20,8 +25,67 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "cambia-esta-clave-en-produccion-usando-la-variable-SECRET_KEY")
 
+# Railway (y la mayoría de los hosts) sirven la app detrás de un proxy: esto
+# le permite a Flask reconocer correctamente el HTTPS real del navegador.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+# Cookies de sesión más seguras. "Secure" solo se activa cuando corre con una
+# SECRET_KEY configurada (asumimos que eso significa que está en producción,
+# detrás de HTTPS); en local (sin esa variable) se deja apagado para que el
+# login funcione igual por http://localhost.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = "SECRET_KEY" in os.environ
+
+# ---------------------------------------------------------------------------
+# Protección básica contra fuerza bruta en el login
+# ---------------------------------------------------------------------------
+
+LOGIN_INTENTOS_FALLIDOS = {}  # ip -> [timestamps de intentos fallidos recientes]
+LOGIN_MAX_INTENTOS = 5
+LOGIN_VENTANA_SEGUNDOS = 300  # 5 minutos
+
+
+def _intentos_recientes(ip):
+    ahora = time.time()
+    intentos = [t for t in LOGIN_INTENTOS_FALLIDOS.get(ip, []) if ahora - t < LOGIN_VENTANA_SEGUNDOS]
+    LOGIN_INTENTOS_FALLIDOS[ip] = intentos
+    return intentos
+
+
+def _login_bloqueado(ip):
+    return len(_intentos_recientes(ip)) >= LOGIN_MAX_INTENTOS
+
+
+def _registrar_intento_fallido(ip):
+    intentos = _intentos_recientes(ip)
+    intentos.append(time.time())
+    LOGIN_INTENTOS_FALLIDOS[ip] = intentos
+
+
+def _limpiar_intentos(ip):
+    LOGIN_INTENTOS_FALLIDOS.pop(ip, None)
+
 USUARIO_INICIAL = "admin"
 CLAVE_INICIAL = "taller2026"
+
+# ---------------------------------------------------------------------------
+# Respaldo automático por correo (Opción A: sin costo, sin infraestructura
+# nueva). Se configura con variables de entorno; si no están, esta función
+# simplemente no hace nada (el sistema sigue funcionando normal).
+# ---------------------------------------------------------------------------
+
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+SMTP_DESTINATARIO = os.environ.get("SMTP_DESTINATARIO", "") or SMTP_USER
+RESPALDO_INTERVALO_HORAS = int(os.environ.get("RESPALDO_INTERVALO_HORAS", "24"))
+
+
+def respaldo_automatico_configurado():
+    return bool(SMTP_USER and SMTP_PASSWORD and SMTP_DESTINATARIO)
+
 
 CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
 MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
@@ -131,6 +195,27 @@ def init_db():
             email TEXT DEFAULT '',
             direccion TEXT DEFAULT '',
             creado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS reservas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            producto_id INTEGER NOT NULL,
+            cantidad INTEGER NOT NULL,
+            orden_trabajo TEXT DEFAULT '',
+            motivo TEXT DEFAULT '',
+            usuario TEXT DEFAULT '',
+            estado TEXT NOT NULL DEFAULT 'activa',
+            creado_en TEXT NOT NULL,
+            actualizado_en TEXT NOT NULL,
+            FOREIGN KEY (producto_id) REFERENCES productos (id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS respaldos_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT NOT NULL,
+            exito INTEGER NOT NULL,
+            destino TEXT DEFAULT '',
+            detalle TEXT DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS usuarios (
@@ -415,6 +500,13 @@ def login():
             return redirect(url_for("index"))
         return render_template("login.html")
 
+    ip = request.remote_addr or "desconocida"
+    if _login_bloqueado(ip):
+        return render_template(
+            "login.html",
+            error=f"Demasiados intentos fallidos. Espera {LOGIN_VENTANA_SEGUNDOS // 60} minutos antes de volver a intentar.",
+        ), 429
+
     username = (request.form.get("username") or "").strip()
     password = request.form.get("password") or ""
 
@@ -422,8 +514,10 @@ def login():
     usuario = db.execute("SELECT * FROM usuarios WHERE username = ?", (username,)).fetchone()
 
     if usuario is None or not check_password_hash(usuario["password_hash"], password):
+        _registrar_intento_fallido(ip)
         return render_template("login.html", error="Usuario o contraseña incorrectos."), 401
 
+    _limpiar_intentos(ip)
     session.clear()
     session["user_id"] = usuario["id"]
     session["username"] = usuario["username"]
@@ -1522,6 +1616,257 @@ def backup_restaurar():
 
 
 # ---------------------------------------------------------------------------
+# Respaldo automático diario por correo
+# ---------------------------------------------------------------------------
+
+def _enviar_respaldo_por_correo():
+    """Manda el archivo de base de datos como adjunto por correo.
+    Devuelve (exito: bool, detalle: str)."""
+    if not respaldo_automatico_configurado():
+        return False, "El respaldo automático no está configurado (faltan las variables SMTP_USER / SMTP_PASSWORD)."
+    if not os.path.exists(DB_PATH):
+        return False, "Aún no existe base de datos que respaldar."
+
+    try:
+        fecha = datetime.now().strftime("%Y-%m-%d_%H%M")
+        msg = EmailMessage()
+        msg["Subject"] = f"Respaldo Inventario Taller — {fecha}"
+        msg["From"] = SMTP_USER
+        msg["To"] = SMTP_DESTINATARIO
+        msg.set_content(
+            "Respaldo automático diario del sistema de inventario del taller.\n\n"
+            f"Fecha: {fecha}\n"
+            "Este correo se genera solo, no es necesario responderlo.\n"
+            "Si algún día necesitas restaurar estos datos, guarda el archivo adjunto "
+            "y súbelo desde el botón 'Respaldo' → 'Restaurar' dentro del sistema."
+        )
+        with open(DB_PATH, "rb") as f:
+            contenido = f.read()
+        msg.add_attachment(
+            contenido, maintype="application", subtype="octet-stream",
+            filename=f"inventario_backup_{fecha}.db",
+        )
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+
+        return True, f"Enviado a {SMTP_DESTINATARIO}"
+    except Exception as e:
+        return False, f"Error al enviar: {e}"
+
+
+def _registrar_respaldo_log(exito, detalle):
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute(
+            "INSERT INTO respaldos_log (fecha, exito, destino, detalle) VALUES (?, ?, ?, ?)",
+            (now_iso(), 1 if exito else 0, SMTP_DESTINATARIO, detalle),
+        )
+        db.commit()
+        db.close()
+    except sqlite3.Error:
+        pass
+
+
+def _hilo_respaldos_automaticos():
+    while True:
+        try:
+            if respaldo_automatico_configurado():
+                db = sqlite3.connect(DB_PATH)
+                ultimo = db.execute(
+                    "SELECT fecha FROM respaldos_log WHERE exito = 1 ORDER BY fecha DESC LIMIT 1"
+                ).fetchone()
+                db.close()
+
+                debe_enviar = True
+                if ultimo:
+                    horas_desde_ultimo = (datetime.now() - datetime.fromisoformat(ultimo[0])).total_seconds() / 3600
+                    debe_enviar = horas_desde_ultimo >= RESPALDO_INTERVALO_HORAS
+
+                if debe_enviar:
+                    exito, detalle = _enviar_respaldo_por_correo()
+                    _registrar_respaldo_log(exito, detalle)
+        except Exception:
+            pass
+        time.sleep(3600)  # revisa una vez por hora si ya toca enviar
+
+
+_hilo_iniciado = False
+
+
+def iniciar_hilo_respaldos():
+    global _hilo_iniciado
+    if not _hilo_iniciado:
+        _hilo_iniciado = True
+        hilo = threading.Thread(target=_hilo_respaldos_automaticos, daemon=True)
+        hilo.start()
+
+
+@app.route("/api/backup/estado-automatico", methods=["GET"])
+def backup_estado_automatico():
+    db = get_db()
+    historial = db.execute(
+        "SELECT * FROM respaldos_log ORDER BY fecha DESC LIMIT 10"
+    ).fetchall()
+    return jsonify({
+        "configurado": respaldo_automatico_configurado(),
+        "destinatario": SMTP_DESTINATARIO if respaldo_automatico_configurado() else None,
+        "intervalo_horas": RESPALDO_INTERVALO_HORAS,
+        "historial": [dict(r) for r in historial],
+    })
+
+
+@app.route("/api/backup/probar-automatico", methods=["POST"])
+def backup_probar_automatico():
+    exito, detalle = _enviar_respaldo_por_correo()
+    _registrar_respaldo_log(exito, detalle)
+    if not exito:
+        return jsonify({"error": detalle}), 400
+    return jsonify({"ok": True, "detalle": detalle})
+
+
+# ---------------------------------------------------------------------------
+# API: Reservas (Módulo 6 - Reserva de Productos)
+# ---------------------------------------------------------------------------
+
+RESERVA_SELECT = """
+    SELECT r.*, p.nombre AS producto_nombre, p.codigo_interno AS producto_codigo_interno
+    FROM reservas r
+    JOIN productos p ON p.id = r.producto_id
+"""
+
+
+def _reserva_a_dict(row):
+    d = dict(row)
+    d["producto_id_sistema"] = f"{d['producto_id']:04d}"
+    return d
+
+
+@app.route("/api/reservas", methods=["GET"])
+def listar_reservas():
+    db = get_db()
+    estado = request.args.get("estado", "").strip()
+    producto_id = request.args.get("producto_id", "").strip()
+
+    sql = RESERVA_SELECT + " WHERE 1=1"
+    params = []
+    if estado:
+        sql += " AND r.estado = ?"
+        params.append(estado)
+    if producto_id:
+        sql += " AND r.producto_id = ?"
+        params.append(producto_id)
+    sql += " ORDER BY r.creado_en DESC"
+
+    rows = db.execute(sql, params).fetchall()
+    return jsonify({"reservas": [_reserva_a_dict(r) for r in rows]})
+
+
+@app.route("/api/productos/<int:producto_id>/reservar", methods=["POST"])
+def reservar_stock(producto_id):
+    db = get_db()
+    producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        cantidad = int(data.get("cantidad"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "La cantidad debe ser un número entero"}), 400
+    if cantidad <= 0:
+        return jsonify({"error": "La cantidad debe ser mayor a 0"}), 400
+    if cantidad > producto["stock_disponible"]:
+        return jsonify({"error": f"No hay stock disponible suficiente (disponible: {producto['stock_disponible']})"}), 400
+
+    orden_trabajo = (data.get("orden_trabajo") or "").strip()
+    motivo = (data.get("motivo") or "").strip()
+    usuario = (data.get("usuario") or "").strip() or "Sin especificar"
+    ts = now_iso()
+
+    db.execute(
+        "UPDATE productos SET stock_disponible = stock_disponible - ?, stock_reservado = stock_reservado + ?, actualizado_en = ? WHERE id = ?",
+        (cantidad, cantidad, ts, producto_id),
+    )
+    cur = db.execute(
+        """
+        INSERT INTO reservas (producto_id, cantidad, orden_trabajo, motivo, usuario, estado, creado_en, actualizado_en)
+        VALUES (?, ?, ?, ?, ?, 'activa', ?, ?)
+        """,
+        (producto_id, cantidad, orden_trabajo, motivo, usuario, ts, ts),
+    )
+    db.commit()
+
+    nueva = db.execute(RESERVA_SELECT + " WHERE r.id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(_reserva_a_dict(nueva)), 201
+
+
+@app.route("/api/reservas/<int:reserva_id>/liberar", methods=["POST"])
+def liberar_reserva(reserva_id):
+    db = get_db()
+    reserva = db.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
+    if reserva is None:
+        return jsonify({"error": "Reserva no encontrada"}), 404
+    if reserva["estado"] != "activa":
+        return jsonify({"error": f"Esta reserva ya está '{reserva['estado']}', no se puede liberar de nuevo"}), 400
+
+    ts = now_iso()
+    db.execute(
+        "UPDATE productos SET stock_disponible = stock_disponible + ?, stock_reservado = stock_reservado - ?, actualizado_en = ? WHERE id = ?",
+        (reserva["cantidad"], reserva["cantidad"], ts, reserva["producto_id"]),
+    )
+    db.execute(
+        "UPDATE reservas SET estado = 'liberada', actualizado_en = ? WHERE id = ?",
+        (ts, reserva_id),
+    )
+    db.commit()
+
+    actualizada = db.execute(RESERVA_SELECT + " WHERE r.id = ?", (reserva_id,)).fetchone()
+    return jsonify(_reserva_a_dict(actualizada))
+
+
+@app.route("/api/reservas/<int:reserva_id>/consumir", methods=["POST"])
+def consumir_reserva(reserva_id):
+    db = get_db()
+    reserva = db.execute("SELECT * FROM reservas WHERE id = ?", (reserva_id,)).fetchone()
+    if reserva is None:
+        return jsonify({"error": "Reserva no encontrada"}), 404
+    if reserva["estado"] != "activa":
+        return jsonify({"error": f"Esta reserva ya está '{reserva['estado']}', no se puede consumir de nuevo"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    usuario = (data.get("usuario") or reserva["usuario"] or "Sin especificar").strip()
+
+    producto = db.execute("SELECT * FROM productos WHERE id = ?", (reserva["producto_id"],)).fetchone()
+    ts = now_iso()
+    nuevo_reservado = producto["stock_reservado"] - reserva["cantidad"]
+
+    db.execute(
+        "UPDATE productos SET stock_reservado = ?, actualizado_en = ? WHERE id = ?",
+        (nuevo_reservado, ts, producto["id"]),
+    )
+    motivo = f"Consumo de reserva" + (f" — OT {reserva['orden_trabajo']}" if reserva["orden_trabajo"] else "")
+    nuevo_total = producto["stock_disponible"] + nuevo_reservado
+    db.execute(
+        """
+        INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, stock_resultante)
+        VALUES (?, ?, 'salida', 'Reserva', ?, ?, ?, ?)
+        """,
+        (producto["id"], ts, reserva["cantidad"], motivo, usuario, nuevo_total),
+    )
+    db.execute(
+        "UPDATE reservas SET estado = 'consumida', actualizado_en = ? WHERE id = ?",
+        (ts, reserva_id),
+    )
+    db.commit()
+
+    actualizada = db.execute(RESERVA_SELECT + " WHERE r.id = ?", (reserva_id,)).fetchone()
+    return jsonify(_reserva_a_dict(actualizada))
+
+
+# ---------------------------------------------------------------------------
 # API: Movimientos - bitácora completa (Módulo 5)
 # ---------------------------------------------------------------------------
 
@@ -1674,6 +2019,7 @@ def dashboard():
 
 
 init_db()
+iniciar_hilo_respaldos()
 
 if __name__ == "__main__":
     debug_mode = os.environ.get("FLASK_DEBUG") == "1"

@@ -137,3 +137,37 @@ navegador (sí, directamente esa dirección). Te muestra algo como:
 mal, desde ese mismo lugar puedes subir ese archivo y restaurar todo tal
 como estaba.
 
+## Respaldo automático diario (recomendado)
+
+Además del botón manual, el sistema puede mandarse solo un respaldo por
+correo cada día — así, aunque te olvides de hacerlo a mano, siempre tienes
+una copia reciente en tu bandeja de entrada. Es gratis, usando tu propio
+Gmail.
+
+### Paso 1: crear una "contraseña de aplicación" en Gmail
+
+Gmail no deja usar tu contraseña normal para esto por seguridad, así que
+hay que crear una especial solo para este propósito:
+
+1. Ve a https://myaccount.google.com/apppasswords (necesitas tener la
+   verificación en dos pasos activada en tu cuenta de Google; si no la
+   tienes, activala primero en https://myaccount.google.com/security).
+2. Ponle un nombre, por ejemplo "Inventario Taller".
+3. Google te va a mostrar un código de 16 letras (algo como
+   `abcd efgh ijkl mnop`). Cópialo — es lo que vas a usar como contraseña
+   en el paso siguiente. Guárdalo en un lugar seguro, no lo vuelves a ver.
+
+### Paso 2: agregar las variables en Railway
+
+En la pestaña "Variables" del servicio, agrega:
+
+- `SMTP_USER` — tu correo de Gmail completo (ej: `tutaller@gmail.com`)
+- `SMTP_PASSWORD` — el código de 16 letras del Paso 1 (sin espacios)
+- `SMTP_DESTINATARIO` — a qué correo quieres que lleguen los respaldos
+  (puede ser el mismo Gmail, o cualquier otro que revises seguido)
+
+Railway va a reiniciar la app sola. Desde ese momento, todos los días se
+manda un respaldo solo, y queda registrado en el botón "Respaldo" de la
+aplicación (ahí puedes ver la fecha del último envío exitoso, y mandar uno
+de prueba para confirmar que quedó bien configurado).
+

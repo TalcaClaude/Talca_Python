@@ -65,6 +65,29 @@ Sistema de logística y abastecimiento para el taller, basado en el documento
   - **Restaurar**: sube un archivo de respaldo y reemplaza todos los
     datos actuales por los de ese archivo (por si algo se pierde).
 
+## Reserva de Productos (Módulo 6)
+- Desde la ficha de cualquier producto: **"Reservar stock"** (cantidad, N°
+  de orden de trabajo, motivo). El stock pasa de "disponible" a
+  "reservado" — el total no cambia.
+- **Liberar**: si el trabajo se cancela, el stock vuelve a estar
+  disponible.
+- **Consumir**: si el trabajo se hizo, el stock reservado sale de verdad
+  del inventario (y queda registrado en el historial de movimientos, con
+  la orden de trabajo asociada).
+- Nueva pestaña **"Reservas"**: todas las reservas activas, consumidas y
+  liberadas, en un solo lugar.
+
+## Robustez y seguridad del sistema
+- **Protección contra fuerza bruta** en el login: 5 intentos fallidos
+  seguidos bloquean esa IP por 5 minutos.
+- **Cookies de sesión seguras** cuando corre en producción (con
+  `SECRET_KEY` configurada).
+- **Respaldo automático diario por correo**: si configuras las variables
+  `SMTP_USER` / `SMTP_PASSWORD` (ver `DEPLOY.md`), el sistema se manda
+  solo una copia de la base de datos por correo cada día — sin costo,
+  usando tu Gmail. Se puede revisar el estado y mandar una prueba desde
+  el botón "Respaldo".
+
 ## Control de Movimientos (Módulo 5)
 - Cada movimiento ahora tiene una **categoría**: Compra, Venta, Consumo
   interno, Reserva, Ajuste de inventario, Devolución, Traslado interno,

@@ -65,6 +65,17 @@ Sistema de logística y abastecimiento para el taller, basado en el documento
   - **Restaurar**: sube un archivo de respaldo y reemplaza todos los
     datos actuales por los de ese archivo (por si algo se pierde).
 
+## Control de Movimientos (Módulo 5)
+- Cada movimiento ahora tiene una **categoría**: Compra, Venta, Consumo
+  interno, Reserva, Ajuste de inventario, Devolución, Traslado interno,
+  Merma o pérdida — se sugiere una por defecto según el tipo (entrada →
+  Compra, salida → Consumo interno, ajuste → Ajuste de inventario), pero
+  se puede cambiar.
+- Nueva pestaña **"Movimientos"**: bitácora completa de todo lo que pasó
+  en el inventario (no solo por producto), con filtros por tipo,
+  categoría, rango de fechas, y buscador por texto (motivo, producto,
+  factura, responsable).
+
 ## Login (usuarios y contraseñas)
 - Ahora hay que iniciar sesión para usar el sistema.
 - **Usuario inicial creado automáticamente:**

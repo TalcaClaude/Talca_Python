@@ -25,6 +25,10 @@ CLAVE_INICIAL = "taller2026"
 
 CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
 MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
+CATEGORIAS_MOVIMIENTO = [
+    "Compra", "Venta", "Consumo interno", "Reserva",
+    "Ajuste de inventario", "Devolución", "Traslado interno", "Merma o pérdida",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +78,7 @@ def init_db():
             producto_id INTEGER NOT NULL,
             fecha TEXT NOT NULL,
             tipo TEXT NOT NULL,          -- entrada | salida | ajuste
+            categoria TEXT DEFAULT '',   -- Compra, Venta, Consumo interno, Reserva, Ajuste de inventario, Devolución, Traslado interno, Merma o pérdida
             cantidad INTEGER NOT NULL,
             motivo TEXT DEFAULT '',
             usuario TEXT DEFAULT '',
@@ -168,6 +173,9 @@ def init_db():
         db.commit()
     if "factura_numero" not in columnas_mov:
         db.execute("ALTER TABLE movimientos ADD COLUMN factura_numero TEXT")
+        db.commit()
+    if "categoria" not in columnas_mov:
+        db.execute("ALTER TABLE movimientos ADD COLUMN categoria TEXT DEFAULT ''")
         db.commit()
 
     # ---- Migración 3: el código interno deja de ser obligatorio/único a nivel
@@ -343,7 +351,7 @@ def now_iso():
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None):
+def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra"):
     """Aplica una entrada de stock a un producto, recalculando el Costo
     Promedio Ponderado si se informa costo_unitario, y deja el movimiento
     registrado con la referencia a la factura si corresponde.
@@ -367,13 +375,13 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
     db.execute(
         """
         INSERT INTO movimientos (
-            producto_id, fecha, tipo, cantidad, motivo, usuario,
+            producto_id, fecha, tipo, categoria, cantidad, motivo, usuario,
             costo_unitario, factura_id, factura_numero, stock_resultante
         )
-        VALUES (?, ?, 'entrada', ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, 'entrada', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            producto_row["id"], ts, cantidad, motivo, usuario, costo_unitario,
+            producto_row["id"], ts, categoria, cantidad, motivo, usuario, costo_unitario,
             factura["id"] if factura else None,
             factura["numero"] if factura else None,
             nuevo_stock,
@@ -592,8 +600,8 @@ def crear_producto():
     if stock_disponible > 0:
         db.execute(
             """
-            INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, motivo, usuario, costo_unitario, stock_resultante)
-            VALUES (?, ?, 'entrada', ?, 'Stock inicial al crear producto', ?, ?, ?)
+            INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, costo_unitario, stock_resultante)
+            VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, 'Stock inicial al crear producto', ?, ?, ?)
             """,
             (nuevo_id, ts, stock_disponible, (data.get("usuario") or "Sistema"), costo_compra, stock_disponible),
         )
@@ -755,6 +763,11 @@ def registrar_movimiento(producto_id):
     if tipo not in ("entrada", "salida", "ajuste"):
         return jsonify({"error": "Tipo de movimiento inválido (usa entrada, salida o ajuste)"}), 400
 
+    categoria_por_defecto = {"entrada": "Compra", "salida": "Consumo interno", "ajuste": "Ajuste de inventario"}
+    categoria = (data.get("categoria") or "").strip() or categoria_por_defecto[tipo]
+    if categoria not in CATEGORIAS_MOVIMIENTO:
+        return jsonify({"error": f"Categoría inválida. Usa una de: {', '.join(CATEGORIAS_MOVIMIENTO)}"}), 400
+
     if factura_numero and tipo != "entrada":
         return jsonify({"error": "El número de factura solo aplica a movimientos de entrada"}), 400
 
@@ -798,7 +811,7 @@ def registrar_movimiento(producto_id):
     stock_actual = row["stock_disponible"]
 
     if tipo == "entrada":
-        nuevo_stock = _aplicar_entrada_stock(db, row, cantidad, costo_unitario, motivo, usuario, factura)
+        nuevo_stock = _aplicar_entrada_stock(db, row, cantidad, costo_unitario, motivo, usuario, factura, categoria)
     elif tipo == "salida":
         if cantidad > stock_actual:
             return jsonify({"error": f"No hay stock suficiente (disponible: {stock_actual})"}), 400
@@ -809,9 +822,9 @@ def registrar_movimiento(producto_id):
             (nuevo_stock, ts, producto_id),
         )
         db.execute(
-            "INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, motivo, usuario, stock_resultante) "
-            "VALUES (?, ?, 'salida', ?, ?, ?, ?)",
-            (producto_id, ts, cantidad, motivo, usuario, nuevo_stock),
+            "INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, stock_resultante) "
+            "VALUES (?, ?, 'salida', ?, ?, ?, ?, ?)",
+            (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock),
         )
     else:  # ajuste -> cantidad es el nuevo stock disponible absoluto
         if cantidad < 0:
@@ -824,9 +837,9 @@ def registrar_movimiento(producto_id):
             (nuevo_stock, ts, producto_id),
         )
         db.execute(
-            "INSERT INTO movimientos (producto_id, fecha, tipo, cantidad, motivo, usuario, stock_resultante) "
-            "VALUES (?, ?, 'ajuste', ?, ?, ?, ?)",
-            (producto_id, ts, cantidad, motivo, usuario, nuevo_stock),
+            "INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, stock_resultante) "
+            "VALUES (?, ?, 'ajuste', ?, ?, ?, ?, ?)",
+            (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock),
         )
 
     if linea:
@@ -1506,6 +1519,66 @@ def backup_restaurar():
     init_db()
 
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# API: Movimientos - bitácora completa (Módulo 5)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/movimientos", methods=["GET"])
+def listar_movimientos():
+    db = get_db()
+
+    tipo = request.args.get("tipo", "").strip()
+    categoria = request.args.get("categoria", "").strip()
+    producto_id = request.args.get("producto_id", "").strip()
+    factura_numero = request.args.get("factura_numero", "").strip()
+    desde = request.args.get("desde", "").strip()
+    hasta = request.args.get("hasta", "").strip()
+    q = request.args.get("q", "").strip()
+
+    sql = """
+        SELECT m.*, p.nombre AS producto_nombre, p.codigo_interno AS producto_codigo_interno
+        FROM movimientos m
+        LEFT JOIN productos p ON p.id = m.producto_id
+        WHERE 1=1
+    """
+    params = []
+
+    if tipo:
+        sql += " AND m.tipo = ?"
+        params.append(tipo)
+    if categoria:
+        sql += " AND m.categoria = ?"
+        params.append(categoria)
+    if producto_id:
+        sql += " AND m.producto_id = ?"
+        params.append(producto_id)
+    if factura_numero:
+        sql += " AND m.factura_numero = ?"
+        params.append(factura_numero)
+    if desde:
+        sql += " AND m.fecha >= ?"
+        params.append(desde)
+    if hasta:
+        sql += " AND m.fecha <= ?"
+        params.append(hasta + "T23:59:59")
+    if q:
+        sql += " AND (m.motivo LIKE ? OR m.usuario LIKE ? OR p.nombre LIKE ? OR m.factura_numero LIKE ?)"
+        like = f"%{q}%"
+        params += [like, like, like, like]
+
+    sql += " ORDER BY m.fecha DESC, m.id DESC LIMIT 500"
+
+    rows = db.execute(sql, params).fetchall()
+    movimientos = []
+    for r in rows:
+        d = dict(r)
+        d["producto_id_sistema"] = f"{r['producto_id']:04d}" if r["producto_id"] is not None else "----"
+        d["producto_nombre"] = d["producto_nombre"] or "(producto eliminado)"
+        movimientos.append(d)
+
+    return jsonify({"movimientos": movimientos, "total": len(movimientos), "categorias": CATEGORIAS_MOVIMIENTO})
 
 
 # ---------------------------------------------------------------------------

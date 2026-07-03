@@ -376,13 +376,14 @@
   <section class="vista" id="vista-planificacion" style="display:none">
 
   <section class="toolbar">
-    <p class="bodega-intro">Para cada producto con stock mínimo definido, se proyecta cuándo se va a quedar bajo el mínimo usando el promedio de salidas semanales recientes, y se sugiere cuánto comprar y a qué proveedor.</p>
+    <p class="bodega-intro">El stock mínimo de cada producto ya no se ingresa a mano: se calcula solo a partir de su consumo real y se actualiza cada vez que entra o sale stock. Con eso, aquí se proyecta cuándo se va a quedar bajo el mínimo y se sugiere cuánto comprar y a qué proveedor.</p>
     <select id="planificacion-periodo">
       <option value="30">Basado en los últimos 30 días</option>
       <option value="60" selected>Basado en los últimos 60 días</option>
       <option value="90">Basado en los últimos 90 días</option>
       <option value="180">Basado en los últimos 180 días</option>
     </select>
+    <button type="button" class="btn btn-secundario" id="btn-planificacion-recalcular">Recalcular todos los mínimos ahora</button>
   </section>
 
   <section class="dash-grid">
@@ -395,7 +396,7 @@
             <tr>
               <th>Producto</th>
               <th class="num">Stock actual</th>
-              <th class="num">Mínimo</th>
+              <th class="num">Mínimo (auto)</th>
               <th class="num">Promedio semanal</th>
               <th>Se agota</th>
               <th class="num">Sugerido comprar</th>
@@ -418,7 +419,7 @@
             <tr>
               <th>Producto</th>
               <th class="num">Stock actual</th>
-              <th class="num">Mínimo</th>
+              <th class="num">Mínimo (auto)</th>
               <th class="num">Valor inmovilizado</th>
               <th>Consumo en el período</th>
             </tr>
@@ -633,21 +634,17 @@
         </div>
         <p class="ayuda-inline" id="f-ubicacion-legacy" style="display:none"></p>
       </div>
-      <div class="grid-3" id="grid-stock-inicial">
+      <div class="grid-2" id="grid-stock-inicial">
         <div class="campo">
           <label>Stock inicial disponible</label>
           <input type="number" id="f-stock-disponible" min="0" value="0">
-        </div>
-        <div class="campo">
-          <label>Stock mínimo (alerta)</label>
-          <input type="number" id="f-stock-minimo" min="0" value="0">
         </div>
         <div class="campo">
           <label id="f-costo-label">Costo promedio inicial ($ CLP)</label>
           <input type="number" id="f-costo" min="0" step="1" value="0">
         </div>
       </div>
-      <p class="ayuda" id="ayuda-stock">El stock inicial queda registrado como primer movimiento de entrada. Una vez creado el producto, los cambios de stock (y el costo, que se recalcula solo como promedio ponderado) se hacen desde "Registrar movimiento".</p>
+      <p class="ayuda" id="ayuda-stock">El stock inicial queda registrado como primer movimiento de entrada. Una vez creado el producto, los cambios de stock (y el costo, que se recalcula solo como promedio ponderado) se hacen desde "Registrar movimiento". El stock mínimo ya no se ingresa a mano: el sistema lo calcula solo según el consumo real una vez que el producto empiece a moverse (ver pestaña Planificación).</p>
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-producto">Cancelar</button>
         <button type="submit" class="btn btn-primary">Guardar producto</button>
@@ -679,6 +676,7 @@
         </div>
 
         <dl id="detalle-ficha"></dl>
+        <p class="ayuda-inline" id="detalle-stock-minimo-calculo"></p>
 
         <h3 class="subtitulo">Registrar movimiento</h3>
         <form id="form-movimiento">

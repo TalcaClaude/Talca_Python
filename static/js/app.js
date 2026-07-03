@@ -594,7 +594,6 @@ async function abrirEdicion(p) {
   document.getElementById("f-id-sistema-tag").style.display = "block";
   document.getElementById("f-codigo").value = p.codigo_interno || "";
   document.getElementById("f-descripcion").value = p.descripcion || "";
-  document.getElementById("f-stock-minimo").value = p.stock_minimo;
   document.getElementById("f-costo").value = p.costo_compra;
   document.getElementById("f-costo-label").textContent = "Costo promedio actual ($ CLP)";
 
@@ -629,7 +628,6 @@ formProducto.addEventListener("submit", async (e) => {
     categoria: document.getElementById("f-categoria").value,
     modelo: document.getElementById("f-modelo").value,
     ubicacion_id: document.getElementById("f-ubicacion-id").value,
-    stock_minimo: document.getElementById("f-stock-minimo").value,
     costo_compra: document.getElementById("f-costo").value,
   };
 
@@ -697,9 +695,20 @@ function renderDetalle(p) {
     <dt>Reservado</dt><dd class="mono">${p.stock_reservado}</dd>
     <dt>Total</dt><dd class="mono">${p.stock_total}</dd>
     <dt>En merma</dt><dd class="mono">${p.stock_merma}${p.stock_merma > 0 ? " <span class=\"subtexto\">(ver pestaña Mermas)</span>" : ""}</dd>
-    <dt>Stock mínimo</dt><dd class="mono">${p.stock_minimo}</dd>
+    <dt>Stock mínimo</dt><dd class="mono">${p.stock_minimo} <span class="badge-urgencia badge-urgencia--proximo" title="Se recalcula solo con cada movimiento de stock">AUTO</span></dd>
     <dt>Costo promedio</dt><dd class="mono">${fmtMoney(p.costo_compra)}</dd>
   `;
+
+  const contCalculo = document.getElementById("detalle-stock-minimo-calculo");
+  const c = p.stock_minimo_detalle;
+  if (c) {
+    const leadTxt = c.lead_time_es_estimado_por_defecto
+      ? `${c.lead_time_dias} día(s) (estimación por defecto — todavía no hay suficientes compras históricas de este producto para calcularlo con datos reales)`
+      : `${c.lead_time_dias} día(s) (estimado del historial real de compras)`;
+    contCalculo.innerHTML = `¿Cómo se calculó? Consumo promedio ${c.consumo_diario_promedio}/día × ${leadTxt} de tiempo de entrega + ${c.stock_seguridad} de resguardo por variabilidad = ${c.stock_minimo_calculado}. Última actualización: ${fmtFecha(c.calculado_en)}.`;
+  } else {
+    contCalculo.textContent = "Todavía no se ha calculado (se hace automáticamente con el primer movimiento de stock de este producto).";
+  }
 
   const lista = document.getElementById("historial-lista");
   if (!p.movimientos || p.movimientos.length === 0) {
@@ -1522,11 +1531,15 @@ async function cargarPlanificacion() {
           const proveedores = (p.proveedores && p.proveedores.length)
             ? p.proveedores.map(pr => escapeHtml(pr.nombre)).join(", ")
             : `<span class="vacio-inline">Sin proveedor conocido — revisar facturas</span>`;
+          const det = p.stock_minimo_detalle;
+          const tituloMinimo = det
+            ? `Calculado solo: ${det.consumo_diario_promedio}/día × ${det.lead_time_dias} día(s) de entrega${det.lead_time_es_estimado_por_defecto ? " (estimación por defecto, poco historial)" : " (estimado del historial real)"} + ${det.stock_seguridad} de resguardo`
+            : "Todavía sin calcular";
           return `
             <tr>
               <td>${nombre}</td>
               <td class="num">${p.stock_disponible}</td>
-              <td class="num">${p.stock_minimo}</td>
+              <td class="num" title="${escapeHtml(tituloMinimo)}">${p.stock_minimo}</td>
               <td class="num">${p.promedio_semanal}</td>
               <td>${seAgota}</td>
               <td class="num"><strong>${p.cantidad_sugerida}</strong></td>
@@ -2196,6 +2209,22 @@ document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
 
 document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
 document.getElementById("planificacion-periodo").addEventListener("change", cargarPlanificacion);
+
+document.getElementById("btn-planificacion-recalcular").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-planificacion-recalcular");
+  btn.disabled = true;
+  btn.textContent = "Recalculando…";
+  try {
+    const data = await api("/api/planificacion/recalcular-todos", { method: "POST" });
+    toast(`Mínimos recalculados: ${data.n_productos} producto(s)`);
+    await cargarPlanificacion();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Recalcular todos los mínimos ahora";
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Caja Chica (Módulo 10)

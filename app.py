@@ -14,6 +14,8 @@ import time
 import threading
 import smtplib
 import uuid
+import statistics
+import math
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
@@ -99,6 +101,27 @@ SMTP_DESTINATARIO = os.environ.get("SMTP_DESTINATARIO", "") or SMTP_USER
 RESPALDO_INTERVALO_HORAS = int(os.environ.get("RESPALDO_INTERVALO_HORAS", "24"))
 ALERTA_STOCK_INTERVALO_HORAS = int(os.environ.get("ALERTA_STOCK_INTERVALO_HORAS", "24"))
 ALERTA_STOCK_DESTINATARIO = os.environ.get("ALERTA_STOCK_DESTINATARIO", "") or SMTP_DESTINATARIO
+
+# ---------------------------------------------------------------------------
+# Cálculo automático del stock mínimo (punto de reorden)
+# ---------------------------------------------------------------------------
+#
+# El stock mínimo de cada producto ya no se escribe a mano: se recalcula
+# solo cada vez que entra o sale stock, usando la fórmula estándar de
+# "punto de reorden":
+#
+#     mínimo = (consumo diario promedio × días de entrega) + stock de seguridad
+#
+# El "stock de seguridad" es el colchón para cubrir que algunas semanas se
+# consume más de lo normal: se calcula a partir de qué tan variable ha sido
+# el consumo (desviación estándar) y de qué tan seguro se quiere estar de no
+# quedar en cero (nivel de servicio). No se necesita ningún modelo de IA
+# para esto — es la fórmula que usa cualquier sistema de inventario.
+STOCK_MINIMO_VENTANA_DIAS = int(os.environ.get("STOCK_MINIMO_VENTANA_DIAS", "90"))
+STOCK_MINIMO_Z_SERVICIO = float(os.environ.get("STOCK_MINIMO_Z_SERVICIO", "1.65"))  # ≈95% de nivel de servicio
+STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS = float(os.environ.get("STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS", "7"))
+STOCK_MINIMO_LEAD_TIME_MIN_DIAS = 1.0
+STOCK_MINIMO_LEAD_TIME_MAX_DIAS = 60.0
 
 
 def respaldo_automatico_configurado():
@@ -523,6 +546,28 @@ def init_db():
         db.execute("ALTER TABLE productos ADD COLUMN foto_archivo TEXT DEFAULT ''")
         db.commit()
 
+    # ---- Migración 10: el stock mínimo (punto de reorden) deja de ser un
+    # número que se escribe a mano y pasa a calcularse solo, a partir del
+    # consumo histórico real de cada producto y de un tiempo de entrega
+    # estimado (medido de cada cuánto se le ha estado comprando a los
+    # proveedores). Esta tabla guarda el detalle del último cálculo de cada
+    # producto, para poder mostrar "por qué" quedó ese mínimo.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stock_minimo_calculo (
+            producto_id INTEGER PRIMARY KEY REFERENCES productos(id) ON DELETE CASCADE,
+            consumo_diario_promedio REAL NOT NULL DEFAULT 0,
+            desviacion_diaria REAL NOT NULL DEFAULT 0,
+            lead_time_dias REAL NOT NULL DEFAULT 0,
+            lead_time_es_estimado_por_defecto INTEGER NOT NULL DEFAULT 1,
+            stock_seguridad REAL NOT NULL DEFAULT 0,
+            stock_minimo_calculado INTEGER NOT NULL DEFAULT 0,
+            calculado_en TEXT NOT NULL
+        )
+        """
+    )
+    db.commit()
+
     db.close()
 
 
@@ -605,6 +650,152 @@ def formatear_rut(valor):
     return f"{cuerpo_con_puntos}-{dv}"
 
 
+def _estimar_lead_time_dias(db, producto_id):
+    """Estima cuántos días suele tardar en 'reponerse' este producto,
+    midiendo el intervalo entre entradas de stock sucesivas (compras)
+    históricas — no se registra un tiempo de entrega explícito en ninguna
+    parte del sistema, así que esto es lo más cercano que hay a ese dato.
+
+    Devuelve (dias, es_estimado_por_defecto). Con menos de dos entradas
+    históricas no hay intervalo que medir, así que se usa un valor por
+    defecto razonable (configurable) y se marca como tal, para que la
+    interfaz pueda avisar que es una estimación poco confiable todavía."""
+    fechas = db.execute(
+        "SELECT fecha FROM movimientos WHERE producto_id = ? AND tipo = 'entrada' ORDER BY fecha ASC",
+        (producto_id,),
+    ).fetchall()
+
+    if len(fechas) < 2:
+        return STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS, True
+
+    intervalos = []
+    anterior = None
+    for f in fechas:
+        try:
+            actual = datetime.fromisoformat(f["fecha"])
+        except (TypeError, ValueError):
+            continue
+        if anterior is not None:
+            dias = (actual - anterior).total_seconds() / 86400
+            if dias > 0:
+                intervalos.append(dias)
+        anterior = actual
+
+    if not intervalos:
+        return STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS, True
+
+    # La mediana es más robusta que el promedio: una sola compra atrasada o
+    # adelantada (ej. stock inicial cargado el mismo día que la primera
+    # factura) no debería distorsionar la estimación completa.
+    estimado = statistics.median(intervalos)
+    estimado = max(STOCK_MINIMO_LEAD_TIME_MIN_DIAS, min(STOCK_MINIMO_LEAD_TIME_MAX_DIAS, estimado))
+    return estimado, False
+
+
+def _consumo_diario_stats(db, producto_id, dias=STOCK_MINIMO_VENTANA_DIAS):
+    """Consumo diario promedio y su desviación estándar dentro de la
+    ventana de días indicada, contando los días sin salidas como 0 (para
+    que el promedio refleje bien la frecuencia real de uso, no solo los
+    días que sí tuvieron movimiento)."""
+    desde_dt = datetime.now() - timedelta(days=dias)
+    desde = desde_dt.isoformat(timespec="seconds")
+
+    filas = db.execute(
+        """
+        SELECT date(fecha) AS dia, SUM(cantidad) AS total
+        FROM movimientos
+        WHERE producto_id = ? AND tipo = 'salida' AND fecha >= ?
+        GROUP BY dia
+        """,
+        (producto_id, desde),
+    ).fetchall()
+    mapa = {r["dia"]: r["total"] for r in filas}
+
+    serie = []
+    cursor = desde_dt
+    hoy = datetime.now()
+    while cursor <= hoy:
+        serie.append(mapa.get(cursor.strftime("%Y-%m-%d"), 0))
+        cursor += timedelta(days=1)
+
+    if not serie:
+        return 0.0, 0.0
+
+    promedio = statistics.mean(serie)
+    desviacion = statistics.pstdev(serie) if len(serie) > 1 else 0.0
+    return promedio, desviacion
+
+
+def _calcular_stock_minimo_producto(db, producto_id):
+    """Punto de reorden: cuánto stock disponible debería quedar cuando toca
+    volver a comprar, calculado solo con datos reales del producto (sin
+    necesidad de ningún modelo de IA — es aritmética simple de inventario):
+
+        mínimo = consumo_diario_promedio × días_de_entrega + stock_de_seguridad
+
+    El stock de seguridad cubre que el consumo real varíe semana a semana
+    (usa la desviación estándar del consumo diario y un nivel de servicio
+    configurable — por defecto ≈95%, es decir, deja margen para no quedar
+    en cero en la gran mayoría de los casos, sin sobre-comprar tampoco)."""
+    consumo_diario, desviacion_diaria = _consumo_diario_stats(db, producto_id)
+    lead_time_dias, lead_time_es_defecto = _estimar_lead_time_dias(db, producto_id)
+
+    if consumo_diario <= 0:
+        # Sin consumo reciente: no hay base para justificar un colchón de
+        # stock — mantenerlo en 0 evita que productos obsoletos o nuevos
+        # sin historial queden marcados como "críticos" sin motivo real.
+        stock_seguridad = 0.0
+        punto_reorden = 0.0
+    else:
+        stock_seguridad = STOCK_MINIMO_Z_SERVICIO * desviacion_diaria * math.sqrt(lead_time_dias)
+        punto_reorden = consumo_diario * lead_time_dias + stock_seguridad
+
+    return {
+        "consumo_diario_promedio": round(consumo_diario, 4),
+        "desviacion_diaria": round(desviacion_diaria, 4),
+        "lead_time_dias": round(lead_time_dias, 2),
+        "lead_time_es_estimado_por_defecto": lead_time_es_defecto,
+        "stock_seguridad": round(stock_seguridad, 2),
+        "stock_minimo_calculado": max(0, round(punto_reorden)),
+    }
+
+
+def _recalcular_stock_minimo(db, producto_id):
+    """Recalcula y GUARDA el stock mínimo del producto (sobrescribe lo que
+    hubiera antes, sea manual o automático) — se llama automáticamente
+    después de cada entrada, salida o pérdida de stock, para que el mínimo
+    quede siempre al día con el consumo real más reciente. No hace commit:
+    queda dentro de la misma transacción del movimiento que lo disparó."""
+    calculo = _calcular_stock_minimo_producto(db, producto_id)
+    ts = now_iso()
+    db.execute(
+        "UPDATE productos SET stock_minimo = ? WHERE id = ?",
+        (calculo["stock_minimo_calculado"], producto_id),
+    )
+    db.execute(
+        """
+        INSERT INTO stock_minimo_calculo (
+            producto_id, consumo_diario_promedio, desviacion_diaria, lead_time_dias,
+            lead_time_es_estimado_por_defecto, stock_seguridad, stock_minimo_calculado, calculado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(producto_id) DO UPDATE SET
+            consumo_diario_promedio = excluded.consumo_diario_promedio,
+            desviacion_diaria = excluded.desviacion_diaria,
+            lead_time_dias = excluded.lead_time_dias,
+            lead_time_es_estimado_por_defecto = excluded.lead_time_es_estimado_por_defecto,
+            stock_seguridad = excluded.stock_seguridad,
+            stock_minimo_calculado = excluded.stock_minimo_calculado,
+            calculado_en = excluded.calculado_en
+        """,
+        (
+            producto_id, calculo["consumo_diario_promedio"], calculo["desviacion_diaria"],
+            calculo["lead_time_dias"], 1 if calculo["lead_time_es_estimado_por_defecto"] else 0,
+            calculo["stock_seguridad"], calculo["stock_minimo_calculado"], ts,
+        ),
+    )
+    return calculo
+
+
 def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra"):
     """Aplica una entrada de stock a un producto, recalculando el Costo
     Promedio Ponderado si se informa costo_unitario, y deja el movimiento
@@ -641,6 +832,7 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
             nuevo_stock,
         ),
     )
+    _recalcular_stock_minimo(db, producto_row["id"])
     return nuevo_stock
 
 
@@ -857,7 +1049,15 @@ def obtener_producto(producto_id):
 
     producto = row_to_dict(row)
     producto["movimientos"] = [dict(m) for m in movimientos]
+    producto["stock_minimo_detalle"] = _stock_minimo_detalle(db, producto_id)
     return jsonify(producto)
+
+
+def _stock_minimo_detalle(db, producto_id):
+    """Detalle de cómo se llegó al stock mínimo actual (para mostrar en la
+    interfaz el 'por qué' del número, no solo el número)."""
+    fila = db.execute("SELECT * FROM stock_minimo_calculo WHERE producto_id = ?", (producto_id,)).fetchone()
+    return dict(fila) if fila else None
 
 
 @app.route("/api/productos", methods=["POST"])
@@ -947,6 +1147,11 @@ def crear_producto():
             (nuevo_id, ts, stock_disponible, usuario_actual(), costo_compra, stock_disponible),
         )
 
+    # El stock mínimo se calcula solo desde el primer momento (con cero
+    # historial da 0 — recién se establece un mínimo real una vez que el
+    # producto acumule salidas), para que ningún producto quede con el
+    # número que alguien haya tipeado a mano en el formulario.
+    _recalcular_stock_minimo(db, nuevo_id)
     db.commit()
 
     _asegurar_categoria(db, categoria)
@@ -977,11 +1182,14 @@ def editar_producto(producto_id):
         if duplicado:
             return jsonify({"error": f"Ya existe otro producto con código '{codigo_interno}'"}), 400
 
+    # El stock mínimo ya NO se edita a mano: se recalcula solo con cada
+    # movimiento de stock (ver _recalcular_stock_minimo). Cualquier valor
+    # que llegue en el body para este campo se ignora a propósito.
+    stock_minimo = row["stock_minimo"]
     try:
-        stock_minimo = int(data.get("stock_minimo", row["stock_minimo"]))
         costo_compra = float(data.get("costo_compra", row["costo_compra"]))
     except (TypeError, ValueError):
-        return jsonify({"error": "Stock mínimo y costo deben ser números"}), 400
+        return jsonify({"error": "El costo debe ser un número"}), 400
 
     if "ubicacion_id" in data:
         ubicacion_id = data.get("ubicacion_id") or None
@@ -1268,6 +1476,9 @@ def registrar_movimiento(producto_id):
             "VALUES (?, ?, 'salida', ?, ?, ?, ?, ?)",
             (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock),
         )
+        # Una salida es la única que cambia el consumo real (una pérdida no
+        # es "demanda", así que no se usa para proyectar el mínimo).
+        _recalcular_stock_minimo(db, producto_id)
     else:  # perdida -> el stock sale de "disponible" pero no desaparece: pasa a la cuenta de merma
         if cantidad > stock_actual:
             return jsonify({"error": f"No hay stock disponible suficiente para marcar como pérdida (disponible: {stock_actual})"}), 400
@@ -2693,6 +2904,52 @@ def alertas_stock_probar():
 
 
 # ---------------------------------------------------------------------------
+# Recalculo periódico del stock mínimo (además del recálculo instantáneo que
+# se dispara con cada movimiento de stock — esto es un respaldo diario para
+# que productos que llevan tiempo sin moverse también reflejen el consumo
+# más reciente, ya que la ventana de cálculo va "envejeciendo" datos aunque
+# no haya un movimiento nuevo que dispare el recálculo puntual).
+# ---------------------------------------------------------------------------
+
+def _recalcular_stock_minimo_todos(db):
+    ids = [r["id"] for r in db.execute("SELECT id FROM productos").fetchall()]
+    for pid in ids:
+        _recalcular_stock_minimo(db, pid)
+    db.commit()
+    return len(ids)
+
+
+def _hilo_recalculo_stock_minimo():
+    while True:
+        try:
+            db = sqlite3.connect(DB_PATH)
+            db.row_factory = sqlite3.Row
+            _recalcular_stock_minimo_todos(db)
+            db.close()
+        except Exception:
+            pass
+        time.sleep(24 * 3600)  # una vez al día alcanza: el recálculo instantáneo cubre lo urgente
+
+
+_hilo_recalculo_iniciado = False
+
+
+def iniciar_hilo_recalculo_stock_minimo():
+    global _hilo_recalculo_iniciado
+    if not _hilo_recalculo_iniciado:
+        _hilo_recalculo_iniciado = True
+        hilo = threading.Thread(target=_hilo_recalculo_stock_minimo, daemon=True)
+        hilo.start()
+
+
+@app.route("/api/planificacion/recalcular-todos", methods=["POST"])
+def planificacion_recalcular_todos():
+    db = get_db()
+    n = _recalcular_stock_minimo_todos(db)
+    return jsonify({"ok": True, "n_productos": n})
+
+
+# ---------------------------------------------------------------------------
 # API: Movimientos - bitácora completa (Módulo 5)
 # ---------------------------------------------------------------------------
 
@@ -2973,6 +3230,7 @@ def revertir_merma(producto_id):
             usuario_actual(), producto["costo_compra"], nuevo_disponible, proveedor_id,
         ),
     )
+    _recalcular_stock_minimo(db, producto_id)
     db.commit()
 
     actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
@@ -3735,6 +3993,8 @@ def _calcular_planificacion(dias=60):
     salidas_por_producto = {r["producto_id"]: r for r in salidas_rows}
     semanas_periodo = max(1, dias / 7.0)
 
+    calculos = {r["producto_id"]: dict(r) for r in db.execute("SELECT * FROM stock_minimo_calculo").fetchall()}
+
     reponer = []
     exceso = []
 
@@ -3744,6 +4004,7 @@ def _calcular_planificacion(dias=60):
         salida = salidas_por_producto.get(p["id"])
         total_salida = salida["total"] if salida else 0
         promedio_semanal = total_salida / semanas_periodo if total_salida else 0.0
+        calculo_minimo = calculos.get(p["id"])
 
         if stock_minimo <= 0:
             # Sin mínimo definido: no se puede proyectar cuándo se va a
@@ -3752,11 +4013,13 @@ def _calcular_planificacion(dias=60):
                 d = dict(p)
                 d["promedio_semanal"] = round(promedio_semanal, 2)
                 d["semanas_sin_consumo"] = dias // 7
+                d["stock_minimo_detalle"] = calculo_minimo
                 exceso.append(d)
             continue
 
         d = dict(p)
         d["promedio_semanal"] = round(promedio_semanal, 2)
+        d["stock_minimo_detalle"] = calculo_minimo
 
         if promedio_semanal > 0:
             semanas_para_minimo = (stock_actual - stock_minimo) / promedio_semanal
@@ -4399,6 +4662,7 @@ def reporte_caja_gastos_pdf():
 init_db()
 iniciar_hilo_respaldos()
 iniciar_hilo_alertas_stock()
+iniciar_hilo_recalculo_stock_minimo()
 
 if __name__ == "__main__":
     debug_mode = os.environ.get("FLASK_DEBUG") == "1"

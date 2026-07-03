@@ -655,6 +655,7 @@ async function abrirDetalle(id) {
     document.getElementById("m-costo-wrap").style.display = "flex";
     document.getElementById("m-factura-wrap").style.display = "flex";
     document.getElementById("m-categoria-wrap").style.display = "flex";
+    document.getElementById("m-proveedor-merma-wrap").style.display = "none";
     poblarSelectCategoriaMovimiento(CATEGORIAS_ENTRADA, "Compra");
     abrirModal("modal-detalle");
   } catch (e) {
@@ -698,6 +699,7 @@ function renderDetalle(p) {
           ${m.categoria ? " · " + escapeHtml(m.categoria) : ""}
           ${m.costo_unitario !== null && m.costo_unitario !== undefined ? " · " + fmtMoney(m.costo_unitario) + " c/u" : ""}
           ${m.factura_numero ? " · factura " + escapeHtml(m.factura_numero) : ""}
+          ${m.proveedor_nombre ? " · proveedor: " + escapeHtml(m.proveedor_nombre) : ""}
           ${m.motivo ? " · " + escapeHtml(m.motivo) : ""}
           ${m.usuario ? " · " + escapeHtml(m.usuario) : ""}
         </span>
@@ -774,6 +776,25 @@ function poblarSelectCategoriaMovimiento(lista, seleccion) {
   select.value = seleccion;
 }
 
+async function cargarProveedoresMerma(productoId) {
+  const select = document.getElementById("m-proveedor-merma");
+  select.innerHTML = '<option value="">Cargando…</option>';
+  try {
+    const data = await api(`/api/productos/${productoId}/proveedores-origen`);
+    const opciones = ['<option value="">-- Selecciona un proveedor --</option>'];
+    data.proveedores.forEach(p => {
+      opciones.push(`<option value="${p.id}">${escapeHtml(p.nombre)}</option>`);
+    });
+    if (data.permite_sin_proveedor) {
+      opciones.push('<option value="__sin_proveedor__">Sin proveedor conocido (stock inicial / sin factura)</option>');
+    }
+    select.innerHTML = opciones.join("");
+  } catch (e) {
+    select.innerHTML = '<option value="">Error al cargar proveedores</option>';
+    toast(e.message, true);
+  }
+}
+
 document.getElementById("m-tipo").addEventListener("change", (e) => {
   const tipo = e.target.value;
   const esEntrada = tipo === "entrada";
@@ -782,8 +803,12 @@ document.getElementById("m-tipo").addEventListener("change", (e) => {
   document.getElementById("m-costo-wrap").style.display = esEntrada ? "flex" : "none";
   document.getElementById("m-factura-wrap").style.display = esEntrada ? "flex" : "none";
   document.getElementById("m-categoria-wrap").style.display = esPerdida ? "none" : "flex";
+  document.getElementById("m-proveedor-merma-wrap").style.display = esPerdida ? "flex" : "none";
   if (!esPerdida) {
     poblarSelectCategoriaMovimiento(esEntrada ? CATEGORIAS_ENTRADA : CATEGORIAS_SALIDA, CATEGORIA_POR_DEFECTO[tipo]);
+  } else {
+    const productoId = document.getElementById("m-producto-id").value;
+    if (productoId) cargarProveedoresMerma(productoId);
   }
   if (!esEntrada) resetearCampoFactura();
 });
@@ -791,15 +816,23 @@ document.getElementById("m-tipo").addEventListener("change", (e) => {
 document.getElementById("form-movimiento").addEventListener("submit", async (e) => {
   e.preventDefault();
   const id = document.getElementById("m-producto-id").value;
+  const tipo = document.getElementById("m-tipo").value;
   const payload = {
-    tipo: document.getElementById("m-tipo").value,
+    tipo,
     categoria: document.getElementById("m-categoria").value,
     cantidad: document.getElementById("m-cantidad").value,
     costo_unitario: document.getElementById("m-costo").value,
     factura_numero: document.getElementById("m-factura").value,
     motivo: document.getElementById("m-motivo").value,
-    usuario: document.getElementById("m-usuario").value,
   };
+  if (tipo === "perdida") {
+    const valorProveedor = document.getElementById("m-proveedor-merma").value;
+    if (!valorProveedor) {
+      toast("Selecciona el proveedor del cual viene este producto", true);
+      return;
+    }
+    payload.proveedor_id = valorProveedor === "__sin_proveedor__" ? null : parseInt(valorProveedor, 10);
+  }
   try {
     await api(`/api/productos/${id}/movimiento`, { method: "POST", body: JSON.stringify(payload) });
     toast("Movimiento registrado");
@@ -807,10 +840,12 @@ document.getElementById("form-movimiento").addEventListener("submit", async (e) 
     document.getElementById("m-costo-wrap").style.display = "flex";
     document.getElementById("m-factura-wrap").style.display = "flex";
     document.getElementById("m-categoria-wrap").style.display = "flex";
+    document.getElementById("m-proveedor-merma-wrap").style.display = "none";
     document.getElementById("m-cantidad-label").textContent = "Cantidad";
     document.getElementById("m-tipo").value = "entrada";
     poblarSelectCategoriaMovimiento(CATEGORIAS_ENTRADA, "Compra");
     resetearCampoFactura();
+    document.getElementById("m-usuario").value = state.sesion.nombre || state.sesion.username || "";
     await Promise.all([cargarProductos(), cargarResumen()]);
     await abrirDetalle(id);
   } catch (e) {
@@ -1304,6 +1339,13 @@ async function cargarRotacion() {
   }
 }
 
+function nombreCortoProducto(p) {
+  // Para el gráfico de rotación no hace falta el ID: basta categoría +
+  // modelo (que es justo lo que identifica al producto para el taller).
+  const partes = [p.categoria, p.modelo].filter(Boolean);
+  return partes.length ? partes.join(" — ") : p.nombre;
+}
+
 function renderTendenciaChart(tendencia) {
   const contChart = document.getElementById("rot-tendencia-chart");
   const contLeyenda = document.getElementById("rot-tendencia-leyenda");
@@ -1320,14 +1362,16 @@ function renderTendenciaChart(tendencia) {
 
   // Series a dibujar: el total general (línea gris de fondo) + hasta 5
   // productos con color propio.
+  const totalPeriodo = total.reduce((a, b) => a + b, 0);
   const series = [
-    { nombre: "Total general", valores: total, color: "#8A93A6", ancho: 3, esTotal: true },
+    { nombre: "Total general", valores: total, color: "#8A93A6", ancho: 3, esTotal: true, totalPeriodo },
     ...productos.map((p, i) => ({
-      nombre: `#${p.id_sistema} ${p.nombre}`,
+      nombre: nombreCortoProducto(p),
       valores: p.valores,
       color: ROT_COLORES[i % ROT_COLORES.length],
       ancho: 2,
       esTotal: false,
+      totalPeriodo: p.total_periodo,
     })),
   ];
 
@@ -1342,7 +1386,7 @@ function renderTendenciaChart(tendencia) {
   const lineas = series.map(s => {
     const puntos = s.valores.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
     const puntosCirculo = s.esTotal ? "" : s.valores.map((v, i) =>
-      `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2.6" fill="${s.color}"><title>${escapeHtml(s.nombre)} · ${fmtSemana(semanas[i])}: ${v}</title></circle>`
+      `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2.6" fill="${s.color}"></circle>`
     ).join("");
     return `<polyline points="${puntos}" fill="none" stroke="${s.color}" stroke-width="${s.ancho}" stroke-linejoin="round" stroke-linecap="round" opacity="${s.esTotal ? 0.55 : 0.95}" />${puntosCirculo}`;
   }).join("");
@@ -1364,19 +1408,90 @@ function renderTendenciaChart(tendencia) {
   }).join("");
 
   contChart.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="rot-svg">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="rot-svg" id="rot-svg-el">
       ${guias}
       ${lineas}
+      <line id="rot-guia-vertical" x1="0" y1="${padT}" x2="0" y2="${H - padB}" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3,3" opacity="0" />
+      ${series.map((s, si) => `<circle id="rot-punto-hover-${si}" r="4" fill="${s.color}" stroke="#fff" stroke-width="1.5" opacity="0" />`).join("")}
       ${etiquetas}
+      <rect x="${padL}" y="${padT}" width="${innerW}" height="${innerH}" fill="transparent" id="rot-hitarea" style="cursor:crosshair" />
     </svg>
+    <div class="rot-tooltip" id="rot-tooltip"></div>
   `;
 
   contLeyenda.innerHTML = series.map(s => `
     <span class="rot-leyenda-item">
       <span class="rot-leyenda-color" style="background:${s.color}"></span>
       ${escapeHtml(s.nombre)}
+      <span class="rot-leyenda-cantidad">· ${s.totalPeriodo} un.</span>
     </span>
   `).join("");
+
+  // ---- Interactividad: al pasar el mouse por el gráfico, se muestra una
+  // línea guía vertical y un tooltip con el detalle de cada serie en esa
+  // semana exacta (no solo el total pasivo) — para poder comparar de un
+  // vistazo qué producto se movió más esa semana en particular.
+  const svgEl = document.getElementById("rot-svg-el");
+  const hitArea = document.getElementById("rot-hitarea");
+  const guiaVertical = document.getElementById("rot-guia-vertical");
+  const tooltip = document.getElementById("rot-tooltip");
+  const puntosHover = series.map((_, si) => document.getElementById(`rot-punto-hover-${si}`));
+
+  function indiceDesdeEvento(evt) {
+    const pt = svgEl.createSVGPoint();
+    pt.x = evt.clientX;
+    pt.y = evt.clientY;
+    const svgP = pt.matrixTransform(svgEl.getScreenCTM().inverse());
+    const stepX = n === 1 ? innerW : innerW / (n - 1);
+    const i = Math.round((svgP.x - padL) / stepX);
+    return Math.max(0, Math.min(n - 1, i));
+  }
+
+  function mostrarTooltip(evt) {
+    const i = indiceDesdeEvento(evt);
+    guiaVertical.setAttribute("x1", x(i).toFixed(1));
+    guiaVertical.setAttribute("x2", x(i).toFixed(1));
+    guiaVertical.setAttribute("opacity", "1");
+
+    series.forEach((s, si) => {
+      puntosHover[si].setAttribute("cx", x(i).toFixed(1));
+      puntosHover[si].setAttribute("cy", y(s.valores[i]).toFixed(1));
+      puntosHover[si].setAttribute("opacity", "1");
+    });
+
+    const filas = series
+      .slice()
+      .map((s, si) => ({ s, valor: s.valores[i], color: s.color }))
+      .sort((a, b) => b.valor - a.valor)
+      .map(({ s, valor, color }) => `
+        <div class="rot-tooltip-fila">
+          <span class="rot-tooltip-punto" style="background:${color}"></span>
+          <span>${escapeHtml(s.nombre)}</span>
+          <span class="rot-tooltip-valor">${valor}</span>
+        </div>`)
+      .join("");
+
+    tooltip.innerHTML = `<div class="rot-tooltip-titulo">Semana: ${escapeHtml(fmtSemana(semanas[i]))}</div>${filas}`;
+    tooltip.classList.add("visible");
+
+    // Posiciona el tooltip cerca del cursor, dentro del contenedor.
+    const contRect = contChart.getBoundingClientRect();
+    let left = evt.clientX - contRect.left + 14;
+    let top = evt.clientY - contRect.top - 10;
+    const anchoTooltip = 180;
+    if (left + anchoTooltip > contRect.width) left = evt.clientX - contRect.left - anchoTooltip - 14;
+    tooltip.style.left = `${Math.max(0, left)}px`;
+    tooltip.style.top = `${Math.max(0, top)}px`;
+  }
+
+  function ocultarTooltip() {
+    guiaVertical.setAttribute("opacity", "0");
+    puntosHover.forEach(p => p.setAttribute("opacity", "0"));
+    tooltip.classList.remove("visible");
+  }
+
+  hitArea.addEventListener("mousemove", mostrarTooltip);
+  hitArea.addEventListener("mouseleave", ocultarTooltip);
 }
 
 // ---------------------------------------------------------------------------
@@ -1616,23 +1731,28 @@ async function cargarMermas() {
 
     if (data.productos.length === 0) {
       const msg = esMes ? `No hubo pérdidas registradas en ${fmtMes(data.mes)}. 👍` : "No hay productos en merma actualmente. 👍";
-      tbody.innerHTML = `<tr><td colspan="6" class="vacio">${msg}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="vacio">${msg}</td></tr>`;
       return;
     }
 
+    // Cada fila es un bucket producto+proveedor (no un producto solo), así
+    // se ve exactamente de qué proveedor son las unidades en merma, sin
+    // mezclar ni adivinar.
     tbody.innerHTML = data.productos.map(p => {
-      const cantidad = esMes ? p.cantidad_mes : p.stock_merma;
-      const valor = esMes ? p.valor_mes : p.stock_merma * p.costo_compra;
+      const cantidad = esMes ? p.cantidad_mes : p.cantidad_bucket;
+      const valor = esMes ? p.valor_mes : p.valor_bucket;
+      const proveedorAttr = p.proveedor_id === null || p.proveedor_id === undefined ? "" : p.proveedor_id;
       const accionDescartar = esMes
         ? ""
-        : `<td><button class="btn-link" data-descartar="${p.id}" data-max="${p.stock_merma}">Descartar</button></td>`;
+        : `<td><button class="btn-link" data-descartar="${p.id}" data-proveedor="${proveedorAttr}" data-max="${cantidad}">Descartar</button></td>`;
       const accionRevertir = esMes
         ? ""
-        : `<td><button class="btn-link" data-revertir="${p.id}" data-max="${p.stock_merma}">Revertir</button></td>`;
+        : `<td><button class="btn-link" data-revertir="${p.id}" data-proveedor="${proveedorAttr}" data-max="${cantidad}">Revertir</button></td>`;
       return `
       <tr>
         <td><button type="button" class="btn-link" data-ver-origen="${p.id}" data-nombre="${escapeHtml(p.nombre)}">#${escapeHtml(p.id_sistema)} ${escapeHtml(p.nombre)}</button></td>
         <td>${escapeHtml(p.categoria) || "—"}</td>
+        <td>${escapeHtml(p.proveedor_nombre)}</td>
         <td class="num mono">${cantidad}</td>
         <td class="num mono">${fmtMoney(valor)}</td>
         ${accionDescartar || "<td></td>"}
@@ -1648,7 +1768,7 @@ async function cargarMermas() {
         try {
           await api(`/api/productos/${btn.dataset.descartar}/merma/descartar`, {
             method: "POST",
-            body: JSON.stringify({ cantidad }),
+            body: JSON.stringify({ cantidad, proveedor_id: btn.dataset.proveedor || null }),
           });
           toast("Descartado de la cuenta de merma");
           await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
@@ -1666,7 +1786,7 @@ async function cargarMermas() {
         try {
           await api(`/api/productos/${btn.dataset.revertir}/merma/revertir`, {
             method: "POST",
-            body: JSON.stringify({ cantidad }),
+            body: JSON.stringify({ cantidad, proveedor_id: btn.dataset.proveedor || null }),
           });
           toast("Merma revertida: stock devuelto a disponible");
           await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
@@ -1680,7 +1800,7 @@ async function cargarMermas() {
       btn.addEventListener("click", () => verOrigenMerma(btn.dataset.verOrigen, btn.dataset.nombre));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar mermas: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar mermas: ${e.message}</td></tr>`;
   }
 }
 

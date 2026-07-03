@@ -453,6 +453,44 @@ def init_db():
         db.execute("UPDATE reservas SET estado = 'liberada' WHERE estado = 'activa'")
         db.commit()
 
+    # ---- Migración 8: la merma ahora se rastrea por proveedor (antes solo
+    # se guardaba un total por producto, y la pantalla "de dónde viene"
+    # asumía erróneamente que era del último ingreso — lo cual era falso si
+    # un producto se compró a más de un proveedor). Se agrega
+    # movimientos.proveedor_id (para que cada pérdida quede con su proveedor
+    # elegido a mano) y la tabla merma_proveedores, que lleva el saldo de
+    # merma pendiente desglosado por proveedor.
+    if "proveedor_id" not in columnas_mov:
+        db.execute("ALTER TABLE movimientos ADD COLUMN proveedor_id INTEGER REFERENCES proveedores(id)")
+        db.commit()
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS merma_proveedores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            producto_id INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+            proveedor_id INTEGER REFERENCES proveedores(id),
+            cantidad INTEGER NOT NULL DEFAULT 0,
+            actualizado_en TEXT NOT NULL
+        )
+        """
+    )
+    db.commit()
+
+    # Si ya existía stock_merma de antes de esta migración (pérdidas
+    # registradas sin proveedor elegido), se preserva el total en un bucket
+    # "sin proveedor conocido" para no perder el dato — no se puede adivinar
+    # retroactivamente cuál fue el proveedor real de esas unidades.
+    ya_migrado = db.execute("SELECT COUNT(*) FROM merma_proveedores").fetchone()[0]
+    if ya_migrado == 0:
+        con_merma = db.execute("SELECT id, stock_merma FROM productos WHERE stock_merma > 0").fetchall()
+        for p in con_merma:
+            db.execute(
+                "INSERT INTO merma_proveedores (producto_id, proveedor_id, cantidad, actualizado_en) VALUES (?, NULL, ?, ?)",
+                (p["id"], p["stock_merma"], now_iso()),
+            )
+        db.commit()
+
     db.close()
 
 
@@ -561,6 +599,78 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
         ),
     )
     return nuevo_stock
+
+
+def _proveedores_origen_producto(db, producto_id):
+    """Proveedores que efectivamente le han vendido este producto al taller
+    (según las entradas registradas con factura), más si corresponde la
+    opción "sin proveedor" cuando hay entradas sin factura/proveedor (ej. el
+    stock inicial al crear el producto). Se usa para que, al marcar una
+    pérdida, solo se puedan elegir proveedores reales de ESE producto."""
+    proveedores = db.execute(
+        """
+        SELECT DISTINCT pr.id, pr.nombre
+        FROM movimientos m
+        JOIN facturas f ON f.numero = m.factura_numero
+        JOIN proveedores pr ON pr.id = f.proveedor_id
+        WHERE m.producto_id = ? AND m.tipo = 'entrada' AND f.proveedor_id IS NOT NULL
+        ORDER BY pr.nombre COLLATE NOCASE
+        """,
+        (producto_id,),
+    ).fetchall()
+
+    tiene_sin_proveedor = db.execute(
+        """
+        SELECT COUNT(*) FROM movimientos m
+        WHERE m.producto_id = ? AND m.tipo = 'entrada'
+          AND (
+            m.factura_numero IS NULL OR m.factura_numero = ''
+            OR NOT EXISTS (
+                SELECT 1 FROM facturas f
+                WHERE f.numero = m.factura_numero AND f.proveedor_id IS NOT NULL
+            )
+          )
+        """,
+        (producto_id,),
+    ).fetchone()[0] > 0
+
+    return [dict(p) for p in proveedores], tiene_sin_proveedor
+
+
+def _merma_bucket_get(db, producto_id, proveedor_id):
+    if proveedor_id is None:
+        return db.execute(
+            "SELECT * FROM merma_proveedores WHERE producto_id = ? AND proveedor_id IS NULL",
+            (producto_id,),
+        ).fetchone()
+    return db.execute(
+        "SELECT * FROM merma_proveedores WHERE producto_id = ? AND proveedor_id = ?",
+        (producto_id, proveedor_id),
+    ).fetchone()
+
+
+def _merma_bucket_sumar(db, producto_id, proveedor_id, delta):
+    """Suma (o resta, con delta negativo) unidades al saldo de merma pendiente
+    de un producto para un proveedor específico (o NULL = sin proveedor
+    conocido). Crea el bucket si no existía; lo elimina si queda en 0."""
+    bucket = _merma_bucket_get(db, producto_id, proveedor_id)
+    ts = now_iso()
+    if bucket is None:
+        if delta <= 0:
+            return  # nada que restar de un bucket que no existe
+        db.execute(
+            "INSERT INTO merma_proveedores (producto_id, proveedor_id, cantidad, actualizado_en) VALUES (?, ?, ?, ?)",
+            (producto_id, proveedor_id, delta, ts),
+        )
+        return
+    nuevo = bucket["cantidad"] + delta
+    if nuevo <= 0:
+        db.execute("DELETE FROM merma_proveedores WHERE id = ?", (bucket["id"],))
+    else:
+        db.execute(
+            "UPDATE merma_proveedores SET cantidad = ?, actualizado_en = ? WHERE id = ?",
+            (nuevo, ts, bucket["id"]),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -692,7 +802,13 @@ def obtener_producto(producto_id):
         return jsonify({"error": "Producto no encontrado"}), 404
 
     movimientos = db.execute(
-        "SELECT * FROM movimientos WHERE producto_id = ? ORDER BY fecha DESC, id DESC",
+        """
+        SELECT m.*, pr.nombre AS proveedor_nombre
+        FROM movimientos m
+        LEFT JOIN proveedores pr ON pr.id = m.proveedor_id
+        WHERE m.producto_id = ?
+        ORDER BY m.fecha DESC, m.id DESC
+        """,
         (producto_id,),
     ).fetchall()
 
@@ -945,8 +1061,27 @@ def registrar_movimiento(producto_id):
     if tipo not in ("entrada", "salida", "perdida"):
         return jsonify({"error": "Tipo de movimiento inválido (usa entrada, salida o perdida)"}), 400
 
+    proveedor_id_perdida = None
     if tipo == "perdida":
         categoria = "Merma o pérdida"
+        # El proveedor de una pérdida SIEMPRE debe ser uno que efectivamente
+        # le haya vendido este producto al taller (nunca se infiere del
+        # último ingreso, porque un producto puede tener varios
+        # proveedores). Es obligatorio elegir uno de la lista real.
+        proveedores_posibles, permite_sin_proveedor = _proveedores_origen_producto(db, producto_id)
+        ids_posibles = {p["id"] for p in proveedores_posibles}
+        proveedor_id_crudo = data.get("proveedor_id")
+        if proveedor_id_crudo in (None, ""):
+            if not permite_sin_proveedor:
+                return jsonify({"error": "Selecciona el proveedor del cual viene este producto para registrar la pérdida"}), 400
+            proveedor_id_perdida = None
+        else:
+            try:
+                proveedor_id_perdida = int(proveedor_id_crudo)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Proveedor inválido"}), 400
+            if proveedor_id_perdida not in ids_posibles:
+                return jsonify({"error": "Ese proveedor no tiene ingresos registrados de este producto. Elige uno de la lista."}), 400
     else:
         categorias_permitidas = CATEGORIAS_ENTRADA if tipo == "entrada" else CATEGORIAS_SALIDA
         categoria_por_defecto = "Compra" if tipo == "entrada" else "Consumo interno"
@@ -1024,10 +1159,11 @@ def registrar_movimiento(producto_id):
             (nuevo_stock, nuevo_merma, ts, producto_id),
         )
         db.execute(
-            "INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, stock_resultante) "
-            "VALUES (?, ?, 'perdida', ?, ?, ?, ?, ?)",
-            (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock),
+            "INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, stock_resultante, proveedor_id) "
+            "VALUES (?, ?, 'perdida', ?, ?, ?, ?, ?, ?)",
+            (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock, proveedor_id_perdida),
         )
+        _merma_bucket_sumar(db, producto_id, proveedor_id_perdida, cantidad)
 
     if linea:
         db.execute(
@@ -2008,19 +2144,38 @@ def listar_movimientos():
 # API: Mermas (cuenta separada de pérdidas)
 # ---------------------------------------------------------------------------
 
+@app.route("/api/productos/<int:producto_id>/proveedores-origen", methods=["GET"])
+def proveedores_origen_producto(producto_id):
+    """Para el formulario de 'Registrar movimiento' cuando el tipo es
+    Pérdida: solo deja elegir un proveedor que efectivamente le haya
+    vendido este producto al taller (según las facturas de ingreso ya
+    registradas), evitando así que alguien marque cualquier proveedor al
+    azar. Si además hay entradas sin proveedor (ej. el stock inicial al
+    crear el producto), se habilita la opción "sin proveedor conocido"."""
+    db = get_db()
+    producto = db.execute("SELECT id FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+    proveedores, permite_sin_proveedor = _proveedores_origen_producto(db, producto_id)
+    return jsonify({"proveedores": proveedores, "permite_sin_proveedor": permite_sin_proveedor})
+
+
 @app.route("/api/mermas", methods=["GET"])
 def listar_mermas():
     """Módulo 7: Mermas.
 
-    Sin filtro (modo "actual"): muestra el saldo pendiente de revisión hoy
-    (stock_merma > 0 en cada producto) — es lo que hay guardado esperando
-    que alguien lo descarte.
+    Sin filtro (modo "actual"): muestra el saldo pendiente de revisión hoy,
+    desglosado por proveedor (tabla merma_proveedores) — cada fila es un
+    producto + el proveedor elegido al marcar esa pérdida, porque un mismo
+    producto puede tener unidades en merma de más de un proveedor a la vez.
 
     Con ?mes=YYYY-MM (modo "mes"): muestra el historial real de pérdidas
-    registradas ese mes (movimientos tipo 'perdida'), aunque ya se hayan
-    descartado después. El valor se calcula con el costo promedio actual
-    del producto, porque no se guarda el costo exacto al momento de la
-    pérdida.
+    registradas ese mes (movimientos tipo 'perdida'), también desglosado por
+    proveedor, aunque ya se hayan descartado después. El valor se calcula
+    con el costo promedio actual del producto, porque no se guarda el costo
+    exacto al momento de la pérdida. Las pérdidas registradas ANTES de que
+    existiera esta función quedan como "proveedor no registrado" (no hay
+    forma de reconstruir ese dato retroactivamente).
     """
     db = get_db()
 
@@ -2036,10 +2191,10 @@ def listar_mermas():
     if mes:
         filas = db.execute(
             """
-            SELECT producto_id, SUM(cantidad) AS cantidad_mes, COUNT(*) AS n_movimientos
+            SELECT producto_id, proveedor_id, SUM(cantidad) AS cantidad_mes, COUNT(*) AS n_movimientos
             FROM movimientos
             WHERE tipo = 'perdida' AND substr(fecha, 1, 7) = ?
-            GROUP BY producto_id
+            GROUP BY producto_id, proveedor_id
             """,
             (mes,),
         ).fetchall()
@@ -2049,7 +2204,13 @@ def listar_mermas():
             prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (r["producto_id"],)).fetchone()
             if prod is None:
                 continue
+            proveedor_nombre = None
+            if r["proveedor_id"] is not None:
+                pr = db.execute("SELECT nombre FROM proveedores WHERE id = ?", (r["proveedor_id"],)).fetchone()
+                proveedor_nombre = pr["nombre"] if pr else None
             d = row_to_dict(prod)
+            d["proveedor_id"] = r["proveedor_id"]
+            d["proveedor_nombre"] = proveedor_nombre or "Proveedor no registrado"
             d["cantidad_mes"] = r["cantidad_mes"]
             d["n_movimientos"] = r["n_movimientos"]
             d["valor_mes"] = r["cantidad_mes"] * d["costo_compra"]
@@ -2067,12 +2228,30 @@ def listar_mermas():
             "total_valor": total_valor,
         })
 
-    rows = db.execute(
-        PRODUCTO_SELECT + " WHERE p.stock_merma > 0 ORDER BY p.nombre COLLATE NOCASE"
+    buckets = db.execute(
+        """
+        SELECT mp.producto_id, mp.proveedor_id, mp.cantidad, pr.nombre AS proveedor_nombre
+        FROM merma_proveedores mp
+        LEFT JOIN proveedores pr ON pr.id = mp.proveedor_id
+        WHERE mp.cantidad > 0
+        """
     ).fetchall()
-    productos = [row_to_dict(r) for r in rows]
-    total_unidades = sum(p["stock_merma"] for p in productos)
-    total_valor = sum(p["stock_merma"] * p["costo_compra"] for p in productos)
+
+    productos = []
+    for b in buckets:
+        prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (b["producto_id"],)).fetchone()
+        if prod is None:
+            continue
+        d = row_to_dict(prod)
+        d["proveedor_id"] = b["proveedor_id"]
+        d["proveedor_nombre"] = b["proveedor_nombre"] or "Sin proveedor conocido"
+        d["cantidad_bucket"] = b["cantidad"]
+        d["valor_bucket"] = b["cantidad"] * d["costo_compra"]
+        productos.append(d)
+    productos.sort(key=lambda d: d["nombre"].lower())
+
+    total_unidades = sum(p["cantidad_bucket"] for p in productos)
+    total_valor = sum(p["valor_bucket"] for p in productos)
     return jsonify({
         "modo": "actual",
         "mes": "",
@@ -2092,19 +2271,27 @@ def descartar_merma(producto_id):
 
     data = request.get_json(force=True, silent=True) or {}
     try:
+        proveedor_id = int(data["proveedor_id"]) if data.get("proveedor_id") not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "Proveedor inválido"}), 400
+    try:
         cantidad = int(data.get("cantidad"))
     except (TypeError, ValueError):
         return jsonify({"error": "La cantidad debe ser un número entero"}), 400
     if cantidad <= 0:
         return jsonify({"error": "La cantidad debe ser mayor a 0"}), 400
-    if cantidad > producto["stock_merma"]:
-        return jsonify({"error": f"Solo hay {producto['stock_merma']} unidad(es) en merma para este producto"}), 400
+
+    bucket = _merma_bucket_get(db, producto_id, proveedor_id)
+    disponible_bucket = bucket["cantidad"] if bucket else 0
+    if cantidad > disponible_bucket:
+        return jsonify({"error": f"Solo hay {disponible_bucket} unidad(es) en merma de este proveedor para este producto"}), 400
 
     nuevo_merma = producto["stock_merma"] - cantidad
     db.execute(
         "UPDATE productos SET stock_merma = ?, actualizado_en = ? WHERE id = ?",
         (nuevo_merma, now_iso(), producto_id),
     )
+    _merma_bucket_sumar(db, producto_id, proveedor_id, -cantidad)
     db.commit()
 
     actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
@@ -2116,7 +2303,9 @@ def revertir_merma(producto_id):
     """Deshace una pérdida: devuelve unidades de stock_merma a
     stock_disponible (a diferencia de 'Descartar', que las elimina para
     siempre). Solo aplica sobre el saldo pendiente actual, igual que
-    'Descartar' — no corrige historial de meses anteriores."""
+    'Descartar' — no corrige historial de meses anteriores. Se indica de
+    qué proveedor son las unidades a revertir (el mismo bucket elegido al
+    marcar la pérdida), para no mezclar saldos de distintos proveedores."""
     db = get_db()
     producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
     if producto is None:
@@ -2124,13 +2313,20 @@ def revertir_merma(producto_id):
 
     data = request.get_json(force=True, silent=True) or {}
     try:
+        proveedor_id = int(data["proveedor_id"]) if data.get("proveedor_id") not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "Proveedor inválido"}), 400
+    try:
         cantidad = int(data.get("cantidad"))
     except (TypeError, ValueError):
         return jsonify({"error": "La cantidad debe ser un número entero"}), 400
     if cantidad <= 0:
         return jsonify({"error": "La cantidad debe ser mayor a 0"}), 400
-    if cantidad > producto["stock_merma"]:
-        return jsonify({"error": f"Solo hay {producto['stock_merma']} unidad(es) en merma para este producto"}), 400
+
+    bucket = _merma_bucket_get(db, producto_id, proveedor_id)
+    disponible_bucket = bucket["cantidad"] if bucket else 0
+    if cantidad > disponible_bucket:
+        return jsonify({"error": f"Solo hay {disponible_bucket} unidad(es) en merma de este proveedor para este producto"}), 400
 
     ts = now_iso()
     nuevo_merma = producto["stock_merma"] - cantidad
@@ -2139,17 +2335,18 @@ def revertir_merma(producto_id):
         "UPDATE productos SET stock_merma = ?, stock_disponible = ?, actualizado_en = ? WHERE id = ?",
         (nuevo_merma, nuevo_disponible, ts, producto_id),
     )
+    _merma_bucket_sumar(db, producto_id, proveedor_id, -cantidad)
     db.execute(
         """
         INSERT INTO movimientos (
             producto_id, fecha, tipo, categoria, cantidad, motivo, usuario,
-            costo_unitario, stock_resultante
-        ) VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, ?, ?, ?, ?)
+            costo_unitario, stock_resultante, proveedor_id
+        ) VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, ?, ?, ?, ?, ?)
         """,
         (
             producto_id, ts, cantidad,
             "Reversión de merma: se restituye a stock disponible",
-            usuario_actual(), producto["costo_compra"], nuevo_disponible,
+            usuario_actual(), producto["costo_compra"], nuevo_disponible, proveedor_id,
         ),
     )
     db.commit()
@@ -2160,10 +2357,11 @@ def revertir_merma(producto_id):
 
 @app.route("/api/productos/<int:producto_id>/merma/origenes", methods=["GET"])
 def merma_origenes(producto_id):
-    """Para la pestaña Merma: al pinchar un producto, muestra de qué
-    factura(s) de ingreso viene y de qué proveedor(es), porque un mismo
-    producto puede haberse comprado a varios proveedores distintos y el
-    taller necesita poder identificar cuál es cuál."""
+    """Historial completo de compras (ingresos con factura) de este
+    producto, para dar contexto — por ejemplo, para decidir a qué
+    proveedor asignar una pérdida nueva. OJO: esto es solo informativo, no
+    dice de qué proveedor son las unidades actualmente en merma (eso lo
+    muestra la pestaña Mermas directamente, ya desglosado por proveedor)."""
     db = get_db()
     producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
     if producto is None:
@@ -2788,7 +2986,10 @@ def _calcular_rotacion(dias):
             "producto_id": p["id"],
             "id_sistema": p["id_sistema"],
             "nombre": p["nombre"],
+            "categoria": p["categoria"],
+            "modelo": p["modelo"],
             "valores": p["_valores_semanales"],
+            "total_periodo": sum(p["_valores_semanales"]),
         }
         for p in mas_utilizados[:5]
     ]

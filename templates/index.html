@@ -316,6 +316,7 @@
         <tr>
           <th>Producto</th>
           <th>Categoría</th>
+          <th>Proveedor</th>
           <th class="num" id="mermas-th-cantidad">En merma</th>
           <th class="num" id="mermas-th-valor">Valor</th>
           <th class="mermas-col-accion"></th>
@@ -323,7 +324,7 @@
         </tr>
       </thead>
       <tbody id="tbody-mermas">
-        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="7" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -576,6 +577,13 @@
             <input type="text" id="m-factura" placeholder="Ej: F-1023">
             <p class="ayuda-inline" id="m-factura-preview" style="display:none"></p>
           </div>
+          <div class="campo" id="m-proveedor-merma-wrap" style="display:none">
+            <label>Proveedor de este producto *</label>
+            <select id="m-proveedor-merma">
+              <option value="">Cargando…</option>
+            </select>
+            <p class="ayuda-inline">Un mismo producto puede haberse comprado a varios proveedores: elige de cuál viene la unidad que se está perdiendo, para no mezclar el registro de merma.</p>
+          </div>
           <div class="campo">
             <label id="m-cantidad-label">Cantidad</label>
             <input type="number" id="m-cantidad" min="0" required>
@@ -590,7 +598,8 @@
           </div>
           <div class="campo">
             <label>Responsable</label>
-            <input type="text" id="m-usuario" placeholder="Nombre de quien registra">
+            <input type="text" id="m-usuario" readonly disabled>
+            <p class="ayuda-inline">Siempre queda registrado con el usuario de la sesión actual — no se puede cambiar.</p>
           </div>
           <div class="modal-actions modal-actions--start">
             <button type="submit" class="btn btn-primary">Registrar movimiento</button>

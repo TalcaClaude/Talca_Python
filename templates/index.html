@@ -37,6 +37,7 @@
     <button class="tab" data-vista="movimientos">Movimientos</button>
     <button class="tab" data-vista="mermas">Mermas</button>
     <button class="tab" data-vista="rotacion">Rotación</button>
+    <button class="tab" data-vista="planificacion">Planificación</button>
     <button class="tab" data-vista="caja">Caja Chica</button>
     <button class="tab" data-vista="reportes">Reportes</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
@@ -172,6 +173,7 @@
 
   <section class="toolbar">
     <p class="bodega-intro">Registra aquí las facturas de compra con sus productos y precios. Luego, al ingresar stock, escribes el número de factura y el sistema completa la cantidad y el precio exactos.</p>
+    <button class="btn btn-secundario" id="btn-carga-masiva-facturas">Carga masiva (Excel)</button>
     <button class="btn btn-primary" id="btn-nueva-factura">+ Nueva factura</button>
   </section>
 
@@ -371,6 +373,67 @@
 
   </section>
 
+  <section class="vista" id="vista-planificacion" style="display:none">
+
+  <section class="toolbar">
+    <p class="bodega-intro">Para cada producto con stock mínimo definido, se proyecta cuándo se va a quedar bajo el mínimo usando el promedio de salidas semanales recientes, y se sugiere cuánto comprar y a qué proveedor.</p>
+    <select id="planificacion-periodo">
+      <option value="30">Basado en los últimos 30 días</option>
+      <option value="60" selected>Basado en los últimos 60 días</option>
+      <option value="90">Basado en los últimos 90 días</option>
+      <option value="180">Basado en los últimos 180 días</option>
+    </select>
+  </section>
+
+  <section class="dash-grid">
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">Sugerido para reponer</h3>
+      <div class="tabla-wrap">
+        <table class="tabla">
+          <thead>
+            <tr>
+              <th>Producto</th>
+              <th class="num">Stock actual</th>
+              <th class="num">Mínimo</th>
+              <th class="num">Promedio semanal</th>
+              <th>Se agota</th>
+              <th class="num">Sugerido comprar</th>
+              <th>Proveedor(es)</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-planificacion-reponer">
+            <tr><td colspan="7" class="vacio">Cargando…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">Exceso de stock (plata inmovilizada)</h3>
+      <p class="bodega-intro">Productos con harto stock y poco o ningún consumo en el período — vale la pena revisar si conviene seguir comprando, o si hay que darles salida.</p>
+      <div class="tabla-wrap">
+        <table class="tabla">
+          <thead>
+            <tr>
+              <th>Producto</th>
+              <th class="num">Stock actual</th>
+              <th class="num">Mínimo</th>
+              <th class="num">Valor inmovilizado</th>
+              <th>Consumo en el período</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-planificacion-exceso">
+            <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </section>
+
+  </section>
+
   <section class="vista" id="vista-caja" style="display:none">
 
   <section class="summary" id="caja-summary">
@@ -442,7 +505,7 @@
   <section class="vista" id="vista-reportes" style="display:none">
 
   <section class="toolbar">
-    <p class="bodega-intro">Descarga los datos del sistema en Excel — para revisarlos, filtrarlos o compartirlos fuera del sistema.</p>
+    <p class="bodega-intro">Descarga los datos del sistema en Excel o PDF — para revisarlos, filtrarlos, imprimirlos o compartirlos fuera del sistema.</p>
   </section>
 
   <section class="dash-grid">
@@ -450,25 +513,73 @@
     <div class="dash-panel">
       <h3 class="dash-titulo">Inventario completo y valorizado</h3>
       <p class="bodega-intro">Todos los productos con su stock, costo promedio y valor total — más una hoja aparte con el valor agrupado por categoría.</p>
-      <a class="btn btn-secundario" href="/api/reportes/inventario">Descargar Excel</a>
+      <div class="reportes-botones">
+        <a class="btn btn-secundario" href="/api/reportes/inventario">Descargar Excel</a>
+        <a class="btn btn-secundario" href="/api/reportes/inventario/pdf">Descargar PDF</a>
+      </div>
     </div>
 
     <div class="dash-panel">
       <h3 class="dash-titulo">Stock crítico y sin movimiento</h3>
       <p class="bodega-intro">Los productos que hay que reponer pronto, y los que llevan tiempo sin tener ninguna salida — en dos hojas separadas.</p>
-      <a class="btn btn-secundario" href="/api/reportes/stock">Descargar Excel</a>
+      <div class="reportes-botones">
+        <a class="btn btn-secundario" href="/api/reportes/stock">Descargar Excel</a>
+        <a class="btn btn-secundario" href="/api/reportes/stock/pdf">Descargar PDF</a>
+      </div>
     </div>
 
     <div class="dash-panel">
       <h3 class="dash-titulo">Rotación y consumo por período</h3>
-      <p class="bodega-intro">Más utilizados, baja rotación, inmovilizados y la tendencia semanal — el mismo análisis de la pestaña Rotación, en Excel.</p>
+      <p class="bodega-intro">Más utilizados, baja rotación, inmovilizados y la tendencia semanal — el mismo análisis de la pestaña Rotación, en Excel o PDF.</p>
       <select id="reportes-rotacion-periodo">
         <option value="30">Últimos 30 días</option>
         <option value="90" selected>Últimos 90 días</option>
         <option value="180">Últimos 180 días</option>
         <option value="365">Último año</option>
       </select>
-      <button class="btn btn-secundario" id="btn-reporte-rotacion">Descargar Excel</button>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-reporte-rotacion">Descargar Excel</button>
+        <button class="btn btn-secundario" id="btn-reporte-rotacion-pdf">Descargar PDF</button>
+      </div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Movimientos de inventario</h3>
+      <p class="bodega-intro">Toda la bitácora de entradas, salidas y pérdidas — filtrable por rango de fechas (déjalo vacío para traer todo).</p>
+      <div class="reportes-rango">
+        <label>Desde <input type="date" id="reportes-mov-desde"></label>
+        <label>Hasta <input type="date" id="reportes-mov-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-reporte-movimientos">Descargar Excel</button>
+        <button class="btn btn-secundario" id="btn-reporte-movimientos-pdf">Descargar PDF</button>
+      </div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Compras realizadas</h3>
+      <p class="bodega-intro">Todas las facturas registradas con su proveedor y total — filtrable por rango de fechas.</p>
+      <div class="reportes-rango">
+        <label>Desde <input type="date" id="reportes-compras-desde"></label>
+        <label>Hasta <input type="date" id="reportes-compras-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-reporte-compras">Descargar Excel</button>
+        <button class="btn btn-secundario" id="btn-reporte-compras-pdf">Descargar PDF</button>
+      </div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Gastos de Caja Chica</h3>
+      <p class="bodega-intro">Todos los gastos registrados, con su categoría y estado de rendición — filtrable por rango de fechas.</p>
+      <div class="reportes-rango">
+        <label>Desde <input type="date" id="reportes-caja-desde"></label>
+        <label>Hasta <input type="date" id="reportes-caja-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-reporte-caja">Descargar Excel</button>
+        <button class="btn btn-secundario" id="btn-reporte-caja-pdf">Descargar PDF</button>
+      </div>
     </div>
 
   </section>
@@ -555,6 +666,18 @@
 
     <div class="detalle-grid">
       <div class="detalle-info">
+
+        <div class="detalle-foto">
+          <div class="detalle-foto-preview" id="detalle-foto-preview">
+            <span class="vacio-inline">Sin foto</span>
+          </div>
+          <div class="detalle-foto-acciones">
+            <input type="file" id="detalle-foto-archivo" accept=".jpg,.jpeg,.png,.webp,.heic" style="display:none">
+            <button type="button" class="btn btn-secundario" id="btn-subir-foto">Subir foto</button>
+            <button type="button" class="btn btn-link btn-link--peligro" id="btn-quitar-foto" style="display:none">Quitar foto</button>
+          </div>
+        </div>
+
         <dl id="detalle-ficha"></dl>
 
         <h3 class="subtitulo">Registrar movimiento</h3>
@@ -724,6 +847,41 @@
   </div>
 </div>
 
+<!-- Modal: Carga masiva de facturas vía Excel -->
+<div class="modal-overlay" id="modal-carga-masiva">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Carga masiva de facturas (Excel)</h2>
+      <button class="modal-close" data-close="modal-carga-masiva">&times;</button>
+    </div>
+
+    <div id="cm-paso-subir">
+      <p class="bodega-intro">Sube un Excel con varias facturas y sus productos de una vez. Si no sabes el formato, descarga la plantilla — ya trae los IDs de tus productos actuales en una hoja aparte.</p>
+      <div class="modal-actions modal-actions--start">
+        <a class="btn btn-secundario" href="/api/facturas/carga-masiva/plantilla">Descargar plantilla</a>
+      </div>
+      <div class="campo">
+        <label>Archivo Excel (.xlsx)</label>
+        <input type="file" id="cm-archivo" accept=".xlsx,.xlsm">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-carga-masiva">Cancelar</button>
+        <button type="button" class="btn btn-primary" id="btn-cm-previsualizar">Previsualizar</button>
+      </div>
+    </div>
+
+    <div id="cm-paso-preview" style="display:none">
+      <p class="ayuda" id="cm-resumen"></p>
+      <div id="cm-lista-facturas"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" id="btn-cm-volver">Volver a subir otro archivo</button>
+        <button type="button" class="btn btn-primary" id="btn-cm-confirmar">Confirmar carga</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <!-- Modal: Nuevo / editar proveedor -->
 <div class="modal-overlay" id="modal-proveedor">
   <div class="modal">
@@ -783,6 +941,13 @@
       <button type="button" class="btn btn-secundario" id="btn-probar-respaldo-auto">Enviar un respaldo de prueba ahora</button>
     </div>
 
+    <h3 class="subtitulo">Alertas de stock crítico (por correo)</h3>
+    <p class="ayuda-inline">Usa las mismas credenciales del respaldo automático. Una vez al día revisa si hay productos en o bajo su stock mínimo, y si hay alguno, avisa por correo — si no hay ninguno, no manda nada.</p>
+    <div id="alertas-stock-estado" class="ayuda">Cargando…</div>
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-secundario" id="btn-probar-alertas-stock">Revisar y enviar ahora si corresponde</button>
+    </div>
+
     <h3 class="subtitulo">Descargar respaldo</h3>
     <p class="ayuda-inline">Guarda una copia de toda la base de datos en tu computador. Hazlo antes de cada actualización del sistema, por si algo sale mal.</p>
     <div class="modal-actions modal-actions--start">
@@ -839,10 +1004,12 @@
 <div class="modal-overlay" id="modal-caja-gasto">
   <div class="modal">
     <div class="modal-head">
-      <h2>Nuevo gasto</h2>
+      <h2 id="modal-caja-gasto-titulo">Nuevo gasto</h2>
       <button class="modal-close" data-close="modal-caja-gasto">&times;</button>
     </div>
+    <p class="ayuda-inline" id="cg-bloqueado-aviso" style="display:none"></p>
     <form id="form-caja-gasto">
+      <input type="hidden" id="cg-id">
       <div class="grid-2">
         <div class="campo">
           <label>Monto ($ CLP) *</label>
@@ -871,31 +1038,38 @@
       <div class="campo">
         <label>Comprobante (foto o PDF de la boleta)</label>
         <input type="file" id="cg-comprobante" accept=".jpg,.jpeg,.png,.webp,.heic,.pdf">
+        <p class="ayuda-inline" id="cg-comprobante-actual" style="display:none"></p>
       </div>
 
-      <label class="toggle-critico">
-        <input type="checkbox" id="cg-emergencia">
-        Es una compra de emergencia — ingresar el stock a un producto del inventario
-      </label>
-      <div id="cg-emergencia-campos" style="display:none">
-        <div class="grid-2">
-          <div class="campo">
-            <label>Producto</label>
-            <select id="cg-producto-id">
-              <option value="">Selecciona un producto…</option>
-            </select>
+      <div id="cg-emergencia-wrap">
+        <label class="toggle-critico">
+          <input type="checkbox" id="cg-emergencia">
+          Es una compra de emergencia — ingresar el stock a un producto del inventario
+        </label>
+        <div id="cg-emergencia-campos" style="display:none">
+          <div class="grid-2">
+            <div class="campo">
+              <label>Producto</label>
+              <select id="cg-producto-id">
+                <option value="">Selecciona un producto…</option>
+              </select>
+            </div>
+            <div class="campo">
+              <label>Cantidad</label>
+              <input type="number" id="cg-cantidad" min="1" value="1">
+            </div>
           </div>
-          <div class="campo">
-            <label>Cantidad</label>
-            <input type="number" id="cg-cantidad" min="1" value="1">
-          </div>
+          <p class="ayuda-inline">El costo unitario se calcula solo, dividiendo el monto del gasto entre la cantidad.</p>
         </div>
-        <p class="ayuda-inline">El costo unitario se calcula solo, dividiendo el monto del gasto entre la cantidad.</p>
       </div>
 
+      <div class="modal-actions modal-actions--split" id="cg-acciones-editar" style="display:none">
+        <button type="button" class="btn btn-danger" id="btn-eliminar-caja-gasto">Eliminar gasto</button>
+        <span></span>
+      </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-caja-gasto">Cancelar</button>
-        <button type="submit" class="btn btn-primary">Guardar gasto</button>
+        <button type="submit" class="btn btn-primary" id="cg-btn-guardar">Guardar gasto</button>
       </div>
     </form>
   </div>
@@ -905,10 +1079,12 @@
 <div class="modal-overlay" id="modal-caja-aporte">
   <div class="modal">
     <div class="modal-head">
-      <h2>Nuevo aporte / reposición</h2>
+      <h2 id="modal-caja-aporte-titulo">Nuevo aporte / reposición</h2>
       <button class="modal-close" data-close="modal-caja-aporte">&times;</button>
     </div>
+    <p class="ayuda-inline" id="ca-bloqueado-aviso" style="display:none"></p>
     <form id="form-caja-aporte">
+      <input type="hidden" id="ca-id">
       <div class="grid-2">
         <div class="campo">
           <label>Monto ($ CLP) *</label>
@@ -926,12 +1102,42 @@
       <div class="campo">
         <label>Comprobante (opcional)</label>
         <input type="file" id="ca-comprobante" accept=".jpg,.jpeg,.png,.webp,.heic,.pdf">
+        <p class="ayuda-inline" id="ca-comprobante-actual" style="display:none"></p>
+      </div>
+      <div class="modal-actions modal-actions--split" id="ca-acciones-editar" style="display:none">
+        <button type="button" class="btn btn-danger" id="btn-eliminar-caja-aporte">Eliminar aporte</button>
+        <span></span>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-caja-aporte">Cancelar</button>
-        <button type="submit" class="btn btn-primary">Guardar aporte</button>
+        <button type="submit" class="btn btn-primary" id="ca-btn-guardar">Guardar aporte</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Modal: Detalle de una rendición ya generada -->
+<div class="modal-overlay" id="modal-caja-rendicion-detalle">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="modal-caja-rendicion-detalle-titulo">Rendición</h2>
+      <button class="modal-close" data-close="modal-caja-rendicion-detalle">&times;</button>
+    </div>
+    <dl id="crd-ficha"></dl>
+    <h3 class="subtitulo">Gastos incluidos</h3>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr><th>Fecha</th><th>Categoría / Descripción</th><th class="num">Monto</th></tr>
+        </thead>
+        <tbody id="tbody-caja-rendicion-detalle">
+          <tr><td colspan="3" class="vacio">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-caja-rendicion-detalle">Cerrar</button>
+    </div>
   </div>
 </div>
 

@@ -32,6 +32,12 @@ COMPROBANTES_DIR = os.path.join(os.path.dirname(DB_PATH), "comprobantes")
 os.makedirs(COMPROBANTES_DIR, exist_ok=True)
 EXTENSIONES_COMPROBANTE_PERMITIDAS = {".jpg", ".jpeg", ".png", ".pdf", ".webp", ".heic"}
 
+# Fotografías de producto (opcional) — mismo criterio que los comprobantes:
+# se guardan junto a la base de datos para no perderse con cada actualización.
+FOTOS_DIR = os.path.join(os.path.dirname(DB_PATH), "fotos_productos")
+os.makedirs(FOTOS_DIR, exist_ok=True)
+EXTENSIONES_FOTO_PERMITIDAS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "cambia-esta-clave-en-produccion-usando-la-variable-SECRET_KEY")
 
@@ -91,10 +97,18 @@ SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_DESTINATARIO = os.environ.get("SMTP_DESTINATARIO", "") or SMTP_USER
 RESPALDO_INTERVALO_HORAS = int(os.environ.get("RESPALDO_INTERVALO_HORAS", "24"))
+ALERTA_STOCK_INTERVALO_HORAS = int(os.environ.get("ALERTA_STOCK_INTERVALO_HORAS", "24"))
+ALERTA_STOCK_DESTINATARIO = os.environ.get("ALERTA_STOCK_DESTINATARIO", "") or SMTP_DESTINATARIO
 
 
 def respaldo_automatico_configurado():
     return bool(SMTP_USER and SMTP_PASSWORD and SMTP_DESTINATARIO)
+
+
+def alerta_stock_configurada():
+    # Reutiliza las mismas credenciales SMTP que ya se configuran para el
+    # respaldo automático (no hace falta configurar dos veces lo mismo).
+    return bool(SMTP_USER and SMTP_PASSWORD and ALERTA_STOCK_DESTINATARIO)
 
 
 CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
@@ -230,6 +244,16 @@ def init_db():
             exito INTEGER NOT NULL,
             destino TEXT DEFAULT '',
             detalle TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS alertas_stock_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT NOT NULL,
+            exito INTEGER NOT NULL,
+            destino TEXT DEFAULT '',
+            detalle TEXT DEFAULT '',
+            n_productos INTEGER NOT NULL DEFAULT 0,
+            correo_enviado INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS usuarios (
@@ -491,6 +515,14 @@ def init_db():
             )
         db.commit()
 
+    # ---- Migración 9: fotografía opcional por producto — solo guarda el
+    # nombre del archivo (igual que los comprobantes de Caja Chica); el
+    # archivo en sí se guarda aparte en FOTOS_DIR.
+    columnas_actuales = [c[1] for c in db.execute("PRAGMA table_info(productos)").fetchall()]
+    if "foto_archivo" not in columnas_actuales:
+        db.execute("ALTER TABLE productos ADD COLUMN foto_archivo TEXT DEFAULT ''")
+        db.commit()
+
     db.close()
 
 
@@ -502,6 +534,8 @@ def row_to_dict(row):
     d = dict(row)
     d["stock_total"] = d["stock_disponible"] + d["stock_reservado"]
     d["id_sistema"] = f"{d['id']:04d}"
+    if "foto_archivo" in d:
+        d["tiene_foto"] = bool(d.get("foto_archivo"))
     return d
 
 
@@ -531,6 +565,15 @@ PRODUCTO_SELECT = """
 
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
+
+
+def fmt_money_pdf(valor):
+    """Formatea un monto en pesos chilenos para los reportes PDF (con
+    separador de miles), igual que se ve en la interfaz."""
+    try:
+        return f"${round(valor):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "$0"
 
 
 def usuario_actual():
@@ -1036,9 +1079,86 @@ def eliminar_producto(producto_id):
         db.execute("DELETE FROM factura_lineas WHERE producto_id = ?", (producto_id,))
         # Los movimientos se eliminan solos por ON DELETE CASCADE.
 
+    fila_foto = db.execute("SELECT foto_archivo FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if fila_foto and fila_foto["foto_archivo"]:
+        _borrar_foto_producto(fila_foto["foto_archivo"])
+
     db.execute("DELETE FROM productos WHERE id = ?", (producto_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# API: Fotografía de producto (opcional)
+# ---------------------------------------------------------------------------
+
+def _borrar_foto_producto(nombre_archivo):
+    if not nombre_archivo:
+        return
+    try:
+        ruta = os.path.join(FOTOS_DIR, secure_filename(nombre_archivo))
+        if os.path.exists(ruta):
+            os.remove(ruta)
+    except OSError:
+        pass
+
+
+@app.route("/api/productos/<int:producto_id>/foto", methods=["POST"])
+def subir_foto_producto(producto_id):
+    db = get_db()
+    producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    archivo = request.files.get("foto")
+    if not archivo or not archivo.filename:
+        return jsonify({"error": "Debes adjuntar una imagen"}), 400
+
+    nombre_original = secure_filename(archivo.filename)
+    ext = os.path.splitext(nombre_original)[1].lower()
+    if ext not in EXTENSIONES_FOTO_PERMITIDAS:
+        return jsonify({"error": f"Tipo de archivo no permitido ({ext or 'sin extensión'}). Usa una foto (jpg/png/webp/heic)."}), 400
+
+    nombre_guardado = f"{uuid.uuid4().hex}{ext}"
+    archivo.save(os.path.join(FOTOS_DIR, nombre_guardado))
+
+    # Si ya tenía una foto anterior, se reemplaza (se borra la vieja del disco).
+    if producto["foto_archivo"]:
+        _borrar_foto_producto(producto["foto_archivo"])
+
+    db.execute(
+        "UPDATE productos SET foto_archivo = ?, actualizado_en = ? WHERE id = ?",
+        (nombre_guardado, now_iso(), producto_id),
+    )
+    db.commit()
+    return jsonify({"ok": True, "foto_archivo": nombre_guardado})
+
+
+@app.route("/api/productos/<int:producto_id>/foto", methods=["DELETE"])
+def eliminar_foto_producto(producto_id):
+    db = get_db()
+    producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    if producto["foto_archivo"]:
+        _borrar_foto_producto(producto["foto_archivo"])
+        db.execute(
+            "UPDATE productos SET foto_archivo = '', actualizado_en = ? WHERE id = ?",
+            (now_iso(), producto_id),
+        )
+        db.commit()
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/productos/foto/<path:nombre_archivo>", methods=["GET"])
+def obtener_foto_producto(nombre_archivo):
+    nombre_seguro = secure_filename(nombre_archivo)
+    ruta = os.path.join(FOTOS_DIR, nombre_seguro)
+    if not os.path.exists(ruta):
+        return jsonify({"error": "Foto no encontrada"}), 404
+    return send_file(ruta)
 
 
 # ---------------------------------------------------------------------------
@@ -1759,6 +1879,17 @@ def crear_factura():
 
         lineas_validadas.append((producto, cantidad, precio_unitario))
 
+    factura_id = _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock)
+    db.commit()
+
+    nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
+    return jsonify(_factura_detalle(db, nueva)), 201
+
+
+def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True):
+    """Inserta la factura y sus líneas, aplicando el ingreso de stock si
+    corresponde. Separado de crear_factura() para poder reutilizarlo también
+    desde la carga masiva vía Excel (Módulo de compras)."""
     ts = now_iso()
     cur = db.execute(
         "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en) VALUES (?, ?, ?, ?)",
@@ -1788,10 +1919,7 @@ def crear_factura():
                 (now_iso(), cur_linea.lastrowid),
             )
 
-    db.commit()
-
-    nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
-    return jsonify(_factura_detalle(db, nueva)), 201
+    return factura_id
 
 
 @app.route("/api/facturas/<int:factura_id>", methods=["DELETE"])
@@ -1856,6 +1984,355 @@ def eliminar_factura(factura_id):
     db.execute("DELETE FROM facturas WHERE id = ?", (factura_id,))
     db.commit()
     return jsonify({"ok": True, "revertido": bool(lineas_aplicadas)})
+
+
+# ---------------------------------------------------------------------------
+# API: Carga masiva de facturas vía Excel
+# ---------------------------------------------------------------------------
+#
+# Flujo en dos pasos para evitar cargar datos con errores sin que el usuario
+# los vea antes: primero se sube el Excel y se valida todo (sin tocar la
+# base de datos), devolviendo una previsualización agrupada por factura con
+# los errores que tenga cada una. Recién cuando el usuario confirma esa
+# previsualización se registran las facturas válidas (las que tengan algún
+# error quedan afuera, no bloquean a las demás).
+#
+# La previsualización se guarda un rato en memoria (CARGA_MASIVA_CACHE) para
+# que "confirmar" no tenga que volver a mandar el Excel completo: solo manda
+# el token que le devolvió la previsualización.
+
+CARGA_MASIVA_CACHE = {}
+CARGA_MASIVA_TTL_SEGUNDOS = 30 * 60
+CARGA_MASIVA_ENCABEZADOS = [
+    "N° Factura", "Fecha (AAAA-MM-DD)", "Proveedor", "RUT Proveedor",
+    "ID Producto", "Categoría", "Modelo", "Cantidad", "Precio Unitario",
+]
+
+
+def _carga_masiva_limpiar_cache():
+    ahora = time.time()
+    vencidos = [t for t, v in CARGA_MASIVA_CACHE.items() if ahora - v["creado_en"] > CARGA_MASIVA_TTL_SEGUNDOS]
+    for t in vencidos:
+        CARGA_MASIVA_CACHE.pop(t, None)
+
+
+@app.route("/api/facturas/carga-masiva/plantilla", methods=["GET"])
+def carga_masiva_plantilla():
+    """Descarga un Excel de ejemplo con las columnas esperadas, más una hoja
+    de referencia con los productos actuales (su ID y nombre) para que sea
+    fácil llenar la planilla sin adivinar los códigos."""
+    from openpyxl import Workbook
+
+    db = get_db()
+    wb = Workbook()
+
+    ws = wb.active
+    ws.title = "Facturas a cargar"
+    ws.append(CARGA_MASIVA_ENCABEZADOS)
+    _estilo_encabezado(ws)
+    ws.append(["F-1001", "2026-07-01", "Repuestos Central", "76.123.456-7", 1, "", "", 4, 25000])
+    ws.append(["F-1001", "2026-07-01", "Repuestos Central", "76.123.456-7", "", "FILTROS", "AIRE-01", 2, 18000])
+    ws.append(["F-1002", "2026-07-02", "Baterías Sur", "", 3, "", "", 1, 90000])
+    _autoancho(ws)
+
+    ws_ref = wb.create_sheet("Productos (referencia)")
+    ws_ref.append(["ID Producto", "Categoría", "Modelo", "Nombre", "Stock actual"])
+    _estilo_encabezado(ws_ref)
+    for p in db.execute(PRODUCTO_SELECT + " ORDER BY p.categoria, p.modelo").fetchall():
+        d = row_to_dict(p)
+        ws_ref.append([d["id"], d["categoria"], d["modelo"], d["nombre"], d["stock_disponible"]])
+    _autoancho(ws_ref)
+
+    ws_ayuda = wb.create_sheet("Instrucciones")
+    ws_ayuda.append(["Cómo llenar esta planilla"])
+    instrucciones = [
+        "Una fila por cada producto de cada factura. Si una factura trae varios productos, repite el N° de Factura en varias filas.",
+        "N° Factura: el número o folio de la factura. No puede repetir uno que ya esté registrado en el sistema.",
+        "Fecha: formato AAAA-MM-DD (ej: 2026-07-01). Si se deja vacía, se guarda sin fecha.",
+        "Proveedor: nombre del proveedor. Si no existe todavía en el sistema, se crea automáticamente.",
+        "RUT Proveedor: opcional. Solo se usa si hay que crear el proveedor (si ya existe, se respeta el RUT que ya tiene guardado).",
+        "ID Producto: el número de producto tal como aparece en el sistema (columna 'ID Producto' de la hoja Productos (referencia), sin el '#'). Es la forma más segura de identificar el producto.",
+        "Categoría / Modelo: alternativa si no se tiene el ID Producto — deben coincidir exactamente con un producto existente (no distingue mayúsculas/minúsculas).",
+        "Cantidad: número entero mayor a 0.",
+        "Precio Unitario: número, puede tener decimales. No puede ser negativo.",
+        "El stock se ingresa automáticamente al confirmar la carga, igual que al crear una factura manual.",
+    ]
+    for i, texto in enumerate(instrucciones, start=2):
+        ws_ayuda.cell(row=i, column=1, value=f"• {texto}")
+    ws_ayuda.column_dimensions["A"].width = 120
+
+    return _excel_response(wb, "plantilla_carga_facturas.xlsx")
+
+
+def _carga_masiva_leer_excel(archivo):
+    """Lee el Excel subido y devuelve una lista de filas crudas (dict), sin
+    validar todavía. Usa los nombres de columna del encabezado (no la
+    posición), para tolerar que el usuario reordene columnas."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(archivo, data_only=True)
+    ws = wb.worksheets[0]
+
+    filas_iter = ws.iter_rows(values_only=True)
+    try:
+        encabezado = next(filas_iter)
+    except StopIteration:
+        return []
+
+    def _norm(txt):
+        return re.sub(r"\s+", " ", str(txt or "")).strip().lower()
+
+    mapa_columnas = {
+        "n° factura": "numero", "n numero factura": "numero", "numero factura": "numero", "factura": "numero",
+        "fecha (aaaa-mm-dd)": "fecha", "fecha": "fecha",
+        "proveedor": "proveedor",
+        "rut proveedor": "rut_proveedor",
+        "id producto": "producto_id",
+        "categoría": "categoria", "categoria": "categoria",
+        "modelo": "modelo",
+        "cantidad": "cantidad",
+        "precio unitario": "precio_unitario",
+    }
+
+    indices = {}
+    for i, col in enumerate(encabezado):
+        clave = mapa_columnas.get(_norm(col))
+        if clave:
+            indices[clave] = i
+
+    filas = []
+    for n_fila, fila in enumerate(filas_iter, start=2):
+        if fila is None or all(v is None or str(v).strip() == "" for v in fila):
+            continue  # fila vacía: se ignora en silencio
+        def val(clave):
+            idx = indices.get(clave)
+            if idx is None or idx >= len(fila):
+                return None
+            v = fila[idx]
+            return v.strip() if isinstance(v, str) else v
+        filas.append({
+            "fila": n_fila,
+            "numero": val("numero"),
+            "fecha": val("fecha"),
+            "proveedor": val("proveedor"),
+            "rut_proveedor": val("rut_proveedor"),
+            "producto_id": val("producto_id"),
+            "categoria": val("categoria"),
+            "modelo": val("modelo"),
+            "cantidad": val("cantidad"),
+            "precio_unitario": val("precio_unitario"),
+        })
+    return filas
+
+
+def _carga_masiva_resolver_producto(db, fila):
+    pid = fila.get("producto_id")
+    if pid is not None and str(pid).strip() != "":
+        try:
+            pid_int = int(float(pid))
+        except (TypeError, ValueError):
+            return None, f"Fila {fila['fila']}: 'ID Producto' inválido ({pid!r})"
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (pid_int,)).fetchone()
+        if not producto:
+            return None, f"Fila {fila['fila']}: no existe ningún producto con ID {pid_int}"
+        return producto, None
+
+    categoria = (fila.get("categoria") or "").strip()
+    modelo = (fila.get("modelo") or "").strip()
+    if not categoria and not modelo:
+        return None, f"Fila {fila['fila']}: falta 'ID Producto' o 'Categoría'/'Modelo' para identificar el producto"
+    producto = db.execute(
+        "SELECT * FROM productos WHERE UPPER(categoria) = UPPER(?) AND UPPER(modelo) = UPPER(?)",
+        (categoria, modelo),
+    ).fetchone()
+    if not producto:
+        return None, f"Fila {fila['fila']}: no se encontró un producto con categoría '{categoria}' y modelo '{modelo}'"
+    return producto, None
+
+
+def _carga_masiva_resolver_proveedor(db, nombre, rut, proveedores_nuevos_en_este_lote):
+    nombre = (nombre or "").strip()
+    if not nombre:
+        return None, None, False
+    existente = db.execute("SELECT * FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (nombre,)).fetchone()
+    if existente:
+        return existente["id"], existente["nombre"], False
+    if nombre.upper() in proveedores_nuevos_en_este_lote:
+        return proveedores_nuevos_en_este_lote[nombre.upper()], nombre, True
+    return "NUEVO", nombre, True  # marcador: se crea recién al confirmar
+
+
+@app.route("/api/facturas/carga-masiva/previsualizar", methods=["POST"])
+def carga_masiva_previsualizar():
+    _carga_masiva_limpiar_cache()
+    archivo = request.files.get("archivo")
+    if not archivo or not archivo.filename:
+        return jsonify({"error": "Debes adjuntar un archivo Excel (.xlsx)"}), 400
+    if not archivo.filename.lower().endswith((".xlsx", ".xlsm")):
+        return jsonify({"error": "El archivo debe ser un Excel (.xlsx)"}), 400
+
+    try:
+        filas = _carga_masiva_leer_excel(archivo)
+    except Exception:
+        return jsonify({"error": "No se pudo leer el archivo. Verifica que sea un Excel válido y siga el formato de la plantilla."}), 400
+
+    if not filas:
+        return jsonify({"error": "El archivo no tiene filas con datos (o está vacío)."}), 400
+
+    db = get_db()
+    numeros_existentes = {r["numero"] for r in db.execute("SELECT numero FROM facturas").fetchall()}
+
+    por_factura = {}
+    orden_facturas = []
+    proveedores_nuevos_vistos = {}
+
+    for fila in filas:
+        numero = str(fila.get("numero") or "").strip().upper()
+        errores_fila = []
+
+        if not numero:
+            errores_fila.append(f"Fila {fila['fila']}: falta el N° de Factura")
+            numero = f"(sin número — fila {fila['fila']})"
+
+        if numero not in por_factura:
+            por_factura[numero] = {"numero": numero, "fecha": fila.get("fecha") or "", "proveedor_nombre": None,
+                                    "proveedor_id": None, "proveedor_nuevo": False, "lineas": [], "errores": []}
+            orden_facturas.append(numero)
+        grupo = por_factura[numero]
+
+        if numero in numeros_existentes:
+            grupo["errores"].append(f"Ya existe una factura registrada con el número '{numero}'")
+
+        if fila.get("proveedor") and grupo["proveedor_nombre"] is None:
+            prov_id, prov_nombre, es_nuevo = _carga_masiva_resolver_proveedor(
+                db, fila.get("proveedor"), fila.get("rut_proveedor"), proveedores_nuevos_vistos
+            )
+            grupo["proveedor_nombre"] = prov_nombre
+            grupo["proveedor_rut"] = (fila.get("rut_proveedor") or "").strip()
+            grupo["proveedor_nuevo"] = es_nuevo
+            grupo["proveedor_id"] = None if prov_id == "NUEVO" else prov_id
+            if es_nuevo and prov_nombre:
+                proveedores_nuevos_vistos[prov_nombre.upper()] = "NUEVO"
+
+        producto, error_producto = _carga_masiva_resolver_producto(db, fila)
+        if error_producto:
+            errores_fila.append(error_producto)
+
+        cantidad_ok, precio_ok = None, None
+        try:
+            cantidad_ok = int(fila.get("cantidad"))
+            if cantidad_ok <= 0:
+                errores_fila.append(f"Fila {fila['fila']}: la cantidad debe ser mayor a 0")
+        except (TypeError, ValueError):
+            errores_fila.append(f"Fila {fila['fila']}: 'Cantidad' inválida ({fila.get('cantidad')!r})")
+
+        try:
+            precio_ok = float(fila.get("precio_unitario"))
+            if precio_ok < 0:
+                errores_fila.append(f"Fila {fila['fila']}: el precio no puede ser negativo")
+        except (TypeError, ValueError):
+            errores_fila.append(f"Fila {fila['fila']}: 'Precio Unitario' inválido ({fila.get('precio_unitario')!r})")
+
+        grupo["lineas"].append({
+            "fila": fila["fila"],
+            "producto_id": producto["id"] if producto else None,
+            "producto_nombre": row_to_dict(producto)["nombre"] if producto else None,
+            "cantidad": cantidad_ok,
+            "precio_unitario": precio_ok,
+            "errores": errores_fila,
+        })
+        if errores_fila:
+            grupo["errores"].extend(errores_fila)
+
+    # Un producto no puede aparecer dos veces en la misma factura.
+    for grupo in por_factura.values():
+        vistos = {}
+        for linea in grupo["lineas"]:
+            if linea["producto_id"] is None:
+                continue
+            if linea["producto_id"] in vistos:
+                msg = f"El producto '{linea['producto_nombre']}' aparece más de una vez en la factura '{grupo['numero']}'"
+                if msg not in grupo["errores"]:
+                    grupo["errores"].append(msg)
+            vistos[linea["producto_id"]] = True
+
+    facturas_preview = [por_factura[n] for n in orden_facturas]
+    for g in facturas_preview:
+        g["valida"] = len(g["errores"]) == 0
+
+    token = uuid.uuid4().hex
+    CARGA_MASIVA_CACHE[token] = {"creado_en": time.time(), "usuario": usuario_actual(), "facturas": facturas_preview}
+
+    return jsonify({
+        "token": token,
+        "facturas": facturas_preview,
+        "resumen": {
+            "total_facturas": len(facturas_preview),
+            "validas": sum(1 for g in facturas_preview if g["valida"]),
+            "con_errores": sum(1 for g in facturas_preview if not g["valida"]),
+        },
+    })
+
+
+@app.route("/api/facturas/carga-masiva/confirmar", methods=["POST"])
+def carga_masiva_confirmar():
+    _carga_masiva_limpiar_cache()
+    data = request.get_json(force=True, silent=True) or {}
+    token = data.get("token")
+    entrada = CARGA_MASIVA_CACHE.get(token)
+    if not entrada:
+        return jsonify({"error": "La previsualización expiró o no es válida. Vuelve a subir el archivo."}), 400
+
+    db = get_db()
+    usuario = usuario_actual()
+    creadas, omitidas = [], []
+
+    for grupo in entrada["facturas"]:
+        if not grupo["valida"]:
+            omitidas.append(grupo["numero"])
+            continue
+
+        # Revalidación rápida por si algo cambió desde la previsualización
+        # (otra factura con el mismo número, un producto eliminado, etc.).
+        ya_existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (grupo["numero"],)).fetchone()
+        if ya_existe:
+            omitidas.append(grupo["numero"])
+            continue
+
+        proveedor_id = grupo.get("proveedor_id")
+        if grupo.get("proveedor_nuevo") and grupo.get("proveedor_nombre"):
+            existente = db.execute(
+                "SELECT id FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (grupo["proveedor_nombre"],)
+            ).fetchone()
+            if existente:
+                proveedor_id = existente["id"]
+            else:
+                cur = db.execute(
+                    "INSERT INTO proveedores (nombre, rut, creado_en) VALUES (?, ?, ?)",
+                    (grupo["proveedor_nombre"], formatear_rut(grupo.get("proveedor_rut") or ""), now_iso()),
+                )
+                proveedor_id = cur.lastrowid
+
+        lineas_validadas = []
+        lineas_ok = True
+        for linea in grupo["lineas"]:
+            producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
+            if not producto or linea["cantidad"] is None or linea["precio_unitario"] is None:
+                lineas_ok = False
+                break
+            lineas_validadas.append((producto, linea["cantidad"], linea["precio_unitario"]))
+
+        if not lineas_ok or not lineas_validadas:
+            omitidas.append(grupo["numero"])
+            continue
+
+        _registrar_factura(db, grupo["numero"], proveedor_id, grupo.get("fecha") or "", lineas_validadas, usuario)
+        creadas.append(grupo["numero"])
+
+    db.commit()
+    CARGA_MASIVA_CACHE.pop(token, None)
+
+    return jsonify({"creadas": creadas, "omitidas": omitidas, "total_creadas": len(creadas)})
 
 
 # ---------------------------------------------------------------------------
@@ -2066,6 +2543,153 @@ def backup_probar_automatico():
     if not exito:
         return jsonify({"error": detalle}), 400
     return jsonify({"ok": True, "detalle": detalle})
+
+
+# ---------------------------------------------------------------------------
+# Alertas automáticas de stock crítico por correo
+# ---------------------------------------------------------------------------
+#
+# Reutiliza las mismas credenciales SMTP que el respaldo automático diario:
+# una vez por día (configurable) revisa si hay productos en o bajo su stock
+# mínimo y, si hay alguno, manda un correo con el detalle. Si no hay
+# productos críticos ese día, no se manda nada (para no generar ruido).
+
+def _productos_stock_critico_para_alerta(db):
+    """Mismo criterio que se usa en el resto del sistema para 'stock
+    crítico' (Dashboard, Reportes): stock disponible en o bajo el mínimo."""
+    rows = db.execute(
+        PRODUCTO_SELECT + " WHERE p.stock_disponible <= p.stock_minimo AND p.stock_minimo > 0"
+        " ORDER BY (p.stock_disponible - p.stock_minimo) ASC"
+    ).fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
+def _enviar_alerta_stock_critico(forzar_aunque_vacio=False):
+    """Revisa el stock crítico actual y, si hay productos, manda un correo
+    con el detalle. Devuelve (exito, detalle, n_productos, correo_enviado)."""
+    if not alerta_stock_configurada():
+        return False, "Las alertas de stock no están configuradas (faltan las variables SMTP_USER / SMTP_PASSWORD).", 0, False
+
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    try:
+        productos = _productos_stock_critico_para_alerta(db)
+    finally:
+        db.close()
+
+    if not productos and not forzar_aunque_vacio:
+        return True, "Sin productos en estado crítico — no se envió correo.", 0, False
+
+    try:
+        fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+        msg = EmailMessage()
+        if productos:
+            msg["Subject"] = f"⚠ {len(productos)} producto(s) con stock crítico — Inventario Taller"
+        else:
+            msg["Subject"] = "Inventario Taller — sin productos con stock crítico"
+        msg["From"] = SMTP_USER
+        msg["To"] = ALERTA_STOCK_DESTINATARIO
+
+        if productos:
+            lineas = [
+                f"  - #{p['id_sistema']} {p['nombre']}: {p['stock_disponible']} disponible(s) (mínimo {p['stock_minimo']})"
+                for p in productos
+            ]
+            cuerpo = (
+                f"Se detectaron {len(productos)} producto(s) en o bajo su stock mínimo.\n\n"
+                + "\n".join(lineas)
+                + f"\n\nFecha: {fecha}\n"
+                "Revisa la pestaña 'Planificación' en el sistema para ver cuánto se sugiere comprar "
+                "y a qué proveedor, o la pestaña 'Productos' para ajustar el mínimo si ya no aplica.\n"
+                "Este correo se genera solo, no es necesario responderlo."
+            )
+        else:
+            cuerpo = f"No hay productos con stock crítico al momento de este chequeo manual.\n\nFecha: {fecha}"
+        msg.set_content(cuerpo)
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+
+        return True, f"Enviado a {ALERTA_STOCK_DESTINATARIO} ({len(productos)} producto(s))", len(productos), True
+    except Exception as e:
+        return False, f"Error al enviar: {e}", len(productos), False
+
+
+def _registrar_alerta_stock_log(exito, detalle, n_productos, correo_enviado):
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute(
+            """
+            INSERT INTO alertas_stock_log (fecha, exito, destino, detalle, n_productos, correo_enviado)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (now_iso(), 1 if exito else 0, ALERTA_STOCK_DESTINATARIO, detalle, n_productos, 1 if correo_enviado else 0),
+        )
+        db.commit()
+        db.close()
+    except sqlite3.Error:
+        pass
+
+
+def _hilo_alertas_stock():
+    while True:
+        try:
+            if alerta_stock_configurada():
+                db = sqlite3.connect(DB_PATH)
+                ultimo = db.execute(
+                    "SELECT fecha FROM alertas_stock_log ORDER BY fecha DESC LIMIT 1"
+                ).fetchone()
+                db.close()
+
+                debe_revisar = True
+                if ultimo:
+                    horas_desde_ultimo = (datetime.now() - datetime.fromisoformat(ultimo[0])).total_seconds() / 3600
+                    debe_revisar = horas_desde_ultimo >= ALERTA_STOCK_INTERVALO_HORAS
+
+                if debe_revisar:
+                    exito, detalle, n_productos, correo_enviado = _enviar_alerta_stock_critico()
+                    _registrar_alerta_stock_log(exito, detalle, n_productos, correo_enviado)
+        except Exception:
+            pass
+        time.sleep(3600)  # revisa una vez por hora si ya toca el chequeo diario
+
+
+_hilo_alertas_iniciado = False
+
+
+def iniciar_hilo_alertas_stock():
+    global _hilo_alertas_iniciado
+    if not _hilo_alertas_iniciado:
+        _hilo_alertas_iniciado = True
+        hilo = threading.Thread(target=_hilo_alertas_stock, daemon=True)
+        hilo.start()
+
+
+@app.route("/api/alertas-stock/estado", methods=["GET"])
+def alertas_stock_estado():
+    db = get_db()
+    historial = db.execute(
+        "SELECT * FROM alertas_stock_log ORDER BY fecha DESC LIMIT 10"
+    ).fetchall()
+    productos_criticos_ahora = _productos_stock_critico_para_alerta(db)
+    return jsonify({
+        "configurado": alerta_stock_configurada(),
+        "destinatario": ALERTA_STOCK_DESTINATARIO if alerta_stock_configurada() else None,
+        "intervalo_horas": ALERTA_STOCK_INTERVALO_HORAS,
+        "n_productos_criticos_ahora": len(productos_criticos_ahora),
+        "historial": [dict(r) for r in historial],
+    })
+
+
+@app.route("/api/alertas-stock/probar", methods=["POST"])
+def alertas_stock_probar():
+    exito, detalle, n_productos, correo_enviado = _enviar_alerta_stock_critico(forzar_aunque_vacio=True)
+    _registrar_alerta_stock_log(exito, detalle, n_productos, correo_enviado)
+    if not exito:
+        return jsonify({"error": detalle}), 400
+    return jsonify({"ok": True, "detalle": detalle, "n_productos": n_productos})
 
 
 # ---------------------------------------------------------------------------
@@ -2411,10 +3035,26 @@ def _guardar_comprobante(archivo):
     return nombre_guardado
 
 
+def _caja_bloqueo_motivo(row):
+    """Explica por qué un gasto/aporte de Caja Chica NO se puede editar ni
+    eliminar (para no descuadrar el saldo o la trazabilidad), o None si es
+    seguro modificarlo libremente."""
+    if row["rendicion_id"] is not None:
+        return "Este gasto ya fue incluido en una rendición y no se puede modificar."
+    if row["rendicion_origen_id"] is not None:
+        return ("Este aporte lo generó automáticamente una rendición y no se puede modificar suelto "
+                "(dejaría el saldo descuadrado respecto a los gastos que ya quedaron marcados como rendidos).")
+    if row["movimiento_inventario_id"] is not None:
+        return ("Este gasto ingresó stock al inventario (compra de emergencia). "
+                "Ajusta el stock manualmente primero si corresponde, y luego edita o elimina el gasto.")
+    return None
+
+
 def _caja_movimiento_dict(row):
     d = dict(row)
     d["tiene_comprobante"] = bool(d.get("comprobante_archivo"))
     d["rendido"] = d.get("rendicion_id") is not None
+    d["bloqueado_motivo"] = _caja_bloqueo_motivo(row)
     return d
 
 
@@ -2595,20 +3235,9 @@ def caja_eliminar_movimiento(mov_id):
     if row is None:
         return jsonify({"error": "Movimiento no encontrado"}), 404
 
-    if row["rendicion_id"] is not None:
-        return jsonify({"error": "Este gasto ya fue incluido en una rendición y no se puede eliminar."}), 409
-
-    if row["rendicion_origen_id"] is not None:
-        return jsonify({
-            "error": "Este aporte lo generó automáticamente una rendición y no se puede eliminar suelto "
-                     "(dejaría el saldo descuadrado respecto a los gastos que ya quedaron marcados como rendidos).",
-        }), 409
-
-    if row["movimiento_inventario_id"] is not None:
-        return jsonify({
-            "error": "Este gasto ingresó stock al inventario (compra de emergencia). "
-                     "Ajusta el stock manualmente primero si corresponde, y luego elimina el gasto.",
-        }), 409
+    bloqueo = _caja_bloqueo_motivo(row)
+    if bloqueo:
+        return jsonify({"error": bloqueo}), 409
 
     if row["comprobante_archivo"]:
         ruta = os.path.join(COMPROBANTES_DIR, row["comprobante_archivo"])
@@ -2621,6 +3250,62 @@ def caja_eliminar_movimiento(mov_id):
     db.execute("DELETE FROM caja_movimientos WHERE id = ?", (mov_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/caja/movimiento/<int:mov_id>", methods=["PUT"])
+def caja_editar_movimiento(mov_id):
+    """Editar un gasto o aporte (fecha, monto, categoría, descripción,
+    proveedor, y opcionalmente reemplazar el comprobante). Usa el mismo
+    candado que Eliminar: si ya está rendido, es una reposición automática,
+    o generó un ingreso de stock, no se puede tocar — para no descuadrar el
+    saldo ni la trazabilidad."""
+    db = get_db()
+    row = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Movimiento no encontrado"}), 404
+
+    bloqueo = _caja_bloqueo_motivo(row)
+    if bloqueo:
+        return jsonify({"error": bloqueo}), 409
+
+    data = request.form
+
+    try:
+        monto = float(data.get("monto"))
+        if monto <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
+
+    fecha_nueva = (data.get("fecha") or "").strip()
+    fecha_final = f"{fecha_nueva}T{datetime.now().strftime('%H:%M:%S')}" if fecha_nueva else row["fecha"]
+    descripcion = (data.get("descripcion") or "").strip().upper()
+
+    campos = {"monto": monto, "fecha": fecha_final, "descripcion": descripcion}
+    if row["tipo"] == "gasto":
+        campos["categoria"] = (data.get("categoria") or "").strip().upper()
+        campos["proveedor"] = (data.get("proveedor") or "").strip().upper()
+
+    if "comprobante" in request.files and request.files["comprobante"].filename:
+        try:
+            nuevo_comprobante = _guardar_comprobante(request.files.get("comprobante"))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if row["comprobante_archivo"]:
+            ruta_vieja = os.path.join(COMPROBANTES_DIR, row["comprobante_archivo"])
+            if os.path.exists(ruta_vieja):
+                try:
+                    os.remove(ruta_vieja)
+                except OSError:
+                    pass
+        campos["comprobante_archivo"] = nuevo_comprobante
+
+    set_clause = ", ".join(f"{k} = ?" for k in campos)
+    db.execute(f"UPDATE caja_movimientos SET {set_clause} WHERE id = ?", (*campos.values(), mov_id))
+    db.commit()
+
+    actualizado = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
+    return jsonify(_caja_movimiento_dict(actualizado))
 
 
 @app.route("/api/caja/comprobante/<path:nombre_archivo>", methods=["GET"])
@@ -3022,6 +3707,109 @@ def rotacion():
 
 
 # ---------------------------------------------------------------------------
+# API: Planificación de compras asistida (Módulo 9)
+# ---------------------------------------------------------------------------
+
+def _calcular_planificacion(dias=60):
+    """Para cada producto con stock mínimo definido, proyecta cuándo se va a
+    quedar bajo el mínimo usando el promedio de salidas semanales recientes
+    (mismo cálculo de ventana que Rotación), y sugiere cuánto comprar.
+
+    También arma la lista inversa: productos con mucho stock y poco o ningún
+    consumo reciente (plata inmovilizada en bodega).
+    """
+    db = get_db()
+    desde = (datetime.now() - timedelta(days=dias)).isoformat(timespec="seconds")
+
+    productos = [row_to_dict(r) for r in db.execute(PRODUCTO_SELECT).fetchall()]
+
+    salidas_rows = db.execute(
+        """
+        SELECT producto_id, SUM(cantidad) AS total, COUNT(DISTINCT strftime('%Y-%W', fecha)) AS n_semanas
+        FROM movimientos
+        WHERE tipo = 'salida' AND fecha >= ?
+        GROUP BY producto_id
+        """,
+        (desde,),
+    ).fetchall()
+    salidas_por_producto = {r["producto_id"]: r for r in salidas_rows}
+    semanas_periodo = max(1, dias / 7.0)
+
+    reponer = []
+    exceso = []
+
+    for p in productos:
+        stock_minimo = p["stock_minimo"] or 0
+        stock_actual = p["stock_disponible"]
+        salida = salidas_por_producto.get(p["id"])
+        total_salida = salida["total"] if salida else 0
+        promedio_semanal = total_salida / semanas_periodo if total_salida else 0.0
+
+        if stock_minimo <= 0:
+            # Sin mínimo definido: no se puede proyectar cuándo se va a
+            # quedar bajo el mínimo, pero igual sirve para detectar exceso.
+            if stock_actual > 0 and promedio_semanal == 0:
+                d = dict(p)
+                d["promedio_semanal"] = round(promedio_semanal, 2)
+                d["semanas_sin_consumo"] = dias // 7
+                exceso.append(d)
+            continue
+
+        d = dict(p)
+        d["promedio_semanal"] = round(promedio_semanal, 2)
+
+        if promedio_semanal > 0:
+            semanas_para_minimo = (stock_actual - stock_minimo) / promedio_semanal
+            dias_para_minimo = round(semanas_para_minimo * 7)
+            d["dias_para_minimo"] = dias_para_minimo
+            fecha_estim = datetime.now() + timedelta(days=dias_para_minimo)
+            d["fecha_estimada_minimo"] = fecha_estim.strftime("%Y-%m-%d")
+            # Sugerencia: cubrir 4 semanas de consumo por sobre el mínimo,
+            # descontando lo que ya hay disponible.
+            objetivo = stock_minimo + promedio_semanal * 4
+            sugerido = max(0, round(objetivo - stock_actual))
+            d["cantidad_sugerida"] = sugerido
+            if stock_actual <= stock_minimo or dias_para_minimo <= 30:
+                proveedores, permite_sin = _proveedores_origen_producto(db, p["id"])
+                d["proveedores"] = proveedores
+                d["urgencia"] = "critico" if stock_actual <= stock_minimo else "proximo"
+                reponer.append(d)
+        else:
+            # Sin consumo en el período: no se puede proyectar una fecha,
+            # pero si ya está bajo el mínimo igual amerita revisión manual.
+            if stock_actual <= stock_minimo:
+                proveedores, permite_sin = _proveedores_origen_producto(db, p["id"])
+                d["proveedores"] = proveedores
+                d["dias_para_minimo"] = None
+                d["fecha_estimada_minimo"] = None
+                d["cantidad_sugerida"] = max(0, stock_minimo * 2 - stock_actual)
+                d["urgencia"] = "critico"
+                reponer.append(d)
+            elif stock_actual > stock_minimo * 2:
+                d["semanas_sin_consumo"] = dias // 7
+                exceso.append(d)
+
+    reponer.sort(key=lambda d: (d["urgencia"] != "critico", d.get("dias_para_minimo") if d.get("dias_para_minimo") is not None else -1))
+    exceso.sort(key=lambda d: d["stock_disponible"] * (d["costo_compra"] or 0), reverse=True)
+
+    return {
+        "dias": dias,
+        "reponer": reponer,
+        "exceso": exceso[:20],
+    }
+
+
+@app.route("/api/planificacion", methods=["GET"])
+def planificacion():
+    try:
+        dias = int(request.args.get("dias", 60))
+    except (TypeError, ValueError):
+        dias = 60
+    dias = max(14, min(dias, 365))
+    return jsonify(_calcular_planificacion(dias))
+
+
+# ---------------------------------------------------------------------------
 # API: Reportes y Exportaciones (Módulo 11)
 # ---------------------------------------------------------------------------
 
@@ -3202,8 +3990,415 @@ def reporte_rotacion():
     return _excel_response(wb, nombre)
 
 
+# ---------------------------------------------------------------------------
+# API: Reportes — versión PDF (mismos 3 reportes que Excel, para imprimir o
+# mostrarle a alguien sin necesidad de abrir una planilla).
+# ---------------------------------------------------------------------------
+
+def _pdf_documento(titulo):
+    """Arma un documento PDF apaisado (más ancho que alto, para que quepan
+    tablas con varias columnas) con un título arriba y devuelve
+    (buffer, doc, elementos, estilos) listos para ir agregando contenido."""
+    import io
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=landscape(A4),
+        topMargin=1.4 * cm, bottomMargin=1.4 * cm, leftMargin=1.4 * cm, rightMargin=1.4 * cm,
+    )
+    estilos = getSampleStyleSheet()
+    estilos.add(ParagraphStyle(name="TituloReporte", fontSize=16, leading=20, spaceAfter=4, fontName="Helvetica-Bold"))
+    estilos.add(ParagraphStyle(name="SubtituloReporte", fontSize=10, textColor="#666666", spaceAfter=14))
+    estilos.add(ParagraphStyle(name="TituloTabla", fontSize=12, spaceBefore=14, spaceAfter=6, fontName="Helvetica-Bold"))
+
+    elementos = [
+        Paragraph(titulo, estilos["TituloReporte"]),
+        Paragraph(f"Taller Mecánico — generado el {datetime.now().strftime('%d-%m-%Y %H:%M')}", estilos["SubtituloReporte"]),
+    ]
+    return buffer, doc, elementos, estilos
+
+
+def _pdf_tabla(elementos, estilos, titulo_tabla, encabezados, filas, notas=""):
+    """Agrega un título de sección + una tabla con estilo consistente."""
+    from reportlab.platypus import Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib import colors
+
+    if titulo_tabla:
+        elementos.append(Paragraph(titulo_tabla, estilos["TituloTabla"]))
+    if not filas:
+        elementos.append(Paragraph("Sin datos para mostrar.", estilos["Normal"]))
+        return
+    datos = [encabezados] + [[str(c) if c is not None else "" for c in fila] for fila in filas]
+    tabla = Table(datos, repeatRows=1)
+    tabla.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2430")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F4F5F7")]),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D8DCE3")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    elementos.append(tabla)
+    if notas:
+        elementos.append(Paragraph(notas, estilos["Normal"]))
+
+
+def _pdf_response(buffer, doc, elementos, nombre_archivo):
+    doc.build(elementos)
+    buffer.seek(0)
+    return send_file(buffer, as_attachment=True, download_name=nombre_archivo, mimetype="application/pdf")
+
+
+@app.route("/api/reportes/inventario/pdf", methods=["GET"])
+def reporte_inventario_pdf():
+    db = get_db()
+    rows = db.execute(PRODUCTO_SELECT + " ORDER BY p.nombre COLLATE NOCASE").fetchall()
+    productos = [row_to_dict(r) for r in rows]
+
+    buffer, doc, elementos, estilos = _pdf_documento("Inventario completo y valorizado")
+
+    valor_general = sum(p["stock_total"] * p["costo_compra"] for p in productos)
+    filas = [
+        [p["id_sistema"], p["codigo_interno"], p["categoria"], p["modelo"],
+         p["ubicacion_codigo"] or "—", p["stock_disponible"], p["stock_reservado"],
+         p["stock_merma"], p["stock_total"], fmt_money_pdf(p["costo_compra"]), fmt_money_pdf(p["stock_total"] * p["costo_compra"])]
+        for p in productos
+    ]
+    _pdf_tabla(
+        elementos, estilos, f"Detalle por producto — valor total: {fmt_money_pdf(valor_general)}",
+        ["N°", "Código", "Categoría", "Modelo", "Ubicación", "Disp.", "Reserv.", "Merma", "Total", "Costo prom.", "Valor"],
+        filas,
+    )
+
+    por_categoria = {}
+    for p in productos:
+        cat = p["categoria"] or "(sin categoría)"
+        acc = por_categoria.setdefault(cat, {"n": 0, "unidades": 0, "valor": 0})
+        acc["n"] += 1
+        acc["unidades"] += p["stock_total"]
+        acc["valor"] += p["stock_total"] * p["costo_compra"]
+    filas_cat = [
+        [cat, acc["n"], acc["unidades"], fmt_money_pdf(acc["valor"])]
+        for cat, acc in sorted(por_categoria.items(), key=lambda kv: kv[1]["valor"], reverse=True)
+    ]
+    _pdf_tabla(elementos, estilos, "Valorizado por categoría", ["Categoría", "N° productos", "Unidades", "Valor"], filas_cat)
+
+    nombre = f"inventario_valorizado_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)
+
+
+@app.route("/api/reportes/stock/pdf", methods=["GET"])
+def reporte_stock_pdf():
+    db = get_db()
+    criticos = [row_to_dict(r) for r in db.execute(
+        PRODUCTO_SELECT + " WHERE p.stock_disponible <= p.stock_minimo ORDER BY (p.stock_disponible - p.stock_minimo) ASC"
+    ).fetchall()]
+    sin_movimiento = [row_to_dict(r) for r in db.execute(
+        PRODUCTO_SELECT + """
+        WHERE p.id NOT IN (SELECT DISTINCT producto_id FROM movimientos)
+        ORDER BY p.creado_en DESC
+        """
+    ).fetchall()]
+
+    buffer, doc, elementos, estilos = _pdf_documento("Stock crítico y productos sin movimiento")
+
+    filas_criticos = [
+        [p["id_sistema"], p["nombre"], p["categoria"], p["stock_disponible"], p["stock_minimo"],
+         p["stock_disponible"] - p["stock_minimo"], p["ubicacion_codigo"] or "—"]
+        for p in criticos
+    ]
+    _pdf_tabla(
+        elementos, estilos, f"Stock crítico ({len(criticos)} producto(s))",
+        ["N°", "Producto", "Categoría", "Disponible", "Mínimo", "Diferencia", "Ubicación"],
+        filas_criticos,
+    )
+
+    filas_sin_mov = [
+        [p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"], fmt_money_pdf(p["stock_total"] * p["costo_compra"]), p["creado_en"][:10]]
+        for p in sin_movimiento
+    ]
+    _pdf_tabla(
+        elementos, estilos, f"Sin ningún movimiento registrado ({len(sin_movimiento)} producto(s))",
+        ["N°", "Producto", "Categoría", "Stock total", "Valor", "Creado el"],
+        filas_sin_mov,
+    )
+
+    nombre = f"stock_critico_sin_movimiento_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)
+
+
+@app.route("/api/reportes/rotacion/pdf", methods=["GET"])
+def reporte_rotacion_pdf():
+    try:
+        dias = int(request.args.get("dias", 90))
+    except (TypeError, ValueError):
+        dias = 90
+    dias = max(7, min(dias, 730))
+    datos = _calcular_rotacion(dias)
+
+    buffer, doc, elementos, estilos = _pdf_documento(f"Rotación y consumo — últimos {dias} días")
+
+    _pdf_tabla(
+        elementos, estilos, "Más utilizados",
+        ["N°", "Producto", "Categoría", "Salidas", "N° mov.", "Tendencia"],
+        [[p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"], p["n_movimientos"], p["tendencia"]]
+         for p in datos["mas_utilizados"]],
+    )
+    _pdf_tabla(
+        elementos, estilos, "Baja rotación",
+        ["N°", "Producto", "Categoría", "Salidas en el período"],
+        [[p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"]] for p in datos["baja_rotacion"]],
+    )
+    _pdf_tabla(
+        elementos, estilos, "Inmovilizados (sin salidas en el período)",
+        ["N°", "Producto", "Categoría", "Stock total", "Valor"],
+        [[p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"], fmt_money_pdf(p["stock_total"] * p["costo_compra"])]
+         for p in datos["inmovilizados"]],
+    )
+
+    nombre = f"rotacion_{dias}dias_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)
+
+
+# ---------------------------------------------------------------------------
+# API: Reportes adicionales — Movimientos, Compras y Gastos de Caja Chica
+# (los otros reportes que pide la planilla original, además de los 3 ya
+# construidos). Todos aceptan ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD opcional.
+# ---------------------------------------------------------------------------
+
+def _rango_fechas():
+    desde = (request.args.get("desde") or "").strip()
+    hasta = (request.args.get("hasta") or "").strip()
+    return desde, hasta
+
+
+def _movimientos_para_reporte(desde, hasta):
+    db = get_db()
+    sql = """
+        SELECT m.*, p.nombre AS producto_nombre, p.codigo_interno AS producto_codigo_interno
+        FROM movimientos m
+        LEFT JOIN productos p ON p.id = m.producto_id
+        WHERE 1=1
+    """
+    params = []
+    if desde:
+        sql += " AND m.fecha >= ?"
+        params.append(desde)
+    if hasta:
+        sql += " AND m.fecha <= ?"
+        params.append(hasta + "T23:59:59")
+    sql += " ORDER BY m.fecha DESC, m.id DESC"
+    return db.execute(sql, params).fetchall()
+
+
+@app.route("/api/reportes/movimientos", methods=["GET"])
+def reporte_movimientos():
+    desde, hasta = _rango_fechas()
+    filas_db = _movimientos_para_reporte(desde, hasta)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Movimientos"
+    ws.append(["Fecha", "Tipo", "Categoría", "Producto", "Cantidad", "Costo unit.", "Motivo", "Usuario", "Factura", "Stock resultante"])
+    for m in filas_db:
+        ws.append([
+            m["fecha"], m["tipo"], m["categoria"] or "", m["producto_nombre"] or "(producto eliminado)",
+            m["cantidad"], m["costo_unitario"], m["motivo"] or "", m["usuario"] or "",
+            m["factura_numero"] or "", m["stock_resultante"],
+        ])
+    _estilo_encabezado(ws)
+    _autoancho(ws)
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"movimientos{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)
+
+
+@app.route("/api/reportes/movimientos/pdf", methods=["GET"])
+def reporte_movimientos_pdf():
+    desde, hasta = _rango_fechas()
+    filas_db = _movimientos_para_reporte(desde, hasta)
+
+    rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
+    buffer, doc, elementos, estilos = _pdf_documento(f"Movimientos de inventario{rango_txt}")
+
+    filas = [
+        [m["fecha"][:16].replace("T", " "), m["tipo"], m["categoria"] or "—",
+         m["producto_nombre"] or "(producto eliminado)", m["cantidad"], m["motivo"] or "—", m["usuario"] or "—"]
+        for m in filas_db
+    ]
+    _pdf_tabla(
+        elementos, estilos, f"Total: {len(filas)} movimiento(s)",
+        ["Fecha", "Tipo", "Categoría", "Producto", "Cant.", "Motivo", "Usuario"],
+        filas,
+    )
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"movimientos{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)
+
+
+def _facturas_para_reporte(desde, hasta):
+    db = get_db()
+    sql = FACTURA_SELECT + " WHERE 1=1"
+    params = []
+    if desde:
+        sql += " AND f.fecha >= ?"
+        params.append(desde)
+    if hasta:
+        sql += " AND f.fecha <= ?"
+        params.append(hasta)
+    sql += " ORDER BY f.fecha DESC, f.id DESC"
+    facturas = db.execute(sql, params).fetchall()
+    resultado = []
+    for f in facturas:
+        resumen = _factura_resumen(db, f)
+        total = db.execute(
+            "SELECT COALESCE(SUM(cantidad * precio_unitario), 0) FROM factura_lineas WHERE factura_id = ?",
+            (f["id"],),
+        ).fetchone()[0]
+        resumen["total"] = total
+        resultado.append(resumen)
+    return resultado
+
+
+@app.route("/api/reportes/compras", methods=["GET"])
+def reporte_compras():
+    desde, hasta = _rango_fechas()
+    facturas = _facturas_para_reporte(desde, hasta)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Compras"
+    ws.append(["Fecha", "N° factura", "Proveedor", "N° líneas", "Líneas aplicadas", "Total"])
+    total_general = 0
+    for f in facturas:
+        total_general += f["total"]
+        ws.append([f["fecha"], f["numero"], f["proveedor_display"], f["total_lineas"], f["lineas_aplicadas"], round(f["total"], 2)])
+    ws.append([])
+    ws.append(["", "", "", "", "TOTAL", round(total_general, 2)])
+    _estilo_encabezado(ws)
+    _autoancho(ws)
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"compras{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)
+
+
+@app.route("/api/reportes/compras/pdf", methods=["GET"])
+def reporte_compras_pdf():
+    desde, hasta = _rango_fechas()
+    facturas = _facturas_para_reporte(desde, hasta)
+
+    rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
+    buffer, doc, elementos, estilos = _pdf_documento(f"Compras realizadas{rango_txt}")
+
+    total_general = sum(f["total"] for f in facturas)
+    filas = [
+        [f["fecha"], f["numero"], f["proveedor_display"] or "—", f["total_lineas"], fmt_money_pdf(f["total"])]
+        for f in facturas
+    ]
+    _pdf_tabla(
+        elementos, estilos, f"Total facturado: {fmt_money_pdf(total_general)} — {len(facturas)} factura(s)",
+        ["Fecha", "N° factura", "Proveedor", "N° líneas", "Total"],
+        filas,
+    )
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"compras{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)
+
+
+def _gastos_caja_para_reporte(desde, hasta):
+    db = get_db()
+    sql = "SELECT * FROM caja_movimientos WHERE tipo = 'gasto'"
+    params = []
+    if desde:
+        sql += " AND fecha >= ?"
+        params.append(desde)
+    if hasta:
+        sql += " AND fecha <= ?"
+        params.append(hasta + "T23:59:59")
+    sql += " ORDER BY fecha DESC, id DESC"
+    return [_caja_movimiento_dict(r) for r in db.execute(sql, params).fetchall()]
+
+
+@app.route("/api/reportes/caja-gastos", methods=["GET"])
+def reporte_caja_gastos():
+    desde, hasta = _rango_fechas()
+    gastos = _gastos_caja_para_reporte(desde, hasta)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Gastos Caja Chica"
+    ws.append(["Fecha", "Categoría", "Descripción", "Proveedor", "Monto", "Estado", "Responsable"])
+    total = 0
+    for g in gastos:
+        total += g["monto"]
+        ws.append([
+            g["fecha"], g["categoria"] or "", g["descripcion"] or "", g["proveedor"] or "",
+            round(g["monto"], 2), "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "",
+        ])
+    ws.append([])
+    ws.append(["", "", "", "", round(total, 2), "", ""])
+    _estilo_encabezado(ws)
+    _autoancho(ws)
+
+    ws2 = wb.create_sheet("Por categoría")
+    ws2.append(["Categoría", "N° de gastos", "Total"])
+    por_categoria = {}
+    for g in gastos:
+        cat = g["categoria"] or "(sin categoría)"
+        acc = por_categoria.setdefault(cat, {"n": 0, "total": 0})
+        acc["n"] += 1
+        acc["total"] += g["monto"]
+    for cat, acc in sorted(por_categoria.items(), key=lambda kv: kv[1]["total"], reverse=True):
+        ws2.append([cat, acc["n"], round(acc["total"], 2)])
+    _estilo_encabezado(ws2)
+    _autoancho(ws2)
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"gastos_caja_chica{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)
+
+
+@app.route("/api/reportes/caja-gastos/pdf", methods=["GET"])
+def reporte_caja_gastos_pdf():
+    desde, hasta = _rango_fechas()
+    gastos = _gastos_caja_para_reporte(desde, hasta)
+
+    rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
+    buffer, doc, elementos, estilos = _pdf_documento(f"Gastos de Caja Chica{rango_txt}")
+
+    total = sum(g["monto"] for g in gastos)
+    filas = [
+        [g["fecha"][:10], g["categoria"] or "—", g["descripcion"] or "—", fmt_money_pdf(g["monto"]),
+         "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "—"]
+        for g in gastos
+    ]
+    _pdf_tabla(
+        elementos, estilos, f"Total gastado: {fmt_money_pdf(total)} — {len(gastos)} gasto(s)",
+        ["Fecha", "Categoría", "Descripción", "Monto", "Estado", "Responsable"],
+        filas,
+    )
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"gastos_caja_chica{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)
+
+
 init_db()
 iniciar_hilo_respaldos()
+iniciar_hilo_alertas_stock()
 
 if __name__ == "__main__":
     debug_mode = os.environ.get("FLASK_DEBUG") == "1"

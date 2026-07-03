@@ -16,6 +16,8 @@ const state = {
   usuarios: [],
   cajaCategoriasVistas: [],
   cajaPendientesSeleccionados: new Set(),
+  cajaMovimientos: [],
+  cajaMovimientoActivoId: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -30,6 +32,14 @@ function fmtFecha(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return iso;
   return d.toLocaleString("es-CL", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function fmtFechaSolo(isoFecha) {
+  // Para fechas simples "YYYY-MM-DD" (sin hora), evita el desfase de un día
+  // que puede dar new Date() al interpretarlas como UTC medianoche.
+  if (!isoFecha) return "—";
+  const [y, m, d] = isoFecha.split("-");
+  return `${d}-${m}-${y}`;
 }
 
 function toast(msg, isError = false) {
@@ -78,6 +88,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
     document.getElementById("vista-mermas").style.display = vista === "mermas" ? "block" : "none";
     document.getElementById("vista-rotacion").style.display = vista === "rotacion" ? "block" : "none";
+    document.getElementById("vista-planificacion").style.display = vista === "planificacion" ? "block" : "none";
     document.getElementById("vista-caja").style.display = vista === "caja" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
@@ -91,6 +102,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       movimientos: "Control de Movimientos",
       mermas: "Mermas",
       rotacion: "Control de Rotación",
+      planificacion: "Planificación de Compras",
       caja: "Caja Chica",
       reportes: "Reportes y Exportaciones",
       usuarios: "Usuarios",
@@ -103,6 +115,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "movimientos") cargarMovimientos();
     if (vista === "mermas") cargarMermas();
     if (vista === "rotacion") cargarRotacion();
+    if (vista === "planificacion") cargarPlanificacion();
     if (vista === "caja") cargarCaja();
     if (vista === "usuarios") cargarUsuarios();
   });
@@ -666,6 +679,7 @@ async function abrirDetalle(id) {
 function renderDetalle(p) {
   document.getElementById("detalle-nombre").textContent = `${p.nombre}`;
   document.getElementById("m-producto-id").value = p.id;
+  renderFotoProducto(p);
 
   const ubicacionTexto = p.ubicacion_codigo
     ? `<span class="mono">${escapeHtml(p.ubicacion_codigo)}</span>`
@@ -708,6 +722,56 @@ function renderDetalle(p) {
     `).join("");
   }
 }
+
+function renderFotoProducto(p) {
+  const preview = document.getElementById("detalle-foto-preview");
+  const btnQuitar = document.getElementById("btn-quitar-foto");
+  if (p.tiene_foto && p.foto_archivo) {
+    preview.innerHTML = `<img src="/api/productos/foto/${encodeURIComponent(p.foto_archivo)}" alt="Foto de ${escapeHtml(p.nombre)}">`;
+    btnQuitar.style.display = "inline-block";
+  } else {
+    preview.innerHTML = `<span class="vacio-inline">Sin foto</span>`;
+    btnQuitar.style.display = "none";
+  }
+}
+
+document.getElementById("btn-subir-foto").addEventListener("click", () => {
+  document.getElementById("detalle-foto-archivo").click();
+});
+
+document.getElementById("detalle-foto-archivo").addEventListener("change", async (e) => {
+  const archivo = e.target.files[0];
+  if (!archivo || !state.productoActivo) return;
+  const formData = new FormData();
+  formData.append("foto", archivo);
+  try {
+    const res = await fetch(`/api/productos/${state.productoActivo.id}/foto`, { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "No se pudo subir la foto");
+    toast("Foto guardada");
+    const actualizado = await api(`/api/productos/${state.productoActivo.id}`);
+    state.productoActivo = actualizado;
+    renderFotoProducto(actualizado);
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    e.target.value = "";
+  }
+});
+
+document.getElementById("btn-quitar-foto").addEventListener("click", async () => {
+  if (!state.productoActivo) return;
+  if (!confirm("¿Quitar la foto de este producto?")) return;
+  try {
+    await api(`/api/productos/${state.productoActivo.id}/foto`, { method: "DELETE" });
+    toast("Foto eliminada");
+    const actualizado = await api(`/api/productos/${state.productoActivo.id}`);
+    state.productoActivo = actualizado;
+    renderFotoProducto(actualizado);
+  } catch (err) {
+    toast(err.message, true);
+  }
+});
 
 function desbloquearCamposMovimiento() {
   document.getElementById("m-cantidad").readOnly = false;
@@ -1117,6 +1181,100 @@ function renderTablaProveedores() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Carga masiva de facturas vía Excel
+// ---------------------------------------------------------------------------
+
+state.cargaMasivaToken = null;
+
+function cmMostrarPaso(paso) {
+  document.getElementById("cm-paso-subir").style.display = paso === "subir" ? "block" : "none";
+  document.getElementById("cm-paso-preview").style.display = paso === "preview" ? "block" : "none";
+}
+
+document.getElementById("btn-carga-masiva-facturas").addEventListener("click", () => {
+  document.getElementById("cm-archivo").value = "";
+  state.cargaMasivaToken = null;
+  cmMostrarPaso("subir");
+  abrirModal("modal-carga-masiva");
+});
+
+document.getElementById("btn-cm-volver").addEventListener("click", () => {
+  document.getElementById("cm-archivo").value = "";
+  state.cargaMasivaToken = null;
+  cmMostrarPaso("subir");
+});
+
+document.getElementById("btn-cm-previsualizar").addEventListener("click", async () => {
+  const archivo = document.getElementById("cm-archivo").files[0];
+  if (!archivo) {
+    toast("Selecciona un archivo Excel primero", true);
+    return;
+  }
+  const formData = new FormData();
+  formData.append("archivo", archivo);
+  try {
+    const res = await fetch("/api/facturas/carga-masiva/previsualizar", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "No se pudo leer el archivo");
+    state.cargaMasivaToken = data.token;
+    renderPreviewCargaMasiva(data);
+    cmMostrarPaso("preview");
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+function renderPreviewCargaMasiva(data) {
+  const r = data.resumen;
+  document.getElementById("cm-resumen").textContent =
+    `${r.total_facturas} factura(s) detectada(s): ${r.validas} lista(s) para cargar, ${r.con_errores} con errores (no se van a importar).`;
+
+  document.getElementById("cm-lista-facturas").innerHTML = data.facturas.map(f => {
+    const claseEstado = f.valida ? "badge-urgencia badge-urgencia--proximo" : "badge-urgencia badge-urgencia--critico";
+    const textoEstado = f.valida ? "Lista para cargar" : "Con errores — se omitirá";
+    const proveedorTxt = f.proveedor_nombre
+      ? `${escapeHtml(f.proveedor_nombre)}${f.proveedor_nuevo ? " (se creará)" : ""}`
+      : "Sin proveedor";
+    const lineasHtml = f.lineas.map(l => `
+      <tr class="${l.errores.length ? "fila-con-error" : ""}">
+        <td>${l.producto_nombre ? escapeHtml(l.producto_nombre) : `<span class="vacio-inline">Producto no identificado (fila ${l.fila})</span>`}</td>
+        <td class="num">${l.cantidad ?? "—"}</td>
+        <td class="num">${l.precio_unitario != null ? fmtMoney(l.precio_unitario) : "—"}</td>
+        <td>${l.errores.length ? l.errores.map(escapeHtml).join("<br>") : ""}</td>
+      </tr>`).join("");
+    return `
+      <div class="dash-panel" style="margin-bottom:14px">
+        <h3 class="dash-titulo">${escapeHtml(f.numero)} <span class="${claseEstado}">${textoEstado}</span></h3>
+        <p class="ayuda-inline">Proveedor: ${proveedorTxt}${f.fecha ? ` · Fecha: ${escapeHtml(f.fecha)}` : ""}</p>
+        ${f.errores.length && !f.lineas.some(l => l.errores.length) ? `<p class="ayuda-inline ayuda-inline--bloqueado">${f.errores.map(escapeHtml).join("<br>")}</p>` : ""}
+        <table class="tabla">
+          <thead><tr><th>Producto</th><th class="num">Cantidad</th><th class="num">Precio unit.</th><th>Errores</th></tr></thead>
+          <tbody>${lineasHtml}</tbody>
+        </table>
+      </div>`;
+  }).join("");
+}
+
+document.getElementById("btn-cm-confirmar").addEventListener("click", async () => {
+  if (!state.cargaMasivaToken) return;
+  try {
+    const data = await api("/api/facturas/carga-masiva/confirmar", {
+      method: "POST",
+      body: JSON.stringify({ token: state.cargaMasivaToken }),
+    });
+    const detalle = data.omitidas.length
+      ? ` (se omitieron: ${data.omitidas.join(", ")})`
+      : "";
+    toast(`${data.total_creadas} factura(s) cargada(s)${detalle}`);
+    cerrarModal("modal-carga-masiva");
+    state.cargaMasivaToken = null;
+    await Promise.all([cargarFacturas(), cargarProductos()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
 // Formatea el RUT en vivo mientras el usuario escribe (puntos de miles + guión
 // antes del dígito verificador), igual que lo hace el backend al guardar —
 // así se ve de inmediato aunque el backend es quien manda la versión final.
@@ -1339,6 +1497,66 @@ async function cargarRotacion() {
   }
 }
 
+async function cargarPlanificacion() {
+  const dias = document.getElementById("planificacion-periodo").value;
+  const tbodyReponer = document.getElementById("tbody-planificacion-reponer");
+  const tbodyExceso = document.getElementById("tbody-planificacion-exceso");
+  tbodyReponer.innerHTML = `<tr><td colspan="7" class="vacio">Cargando…</td></tr>`;
+  tbodyExceso.innerHTML = `<tr><td colspan="5" class="vacio">Cargando…</td></tr>`;
+  try {
+    const d = await api(`/api/planificacion?dias=${dias}`);
+
+    tbodyReponer.innerHTML = d.reponer.length
+      ? d.reponer.map(p => {
+          const nombre = `#${p.id_sistema} — ${escapeHtml(nombreCortoProducto(p))}`;
+          const urgenciaClase = p.urgencia === "critico" ? "badge-urgencia badge-urgencia--critico" : "badge-urgencia badge-urgencia--proximo";
+          const urgenciaTexto = p.urgencia === "critico" ? "Ya bajo el mínimo" : "Próximo a agotarse";
+          let seAgota;
+          if (p.dias_para_minimo === null) {
+            seAgota = `<span class="${urgenciaClase}">${urgenciaTexto}</span>`;
+          } else if (p.dias_para_minimo <= 0) {
+            seAgota = `<span class="${urgenciaClase}">Ya bajo el mínimo</span>`;
+          } else {
+            seAgota = `<span class="${urgenciaClase}">${urgenciaTexto}</span><div class="dash-item-detalle">en ~${p.dias_para_minimo} día(s) (${fmtFechaSolo(p.fecha_estimada_minimo)})</div>`;
+          }
+          const proveedores = (p.proveedores && p.proveedores.length)
+            ? p.proveedores.map(pr => escapeHtml(pr.nombre)).join(", ")
+            : `<span class="vacio-inline">Sin proveedor conocido — revisar facturas</span>`;
+          return `
+            <tr>
+              <td>${nombre}</td>
+              <td class="num">${p.stock_disponible}</td>
+              <td class="num">${p.stock_minimo}</td>
+              <td class="num">${p.promedio_semanal}</td>
+              <td>${seAgota}</td>
+              <td class="num"><strong>${p.cantidad_sugerida}</strong></td>
+              <td>${proveedores}</td>
+            </tr>`;
+        }).join("")
+      : `<tr><td colspan="7" class="vacio">No hay productos que necesiten reposición por ahora.</td></tr>`;
+
+    tbodyExceso.innerHTML = d.exceso.length
+      ? d.exceso.map(p => {
+          const nombre = `#${p.id_sistema} — ${escapeHtml(nombreCortoProducto(p))}`;
+          const valorInmovilizado = p.stock_disponible * (p.costo_compra || 0);
+          const consumo = p.promedio_semanal > 0
+            ? `${p.promedio_semanal} salidas/semana en promedio`
+            : `Sin salidas en los últimos ${p.semanas_sin_consumo} semana(s)`;
+          return `
+            <tr>
+              <td>${nombre}</td>
+              <td class="num">${p.stock_disponible}</td>
+              <td class="num">${p.stock_minimo}</td>
+              <td class="num">${fmtMoney(valorInmovilizado)}</td>
+              <td>${consumo}</td>
+            </tr>`;
+        }).join("")
+      : `<tr><td colspan="5" class="vacio">No se detectó exceso de stock en el período elegido.</td></tr>`;
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
 function nombreCortoProducto(p) {
   // Para el gráfico de rotación no hace falta el ID: basta categoría +
   // modelo (que es justo lo que identifica al producto para el taller).
@@ -1514,6 +1732,7 @@ document.getElementById("btn-respaldo").addEventListener("click", async () => {
     document.getElementById("respaldo-diagnostico").textContent = "No se pudo cargar el diagnóstico: " + e.message;
   }
   await cargarEstadoRespaldoAutomatico();
+  await cargarEstadoAlertasStock();
 });
 
 async function cargarEstadoRespaldoAutomatico() {
@@ -1549,6 +1768,50 @@ document.getElementById("btn-probar-respaldo-auto").addEventListener("click", as
   } finally {
     btn.disabled = false;
     btn.textContent = "Enviar un respaldo de prueba ahora";
+  }
+});
+
+async function cargarEstadoAlertasStock() {
+  const cont = document.getElementById("alertas-stock-estado");
+  cont.textContent = "Cargando…";
+  try {
+    const info = await api("/api/alertas-stock/estado");
+    if (!info.configurado) {
+      cont.innerHTML = `⚠ No está configurado todavía. Se necesita agregar las variables <span class="mono">SMTP_USER</span> y <span class="mono">SMTP_PASSWORD</span> en Railway (ver guía DEPLOY.md) — las mismas que usa el respaldo automático.`;
+      return;
+    }
+    const ultimoEnviado = info.historial.find(h => h.correo_enviado);
+    const ultimoTexto = ultimoEnviado
+      ? `Último correo de alerta enviado: ${fmtFecha(ultimoEnviado.fecha)} (${ultimoEnviado.n_productos} producto(s))`
+      : "Todavía no se ha enviado ningún correo de alerta (no ha habido productos críticos, o aún no se hace el primer chequeo).";
+    const criticosAhora = info.n_productos_criticos_ahora > 0
+      ? `<strong>${info.n_productos_criticos_ahora} producto(s) con stock crítico ahora mismo.</strong>`
+      : "No hay productos con stock crítico en este momento.";
+    cont.innerHTML = `
+      ✓ Configurado — se revisa y avisa a <span class="mono">${escapeHtml(info.destinatario)}</span> cada ${info.intervalo_horas}h si corresponde.<br>
+      ${criticosAhora}<br>
+      ${ultimoTexto}
+    `;
+  } catch (e) {
+    cont.textContent = "No se pudo cargar: " + e.message;
+  }
+}
+
+document.getElementById("btn-probar-alertas-stock").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-probar-alertas-stock");
+  btn.disabled = true;
+  btn.textContent = "Revisando…";
+  try {
+    const data = await api("/api/alertas-stock/probar", { method: "POST" });
+    toast(data.n_productos > 0
+      ? `Alerta enviada: ${data.n_productos} producto(s) con stock crítico.`
+      : "Revisado: no hay productos con stock crítico por ahora.");
+    await cargarEstadoAlertasStock();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Revisar y enviar ahora si corresponde";
   }
 });
 
@@ -1932,6 +2195,7 @@ document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
 });
 
 document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
+document.getElementById("planificacion-periodo").addEventListener("change", cargarPlanificacion);
 
 // ---------------------------------------------------------------------------
 // Caja Chica (Módulo 10)
@@ -1976,6 +2240,8 @@ async function cargarCajaMovimientos() {
     document.getElementById("cg-categorias-usadas").innerHTML =
       state.cajaCategoriasVistas.map(c => `<option value="${escapeHtml(c)}"></option>`).join("");
 
+    state.cajaMovimientos = data.movimientos;
+
     if (data.movimientos.length === 0) {
       tbody.innerHTML = `<tr><td colspan="9" class="vacio">No se encontraron movimientos con esos filtros.</td></tr>`;
       return;
@@ -1985,13 +2251,11 @@ async function cargarCajaMovimientos() {
       const esGasto = m.tipo === "gasto";
       const catDesc = [m.categoria, m.descripcion].filter(Boolean).join(" — ") || "—";
       const comprobante = m.tiene_comprobante
-        ? `<a href="/api/caja/comprobante/${encodeURIComponent(m.comprobante_archivo)}" target="_blank" rel="noopener">Ver</a>`
+        ? `<a href="/api/caja/comprobante/${encodeURIComponent(m.comprobante_archivo)}" target="_blank" rel="noopener" data-sin-navegar="1">Ver</a>`
         : "—";
       const estadoTxt = esGasto ? (m.rendido ? `<span class="mov-tipo mov-tipo--entrada">rendido</span>` : `<span class="mov-tipo mov-tipo--perdida">pendiente</span>`) : "—";
-      const puedeEliminar = !m.rendicion_id && !m.movimiento_inventario_id && !m.rendicion_origen_id;
-      const accion = puedeEliminar ? `<button class="btn-link" data-caja-eliminar="${m.id}">Eliminar</button>` : "";
       return `
-      <tr>
+      <tr data-id="${m.id}" data-tipo="${m.tipo}" class="fila-clicable">
         <td class="mono">${fmtFecha(m.fecha)}</td>
         <td><span class="mov-tipo mov-tipo--${esGasto ? "salida" : "entrada"}">${esGasto ? "gasto" : "aporte"}</span></td>
         <td>${escapeHtml(catDesc)}</td>
@@ -2000,17 +2264,16 @@ async function cargarCajaMovimientos() {
         <td>${comprobante}</td>
         <td>${estadoTxt}</td>
         <td>${escapeHtml(m.usuario) || "—"}</td>
-        <td>${accion}</td>
+        <td></td>
       </tr>`;
     }).join("");
 
-    tbody.querySelectorAll("[data-caja-eliminar]").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        const ok = await eliminarConReintento(`/api/caja/movimiento/${btn.dataset.cajaEliminar}`, "¿Eliminar este movimiento de Caja Chica?");
-        if (ok) {
-          toast("Movimiento eliminado");
-          await cargarCaja();
-        }
+    tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+      tr.addEventListener("click", (e) => {
+        if (e.target.closest("[data-sin-navegar]")) return; // no interceptar el link "Ver comprobante"
+        const id = parseInt(tr.dataset.id, 10);
+        if (tr.dataset.tipo === "gasto") abrirEdicionCajaGasto(id);
+        else abrirEdicionCajaAporte(id);
       });
     });
   } catch (e) {
@@ -2040,7 +2303,14 @@ document.getElementById("caja-limpiar-filtros").addEventListener("click", () => 
 
 document.getElementById("btn-nuevo-gasto").addEventListener("click", async () => {
   document.getElementById("form-caja-gasto").reset();
+  document.getElementById("cg-id").value = "";
   document.getElementById("cg-emergencia-campos").style.display = "none";
+  document.getElementById("modal-caja-gasto-titulo").textContent = "Nuevo gasto";
+  document.getElementById("cg-bloqueado-aviso").style.display = "none";
+  document.getElementById("cg-comprobante-actual").style.display = "none";
+  document.getElementById("cg-emergencia-wrap").style.display = "block";
+  document.getElementById("cg-acciones-editar").style.display = "none";
+  habilitarFormularioCaja("cg", true);
   try {
     const data = await api("/api/productos");
     const select = document.getElementById("cg-producto-id");
@@ -2056,8 +2326,60 @@ document.getElementById("cg-emergencia").addEventListener("change", (e) => {
   document.getElementById("cg-emergencia-campos").style.display = e.target.checked ? "block" : "none";
 });
 
+function habilitarFormularioCaja(prefijo, habilitado) {
+  document.querySelectorAll(`#form-caja-${prefijo === "cg" ? "gasto" : "aporte"} input, #form-caja-${prefijo === "cg" ? "gasto" : "aporte"} select`)
+    .forEach(el => { if (el.id !== `${prefijo}-id`) el.disabled = !habilitado; });
+  document.getElementById(`${prefijo}-btn-guardar`).style.display = habilitado ? "" : "none";
+}
+
+function abrirEdicionCajaGasto(id) {
+  const m = (state.cajaMovimientos || []).find(x => x.id === id);
+  if (!m) return;
+  document.getElementById("form-caja-gasto").reset();
+  document.getElementById("cg-id").value = m.id;
+  document.getElementById("cg-monto").value = m.monto;
+  document.getElementById("cg-fecha").value = (m.fecha || "").slice(0, 10);
+  document.getElementById("cg-categoria").value = m.categoria || "";
+  document.getElementById("cg-proveedor").value = m.proveedor || "";
+  document.getElementById("cg-descripcion").value = m.descripcion || "";
+  document.getElementById("cg-comprobante-actual").style.display = m.tiene_comprobante ? "block" : "none";
+  document.getElementById("cg-comprobante-actual").innerHTML = m.tiene_comprobante
+    ? `Ya tiene un comprobante cargado. <a href="/api/caja/comprobante/${encodeURIComponent(m.comprobante_archivo)}" target="_blank" rel="noopener">Verlo</a> — sube uno nuevo para reemplazarlo.`
+    : "";
+  // La compra de emergencia queda fija al crear el gasto (ya generó su
+  // propio movimiento de inventario); no tiene sentido editarla después.
+  document.getElementById("cg-emergencia-wrap").style.display = m.movimiento_inventario_id ? "none" : "block";
+  document.getElementById("modal-caja-gasto-titulo").textContent = "Editar gasto";
+
+  const bloqueo = m.bloqueado_motivo;
+  const aviso = document.getElementById("cg-bloqueado-aviso");
+  if (bloqueo) {
+    aviso.textContent = bloqueo;
+    aviso.className = "ayuda-inline ayuda-inline--bloqueado";
+    aviso.style.display = "block";
+  } else {
+    aviso.style.display = "none";
+  }
+  habilitarFormularioCaja("cg", !bloqueo);
+  document.getElementById("cg-acciones-editar").style.display = bloqueo ? "none" : "flex";
+  state.cajaMovimientoActivoId = m.id;
+  abrirModal("modal-caja-gasto");
+}
+
+document.getElementById("btn-eliminar-caja-gasto").addEventListener("click", async () => {
+  const id = state.cajaMovimientoActivoId;
+  if (!id) return;
+  const ok = await eliminarConReintento(`/api/caja/movimiento/${id}`, "¿Eliminar este gasto?");
+  if (ok) {
+    toast("Gasto eliminado");
+    cerrarModal("modal-caja-gasto");
+    await cargarCaja();
+  }
+});
+
 document.getElementById("form-caja-gasto").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const id = document.getElementById("cg-id").value;
   const formData = new FormData();
   formData.append("monto", document.getElementById("cg-monto").value);
   formData.append("fecha", document.getElementById("cg-fecha").value);
@@ -2066,16 +2388,17 @@ document.getElementById("form-caja-gasto").addEventListener("submit", async (e) 
   formData.append("descripcion", document.getElementById("cg-descripcion").value);
   const archivo = document.getElementById("cg-comprobante").files[0];
   if (archivo) formData.append("comprobante", archivo);
-  if (document.getElementById("cg-emergencia").checked) {
+  if (!id && document.getElementById("cg-emergencia").checked) {
     formData.append("producto_id", document.getElementById("cg-producto-id").value);
     formData.append("cantidad", document.getElementById("cg-cantidad").value);
   }
 
   try {
-    const res = await fetch("/api/caja/gasto", { method: "POST", body: formData });
+    const url = id ? `/api/caja/movimiento/${id}` : "/api/caja/gasto";
+    const res = await fetch(url, { method: id ? "PUT" : "POST", body: formData });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Error al guardar el gasto");
-    toast("Gasto registrado");
+    toast(id ? "Gasto actualizado" : "Gasto registrado");
     cerrarModal("modal-caja-gasto");
     await Promise.all([cargarCaja(), cargarProductos()]);
   } catch (e) {
@@ -2087,11 +2410,58 @@ document.getElementById("form-caja-gasto").addEventListener("submit", async (e) 
 
 document.getElementById("btn-nuevo-aporte").addEventListener("click", () => {
   document.getElementById("form-caja-aporte").reset();
+  document.getElementById("ca-id").value = "";
+  document.getElementById("modal-caja-aporte-titulo").textContent = "Nuevo aporte / reposición";
+  document.getElementById("ca-bloqueado-aviso").style.display = "none";
+  document.getElementById("ca-comprobante-actual").style.display = "none";
+  document.getElementById("ca-acciones-editar").style.display = "none";
+  habilitarFormularioCaja("ca", true);
   abrirModal("modal-caja-aporte");
+});
+
+function abrirEdicionCajaAporte(id) {
+  const m = (state.cajaMovimientos || []).find(x => x.id === id);
+  if (!m) return;
+  document.getElementById("form-caja-aporte").reset();
+  document.getElementById("ca-id").value = m.id;
+  document.getElementById("ca-monto").value = m.monto;
+  document.getElementById("ca-fecha").value = (m.fecha || "").slice(0, 10);
+  document.getElementById("ca-descripcion").value = m.descripcion || "";
+  document.getElementById("ca-comprobante-actual").style.display = m.tiene_comprobante ? "block" : "none";
+  document.getElementById("ca-comprobante-actual").innerHTML = m.tiene_comprobante
+    ? `Ya tiene un comprobante cargado. <a href="/api/caja/comprobante/${encodeURIComponent(m.comprobante_archivo)}" target="_blank" rel="noopener">Verlo</a> — sube uno nuevo para reemplazarlo.`
+    : "";
+  document.getElementById("modal-caja-aporte-titulo").textContent = "Editar aporte";
+
+  const bloqueo = m.bloqueado_motivo;
+  const aviso = document.getElementById("ca-bloqueado-aviso");
+  if (bloqueo) {
+    aviso.textContent = bloqueo;
+    aviso.className = "ayuda-inline ayuda-inline--bloqueado";
+    aviso.style.display = "block";
+  } else {
+    aviso.style.display = "none";
+  }
+  habilitarFormularioCaja("ca", !bloqueo);
+  document.getElementById("ca-acciones-editar").style.display = bloqueo ? "none" : "flex";
+  state.cajaMovimientoActivoId = m.id;
+  abrirModal("modal-caja-aporte");
+}
+
+document.getElementById("btn-eliminar-caja-aporte").addEventListener("click", async () => {
+  const id = state.cajaMovimientoActivoId;
+  if (!id) return;
+  const ok = await eliminarConReintento(`/api/caja/movimiento/${id}`, "¿Eliminar este aporte?");
+  if (ok) {
+    toast("Aporte eliminado");
+    cerrarModal("modal-caja-aporte");
+    await cargarCaja();
+  }
 });
 
 document.getElementById("form-caja-aporte").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const id = document.getElementById("ca-id").value;
   const formData = new FormData();
   formData.append("monto", document.getElementById("ca-monto").value);
   formData.append("fecha", document.getElementById("ca-fecha").value);
@@ -2100,10 +2470,11 @@ document.getElementById("form-caja-aporte").addEventListener("submit", async (e)
   if (archivo) formData.append("comprobante", archivo);
 
   try {
-    const res = await fetch("/api/caja/aporte", { method: "POST", body: formData });
+    const url = id ? `/api/caja/movimiento/${id}` : "/api/caja/aporte";
+    const res = await fetch(url, { method: id ? "PUT" : "POST", body: formData });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Error al guardar el aporte");
-    toast("Aporte registrado");
+    toast(id ? "Aporte actualizado" : "Aporte registrado");
     cerrarModal("modal-caja-aporte");
     await cargarCaja();
   } catch (e) {
@@ -2197,7 +2568,7 @@ document.getElementById("btn-ver-rendiciones").addEventListener("click", async (
       return;
     }
     tbody.innerHTML = data.rendiciones.map(r => `
-      <tr>
+      <tr data-id="${r.id}">
         <td class="mono">${fmtFecha(r.fecha)}</td>
         <td class="num mono">${r.n_gastos}</td>
         <td class="num mono">${fmtMoney(r.total)}</td>
@@ -2205,10 +2576,42 @@ document.getElementById("btn-ver-rendiciones").addEventListener("click", async (
         <td>${escapeHtml(r.usuario) || "—"}</td>
       </tr>
     `).join("");
+    tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+      tr.addEventListener("click", () => verDetalleRendicion(parseInt(tr.dataset.id, 10)));
+    });
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
   }
 });
+
+async function verDetalleRendicion(id) {
+  document.getElementById("modal-caja-rendicion-detalle-titulo").textContent = `Rendición #${id}`;
+  const ficha = document.getElementById("crd-ficha");
+  const tbody = document.getElementById("tbody-caja-rendicion-detalle");
+  ficha.innerHTML = "";
+  tbody.innerHTML = `<tr><td colspan="3" class="vacio">Cargando…</td></tr>`;
+  abrirModal("modal-caja-rendicion-detalle");
+  try {
+    const r = await api(`/api/caja/rendicion/${id}`);
+    ficha.innerHTML = `
+      <dt>Fecha</dt><dd>${fmtFecha(r.fecha)}</dd>
+      <dt>Total repuesto</dt><dd class="mono">${fmtMoney(r.total)}</dd>
+      <dt>N° de gastos</dt><dd class="mono">${r.gastos.length}</dd>
+      <dt>Nota</dt><dd>${escapeHtml(r.nota) || "—"}</dd>
+      <dt>Responsable</dt><dd>${escapeHtml(r.usuario) || "—"}</dd>
+    `;
+    tbody.innerHTML = r.gastos.length
+      ? r.gastos.map(g => `
+        <tr>
+          <td class="mono">${fmtFecha(g.fecha)}</td>
+          <td>${escapeHtml([g.categoria, g.descripcion].filter(Boolean).join(" — ") || "—")}</td>
+          <td class="num mono">${fmtMoney(g.monto)}</td>
+        </tr>`).join("")
+      : `<tr><td colspan="3" class="vacio">Sin gastos asociados.</td></tr>`;
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="3" class="vacio">Error: ${e.message}</td></tr>`;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Reportes y Exportaciones (Módulo 11)
@@ -2217,6 +2620,41 @@ document.getElementById("btn-ver-rendiciones").addEventListener("click", async (
 document.getElementById("btn-reporte-rotacion").addEventListener("click", () => {
   const dias = document.getElementById("reportes-rotacion-periodo").value;
   window.location.href = `/api/reportes/rotacion?dias=${dias}`;
+});
+
+document.getElementById("btn-reporte-rotacion-pdf").addEventListener("click", () => {
+  const dias = document.getElementById("reportes-rotacion-periodo").value;
+  window.location.href = `/api/reportes/rotacion/pdf?dias=${dias}`;
+});
+
+function rangoFechasParams(idDesde, idHasta) {
+  const desde = document.getElementById(idDesde).value;
+  const hasta = document.getElementById(idHasta).value;
+  const params = new URLSearchParams();
+  if (desde) params.set("desde", desde);
+  if (hasta) params.set("hasta", hasta);
+  return params.toString();
+}
+
+document.getElementById("btn-reporte-movimientos").addEventListener("click", () => {
+  window.location.href = `/api/reportes/movimientos?${rangoFechasParams("reportes-mov-desde", "reportes-mov-hasta")}`;
+});
+document.getElementById("btn-reporte-movimientos-pdf").addEventListener("click", () => {
+  window.location.href = `/api/reportes/movimientos/pdf?${rangoFechasParams("reportes-mov-desde", "reportes-mov-hasta")}`;
+});
+
+document.getElementById("btn-reporte-compras").addEventListener("click", () => {
+  window.location.href = `/api/reportes/compras?${rangoFechasParams("reportes-compras-desde", "reportes-compras-hasta")}`;
+});
+document.getElementById("btn-reporte-compras-pdf").addEventListener("click", () => {
+  window.location.href = `/api/reportes/compras/pdf?${rangoFechasParams("reportes-compras-desde", "reportes-compras-hasta")}`;
+});
+
+document.getElementById("btn-reporte-caja").addEventListener("click", () => {
+  window.location.href = `/api/reportes/caja-gastos?${rangoFechasParams("reportes-caja-desde", "reportes-caja-hasta")}`;
+});
+document.getElementById("btn-reporte-caja-pdf").addEventListener("click", () => {
+  window.location.href = `/api/reportes/caja-gastos/pdf?${rangoFechasParams("reportes-caja-desde", "reportes-caja-hasta")}`;
 });
 
 // ---------------------------------------------------------------------------

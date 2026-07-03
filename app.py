@@ -8,6 +8,7 @@ para que sea fácil de instalar y correr en cualquier PC o servidor.
 """
 
 import os
+import re
 import sqlite3
 import time
 import threading
@@ -501,6 +502,28 @@ def usuario_actual():
     return session.get("nombre") or session.get("username") or "Sistema"
 
 
+def formatear_rut(valor):
+    """Normaliza un RUT chileno agregando puntos de miles y el guión antes
+    del dígito verificador, sin importar cómo lo haya escrito el usuario.
+    Ej: "770893703" -> "77.089.370-3", "7.708.937-03-0" (con basura) se
+    limpia primero. Si no viene nada o no hay al menos un dígito, retorna
+    el texto original (limpio de espacios) tal cual, para no inventar datos."""
+    if not valor:
+        return ""
+    limpio = re.sub(r"[^0-9kK]", "", valor)
+    if not limpio:
+        return valor.strip().upper()
+    cuerpo, dv = limpio[:-1], limpio[-1].upper()
+    if not cuerpo:
+        return dv
+    cuerpo_con_puntos = ""
+    for i, digito in enumerate(reversed(cuerpo)):
+        if i and i % 3 == 0:
+            cuerpo_con_puntos = "." + cuerpo_con_puntos
+        cuerpo_con_puntos = digito + cuerpo_con_puntos
+    return f"{cuerpo_con_puntos}-{dv}"
+
+
 def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra"):
     """Aplica una entrada de stock a un producto, recalculando el Costo
     Promedio Ponderado si se informa costo_unitario, y deja el movimiento
@@ -682,9 +705,9 @@ def obtener_producto(producto_id):
 def crear_producto():
     data = request.get_json(force=True, silent=True) or {}
 
-    codigo_interno = (data.get("codigo_interno") or "").strip()
-    categoria = (data.get("categoria") or "").strip()
-    modelo = (data.get("modelo") or "").strip()
+    codigo_interno = (data.get("codigo_interno") or "").strip().upper()
+    categoria = (data.get("categoria") or "").strip().upper()
+    modelo = (data.get("modelo") or "").strip().upper()
 
     db = get_db()
 
@@ -739,7 +762,7 @@ def crear_producto():
         """,
         (
             codigo_interno,
-            (data.get("descripcion") or "").strip(),
+            (data.get("descripcion") or "").strip().upper(),
             categoria,
             modelo,
             ubicacion_id,
@@ -762,7 +785,7 @@ def crear_producto():
             INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, costo_unitario, stock_resultante)
             VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, 'Stock inicial al crear producto', ?, ?, ?)
             """,
-            (nuevo_id, ts, stock_disponible, (data.get("usuario") or "Sistema"), costo_compra, stock_disponible),
+            (nuevo_id, ts, stock_disponible, usuario_actual(), costo_compra, stock_disponible),
         )
 
     db.commit()
@@ -785,7 +808,7 @@ def editar_producto(producto_id):
     data = request.get_json(force=True, silent=True) or {}
 
     codigo_interno = data.get("codigo_interno", row["codigo_interno"])
-    codigo_interno = (codigo_interno or "").strip()
+    codigo_interno = (codigo_interno or "").strip().upper()
 
     if codigo_interno:
         duplicado = db.execute(
@@ -815,8 +838,8 @@ def editar_producto(producto_id):
     else:
         ubicacion_id = row["ubicacion_id"]
 
-    categoria = (data.get("categoria") if data.get("categoria") is not None else row["categoria"]).strip()
-    modelo = (data.get("modelo") if data.get("modelo") is not None else row["modelo"]).strip()
+    categoria = (data.get("categoria") if data.get("categoria") is not None else row["categoria"]).strip().upper()
+    modelo = (data.get("modelo") if data.get("modelo") is not None else row["modelo"]).strip().upper()
 
     if categoria or modelo:
         duplicado_pm = db.execute(
@@ -843,7 +866,7 @@ def editar_producto(producto_id):
         (
             codigo_interno,
             nombre,
-            (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip(),
+            (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip().upper(),
             categoria,
             modelo,
             ubicacion_id,
@@ -915,9 +938,9 @@ def registrar_movimiento(producto_id):
 
     data = request.get_json(force=True, silent=True) or {}
     tipo = (data.get("tipo") or "").strip().lower()
-    motivo = (data.get("motivo") or "").strip()
-    usuario = (data.get("usuario") or "").strip() or "Sin especificar"
-    factura_numero = (data.get("factura_numero") or "").strip()
+    motivo = (data.get("motivo") or "").strip().upper()
+    usuario = usuario_actual()  # siempre quien tiene la sesión iniciada, nunca lo que mande el cliente
+    factura_numero = (data.get("factura_numero") or "").strip().upper()
 
     if tipo not in ("entrada", "salida", "perdida"):
         return jsonify({"error": "Tipo de movimiento inválido (usa entrada, salida o perdida)"}), 400
@@ -1112,28 +1135,44 @@ def eliminar_ubicacion(ubicacion_id):
 # ---------------------------------------------------------------------------
 
 def _asegurar_categoria(db, nombre):
-    nombre = (nombre or "").strip()
+    nombre = (nombre or "").strip().upper()
     if nombre:
         db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (nombre,))
 
 
 def _asegurar_modelo(db, nombre):
-    nombre = (nombre or "").strip()
+    nombre = (nombre or "").strip().upper()
     if nombre:
         db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (nombre,))
+
+
+def _recalcular_nombres_afectados(db, ids_productos):
+    for pid in ids_productos:
+        r = db.execute("SELECT id, codigo_interno, categoria, modelo FROM productos WHERE id = ?", (pid,)).fetchone()
+        if r:
+            nuevo_nombre = nombre_automatico(r["categoria"], r["modelo"], r["codigo_interno"], r["id"])
+            db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nuevo_nombre, r["id"]))
 
 
 @app.route("/api/categorias", methods=["GET"])
 def listar_categorias():
     db = get_db()
-    rows = db.execute("SELECT nombre FROM categorias ORDER BY nombre COLLATE NOCASE").fetchall()
-    return jsonify({"categorias": [r["nombre"] for r in rows]})
+    rows = db.execute(
+        """
+        SELECT c.id, c.nombre, COUNT(p.id) AS n_productos
+        FROM categorias c
+        LEFT JOIN productos p ON UPPER(TRIM(p.categoria)) = c.nombre
+        GROUP BY c.id
+        ORDER BY c.nombre COLLATE NOCASE
+        """
+    ).fetchall()
+    return jsonify({"categorias": [dict(r) for r in rows]})
 
 
 @app.route("/api/categorias", methods=["POST"])
 def crear_categoria():
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
     db = get_db()
@@ -1142,23 +1181,118 @@ def crear_categoria():
     return jsonify({"nombre": nombre}), 201
 
 
+@app.route("/api/categorias/<int:categoria_id>", methods=["PUT"])
+def editar_categoria(categoria_id):
+    """Renombra una categoría — y actualiza en cascada todos los productos
+    que ya la tenían asignada, para corregir errores de tipeo sin tener que
+    editar producto por producto."""
+    db = get_db()
+    actual = db.execute("SELECT * FROM categorias WHERE id = ?", (categoria_id,)).fetchone()
+    if actual is None:
+        return jsonify({"error": "Categoría no encontrada"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    nuevo_nombre = (data.get("nombre") or "").strip().upper()
+    if not nuevo_nombre:
+        return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
+
+    if nuevo_nombre != actual["nombre"]:
+        choque = db.execute("SELECT id FROM categorias WHERE nombre = ? AND id != ?", (nuevo_nombre, categoria_id)).fetchone()
+        if choque:
+            return jsonify({"error": f"Ya existe una categoría llamada '{nuevo_nombre}'. Elimina una de las dos para evitar duplicados."}), 400
+
+    afectados = [r["id"] for r in db.execute("SELECT id FROM productos WHERE UPPER(TRIM(categoria)) = ?", (actual["nombre"],)).fetchall()]
+
+    db.execute("UPDATE categorias SET nombre = ? WHERE id = ?", (nuevo_nombre, categoria_id))
+    db.execute("UPDATE productos SET categoria = ? WHERE UPPER(TRIM(categoria)) = ?", (nuevo_nombre, actual["nombre"]))
+    _recalcular_nombres_afectados(db, afectados)
+    db.commit()
+    return jsonify({"id": categoria_id, "nombre": nuevo_nombre, "productos_actualizados": len(afectados)})
+
+
+@app.route("/api/categorias/<int:categoria_id>", methods=["DELETE"])
+def eliminar_categoria(categoria_id):
+    """Quita la categoría de la lista precargada. Como la categoría se
+    guarda como texto directo en cada producto (no es una llave foránea),
+    esto no le cambia el dato a los productos que ya la tenían — solo deja
+    de sugerirse para productos nuevos."""
+    db = get_db()
+    actual = db.execute("SELECT * FROM categorias WHERE id = ?", (categoria_id,)).fetchone()
+    if actual is None:
+        return jsonify({"error": "Categoría no encontrada"}), 404
+    n_productos = db.execute(
+        "SELECT COUNT(*) FROM productos WHERE UPPER(TRIM(categoria)) = ?", (actual["nombre"],)
+    ).fetchone()[0]
+    db.execute("DELETE FROM categorias WHERE id = ?", (categoria_id,))
+    db.commit()
+    return jsonify({"ok": True, "productos_con_esta_categoria": n_productos})
+
+
 @app.route("/api/modelos", methods=["GET"])
 def listar_modelos():
     db = get_db()
-    rows = db.execute("SELECT nombre FROM modelos ORDER BY nombre COLLATE NOCASE").fetchall()
-    return jsonify({"modelos": [r["nombre"] for r in rows]})
+    rows = db.execute(
+        """
+        SELECT m.id, m.nombre, COUNT(p.id) AS n_productos
+        FROM modelos m
+        LEFT JOIN productos p ON UPPER(TRIM(p.modelo)) = m.nombre
+        GROUP BY m.id
+        ORDER BY m.nombre COLLATE NOCASE
+        """
+    ).fetchall()
+    return jsonify({"modelos": [dict(r) for r in rows]})
 
 
 @app.route("/api/modelos", methods=["POST"])
 def crear_modelo():
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
     db = get_db()
     db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (nombre,))
     db.commit()
     return jsonify({"nombre": nombre}), 201
+
+
+@app.route("/api/modelos/<int:modelo_id>", methods=["PUT"])
+def editar_modelo(modelo_id):
+    db = get_db()
+    actual = db.execute("SELECT * FROM modelos WHERE id = ?", (modelo_id,)).fetchone()
+    if actual is None:
+        return jsonify({"error": "Modelo no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    nuevo_nombre = (data.get("nombre") or "").strip().upper()
+    if not nuevo_nombre:
+        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
+
+    if nuevo_nombre != actual["nombre"]:
+        choque = db.execute("SELECT id FROM modelos WHERE nombre = ? AND id != ?", (nuevo_nombre, modelo_id)).fetchone()
+        if choque:
+            return jsonify({"error": f"Ya existe un modelo llamado '{nuevo_nombre}'. Elimina uno de los dos para evitar duplicados."}), 400
+
+    afectados = [r["id"] for r in db.execute("SELECT id FROM productos WHERE UPPER(TRIM(modelo)) = ?", (actual["nombre"],)).fetchall()]
+
+    db.execute("UPDATE modelos SET nombre = ? WHERE id = ?", (nuevo_nombre, modelo_id))
+    db.execute("UPDATE productos SET modelo = ? WHERE UPPER(TRIM(modelo)) = ?", (nuevo_nombre, actual["nombre"]))
+    _recalcular_nombres_afectados(db, afectados)
+    db.commit()
+    return jsonify({"id": modelo_id, "nombre": nuevo_nombre, "productos_actualizados": len(afectados)})
+
+
+@app.route("/api/modelos/<int:modelo_id>", methods=["DELETE"])
+def eliminar_modelo(modelo_id):
+    db = get_db()
+    actual = db.execute("SELECT * FROM modelos WHERE id = ?", (modelo_id,)).fetchone()
+    if actual is None:
+        return jsonify({"error": "Modelo no encontrado"}), 404
+    n_productos = db.execute(
+        "SELECT COUNT(*) FROM productos WHERE UPPER(TRIM(modelo)) = ?", (actual["nombre"],)
+    ).fetchone()[0]
+    db.execute("DELETE FROM modelos WHERE id = ?", (modelo_id,))
+    db.commit()
+    return jsonify({"ok": True, "productos_con_este_modelo": n_productos})
 
 
 # ---------------------------------------------------------------------------
@@ -1183,7 +1317,7 @@ def listar_proveedores():
 @app.route("/api/proveedores", methods=["POST"])
 def crear_proveedor():
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre del proveedor es obligatorio"}), 400
 
@@ -1196,10 +1330,10 @@ def crear_proveedor():
         "INSERT INTO proveedores (nombre, rut, telefono, email, direccion, creado_en) VALUES (?, ?, ?, ?, ?, ?)",
         (
             nombre,
-            (data.get("rut") or "").strip(),
+            formatear_rut((data.get("rut") or "").strip()),
             (data.get("telefono") or "").strip(),
             (data.get("email") or "").strip(),
-            (data.get("direccion") or "").strip(),
+            (data.get("direccion") or "").strip().upper(),
             now_iso(),
         ),
     )
@@ -1216,7 +1350,7 @@ def editar_proveedor(proveedor_id):
         return jsonify({"error": "Proveedor no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or row["nombre"]).strip()
+    nombre = (data.get("nombre") or row["nombre"]).strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre del proveedor es obligatorio"}), 400
 
@@ -1226,14 +1360,15 @@ def editar_proveedor(proveedor_id):
     if duplicado:
         return jsonify({"error": f"Ya existe otro proveedor con el nombre '{nombre}'"}), 400
 
+    rut_nuevo = (data.get("rut") if data.get("rut") is not None else row["rut"]).strip()
     db.execute(
         "UPDATE proveedores SET nombre = ?, rut = ?, telefono = ?, email = ?, direccion = ? WHERE id = ?",
         (
             nombre,
-            (data.get("rut") if data.get("rut") is not None else row["rut"]).strip(),
+            formatear_rut(rut_nuevo),
             (data.get("telefono") if data.get("telefono") is not None else row["telefono"]).strip(),
             (data.get("email") if data.get("email") is not None else row["email"]).strip(),
-            (data.get("direccion") if data.get("direccion") is not None else row["direccion"]).strip(),
+            (data.get("direccion") if data.get("direccion") is not None else row["direccion"]).strip().upper(),
             proveedor_id,
         ),
     )
@@ -1292,7 +1427,7 @@ def crear_usuario():
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
 
     if not username or not password:
         return jsonify({"error": "Usuario y contraseña son obligatorios"}), 400
@@ -1321,7 +1456,8 @@ def editar_usuario(usuario_id):
         return jsonify({"error": "Usuario no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
-    nombre = data.get("nombre") if data.get("nombre") is not None else row["nombre"]
+    nombre = (data.get("nombre") if data.get("nombre") is not None else row["nombre"]) or ""
+    nombre = nombre.strip().upper()
     password = data.get("password") or ""
 
     if password and len(password) < 4:
@@ -1435,12 +1571,12 @@ def obtener_factura_por_numero(numero):
 @app.route("/api/facturas", methods=["POST"])
 def crear_factura():
     data = request.get_json(force=True, silent=True) or {}
-    numero = (data.get("numero") or "").strip()
+    numero = (data.get("numero") or "").strip().upper()
     proveedor_id = data.get("proveedor_id") or None
     fecha = (data.get("fecha") or "").strip()
     lineas_in = data.get("lineas") or []
     aplicar_stock = data.get("aplicar_stock", True)
-    usuario = (data.get("usuario") or "").strip() or "Sistema"
+    usuario = usuario_actual()  # siempre quien tiene la sesión iniciada, nunca lo que mande el cliente
 
     if not numero:
         return jsonify({"error": "El número de factura es obligatorio"}), 400
@@ -1530,8 +1666,7 @@ def eliminar_factura(factura_id):
         return jsonify({"error": "Factura no encontrada"}), 404
 
     forzar = request.args.get("forzar") == "1"
-    data = request.get_json(force=True, silent=True) or {}
-    usuario = (data.get("usuario") or "").strip() or "Sistema"
+    usuario = usuario_actual()  # siempre quien tiene la sesión iniciada, nunca lo que mande el cliente
 
     lineas_aplicadas = db.execute(
         "SELECT * FROM factura_lineas WHERE factura_id = ? AND aplicada = 1", (factura_id,)
@@ -1974,6 +2109,89 @@ def descartar_merma(producto_id):
 
     actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
     return jsonify(row_to_dict(actualizado))
+
+
+@app.route("/api/productos/<int:producto_id>/merma/revertir", methods=["POST"])
+def revertir_merma(producto_id):
+    """Deshace una pérdida: devuelve unidades de stock_merma a
+    stock_disponible (a diferencia de 'Descartar', que las elimina para
+    siempre). Solo aplica sobre el saldo pendiente actual, igual que
+    'Descartar' — no corrige historial de meses anteriores."""
+    db = get_db()
+    producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        cantidad = int(data.get("cantidad"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "La cantidad debe ser un número entero"}), 400
+    if cantidad <= 0:
+        return jsonify({"error": "La cantidad debe ser mayor a 0"}), 400
+    if cantidad > producto["stock_merma"]:
+        return jsonify({"error": f"Solo hay {producto['stock_merma']} unidad(es) en merma para este producto"}), 400
+
+    ts = now_iso()
+    nuevo_merma = producto["stock_merma"] - cantidad
+    nuevo_disponible = producto["stock_disponible"] + cantidad
+    db.execute(
+        "UPDATE productos SET stock_merma = ?, stock_disponible = ?, actualizado_en = ? WHERE id = ?",
+        (nuevo_merma, nuevo_disponible, ts, producto_id),
+    )
+    db.execute(
+        """
+        INSERT INTO movimientos (
+            producto_id, fecha, tipo, categoria, cantidad, motivo, usuario,
+            costo_unitario, stock_resultante
+        ) VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, ?, ?, ?, ?)
+        """,
+        (
+            producto_id, ts, cantidad,
+            "Reversión de merma: se restituye a stock disponible",
+            usuario_actual(), producto["costo_compra"], nuevo_disponible,
+        ),
+    )
+    db.commit()
+
+    actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
+    return jsonify(row_to_dict(actualizado))
+
+
+@app.route("/api/productos/<int:producto_id>/merma/origenes", methods=["GET"])
+def merma_origenes(producto_id):
+    """Para la pestaña Merma: al pinchar un producto, muestra de qué
+    factura(s) de ingreso viene y de qué proveedor(es), porque un mismo
+    producto puede haberse comprado a varios proveedores distintos y el
+    taller necesita poder identificar cuál es cuál."""
+    db = get_db()
+    producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+
+    filas = db.execute(
+        """
+        SELECT m.id AS movimiento_id, m.fecha, m.cantidad, m.costo_unitario,
+               m.factura_numero, f.id AS factura_id, f.fecha AS factura_fecha,
+               pr.id AS proveedor_id, pr.nombre AS proveedor_nombre, pr.rut AS proveedor_rut
+        FROM movimientos m
+        LEFT JOIN facturas f ON f.numero = m.factura_numero
+        LEFT JOIN proveedores pr ON pr.id = f.proveedor_id
+        WHERE m.producto_id = ? AND m.tipo = 'entrada'
+        ORDER BY m.fecha DESC
+        """,
+        (producto_id,),
+    ).fetchall()
+
+    origenes = [dict(r) for r in filas]
+    proveedores_distintos = {
+        o["proveedor_id"] for o in origenes if o["proveedor_id"] is not None
+    }
+    return jsonify({
+        "producto_id": producto_id,
+        "origenes": origenes,
+        "n_proveedores_distintos": len(proveedores_distintos),
+    })
 
 
 # ---------------------------------------------------------------------------

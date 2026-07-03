@@ -255,10 +255,17 @@ async function cargarCategoriasYMarcas() {
       api("/api/categorias"),
       api("/api/modelos"),
     ]);
+    // La API devuelve objetos {id, nombre, n_productos} (no strings sueltos)
+    // para poder editarlos/eliminarlos desde el panel de gestión.
     state.categoriasDisponibles = cats.categorias;
     state.modelosDisponibles = modelos.modelos;
     renderSelectCategoria();
     renderSelectModelo();
+    const modalGestion = document.getElementById("modal-gestion-categorias");
+    if (modalGestion && modalGestion.classList.contains("abierto")) {
+      renderGestionCategorias();
+      renderGestionModelos();
+    }
   } catch (e) {
     console.error(e);
   }
@@ -268,7 +275,7 @@ function renderSelectCategoria(seleccionActual) {
   const select = document.getElementById("f-categoria");
   const actual = seleccionActual !== undefined ? seleccionActual : select.value;
   select.innerHTML = '<option value="">Sin categoría</option>' +
-    state.categoriasDisponibles.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+    state.categoriasDisponibles.map(c => `<option value="${escapeHtml(c.nombre)}">${escapeHtml(c.nombre)}</option>`).join("");
   select.value = actual || "";
 }
 
@@ -276,7 +283,7 @@ function renderSelectModelo(seleccionActual) {
   const select = document.getElementById("f-modelo");
   const actual = seleccionActual !== undefined ? seleccionActual : select.value;
   select.innerHTML = '<option value="">Sin modelo</option>' +
-    state.modelosDisponibles.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+    state.modelosDisponibles.map(m => `<option value="${escapeHtml(m.nombre)}">${escapeHtml(m.nombre)}</option>`).join("");
   select.value = actual || "";
 }
 
@@ -300,6 +307,142 @@ document.querySelectorAll("[data-nuevo]").forEach(btn => {
       toast(e.message, true);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Panel de gestión: renombrar/eliminar categorías y modelos
+// (para corregir una categoría mal ingresada sin editar producto por producto)
+// ---------------------------------------------------------------------------
+
+function renderGestionCategorias() {
+  const tbody = document.getElementById("tbody-gestion-categorias");
+  const lista = state.categoriasDisponibles;
+  if (!lista.length) {
+    tbody.innerHTML = `<tr><td colspan="3" class="vacio">No hay categorías cargadas.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = lista.map(c => `
+    <tr>
+      <td>${escapeHtml(c.nombre)}</td>
+      <td class="num mono">${c.n_productos}</td>
+      <td>
+        <button type="button" class="btn-link" data-editar-categoria="${c.id}" data-nombre="${escapeHtml(c.nombre)}">Renombrar</button>
+        <button type="button" class="btn-link btn-link--peligro" data-eliminar-categoria="${c.id}" data-nombre="${escapeHtml(c.nombre)}">Eliminar</button>
+      </td>
+    </tr>`).join("");
+
+  tbody.querySelectorAll("[data-editar-categoria]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const nuevo = prompt(`Nuevo nombre para la categoría "${btn.dataset.nombre}":`, btn.dataset.nombre);
+      if (!nuevo || !nuevo.trim() || nuevo.trim().toUpperCase() === btn.dataset.nombre) return;
+      try {
+        const r = await api(`/api/categorias/${btn.dataset.editarCategoria}`, {
+          method: "PUT", body: JSON.stringify({ nombre: nuevo.trim() }),
+        });
+        toast(`Categoría renombrada (${r.productos_actualizados} producto(s) actualizados)`);
+        await Promise.all([cargarCategoriasYMarcas(), cargarProductos()]);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  });
+
+  tbody.querySelectorAll("[data-eliminar-categoria]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`¿Quitar "${btn.dataset.nombre}" de la lista de categorías precargadas? Los productos que ya la tienen NO se modifican.`)) return;
+      try {
+        await api(`/api/categorias/${btn.dataset.eliminarCategoria}`, { method: "DELETE" });
+        toast("Categoría eliminada de la lista");
+        await Promise.all([cargarCategoriasYMarcas(), cargarProductos()]);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  });
+}
+
+function renderGestionModelos() {
+  const tbody = document.getElementById("tbody-gestion-modelos");
+  const lista = state.modelosDisponibles;
+  if (!lista.length) {
+    tbody.innerHTML = `<tr><td colspan="3" class="vacio">No hay modelos cargados.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = lista.map(m => `
+    <tr>
+      <td>${escapeHtml(m.nombre)}</td>
+      <td class="num mono">${m.n_productos}</td>
+      <td>
+        <button type="button" class="btn-link" data-editar-modelo="${m.id}" data-nombre="${escapeHtml(m.nombre)}">Renombrar</button>
+        <button type="button" class="btn-link btn-link--peligro" data-eliminar-modelo="${m.id}" data-nombre="${escapeHtml(m.nombre)}">Eliminar</button>
+      </td>
+    </tr>`).join("");
+
+  tbody.querySelectorAll("[data-editar-modelo]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const nuevo = prompt(`Nuevo nombre para el modelo "${btn.dataset.nombre}":`, btn.dataset.nombre);
+      if (!nuevo || !nuevo.trim() || nuevo.trim().toUpperCase() === btn.dataset.nombre) return;
+      try {
+        const r = await api(`/api/modelos/${btn.dataset.editarModelo}`, {
+          method: "PUT", body: JSON.stringify({ nombre: nuevo.trim() }),
+        });
+        toast(`Modelo renombrado (${r.productos_actualizados} producto(s) actualizados)`);
+        await Promise.all([cargarCategoriasYMarcas(), cargarProductos()]);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  });
+
+  tbody.querySelectorAll("[data-eliminar-modelo]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm(`¿Quitar "${btn.dataset.nombre}" de la lista de modelos precargados? Los productos que ya lo tienen NO se modifican.`)) return;
+      try {
+        await api(`/api/modelos/${btn.dataset.eliminarModelo}`, { method: "DELETE" });
+        toast("Modelo eliminado de la lista");
+        await Promise.all([cargarCategoriasYMarcas(), cargarProductos()]);
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  });
+}
+
+document.getElementById("btn-gestion-categorias").addEventListener("click", async () => {
+  abrirModal("modal-gestion-categorias");
+  await cargarCategoriasYMarcas();
+  renderGestionCategorias();
+  renderGestionModelos();
+});
+
+document.getElementById("gc-btn-agregar-categoria").addEventListener("click", async () => {
+  const input = document.getElementById("gc-nueva-categoria");
+  const nombre = input.value.trim();
+  if (!nombre) return;
+  try {
+    await api("/api/categorias", { method: "POST", body: JSON.stringify({ nombre }) });
+    input.value = "";
+    toast("Categoría agregada");
+    await cargarCategoriasYMarcas();
+    renderGestionCategorias();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+document.getElementById("gc-btn-agregar-modelo").addEventListener("click", async () => {
+  const input = document.getElementById("gc-nuevo-modelo");
+  const nombre = input.value.trim();
+  if (!nombre) return;
+  try {
+    await api("/api/modelos", { method: "POST", body: JSON.stringify({ nombre }) });
+    input.value = "";
+    toast("Modelo agregado");
+    await cargarCategoriasYMarcas();
+    renderGestionModelos();
+  } catch (e) {
+    toast(e.message, true);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -939,6 +1082,27 @@ function renderTablaProveedores() {
   });
 }
 
+// Formatea el RUT en vivo mientras el usuario escribe (puntos de miles + guión
+// antes del dígito verificador), igual que lo hace el backend al guardar —
+// así se ve de inmediato aunque el backend es quien manda la versión final.
+function formatearRutEnVivo(valor) {
+  const limpio = valor.replace(/[^0-9kK]/g, "");
+  if (!limpio) return "";
+  const cuerpo = limpio.slice(0, -1);
+  const dv = limpio.slice(-1).toUpperCase();
+  if (!cuerpo) return dv;
+  const cuerpoConPuntos = cuerpo.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${cuerpoConPuntos}-${dv}`;
+}
+
+document.getElementById("pv-rut").addEventListener("input", (e) => {
+  const cursorAlFinal = e.target.selectionEnd === e.target.value.length;
+  e.target.value = formatearRutEnVivo(e.target.value);
+  if (cursorAlFinal) {
+    e.target.setSelectionRange(e.target.value.length, e.target.value.length);
+  }
+});
+
 document.getElementById("btn-nuevo-proveedor").addEventListener("click", () => {
   document.getElementById("form-proveedor").reset();
   document.getElementById("pv-id").value = "";
@@ -1452,23 +1616,27 @@ async function cargarMermas() {
 
     if (data.productos.length === 0) {
       const msg = esMes ? `No hubo pérdidas registradas en ${fmtMes(data.mes)}. 👍` : "No hay productos en merma actualmente. 👍";
-      tbody.innerHTML = `<tr><td colspan="5" class="vacio">${msg}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6" class="vacio">${msg}</td></tr>`;
       return;
     }
 
     tbody.innerHTML = data.productos.map(p => {
       const cantidad = esMes ? p.cantidad_mes : p.stock_merma;
       const valor = esMes ? p.valor_mes : p.stock_merma * p.costo_compra;
-      const accion = esMes
+      const accionDescartar = esMes
         ? ""
         : `<td><button class="btn-link" data-descartar="${p.id}" data-max="${p.stock_merma}">Descartar</button></td>`;
+      const accionRevertir = esMes
+        ? ""
+        : `<td><button class="btn-link" data-revertir="${p.id}" data-max="${p.stock_merma}">Revertir</button></td>`;
       return `
       <tr>
-        <td>#${escapeHtml(p.id_sistema)} ${escapeHtml(p.nombre)}</td>
+        <td><button type="button" class="btn-link" data-ver-origen="${p.id}" data-nombre="${escapeHtml(p.nombre)}">#${escapeHtml(p.id_sistema)} ${escapeHtml(p.nombre)}</button></td>
         <td>${escapeHtml(p.categoria) || "—"}</td>
         <td class="num mono">${cantidad}</td>
         <td class="num mono">${fmtMoney(valor)}</td>
-        ${accion || "<td></td>"}
+        ${accionDescartar || "<td></td>"}
+        ${accionRevertir || "<td></td>"}
       </tr>`;
     }).join("");
 
@@ -1489,8 +1657,59 @@ async function cargarMermas() {
         }
       });
     });
+
+    tbody.querySelectorAll("[data-revertir]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        const max = btn.dataset.max;
+        const cantidad = prompt(`¿Cuántas unidades quieres devolver a stock disponible? (máximo ${max})`, max);
+        if (!cantidad) return;
+        try {
+          await api(`/api/productos/${btn.dataset.revertir}/merma/revertir`, {
+            method: "POST",
+            body: JSON.stringify({ cantidad }),
+          });
+          toast("Merma revertida: stock devuelto a disponible");
+          await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      });
+    });
+
+    tbody.querySelectorAll("[data-ver-origen]").forEach(btn => {
+      btn.addEventListener("click", () => verOrigenMerma(btn.dataset.verOrigen, btn.dataset.nombre));
+    });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar mermas: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar mermas: ${e.message}</td></tr>`;
+  }
+}
+
+async function verOrigenMerma(productoId, nombre) {
+  document.getElementById("modal-merma-origen-titulo").textContent = `Origen de: ${nombre}`;
+  const tbody = document.getElementById("tbody-merma-origen");
+  const resumen = document.getElementById("merma-origen-resumen");
+  tbody.innerHTML = `<tr><td colspan="5" class="vacio">Cargando…</td></tr>`;
+  resumen.textContent = "";
+  abrirModal("modal-merma-origen");
+  try {
+    const data = await api(`/api/productos/${productoId}/merma/origenes`);
+    if (data.origenes.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="vacio">No hay ingresos de stock (con factura) registrados para este producto.</td></tr>`;
+      return;
+    }
+    resumen.textContent = data.n_proveedores_distintos > 1
+      ? `Este producto ha sido comprado a ${data.n_proveedores_distintos} proveedores distintos — revisa cuál corresponde a la unidad en merma.`
+      : "";
+    tbody.innerHTML = data.origenes.map(o => `
+      <tr>
+        <td>${fmtFecha(o.fecha)}</td>
+        <td class="num mono">${o.cantidad}</td>
+        <td class="num mono">${fmtMoney(o.costo_unitario)}</td>
+        <td>${escapeHtml(o.factura_numero) || "—"}</td>
+        <td>${escapeHtml(o.proveedor_nombre) || "Sin proveedor asignado"}</td>
+      </tr>`).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error: ${e.message}</td></tr>`;
   }
 }
 

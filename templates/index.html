@@ -114,6 +114,7 @@
       <input type="checkbox" id="filtro-criticos">
       Solo stock crítico
     </label>
+    <button type="button" class="btn btn-secundario" id="btn-gestion-categorias">Gestionar categorías/modelos</button>
   </section>
 
   <section class="tabla-wrap">
@@ -318,10 +319,11 @@
           <th class="num" id="mermas-th-cantidad">En merma</th>
           <th class="num" id="mermas-th-valor">Valor</th>
           <th class="mermas-col-accion"></th>
+          <th class="mermas-col-accion"></th>
         </tr>
       </thead>
       <tbody id="tbody-mermas">
-        <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -971,6 +973,86 @@
           <tr><td colspan="5" class="vacio">Cargando…</td></tr>
         </tbody>
       </table>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Gestión de categorías y modelos -->
+<div class="modal-overlay" id="modal-gestion-categorias">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Gestionar categorías y modelos</h2>
+      <button class="modal-close" data-close="modal-gestion-categorias">&times;</button>
+    </div>
+    <p class="ayuda-inline">Aquí puedes corregir un nombre mal ingresado (se actualiza automáticamente en todos los productos que lo usan), o agregar/eliminar categorías y modelos de la lista precargada. Eliminar una categoría o modelo de esta lista NO borra el dato en los productos que ya la tienen: solo deja de sugerirse para productos nuevos.</p>
+    <div class="grid-2">
+      <div>
+        <h3>Categorías</h3>
+        <div class="campo-select-mas">
+          <input type="text" id="gc-nueva-categoria" placeholder="Nueva categoría">
+          <button type="button" class="btn-link" id="gc-btn-agregar-categoria">+ Agregar</button>
+        </div>
+        <div class="tabla-wrap">
+          <table class="tabla">
+            <thead>
+              <tr><th>Nombre</th><th class="num">Productos</th><th></th></tr>
+            </thead>
+            <tbody id="tbody-gestion-categorias">
+              <tr><td colspan="3" class="vacio">Cargando…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div>
+        <h3>Modelos</h3>
+        <div class="campo-select-mas">
+          <input type="text" id="gc-nuevo-modelo" placeholder="Nuevo modelo">
+          <button type="button" class="btn-link" id="gc-btn-agregar-modelo">+ Agregar</button>
+        </div>
+        <div class="tabla-wrap">
+          <table class="tabla">
+            <thead>
+              <tr><th>Nombre</th><th class="num">Productos</th><th></th></tr>
+            </thead>
+            <tbody id="tbody-gestion-modelos">
+              <tr><td colspan="3" class="vacio">Cargando…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-gestion-categorias">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Detalle de origen de un producto en Merma (factura + proveedor) -->
+<div class="modal-overlay" id="modal-merma-origen">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="modal-merma-origen-titulo">Origen del producto</h2>
+      <button class="modal-close" data-close="modal-merma-origen">&times;</button>
+    </div>
+    <p class="ayuda-inline" id="merma-origen-resumen"></p>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Fecha ingreso</th>
+            <th>Cantidad</th>
+            <th>Costo unit.</th>
+            <th>Factura</th>
+            <th>Proveedor</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-merma-origen">
+          <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-merma-origen">Cerrar</button>
     </div>
   </div>
 </div>

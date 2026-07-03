@@ -543,6 +543,7 @@ body::before { content: none; }
   padding: 0;
 }
 .btn-link:hover { text-decoration: underline; }
+.btn-link--peligro { color: var(--danger, #c0392b); margin-left: 10px; }
 
 .ayuda-inline {
   font-size: 12px;

@@ -38,6 +38,7 @@
     <button class="tab" data-vista="mermas">Mermas</button>
     <button class="tab" data-vista="rotacion">Rotación</button>
     <button class="tab" data-vista="planificacion">Planificación</button>
+    <button class="tab" data-vista="operativo">Operativo</button>
     <button class="tab" data-vista="caja">Caja Chica</button>
     <button class="tab" data-vista="reportes">Reportes</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
@@ -431,6 +432,58 @@
       </div>
     </div>
 
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-operativo" style="display:none">
+
+  <section class="toolbar">
+    <input type="text" id="op-buscar" placeholder="Buscar por cliente, equipo, mecánico o descripción…">
+    <select id="op-filtro-estado">
+      <option value="">Todos los estados (excepto cancelado)</option>
+      <option value="recibido">Recibido</option>
+      <option value="diagnostico">Diagnóstico</option>
+      <option value="reparacion">Reparación</option>
+      <option value="esperando_repuesto">Esperando repuesto</option>
+      <option value="listo">Listo</option>
+      <option value="entregado">Entregado</option>
+      <option value="cancelado">Cancelado</option>
+    </select>
+    <span style="flex:1"></span>
+    <button class="btn btn-secundario" id="btn-op-clientes">Clientes</button>
+    <button class="btn btn-primary" id="btn-op-nueva-orden">+ Nueva orden</button>
+  </section>
+
+  <section class="op-kanban" id="op-kanban">
+    <div class="op-columna" data-estado="recibido">
+      <h3>Recibido <span class="op-columna-count" id="op-count-recibido">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-recibido"></div>
+    </div>
+    <div class="op-columna" data-estado="diagnostico">
+      <h3>Diagnóstico <span class="op-columna-count" id="op-count-diagnostico">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-diagnostico"></div>
+    </div>
+    <div class="op-columna" data-estado="reparacion">
+      <h3>Reparación <span class="op-columna-count" id="op-count-reparacion">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-reparacion"></div>
+    </div>
+    <div class="op-columna" data-estado="esperando_repuesto">
+      <h3>Esperando repuesto <span class="op-columna-count" id="op-count-esperando_repuesto">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-esperando_repuesto"></div>
+    </div>
+    <div class="op-columna" data-estado="listo">
+      <h3>Listo <span class="op-columna-count" id="op-count-listo">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-listo"></div>
+    </div>
+    <div class="op-columna" data-estado="entregado">
+      <h3>Entregado <span class="op-columna-count" id="op-count-entregado">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-entregado"></div>
+    </div>
+    <div class="op-columna" data-estado="cancelado" id="op-columna-cancelado" style="display:none">
+      <h3>Cancelado <span class="op-columna-count" id="op-count-cancelado">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-cancelado"></div>
+    </div>
   </section>
 
   </section>
@@ -1267,6 +1320,269 @@
     <div class="modal-actions">
       <button type="button" class="btn btn-secundario" data-close="modal-merma-origen">Cerrar</button>
     </div>
+  </div>
+</div>
+
+<!-- Módulo Operativo: cliente -->
+<div class="modal-overlay" id="modal-op-cliente">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-op-cliente-titulo">Nuevo cliente</h2>
+      <button class="modal-close" data-close="modal-op-cliente">&times;</button>
+    </div>
+    <form id="form-op-cliente">
+      <input type="hidden" id="opc-id">
+      <div class="campo">
+        <label>Nombre *</label>
+        <input type="text" id="opc-nombre" required placeholder="Ej: Juan Pérez">
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Teléfono</label>
+          <input type="text" id="opc-telefono">
+        </div>
+        <div class="campo">
+          <label>Email</label>
+          <input type="email" id="opc-email">
+        </div>
+      </div>
+      <div class="campo">
+        <label>RUT</label>
+        <input type="text" id="opc-rut">
+      </div>
+      <div class="campo">
+        <label>Notas</label>
+        <textarea id="opc-notas" rows="2"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-op-cliente">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar cliente</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Módulo Operativo: lista de clientes -->
+<div class="modal-overlay" id="modal-op-clientes-lista">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Clientes</h2>
+      <button class="modal-close" data-close="modal-op-clientes-lista">&times;</button>
+    </div>
+    <div class="toolbar">
+      <input type="text" id="opcl-buscar" placeholder="Buscar por nombre, RUT o teléfono…">
+      <span style="flex:1"></span>
+      <button type="button" class="btn btn-primary" id="btn-opcl-nuevo">+ Nuevo cliente</button>
+    </div>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Nombre</th>
+            <th>Teléfono</th>
+            <th>Email</th>
+            <th class="num">Equipos</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="tbody-op-clientes">
+          <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Módulo Operativo: equipo -->
+<div class="modal-overlay" id="modal-op-equipo">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-op-equipo-titulo">Nuevo equipo</h2>
+      <button class="modal-close" data-close="modal-op-equipo">&times;</button>
+    </div>
+    <form id="form-op-equipo">
+      <input type="hidden" id="ope-id">
+      <input type="hidden" id="ope-cliente-id">
+      <div class="grid-2">
+        <div class="campo">
+          <label>Patente / identificador</label>
+          <input type="text" id="ope-identificador" placeholder="Ej: ABCD12">
+        </div>
+        <div class="campo">
+          <label>Marca</label>
+          <input type="text" id="ope-marca">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Modelo</label>
+        <input type="text" id="ope-modelo">
+      </div>
+      <div class="campo">
+        <label>Notas</label>
+        <textarea id="ope-notas" rows="2"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-op-equipo">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar equipo</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Módulo Operativo: nueva orden de trabajo -->
+<div class="modal-overlay" id="modal-op-orden-nueva">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Nueva orden de trabajo</h2>
+      <button class="modal-close" data-close="modal-op-orden-nueva">&times;</button>
+    </div>
+    <form id="form-op-orden-nueva">
+      <div class="grid-2">
+        <div class="campo">
+          <label>Cliente *</label>
+          <div class="campo-select-mas">
+            <select id="opon-cliente-id" required><option value="">Selecciona un cliente…</option></select>
+            <button type="button" class="btn-link" id="opon-nuevo-cliente">+ Nuevo</button>
+          </div>
+        </div>
+        <div class="campo">
+          <label>Equipo</label>
+          <div class="campo-select-mas">
+            <select id="opon-equipo-id"><option value="">Sin equipo específico</option></select>
+            <button type="button" class="btn-link" id="opon-nuevo-equipo">+ Nuevo</button>
+          </div>
+        </div>
+      </div>
+      <div class="campo">
+        <label>Descripción del problema</label>
+        <textarea id="opon-descripcion" rows="3" placeholder="Ej: Caja automática patina en 2da marcha"></textarea>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Mecánico asignado</label>
+          <input type="text" id="opon-mecanico">
+        </div>
+        <div class="campo">
+          <label>Entrega estimada</label>
+          <input type="date" id="opon-fecha-estimada">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-op-orden-nueva">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Crear orden</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Módulo Operativo: detalle de orden de trabajo -->
+<div class="modal-overlay" id="modal-op-orden-detalle">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="opod-titulo">Orden de trabajo</h2>
+      <button class="modal-close" data-close="modal-op-orden-detalle">&times;</button>
+    </div>
+    <input type="hidden" id="opod-id">
+    <p class="ayuda-inline" id="opod-cliente-equipo"></p>
+
+    <div class="grid-2">
+      <div class="campo">
+        <label>Estado</label>
+        <select id="opod-estado">
+          <option value="recibido">Recibido</option>
+          <option value="diagnostico">Diagnóstico</option>
+          <option value="reparacion">Reparación</option>
+          <option value="esperando_repuesto">Esperando repuesto</option>
+          <option value="listo">Listo</option>
+          <option value="entregado">Entregado</option>
+          <option value="cancelado">Cancelado</option>
+        </select>
+      </div>
+      <div class="campo">
+        <label>Mecánico asignado</label>
+        <input type="text" id="opod-mecanico">
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="campo">
+        <label>Entrega estimada</label>
+        <input type="date" id="opod-fecha-estimada">
+      </div>
+      <div class="campo">
+        <label>Entrega real</label>
+        <input type="text" id="opod-fecha-real" disabled>
+      </div>
+    </div>
+    <div class="campo">
+      <label>Descripción del problema</label>
+      <textarea id="opod-descripcion" rows="2"></textarea>
+    </div>
+    <div class="campo">
+      <label>Diagnóstico</label>
+      <textarea id="opod-diagnostico" rows="2"></textarea>
+    </div>
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-primary" id="btn-opod-guardar">Guardar cambios</button>
+    </div>
+
+    <h3 class="subtitulo">Repuestos y mano de obra</h3>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Tipo</th>
+            <th>Descripción</th>
+            <th class="num">Cantidad</th>
+            <th class="num">Costo unit.</th>
+            <th class="num">Subtotal</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="tbody-op-items">
+          <tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="4" style="text-align:right"><strong>Total</strong></td>
+            <td class="num" id="opod-total"><strong>—</strong></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <form id="form-op-item">
+      <div class="grid-3">
+        <div class="campo">
+          <label>Tipo</label>
+          <select id="opoi-tipo">
+            <option value="repuesto">Repuesto (consume stock)</option>
+            <option value="mano_obra">Mano de obra</option>
+          </select>
+        </div>
+        <div class="campo" id="opoi-campo-producto">
+          <label>Producto</label>
+          <select id="opoi-producto-id"><option value="">Selecciona un producto…</option></select>
+        </div>
+        <div class="campo" id="opoi-campo-descripcion" style="display:none">
+          <label>Descripción</label>
+          <input type="text" id="opoi-descripcion" placeholder="Ej: Cambio de sellos">
+        </div>
+      </div>
+      <div class="grid-3">
+        <div class="campo">
+          <label>Cantidad</label>
+          <input type="number" id="opoi-cantidad" min="0.01" step="0.01" value="1">
+        </div>
+        <div class="campo" id="opoi-campo-costo" style="display:none">
+          <label>Costo unitario ($)</label>
+          <input type="number" id="opoi-costo" min="0" step="1">
+        </div>
+        <div class="campo" style="justify-content:flex-end">
+          <button type="submit" class="btn btn-secundario">+ Agregar ítem</button>
+        </div>
+      </div>
+    </form>
   </div>
 </div>
 

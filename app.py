@@ -24,15 +24,50 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
-
-# Los comprobantes de Caja Chica (Módulo 10) se guardan junto a la base de
-# datos — así, en Railway, quedan en el mismo disco persistente que
-# inventario.db y no se pierden con cada actualización.
-COMPROBANTES_DIR = os.path.join(os.path.dirname(DB_PATH), "comprobantes")
-os.makedirs(COMPROBANTES_DIR, exist_ok=True)
-EXTENSIONES_COMPROBANTE_PERMITIDAS = {".jpg", ".jpeg", ".png", ".pdf", ".webp", ".heic"}
+# BASE_DIR/DB_PATH y la conexión a la base de datos, el cálculo de stock
+# mínimo, las utilidades de formato y los helpers de reportes Excel/PDF ya
+# no viven acá: se movieron a core.py, un módulo sin ninguna dependencia
+# hacia app.py ni hacia modulos/, justamente para que ni app.py ni un
+# módulo nuevo (Caja Chica, y a futuro Operativo, RRHH, etc.) tengan que
+# importarse entre sí — eso es lo que causaba un import circular cuando
+# Caja Chica se separó por primera vez. Ver el docstring de core.py.
+from core import (  # noqa: E402
+    BASE_DIR,
+    DB_PATH,
+    COMPROBANTES_DIR,
+    EXTENSIONES_COMPROBANTE_PERMITIDAS,
+    DB_BUSY_TIMEOUT_MS,
+    STOCK_MINIMO_VENTANA_DIAS,
+    STOCK_MINIMO_Z_SERVICIO,
+    STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS,
+    STOCK_MINIMO_LEAD_TIME_MIN_DIAS,
+    STOCK_MINIMO_LEAD_TIME_MAX_DIAS,
+    _conectar_db,
+    get_db,
+    close_db,
+    _iniciar_transaccion_stock,
+    row_to_dict,
+    codigo_ubicacion,
+    nombre_automatico,
+    now_iso,
+    fmt_money_pdf,
+    usuario_actual,
+    formatear_rut,
+    _estimar_lead_time_dias,
+    _consumo_diario_stats,
+    _calcular_stock_minimo_producto,
+    _recalcular_stock_minimo,
+    _aplicar_entrada_stock,
+    _aplicar_salida_stock,
+    _crear_libro_excel,
+    _estilo_encabezado,
+    _autoancho,
+    _excel_response,
+    _pdf_documento,
+    _pdf_tabla,
+    _pdf_response,
+    _rango_fechas,
+)
 
 # Fotografías de producto (opcional) — mismo criterio que los comprobantes:
 # se guardan junto a la base de datos para no perderse con cada actualización.
@@ -54,6 +89,10 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = "SECRET_KEY" in os.environ
+
+# close_db vive en core.py (sin decorador, porque core.py no conoce el
+# objeto `app`); se registra acá como teardown de cada contexto de request.
+app.teardown_appcontext(close_db)
 
 # ---------------------------------------------------------------------------
 # Protección básica contra fuerza bruta en el login
@@ -117,12 +156,6 @@ ALERTA_STOCK_DESTINATARIO = os.environ.get("ALERTA_STOCK_DESTINATARIO", "") or S
 # el consumo (desviación estándar) y de qué tan seguro se quiere estar de no
 # quedar en cero (nivel de servicio). No se necesita ningún modelo de IA
 # para esto — es la fórmula que usa cualquier sistema de inventario.
-STOCK_MINIMO_VENTANA_DIAS = int(os.environ.get("STOCK_MINIMO_VENTANA_DIAS", "90"))
-STOCK_MINIMO_Z_SERVICIO = float(os.environ.get("STOCK_MINIMO_Z_SERVICIO", "1.65"))  # ≈95% de nivel de servicio
-STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS = float(os.environ.get("STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS", "7"))
-STOCK_MINIMO_LEAD_TIME_MIN_DIAS = 1.0
-STOCK_MINIMO_LEAD_TIME_MAX_DIAS = 60.0
-
 
 def respaldo_automatico_configurado():
     return bool(SMTP_USER and SMTP_PASSWORD and SMTP_DESTINATARIO)
@@ -145,27 +178,13 @@ CATEGORIAS_MOVIMIENTO = sorted(set(CATEGORIAS_ENTRADA) | set(CATEGORIAS_SALIDA))
 
 
 # ---------------------------------------------------------------------------
-# Conexión a la base de datos
+# Inicialización de la base de datos: creación de tablas y migraciones.
+# La conexión en sí (WAL, busy_timeout, BEGIN IMMEDIATE) vive en core.py.
 # ---------------------------------------------------------------------------
-
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
-    return g.db
-
-
-@app.teardown_appcontext
-def close_db(exception=None):
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
 
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
+    db = _conectar_db()
 
     db.executescript(
         """
@@ -568,37 +587,50 @@ def init_db():
     )
     db.commit()
 
+    # ---- Índices de rendimiento: movimientos es la tabla que más va a
+    # crecer con los años (cada entrada, salida y pérdida queda ahí para
+    # siempre), y prácticamente todas las pantallas de análisis (Rotación,
+    # Planificación, historial de un producto, reportes) filtran por
+    # producto_id, tipo y/o fecha. Sin estos índices, cada una de esas
+    # consultas recorre la tabla completa — hoy no se nota con pocos meses
+    # de datos, pero sí se va a notar con miles de movimientos acumulados.
+    # Van al final de init_db() porque referencian tablas (merma_proveedores,
+    # stock_minimo_calculo) que recién se crean en migraciones anteriores;
+    # así funcionan tanto en una base nueva como en una ya existente.
+    db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_movimientos_producto_id ON movimientos (producto_id);
+        CREATE INDEX IF NOT EXISTS idx_movimientos_tipo_fecha ON movimientos (tipo, fecha);
+        CREATE INDEX IF NOT EXISTS idx_movimientos_producto_tipo_fecha ON movimientos (producto_id, tipo, fecha);
+        CREATE INDEX IF NOT EXISTS idx_movimientos_factura_numero ON movimientos (factura_numero);
+
+        CREATE INDEX IF NOT EXISTS idx_factura_lineas_factura_id ON factura_lineas (factura_id);
+        CREATE INDEX IF NOT EXISTS idx_factura_lineas_producto_id ON factura_lineas (producto_id);
+
+        CREATE INDEX IF NOT EXISTS idx_caja_movimientos_fecha ON caja_movimientos (fecha);
+        CREATE INDEX IF NOT EXISTS idx_caja_movimientos_tipo ON caja_movimientos (tipo);
+        CREATE INDEX IF NOT EXISTS idx_caja_movimientos_rendicion_id ON caja_movimientos (rendicion_id);
+
+        CREATE INDEX IF NOT EXISTS idx_merma_proveedores_producto_id ON merma_proveedores (producto_id);
+
+        CREATE INDEX IF NOT EXISTS idx_productos_stock_minimo ON productos (stock_disponible, stock_minimo);
+        """
+    )
+    db.commit()
+
+    # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
+    # (ver modulos/) es dueño de su propia migración, para que agregar un
+    # módulo nuevo no implique tocar el resto de init_db(). Va al final
+    # porque orden_items referencia productos y movimientos.
+    init_operativo_db(db)
+
     db.close()
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers propios de Logística (row_to_dict, now_iso, el cálculo de stock
+# mínimo, etc. se movieron a core.py — ver el import al principio del archivo)
 # ---------------------------------------------------------------------------
-
-def row_to_dict(row):
-    d = dict(row)
-    d["stock_total"] = d["stock_disponible"] + d["stock_reservado"]
-    d["id_sistema"] = f"{d['id']:04d}"
-    if "foto_archivo" in d:
-        d["tiene_foto"] = bool(d.get("foto_archivo"))
-    return d
-
-
-def codigo_ubicacion(pasillo, estanteria, nivel):
-    return f"P{pasillo}-E{estanteria}-N{nivel}"
-
-
-def nombre_automatico(categoria, modelo, codigo_interno, id_num):
-    """El producto ya no tiene un campo 'nombre' editable: se arma solo a
-    partir de categoría + modelo (los datos que realmente lo identifican),
-    con respaldos razonables si esos vienen vacíos."""
-    partes = [p for p in [(categoria or "").strip(), (modelo or "").strip()] if p]
-    if partes:
-        return " - ".join(partes)
-    if (codigo_interno or "").strip():
-        return codigo_interno.strip()
-    return f"Producto #{id_num:04d}"
-
 
 PRODUCTO_SELECT = """
     SELECT p.*, u.codigo AS ubicacion_codigo, u.pasillo AS ubicacion_pasillo,
@@ -606,234 +638,6 @@ PRODUCTO_SELECT = """
     FROM productos p
     LEFT JOIN ubicaciones u ON p.ubicacion_id = u.id
 """
-
-
-def now_iso():
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def fmt_money_pdf(valor):
-    """Formatea un monto en pesos chilenos para los reportes PDF (con
-    separador de miles), igual que se ve en la interfaz."""
-    try:
-        return f"${round(valor):,}".replace(",", ".")
-    except (TypeError, ValueError):
-        return "$0"
-
-
-def usuario_actual():
-    """El responsable de un movimiento de Caja Chica siempre es quien tiene
-    la sesión iniciada (nunca un valor mandado por el cliente), para que no
-    se pueda registrar un gasto o aporte a nombre de otra persona."""
-    return session.get("nombre") or session.get("username") or "Sistema"
-
-
-def formatear_rut(valor):
-    """Normaliza un RUT chileno agregando puntos de miles y el guión antes
-    del dígito verificador, sin importar cómo lo haya escrito el usuario.
-    Ej: "770893703" -> "77.089.370-3", "7.708.937-03-0" (con basura) se
-    limpia primero. Si no viene nada o no hay al menos un dígito, retorna
-    el texto original (limpio de espacios) tal cual, para no inventar datos."""
-    if not valor:
-        return ""
-    limpio = re.sub(r"[^0-9kK]", "", valor)
-    if not limpio:
-        return valor.strip().upper()
-    cuerpo, dv = limpio[:-1], limpio[-1].upper()
-    if not cuerpo:
-        return dv
-    cuerpo_con_puntos = ""
-    for i, digito in enumerate(reversed(cuerpo)):
-        if i and i % 3 == 0:
-            cuerpo_con_puntos = "." + cuerpo_con_puntos
-        cuerpo_con_puntos = digito + cuerpo_con_puntos
-    return f"{cuerpo_con_puntos}-{dv}"
-
-
-def _estimar_lead_time_dias(db, producto_id):
-    """Estima cuántos días suele tardar en 'reponerse' este producto,
-    midiendo el intervalo entre entradas de stock sucesivas (compras)
-    históricas — no se registra un tiempo de entrega explícito en ninguna
-    parte del sistema, así que esto es lo más cercano que hay a ese dato.
-
-    Devuelve (dias, es_estimado_por_defecto). Con menos de dos entradas
-    históricas no hay intervalo que medir, así que se usa un valor por
-    defecto razonable (configurable) y se marca como tal, para que la
-    interfaz pueda avisar que es una estimación poco confiable todavía."""
-    fechas = db.execute(
-        "SELECT fecha FROM movimientos WHERE producto_id = ? AND tipo = 'entrada' ORDER BY fecha ASC",
-        (producto_id,),
-    ).fetchall()
-
-    if len(fechas) < 2:
-        return STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS, True
-
-    intervalos = []
-    anterior = None
-    for f in fechas:
-        try:
-            actual = datetime.fromisoformat(f["fecha"])
-        except (TypeError, ValueError):
-            continue
-        if anterior is not None:
-            dias = (actual - anterior).total_seconds() / 86400
-            if dias > 0:
-                intervalos.append(dias)
-        anterior = actual
-
-    if not intervalos:
-        return STOCK_MINIMO_LEAD_TIME_DEFECTO_DIAS, True
-
-    # La mediana es más robusta que el promedio: una sola compra atrasada o
-    # adelantada (ej. stock inicial cargado el mismo día que la primera
-    # factura) no debería distorsionar la estimación completa.
-    estimado = statistics.median(intervalos)
-    estimado = max(STOCK_MINIMO_LEAD_TIME_MIN_DIAS, min(STOCK_MINIMO_LEAD_TIME_MAX_DIAS, estimado))
-    return estimado, False
-
-
-def _consumo_diario_stats(db, producto_id, dias=STOCK_MINIMO_VENTANA_DIAS):
-    """Consumo diario promedio y su desviación estándar dentro de la
-    ventana de días indicada, contando los días sin salidas como 0 (para
-    que el promedio refleje bien la frecuencia real de uso, no solo los
-    días que sí tuvieron movimiento)."""
-    desde_dt = datetime.now() - timedelta(days=dias)
-    desde = desde_dt.isoformat(timespec="seconds")
-
-    filas = db.execute(
-        """
-        SELECT date(fecha) AS dia, SUM(cantidad) AS total
-        FROM movimientos
-        WHERE producto_id = ? AND tipo = 'salida' AND fecha >= ?
-        GROUP BY dia
-        """,
-        (producto_id, desde),
-    ).fetchall()
-    mapa = {r["dia"]: r["total"] for r in filas}
-
-    serie = []
-    cursor = desde_dt
-    hoy = datetime.now()
-    while cursor <= hoy:
-        serie.append(mapa.get(cursor.strftime("%Y-%m-%d"), 0))
-        cursor += timedelta(days=1)
-
-    if not serie:
-        return 0.0, 0.0
-
-    promedio = statistics.mean(serie)
-    desviacion = statistics.pstdev(serie) if len(serie) > 1 else 0.0
-    return promedio, desviacion
-
-
-def _calcular_stock_minimo_producto(db, producto_id):
-    """Punto de reorden: cuánto stock disponible debería quedar cuando toca
-    volver a comprar, calculado solo con datos reales del producto (sin
-    necesidad de ningún modelo de IA — es aritmética simple de inventario):
-
-        mínimo = consumo_diario_promedio × días_de_entrega + stock_de_seguridad
-
-    El stock de seguridad cubre que el consumo real varíe semana a semana
-    (usa la desviación estándar del consumo diario y un nivel de servicio
-    configurable — por defecto ≈95%, es decir, deja margen para no quedar
-    en cero en la gran mayoría de los casos, sin sobre-comprar tampoco)."""
-    consumo_diario, desviacion_diaria = _consumo_diario_stats(db, producto_id)
-    lead_time_dias, lead_time_es_defecto = _estimar_lead_time_dias(db, producto_id)
-
-    if consumo_diario <= 0:
-        # Sin consumo reciente: no hay base para justificar un colchón de
-        # stock — mantenerlo en 0 evita que productos obsoletos o nuevos
-        # sin historial queden marcados como "críticos" sin motivo real.
-        stock_seguridad = 0.0
-        punto_reorden = 0.0
-    else:
-        stock_seguridad = STOCK_MINIMO_Z_SERVICIO * desviacion_diaria * math.sqrt(lead_time_dias)
-        punto_reorden = consumo_diario * lead_time_dias + stock_seguridad
-
-    return {
-        "consumo_diario_promedio": round(consumo_diario, 4),
-        "desviacion_diaria": round(desviacion_diaria, 4),
-        "lead_time_dias": round(lead_time_dias, 2),
-        "lead_time_es_estimado_por_defecto": lead_time_es_defecto,
-        "stock_seguridad": round(stock_seguridad, 2),
-        "stock_minimo_calculado": max(0, round(punto_reorden)),
-    }
-
-
-def _recalcular_stock_minimo(db, producto_id):
-    """Recalcula y GUARDA el stock mínimo del producto (sobrescribe lo que
-    hubiera antes, sea manual o automático) — se llama automáticamente
-    después de cada entrada, salida o pérdida de stock, para que el mínimo
-    quede siempre al día con el consumo real más reciente. No hace commit:
-    queda dentro de la misma transacción del movimiento que lo disparó."""
-    calculo = _calcular_stock_minimo_producto(db, producto_id)
-    ts = now_iso()
-    db.execute(
-        "UPDATE productos SET stock_minimo = ? WHERE id = ?",
-        (calculo["stock_minimo_calculado"], producto_id),
-    )
-    db.execute(
-        """
-        INSERT INTO stock_minimo_calculo (
-            producto_id, consumo_diario_promedio, desviacion_diaria, lead_time_dias,
-            lead_time_es_estimado_por_defecto, stock_seguridad, stock_minimo_calculado, calculado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(producto_id) DO UPDATE SET
-            consumo_diario_promedio = excluded.consumo_diario_promedio,
-            desviacion_diaria = excluded.desviacion_diaria,
-            lead_time_dias = excluded.lead_time_dias,
-            lead_time_es_estimado_por_defecto = excluded.lead_time_es_estimado_por_defecto,
-            stock_seguridad = excluded.stock_seguridad,
-            stock_minimo_calculado = excluded.stock_minimo_calculado,
-            calculado_en = excluded.calculado_en
-        """,
-        (
-            producto_id, calculo["consumo_diario_promedio"], calculo["desviacion_diaria"],
-            calculo["lead_time_dias"], 1 if calculo["lead_time_es_estimado_por_defecto"] else 0,
-            calculo["stock_seguridad"], calculo["stock_minimo_calculado"], ts,
-        ),
-    )
-    return calculo
-
-
-def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra"):
-    """Aplica una entrada de stock a un producto, recalculando el Costo
-    Promedio Ponderado si se informa costo_unitario, y deja el movimiento
-    registrado con la referencia a la factura si corresponde.
-    Devuelve el nuevo stock disponible.
-    """
-    stock_actual = producto_row["stock_disponible"]
-    costo_actual = producto_row["costo_compra"]
-    nuevo_stock = stock_actual + cantidad
-
-    nuevo_costo_promedio = costo_actual
-    if costo_unitario is not None:
-        valor_actual = stock_actual * costo_actual
-        valor_nuevo = cantidad * costo_unitario
-        nuevo_costo_promedio = (valor_actual + valor_nuevo) / nuevo_stock if nuevo_stock > 0 else costo_unitario
-
-    ts = now_iso()
-    db.execute(
-        "UPDATE productos SET stock_disponible = ?, costo_compra = ?, actualizado_en = ? WHERE id = ?",
-        (nuevo_stock, nuevo_costo_promedio, ts, producto_row["id"]),
-    )
-    db.execute(
-        """
-        INSERT INTO movimientos (
-            producto_id, fecha, tipo, categoria, cantidad, motivo, usuario,
-            costo_unitario, factura_id, factura_numero, stock_resultante
-        )
-        VALUES (?, ?, 'entrada', ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            producto_row["id"], ts, categoria, cantidad, motivo, usuario, costo_unitario,
-            factura["id"] if factura else None,
-            factura["numero"] if factura else None,
-            nuevo_stock,
-        ),
-    )
-    _recalcular_stock_minimo(db, producto_row["id"])
-    return nuevo_stock
 
 
 def _proveedores_origen_producto(db, producto_id):
@@ -1376,6 +1180,7 @@ def obtener_foto_producto(nombre_archivo):
 @app.route("/api/productos/<int:producto_id>/movimiento", methods=["POST"])
 def registrar_movimiento(producto_id):
     db = get_db()
+    _iniciar_transaccion_stock(db)
     row = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
     if row is None:
         return jsonify({"error": "Producto no encontrado"}), 404
@@ -1463,22 +1268,15 @@ def registrar_movimiento(producto_id):
     if tipo == "entrada":
         nuevo_stock = _aplicar_entrada_stock(db, row, cantidad, costo_unitario, motivo, usuario, factura, categoria)
     elif tipo == "salida":
-        if cantidad > stock_actual:
-            return jsonify({"error": f"No hay stock suficiente (disponible: {stock_actual})"}), 400
-        nuevo_stock = stock_actual - cantidad
-        ts = now_iso()
-        db.execute(
-            "UPDATE productos SET stock_disponible = ?, actualizado_en = ? WHERE id = ?",
-            (nuevo_stock, ts, producto_id),
-        )
-        db.execute(
-            "INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, stock_resultante) "
-            "VALUES (?, ?, 'salida', ?, ?, ?, ?, ?)",
-            (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock),
-        )
         # Una salida es la única que cambia el consumo real (una pérdida no
-        # es "demanda", así que no se usa para proyectar el mínimo).
-        _recalcular_stock_minimo(db, producto_id)
+        # es "demanda", así que no se usa para proyectar el mínimo) — eso
+        # ya lo maneja _aplicar_salida_stock (core.py), que también usa
+        # el módulo Operativo cuando una orden de trabajo consume un
+        # repuesto, para que ambos caminos queden siempre consistentes.
+        try:
+            nuevo_stock = _aplicar_salida_stock(db, row, cantidad, motivo, usuario, categoria)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
     else:  # perdida -> el stock sale de "disponible" pero no desaparece: pasa a la cuenta de merma
         if cantidad > stock_actual:
             return jsonify({"error": f"No hay stock disponible suficiente para marcar como pérdida (disponible: {stock_actual})"}), 400
@@ -2051,6 +1849,7 @@ def crear_factura():
         return jsonify({"error": "Agrega al menos un producto a la factura"}), 400
 
     db = get_db()
+    _iniciar_transaccion_stock(db)
 
     if proveedor_id:
         try:
@@ -2136,6 +1935,7 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
 @app.route("/api/facturas/<int:factura_id>", methods=["DELETE"])
 def eliminar_factura(factura_id):
     db = get_db()
+    _iniciar_transaccion_stock(db)
     factura = db.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
     if factura is None:
         return jsonify({"error": "Factura no encontrada"}), 404
@@ -2495,6 +2295,7 @@ def carga_masiva_confirmar():
         return jsonify({"error": "La previsualización expiró o no es válida. Vuelve a subir el archivo."}), 400
 
     db = get_db()
+    _iniciar_transaccion_stock(db)
     usuario = usuario_actual()
     creadas, omitidas = [], []
 
@@ -2688,7 +2489,7 @@ def _enviar_respaldo_por_correo():
 
 def _registrar_respaldo_log(exito, detalle):
     try:
-        db = sqlite3.connect(DB_PATH)
+        db = _conectar_db()
         db.execute(
             "INSERT INTO respaldos_log (fecha, exito, destino, detalle) VALUES (?, ?, ?, ?)",
             (now_iso(), 1 if exito else 0, SMTP_DESTINATARIO, detalle),
@@ -2703,7 +2504,7 @@ def _hilo_respaldos_automaticos():
     while True:
         try:
             if respaldo_automatico_configurado():
-                db = sqlite3.connect(DB_PATH)
+                db = _conectar_db()
                 ultimo = db.execute(
                     "SELECT fecha FROM respaldos_log WHERE exito = 1 ORDER BY fecha DESC LIMIT 1"
                 ).fetchone()
@@ -2781,8 +2582,7 @@ def _enviar_alerta_stock_critico(forzar_aunque_vacio=False):
     if not alerta_stock_configurada():
         return False, "Las alertas de stock no están configuradas (faltan las variables SMTP_USER / SMTP_PASSWORD).", 0, False
 
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
+    db = _conectar_db()
     try:
         productos = _productos_stock_critico_para_alerta(db)
     finally:
@@ -2830,7 +2630,7 @@ def _enviar_alerta_stock_critico(forzar_aunque_vacio=False):
 
 def _registrar_alerta_stock_log(exito, detalle, n_productos, correo_enviado):
     try:
-        db = sqlite3.connect(DB_PATH)
+        db = _conectar_db()
         db.execute(
             """
             INSERT INTO alertas_stock_log (fecha, exito, destino, detalle, n_productos, correo_enviado)
@@ -2848,7 +2648,7 @@ def _hilo_alertas_stock():
     while True:
         try:
             if alerta_stock_configurada():
-                db = sqlite3.connect(DB_PATH)
+                db = _conectar_db()
                 ultimo = db.execute(
                     "SELECT fecha FROM alertas_stock_log ORDER BY fecha DESC LIMIT 1"
                 ).fetchone()
@@ -2922,8 +2722,7 @@ def _recalcular_stock_minimo_todos(db):
 def _hilo_recalculo_stock_minimo():
     while True:
         try:
-            db = sqlite3.connect(DB_PATH)
-            db.row_factory = sqlite3.Row
+            db = _conectar_db()
             _recalcular_stock_minimo_todos(db)
             db.close()
         except Exception:
@@ -3146,6 +2945,7 @@ def listar_mermas():
 @app.route("/api/productos/<int:producto_id>/merma/descartar", methods=["POST"])
 def descartar_merma(producto_id):
     db = get_db()
+    _iniciar_transaccion_stock(db)
     producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
     if producto is None:
         return jsonify({"error": "Producto no encontrado"}), 404
@@ -3188,6 +2988,7 @@ def revertir_merma(producto_id):
     qué proveedor son las unidades a revertir (el mismo bucket elegido al
     marcar la pérdida), para no mezclar saldos de distintos proveedores."""
     db = get_db()
+    _iniciar_transaccion_stock(db)
     producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
     if producto is None:
         return jsonify({"error": "Producto no encontrado"}), 404
@@ -3277,390 +3078,6 @@ def merma_origenes(producto_id):
 # ---------------------------------------------------------------------------
 # API: Caja Chica (Módulo 10)
 # ---------------------------------------------------------------------------
-
-def _guardar_comprobante(archivo):
-    """Guarda el archivo subido (boleta/comprobante) en COMPROBANTES_DIR con
-    un nombre único, y devuelve el nombre guardado (o '' si no venía nada).
-    Valida la extensión para no aceptar cualquier tipo de archivo."""
-    if not archivo or not archivo.filename:
-        return ""
-    nombre_original = secure_filename(archivo.filename)
-    ext = os.path.splitext(nombre_original)[1].lower()
-    if ext not in EXTENSIONES_COMPROBANTE_PERMITIDAS:
-        raise ValueError(f"Tipo de archivo no permitido para comprobantes ({ext or 'sin extensión'}). Usa foto (jpg/png/webp/heic) o PDF.")
-    nombre_guardado = f"{uuid.uuid4().hex}{ext}"
-    archivo.save(os.path.join(COMPROBANTES_DIR, nombre_guardado))
-    return nombre_guardado
-
-
-def _caja_bloqueo_motivo(row):
-    """Explica por qué un gasto/aporte de Caja Chica NO se puede editar ni
-    eliminar (para no descuadrar el saldo o la trazabilidad), o None si es
-    seguro modificarlo libremente."""
-    if row["rendicion_id"] is not None:
-        return "Este gasto ya fue incluido en una rendición y no se puede modificar."
-    if row["rendicion_origen_id"] is not None:
-        return ("Este aporte lo generó automáticamente una rendición y no se puede modificar suelto "
-                "(dejaría el saldo descuadrado respecto a los gastos que ya quedaron marcados como rendidos).")
-    if row["movimiento_inventario_id"] is not None:
-        return ("Este gasto ingresó stock al inventario (compra de emergencia). "
-                "Ajusta el stock manualmente primero si corresponde, y luego edita o elimina el gasto.")
-    return None
-
-
-def _caja_movimiento_dict(row):
-    d = dict(row)
-    d["tiene_comprobante"] = bool(d.get("comprobante_archivo"))
-    d["rendido"] = d.get("rendicion_id") is not None
-    d["bloqueado_motivo"] = _caja_bloqueo_motivo(row)
-    return d
-
-
-@app.route("/api/caja/resumen", methods=["GET"])
-def caja_resumen():
-    db = get_db()
-    total_aportado = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'aporte'"
-    ).fetchone()[0]
-    total_gastado = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto'"
-    ).fetchone()[0]
-    pendiente_rendir = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL"
-    ).fetchone()[0]
-
-    inicio_mes = datetime.now().strftime("%Y-%m") + "-01"
-    gastado_mes = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND fecha >= ?",
-        (inicio_mes,),
-    ).fetchone()[0]
-
-    return jsonify({
-        "saldo_disponible": total_aportado - total_gastado,
-        "total_aportado": total_aportado,
-        "total_gastado": total_gastado,
-        "pendiente_rendir": pendiente_rendir,
-        "gastado_mes": gastado_mes,
-    })
-
-
-@app.route("/api/caja/movimientos", methods=["GET"])
-def caja_listar_movimientos():
-    db = get_db()
-
-    tipo = request.args.get("tipo", "").strip()
-    estado = request.args.get("estado", "").strip()  # 'pendiente' | 'rendido' (solo aplica a gasto)
-    desde = request.args.get("desde", "").strip()
-    hasta = request.args.get("hasta", "").strip()
-    q = request.args.get("q", "").strip()
-
-    sql = "SELECT * FROM caja_movimientos WHERE 1=1"
-    params = []
-    if tipo:
-        sql += " AND tipo = ?"
-        params.append(tipo)
-    if estado == "pendiente":
-        sql += " AND tipo = 'gasto' AND rendicion_id IS NULL"
-    elif estado == "rendido":
-        sql += " AND tipo = 'gasto' AND rendicion_id IS NOT NULL"
-    if desde:
-        sql += " AND fecha >= ?"
-        params.append(desde)
-    if hasta:
-        sql += " AND fecha <= ?"
-        params.append(hasta + "T23:59:59")
-    if q:
-        sql += " AND (categoria LIKE ? OR descripcion LIKE ? OR proveedor LIKE ? OR usuario LIKE ?)"
-        like = f"%{q}%"
-        params += [like, like, like, like]
-
-    sql += " ORDER BY fecha DESC, id DESC LIMIT 500"
-    rows = db.execute(sql, params).fetchall()
-    movimientos = [_caja_movimiento_dict(r) for r in rows]
-
-    return jsonify({"movimientos": movimientos, "total": len(movimientos)})
-
-
-@app.route("/api/caja/gasto", methods=["POST"])
-def caja_crear_gasto():
-    db = get_db()
-    data = request.form
-
-    try:
-        monto = float(data.get("monto"))
-        if monto <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
-
-    fecha = (data.get("fecha") or "").strip()
-    fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
-
-    categoria = (data.get("categoria") or "").strip().upper()
-    descripcion = (data.get("descripcion") or "").strip().upper()
-    proveedor = (data.get("proveedor") or "").strip().upper()
-
-    try:
-        comprobante = _guardar_comprobante(request.files.get("comprobante"))
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    # ---- Compra de emergencia asociada al inventario: si viene un producto
-    # y una cantidad, además de registrar el gasto se ingresa el stock como
-    # una entrada normal (igual que una factura), dejando ambos registros
-    # enlazados para que se pueda seguir el rastro del dinero al producto.
-    producto_id = (data.get("producto_id") or "").strip()
-    movimiento_inventario_id = None
-    if producto_id:
-        try:
-            producto_id = int(producto_id)
-            cantidad = int(data.get("cantidad") or 0)
-            if cantidad <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            return jsonify({"error": "Para asociar una compra de emergencia, indica un producto y una cantidad válida"}), 400
-
-        producto_row = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
-        if producto_row is None:
-            return jsonify({"error": "El producto seleccionado no existe"}), 400
-
-        costo_unitario = monto / cantidad
-        nuevo_stock = _aplicar_entrada_stock(
-            db, producto_row, cantidad, costo_unitario,
-            motivo=f"COMPRA DE EMERGENCIA (CAJA CHICA){' - ' + descripcion if descripcion else ''}",
-            usuario=usuario_actual(), factura=None, categoria="Compra",
-        )
-        movimiento_inventario_id = db.execute(
-            "SELECT id FROM movimientos WHERE producto_id = ? ORDER BY id DESC LIMIT 1", (producto_id,)
-        ).fetchone()[0]
-    else:
-        producto_id = None
-
-    ts = now_iso()
-    cur = db.execute(
-        """
-        INSERT INTO caja_movimientos (
-            tipo, fecha, monto, categoria, descripcion, proveedor, usuario,
-            comprobante_archivo, producto_id, movimiento_inventario_id, creado_en
-        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (fecha, monto, categoria, descripcion, proveedor, usuario_actual(),
-         comprobante, producto_id, movimiento_inventario_id, ts),
-    )
-    db.commit()
-    nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(_caja_movimiento_dict(nuevo)), 201
-
-
-@app.route("/api/caja/aporte", methods=["POST"])
-def caja_crear_aporte():
-    db = get_db()
-    data = request.form
-
-    try:
-        monto = float(data.get("monto"))
-        if monto <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
-
-    fecha = (data.get("fecha") or "").strip()
-    fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
-    descripcion = (data.get("descripcion") or "").strip().upper()
-
-    try:
-        comprobante = _guardar_comprobante(request.files.get("comprobante"))
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    ts = now_iso()
-    cur = db.execute(
-        """
-        INSERT INTO caja_movimientos (tipo, fecha, monto, descripcion, usuario, comprobante_archivo, creado_en)
-        VALUES ('aporte', ?, ?, ?, ?, ?, ?)
-        """,
-        (fecha, monto, descripcion, usuario_actual(), comprobante, ts),
-    )
-    db.commit()
-    nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(_caja_movimiento_dict(nuevo)), 201
-
-
-@app.route("/api/caja/movimiento/<int:mov_id>", methods=["DELETE"])
-def caja_eliminar_movimiento(mov_id):
-    db = get_db()
-    row = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
-    if row is None:
-        return jsonify({"error": "Movimiento no encontrado"}), 404
-
-    bloqueo = _caja_bloqueo_motivo(row)
-    if bloqueo:
-        return jsonify({"error": bloqueo}), 409
-
-    if row["comprobante_archivo"]:
-        ruta = os.path.join(COMPROBANTES_DIR, row["comprobante_archivo"])
-        if os.path.exists(ruta):
-            try:
-                os.remove(ruta)
-            except OSError:
-                pass
-
-    db.execute("DELETE FROM caja_movimientos WHERE id = ?", (mov_id,))
-    db.commit()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/caja/movimiento/<int:mov_id>", methods=["PUT"])
-def caja_editar_movimiento(mov_id):
-    """Editar un gasto o aporte (fecha, monto, categoría, descripción,
-    proveedor, y opcionalmente reemplazar el comprobante). Usa el mismo
-    candado que Eliminar: si ya está rendido, es una reposición automática,
-    o generó un ingreso de stock, no se puede tocar — para no descuadrar el
-    saldo ni la trazabilidad."""
-    db = get_db()
-    row = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
-    if row is None:
-        return jsonify({"error": "Movimiento no encontrado"}), 404
-
-    bloqueo = _caja_bloqueo_motivo(row)
-    if bloqueo:
-        return jsonify({"error": bloqueo}), 409
-
-    data = request.form
-
-    try:
-        monto = float(data.get("monto"))
-        if monto <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
-
-    fecha_nueva = (data.get("fecha") or "").strip()
-    fecha_final = f"{fecha_nueva}T{datetime.now().strftime('%H:%M:%S')}" if fecha_nueva else row["fecha"]
-    descripcion = (data.get("descripcion") or "").strip().upper()
-
-    campos = {"monto": monto, "fecha": fecha_final, "descripcion": descripcion}
-    if row["tipo"] == "gasto":
-        campos["categoria"] = (data.get("categoria") or "").strip().upper()
-        campos["proveedor"] = (data.get("proveedor") or "").strip().upper()
-
-    if "comprobante" in request.files and request.files["comprobante"].filename:
-        try:
-            nuevo_comprobante = _guardar_comprobante(request.files.get("comprobante"))
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-        if row["comprobante_archivo"]:
-            ruta_vieja = os.path.join(COMPROBANTES_DIR, row["comprobante_archivo"])
-            if os.path.exists(ruta_vieja):
-                try:
-                    os.remove(ruta_vieja)
-                except OSError:
-                    pass
-        campos["comprobante_archivo"] = nuevo_comprobante
-
-    set_clause = ", ".join(f"{k} = ?" for k in campos)
-    db.execute(f"UPDATE caja_movimientos SET {set_clause} WHERE id = ?", (*campos.values(), mov_id))
-    db.commit()
-
-    actualizado = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
-    return jsonify(_caja_movimiento_dict(actualizado))
-
-
-@app.route("/api/caja/comprobante/<path:nombre_archivo>", methods=["GET"])
-def caja_ver_comprobante(nombre_archivo):
-    nombre_seguro = secure_filename(nombre_archivo)
-    ruta = os.path.join(COMPROBANTES_DIR, nombre_seguro)
-    if not os.path.isfile(ruta):
-        return jsonify({"error": "Comprobante no encontrado"}), 404
-    return send_file(ruta)
-
-
-@app.route("/api/caja/pendientes", methods=["GET"])
-def caja_gastos_pendientes():
-    db = get_db()
-    rows = db.execute(
-        "SELECT * FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL ORDER BY fecha ASC"
-    ).fetchall()
-    return jsonify({"gastos": [_caja_movimiento_dict(r) for r in rows]})
-
-
-@app.route("/api/caja/rendicion", methods=["POST"])
-def caja_crear_rendicion():
-    db = get_db()
-    data = request.get_json(force=True, silent=True) or {}
-    gasto_ids = data.get("gasto_ids") or []
-    nota = (data.get("nota") or "").strip().upper()
-
-    if not gasto_ids:
-        return jsonify({"error": "Selecciona al menos un gasto para rendir"}), 400
-
-    placeholders = ",".join("?" for _ in gasto_ids)
-    gastos = db.execute(
-        f"SELECT * FROM caja_movimientos WHERE id IN ({placeholders}) AND tipo = 'gasto'",
-        gasto_ids,
-    ).fetchall()
-    if len(gastos) != len(gasto_ids):
-        return jsonify({"error": "Alguno de los gastos seleccionados no existe"}), 400
-    if any(g["rendicion_id"] is not None for g in gastos):
-        return jsonify({"error": "Alguno de los gastos seleccionados ya fue rendido antes"}), 400
-
-    total = sum(g["monto"] for g in gastos)
-    ts = now_iso()
-    cur = db.execute(
-        "INSERT INTO caja_rendiciones (fecha, usuario, total, nota, creado_en) VALUES (?, ?, ?, ?, ?)",
-        (ts, usuario_actual(), total, nota, ts),
-    )
-    rendicion_id = cur.lastrowid
-
-    db.execute(
-        f"UPDATE caja_movimientos SET rendicion_id = ? WHERE id IN ({placeholders})",
-        [rendicion_id] + gasto_ids,
-    )
-
-    # Reposición automática: el saldo vuelve a subir de inmediato por el
-    # total rendido (a pedido del taller — se asume que la plata vuelve
-    # junto con la rendición). Queda marcada con rendicion_origen_id para
-    # que no se pueda borrar suelta y dejar el saldo descuadrado respecto a
-    # los gastos que ya quedaron marcados como rendidos.
-    db.execute(
-        """
-        INSERT INTO caja_movimientos (tipo, fecha, monto, descripcion, usuario, rendicion_origen_id, creado_en)
-        VALUES ('aporte', ?, ?, ?, ?, ?, ?)
-        """,
-        (ts, total, f"REPOSICIÓN AUTOMÁTICA - RENDICIÓN #{rendicion_id}", usuario_actual(), rendicion_id, ts),
-    )
-
-    db.commit()
-    nueva = db.execute("SELECT * FROM caja_rendiciones WHERE id = ?", (rendicion_id,)).fetchone()
-    return jsonify(dict(nueva)), 201
-
-
-@app.route("/api/caja/rendiciones", methods=["GET"])
-def caja_listar_rendiciones():
-    db = get_db()
-    rows = db.execute("SELECT * FROM caja_rendiciones ORDER BY fecha DESC, id DESC").fetchall()
-    rendiciones = []
-    for r in rows:
-        d = dict(r)
-        d["n_gastos"] = db.execute(
-            "SELECT COUNT(*) FROM caja_movimientos WHERE rendicion_id = ?", (r["id"],)
-        ).fetchone()[0]
-        rendiciones.append(d)
-    return jsonify({"rendiciones": rendiciones})
-
-
-@app.route("/api/caja/rendicion/<int:rendicion_id>", methods=["GET"])
-def caja_detalle_rendicion(rendicion_id):
-    db = get_db()
-    rendicion = db.execute("SELECT * FROM caja_rendiciones WHERE id = ?", (rendicion_id,)).fetchone()
-    if rendicion is None:
-        return jsonify({"error": "Rendición no encontrada"}), 404
-    gastos = db.execute(
-        "SELECT * FROM caja_movimientos WHERE rendicion_id = ? ORDER BY fecha ASC", (rendicion_id,)
-    ).fetchall()
-    d = dict(rendicion)
-    d["gastos"] = [_caja_movimiento_dict(g) for g in gastos]
-    return jsonify(d)
 
 
 # ---------------------------------------------------------------------------
@@ -3796,17 +3213,6 @@ def _calcular_rotacion(dias):
         (desde,),
     ).fetchall()
 
-    mas_utilizados = []
-    ids_con_salida = set()
-    for r in top_rows:
-        prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (r["producto_id"],)).fetchone()
-        if prod:
-            d = row_to_dict(prod)
-            d["total_salida_periodo"] = r["total_salida_periodo"]
-            d["n_movimientos"] = r["n_movimientos"]
-            mas_utilizados.append(d)
-            ids_con_salida.add(prod["id"])
-
     # ---- Baja rotación: sí tuvieron salida en el período, pero poca — las
     # que aparecen al final del ranking general (no las que no tuvieron
     # ninguna, esas son "inmovilizados").
@@ -3820,9 +3226,33 @@ def _calcular_rotacion(dias):
         (desde,),
     ).fetchall()
 
+    # ---- Se traen de una sola vez todos los productos que aparecen en
+    # top_rows o en todas_salidas (en vez de una consulta por producto
+    # dentro de cada loop), para no golpear la base con N consultas cuando
+    # hay cientos de productos con movimiento en el período.
+    ids_relevantes = {r["producto_id"] for r in top_rows} | {r["producto_id"] for r in todas_salidas}
+    productos_por_id = {}
+    if ids_relevantes:
+        placeholders = ",".join("?" for _ in ids_relevantes)
+        for prod in db.execute(
+            PRODUCTO_SELECT + f" WHERE p.id IN ({placeholders})", tuple(ids_relevantes)
+        ).fetchall():
+            productos_por_id[prod["id"]] = prod
+
+    mas_utilizados = []
+    ids_con_salida = set()
+    for r in top_rows:
+        prod = productos_por_id.get(r["producto_id"])
+        if prod:
+            d = row_to_dict(prod)
+            d["total_salida_periodo"] = r["total_salida_periodo"]
+            d["n_movimientos"] = r["n_movimientos"]
+            mas_utilizados.append(d)
+            ids_con_salida.add(prod["id"])
+
     baja_rotacion = []
     for r in todas_salidas:
-        prod = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (r["producto_id"],)).fetchone()
+        prod = productos_por_id.get(r["producto_id"])
         if prod:
             d = row_to_dict(prod)
             d["total_salida_periodo"] = r["total_salida_periodo"]
@@ -4076,38 +3506,6 @@ def planificacion():
 # API: Reportes y Exportaciones (Módulo 11)
 # ---------------------------------------------------------------------------
 
-def _crear_libro_excel():
-    from openpyxl import Workbook
-    return Workbook()
-
-
-def _estilo_encabezado(ws, fila=1):
-    from openpyxl.styles import Font, PatternFill, Alignment
-    for celda in ws[fila]:
-        celda.font = Font(bold=True, color="FFFFFF")
-        celda.fill = PatternFill(start_color="1F2430", end_color="1F2430", fill_type="solid")
-        celda.alignment = Alignment(vertical="center")
-
-
-def _autoancho(ws):
-    for columna in ws.columns:
-        letra = columna[0].column_letter
-        largo = max((len(str(c.value)) if c.value is not None else 0) for c in columna)
-        ws.column_dimensions[letra].width = min(48, max(10, largo + 2))
-
-
-def _excel_response(wb, nombre_archivo):
-    import io
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name=nombre_archivo,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
 
 @app.route("/api/reportes/inventario", methods=["GET"])
 def reporte_inventario():
@@ -4258,67 +3656,6 @@ def reporte_rotacion():
 # mostrarle a alguien sin necesidad de abrir una planilla).
 # ---------------------------------------------------------------------------
 
-def _pdf_documento(titulo):
-    """Arma un documento PDF apaisado (más ancho que alto, para que quepan
-    tablas con varias columnas) con un título arriba y devuelve
-    (buffer, doc, elementos, estilos) listos para ir agregando contenido."""
-    import io
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import cm
-
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=landscape(A4),
-        topMargin=1.4 * cm, bottomMargin=1.4 * cm, leftMargin=1.4 * cm, rightMargin=1.4 * cm,
-    )
-    estilos = getSampleStyleSheet()
-    estilos.add(ParagraphStyle(name="TituloReporte", fontSize=16, leading=20, spaceAfter=4, fontName="Helvetica-Bold"))
-    estilos.add(ParagraphStyle(name="SubtituloReporte", fontSize=10, textColor="#666666", spaceAfter=14))
-    estilos.add(ParagraphStyle(name="TituloTabla", fontSize=12, spaceBefore=14, spaceAfter=6, fontName="Helvetica-Bold"))
-
-    elementos = [
-        Paragraph(titulo, estilos["TituloReporte"]),
-        Paragraph(f"Taller Mecánico — generado el {datetime.now().strftime('%d-%m-%Y %H:%M')}", estilos["SubtituloReporte"]),
-    ]
-    return buffer, doc, elementos, estilos
-
-
-def _pdf_tabla(elementos, estilos, titulo_tabla, encabezados, filas, notas=""):
-    """Agrega un título de sección + una tabla con estilo consistente."""
-    from reportlab.platypus import Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib import colors
-
-    if titulo_tabla:
-        elementos.append(Paragraph(titulo_tabla, estilos["TituloTabla"]))
-    if not filas:
-        elementos.append(Paragraph("Sin datos para mostrar.", estilos["Normal"]))
-        return
-    datos = [encabezados] + [[str(c) if c is not None else "" for c in fila] for fila in filas]
-    tabla = Table(datos, repeatRows=1)
-    tabla.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2430")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F4F5F7")]),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D8DCE3")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-    ]))
-    elementos.append(tabla)
-    if notas:
-        elementos.append(Paragraph(notas, estilos["Normal"]))
-
-
-def _pdf_response(buffer, doc, elementos, nombre_archivo):
-    doc.build(elementos)
-    buffer.seek(0)
-    return send_file(buffer, as_attachment=True, download_name=nombre_archivo, mimetype="application/pdf")
 
 
 @app.route("/api/reportes/inventario/pdf", methods=["GET"])
@@ -4438,10 +3775,6 @@ def reporte_rotacion_pdf():
 # construidos). Todos aceptan ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD opcional.
 # ---------------------------------------------------------------------------
 
-def _rango_fechas():
-    desde = (request.args.get("desde") or "").strip()
-    hasta = (request.args.get("hasta") or "").strip()
-    return desde, hasta
 
 
 def _movimientos_para_reporte(desde, hasta):
@@ -4581,82 +3914,19 @@ def reporte_compras_pdf():
     return _pdf_response(buffer, doc, elementos, nombre)
 
 
-def _gastos_caja_para_reporte(desde, hasta):
-    db = get_db()
-    sql = "SELECT * FROM caja_movimientos WHERE tipo = 'gasto'"
-    params = []
-    if desde:
-        sql += " AND fecha >= ?"
-        params.append(desde)
-    if hasta:
-        sql += " AND fecha <= ?"
-        params.append(hasta + "T23:59:59")
-    sql += " ORDER BY fecha DESC, id DESC"
-    return [_caja_movimiento_dict(r) for r in db.execute(sql, params).fetchall()]
+# ---------------------------------------------------------------------------
+# Módulos separados (ver modulos/) — primer paso hacia la arquitectura de
+# ERP: Caja Chica ya vive en su propio archivo como Blueprint de Flask, en
+# vez de estar mezclado acá. Se importa recién al final del archivo, después
+# de que todas las funciones que ese módulo necesita (get_db,
+# _aplicar_entrada_stock, los helpers de reportes, etc.) ya están definidas
+# arriba — así se evita un import circular.
+# ---------------------------------------------------------------------------
+from modulos.caja_chica import bp as bp_caja_chica  # noqa: E402
+app.register_blueprint(bp_caja_chica)
 
-
-@app.route("/api/reportes/caja-gastos", methods=["GET"])
-def reporte_caja_gastos():
-    desde, hasta = _rango_fechas()
-    gastos = _gastos_caja_para_reporte(desde, hasta)
-
-    wb = _crear_libro_excel()
-    ws = wb.active
-    ws.title = "Gastos Caja Chica"
-    ws.append(["Fecha", "Categoría", "Descripción", "Proveedor", "Monto", "Estado", "Responsable"])
-    total = 0
-    for g in gastos:
-        total += g["monto"]
-        ws.append([
-            g["fecha"], g["categoria"] or "", g["descripcion"] or "", g["proveedor"] or "",
-            round(g["monto"], 2), "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "",
-        ])
-    ws.append([])
-    ws.append(["", "", "", "", round(total, 2), "", ""])
-    _estilo_encabezado(ws)
-    _autoancho(ws)
-
-    ws2 = wb.create_sheet("Por categoría")
-    ws2.append(["Categoría", "N° de gastos", "Total"])
-    por_categoria = {}
-    for g in gastos:
-        cat = g["categoria"] or "(sin categoría)"
-        acc = por_categoria.setdefault(cat, {"n": 0, "total": 0})
-        acc["n"] += 1
-        acc["total"] += g["monto"]
-    for cat, acc in sorted(por_categoria.items(), key=lambda kv: kv[1]["total"], reverse=True):
-        ws2.append([cat, acc["n"], round(acc["total"], 2)])
-    _estilo_encabezado(ws2)
-    _autoancho(ws2)
-
-    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
-    nombre = f"gastos_caja_chica{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
-    return _excel_response(wb, nombre)
-
-
-@app.route("/api/reportes/caja-gastos/pdf", methods=["GET"])
-def reporte_caja_gastos_pdf():
-    desde, hasta = _rango_fechas()
-    gastos = _gastos_caja_para_reporte(desde, hasta)
-
-    rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
-    buffer, doc, elementos, estilos = _pdf_documento(f"Gastos de Caja Chica{rango_txt}")
-
-    total = sum(g["monto"] for g in gastos)
-    filas = [
-        [g["fecha"][:10], g["categoria"] or "—", g["descripcion"] or "—", fmt_money_pdf(g["monto"]),
-         "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "—"]
-        for g in gastos
-    ]
-    _pdf_tabla(
-        elementos, estilos, f"Total gastado: {fmt_money_pdf(total)} — {len(gastos)} gasto(s)",
-        ["Fecha", "Categoría", "Descripción", "Monto", "Estado", "Responsable"],
-        filas,
-    )
-
-    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
-    nombre = f"gastos_caja_chica{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-    return _pdf_response(buffer, doc, elementos, nombre)
+from modulos.operativo import bp as bp_operativo, init_operativo_db  # noqa: E402
+app.register_blueprint(bp_operativo)
 
 
 init_db()

@@ -59,6 +59,10 @@ TIPOS_ITEM = ["repuesto", "mano_obra"]
 # ---- Fase 3.5: constantes de los sub-flujos ampliados ----
 PRIORIDADES_ORDEN = ["baja", "media", "alta", "urgente"]
 TIPOS_PRESUPUESTO_ITEM = ["mano_obra", "repuesto", "insumo", "servicio_externo", "descuento"]
+TIPOS_PRESUPUESTO_ITEM_LABEL = {
+    "mano_obra": "Mano de obra", "repuesto": "Repuesto", "insumo": "Insumo",
+    "servicio_externo": "Servicio externo", "descuento": "Descuento",
+}
 ESTADOS_PRESUPUESTO = ["pendiente", "enviado", "aprobado", "rechazado"]
 RESULTADOS_QC_ITEM = ["ok", "falla", "na"]  # resultado de cada punto del checklist
 RESULTADOS_QC = ["pendiente", "aprobado", "rechazado"]  # veredicto general de la orden
@@ -432,11 +436,18 @@ def eliminar_cliente(cliente_id):
 def listar_equipos():
     db = get_db()
     cliente_id = request.args.get("cliente_id")
-    sql = "SELECT * FROM equipos"
+    identificador = (request.args.get("identificador") or "").strip()
+    sql = "SELECT * FROM equipos WHERE 1=1"
     params = []
     if cliente_id:
-        sql += " WHERE cliente_id = ?"
+        sql += " AND cliente_id = ?"
         params.append(cliente_id)
+    if identificador:
+        # Coincidencia exacta (sin importar mayúsculas/espacios), para poder
+        # autocompletar marca/modelo si esa patente ya está registrada en el
+        # taller (aunque sea con otro cliente — ej. el auto cambió de dueño).
+        sql += " AND UPPER(TRIM(identificador)) = UPPER(TRIM(?))"
+        params.append(identificador)
     sql += " ORDER BY creado_en DESC"
     rows = db.execute(sql, params).fetchall()
     return jsonify({"equipos": [dict(r) for r in rows], "total": len(rows)})
@@ -1161,6 +1172,111 @@ def actualizar_presupuesto(orden_id):
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     return jsonify(_orden_dict_detalle(db, actualizada))
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/pdf", methods=["GET"])
+def presupuesto_pdf(orden_id):
+    """Genera el presupuesto en PDF, listo para descargar y enviárselo al
+    cliente (por correo, WhatsApp, etc.). Usa los mismos datos que ya se
+    ven en el modal de Presupuesto — cliente, vehículo, ítems y totales."""
+    db = get_db()
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    orden = _orden_dict_detalle(db, row)
+    cliente = orden.get("cliente") or {}
+    equipo = orden.get("equipo") or {}
+    presupuesto = orden["presupuesto"]
+
+    import io
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        topMargin=1.6 * cm, bottomMargin=1.6 * cm, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+    )
+    estilos = getSampleStyleSheet()
+    estilos.add(ParagraphStyle(name="TituloPresupuesto", fontSize=18, leading=22, spaceAfter=2, fontName="Helvetica-Bold"))
+    estilos.add(ParagraphStyle(name="SubtituloPresupuesto", fontSize=10, textColor="#666666", spaceAfter=16))
+    estilos.add(ParagraphStyle(name="EtiquetaPresupuesto", fontSize=9, textColor="#666666", spaceBefore=10, spaceAfter=2))
+
+    elementos = [
+        Paragraph("Taller Mecánico", estilos["TituloPresupuesto"]),
+        Paragraph(f"Presupuesto — Orden de trabajo #{orden_id} · generado el {datetime.now().strftime('%d-%m-%Y %H:%M')}", estilos["SubtituloPresupuesto"]),
+    ]
+
+    vehiculo_txt = " ".join(filter(None, [equipo.get("marca"), equipo.get("modelo")])) or "—"
+    datos_cliente = [
+        ["Cliente:", cliente.get("nombre") or "—", "RUT:", cliente.get("rut") or "—"],
+        ["Teléfono:", cliente.get("telefono") or "—", "Vehículo:", vehiculo_txt],
+        ["Patente:", equipo.get("identificador") or "—", "Año:", equipo.get("anio") or "—"],
+    ]
+    tabla_cliente = Table(datos_cliente, colWidths=[2.4 * cm, 6.3 * cm, 2.2 * cm, 6.3 * cm])
+    tabla_cliente.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    elementos.append(tabla_cliente)
+    elementos.append(Spacer(1, 14))
+
+    encabezados = ["Tipo", "Descripción", "Cantidad", "Precio unit.", "Subtotal"]
+    filas = [encabezados]
+    for it in presupuesto["items"]:
+        filas.append([
+            TIPOS_PRESUPUESTO_ITEM_LABEL.get(it["tipo"], it["tipo"]),
+            it["descripcion"] or "—",
+            f"{it['cantidad']:g}",
+            fmt_money_pdf(it["precio_unitario"]),
+            fmt_money_pdf(it["subtotal"]),
+        ])
+    if len(filas) == 1:
+        filas.append(["—", "Sin ítems todavía", "", "", ""])
+
+    tabla_items = Table(filas, colWidths=[2.8 * cm, 7.2 * cm, 2.2 * cm, 2.9 * cm, 2.9 * cm])
+    tabla_items.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F2430")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CCCCCC")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F5F5")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    elementos.append(tabla_items)
+    elementos.append(Spacer(1, 12))
+
+    resumen = [["Subtotal", fmt_money_pdf(presupuesto["subtotal"])]]
+    if orden.get("presupuesto_iva"):
+        resumen.append(["IVA (19%)", fmt_money_pdf(presupuesto["iva_monto"])])
+    resumen.append(["TOTAL", fmt_money_pdf(presupuesto["total"])])
+    tabla_resumen = Table(resumen, colWidths=[15.2 * cm, 2.8 * cm])
+    tabla_resumen.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -2), "Helvetica"),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10.5),
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.75, colors.HexColor("#333333")),
+        ("TOPPADDING", (0, -1), (-1, -1), 6),
+    ]))
+    elementos.append(tabla_resumen)
+
+    if orden.get("presupuesto_notas"):
+        elementos.append(Paragraph("Notas", estilos["EtiquetaPresupuesto"]))
+        elementos.append(Paragraph(orden["presupuesto_notas"], estilos["Normal"]))
+
+    nombre = f"presupuesto_ot{orden_id}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)
 
 
 # ---------------------------------------------------------------------------

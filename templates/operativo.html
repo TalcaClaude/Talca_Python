@@ -285,13 +285,14 @@
         </div>
         <div class="campo">
           <label>Marca</label>
-          <input type="text" id="ope-marca">
+          <input type="text" id="ope-marca" list="dl-op-marcas">
         </div>
       </div>
       <div class="campo">
         <label>Modelo</label>
-        <input type="text" id="ope-modelo">
+        <input type="text" id="ope-modelo" list="dl-op-modelos">
       </div>
+      <p class="ayuda-inline" id="ope-patente-encontrada" style="display:none"></p>
       <div class="campo">
         <label>Notas</label>
         <textarea id="ope-notas" rows="2"></textarea>
@@ -526,8 +527,8 @@
     </div>
     <div class="grid-2">
       <div class="campo">
-        <label>Valor de la OT</label>
-        <input type="text" id="opod-valor" disabled>
+        <label>Valor de la OT ($)</label>
+        <input type="number" id="opod-valor" min="0" step="1">
       </div>
       <div class="campo">
         <label>Pagado / Saldo</label>
@@ -767,9 +768,10 @@
     </div>
     <div class="modal-actions">
       <button type="button" class="btn btn-secundario" data-close="modal-op-presupuesto">Cerrar</button>
+      <button type="button" class="btn btn-secundario" id="btn-opp-descargar-pdf">⬇ Descargar PDF</button>
       <button type="button" class="btn btn-primary" id="btn-opp-guardar">Guardar presupuesto</button>
     </div>
-    <p class="ayuda-inline">Al marcar el presupuesto como "Aprobado", la orden pasa automáticamente a Reparación.</p>
+    <p class="ayuda-inline">Al marcar el presupuesto como "Aprobado", la orden pasa automáticamente a Reparación. Usa "Descargar PDF" para enviarle el presupuesto al cliente.</p>
   </div>
 </div>
 

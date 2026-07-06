@@ -500,6 +500,7 @@ document.getElementById("opon-nuevo-equipo").addEventListener("click", () => {
     return;
   }
   document.getElementById("form-op-equipo").reset();
+  document.getElementById("ope-patente-encontrada").style.display = "none";
   document.getElementById("ope-id").value = "";
   renderSelectClienteEquipoModal(clienteId);
   document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
@@ -508,6 +509,38 @@ document.getElementById("opon-nuevo-equipo").addEventListener("click", () => {
     poblarCamposVehiculoNuevaOrden(nuevo.id);
   };
   abrirModal("modal-op-equipo");
+});
+
+// No existe ninguna base de datos (ni gratis ni confiable) para autocompletar
+// marca/modelo a partir de la patente de un auto en Chile — se evaluó y no
+// se integró ningún servicio externo de pago. Lo que sí podemos hacer con
+// nuestros propios datos: si esa patente ya está registrada en el taller
+// (aunque haya sido con otro cliente, ej. el auto cambió de dueño),
+// autocompletamos marca/modelo/color/año/etc. desde ese registro anterior.
+document.getElementById("ope-identificador").addEventListener("blur", async (e) => {
+  if (document.getElementById("ope-id").value) return; // editando un equipo existente: no tocar
+  const patente = e.target.value.trim();
+  const aviso = document.getElementById("ope-patente-encontrada");
+  if (!patente) {
+    aviso.style.display = "none";
+    return;
+  }
+  try {
+    const data = await api(`/api/operativo/equipos?identificador=${encodeURIComponent(patente)}`);
+    if (data.equipos.length === 0) {
+      aviso.style.display = "none";
+      return;
+    }
+    const encontrado = data.equipos[0];
+    const marcaEl = document.getElementById("ope-marca");
+    const modeloEl = document.getElementById("ope-modelo");
+    if (!marcaEl.value.trim()) marcaEl.value = encontrado.marca || "";
+    if (!modeloEl.value.trim()) modeloEl.value = encontrado.modelo || "";
+    aviso.textContent = `Esta patente ya está registrada (${[encontrado.marca, encontrado.modelo].filter(Boolean).join(" ") || "sin marca/modelo"}) — se completaron marca y modelo.`;
+    aviso.style.display = "";
+  } catch (e2) {
+    // silencioso: esto es solo una ayuda, no debe bloquear el guardado del equipo
+  }
 });
 
 document.getElementById("form-op-equipo").addEventListener("submit", async (e) => {
@@ -680,7 +713,7 @@ function renderResumenClienteAuto(orden) {
 function renderValorYPagosOrden(orden) {
   const valor = orden.precio_referencial != null ? orden.precio_referencial : 0;
   const pagado = orden.total_pagado || 0;
-  document.getElementById("opod-valor").value = fmtMoney(valor);
+  document.getElementById("opod-valor").value = valor;
   document.getElementById("opod-pagado-saldo").value = `${fmtMoney(pagado)} pagado · saldo ${fmtMoney(Math.max(0, valor - pagado))}`;
 
   const tbody = document.getElementById("tbody-opod-pagos");
@@ -751,6 +784,7 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
     estado: document.getElementById("opod-estado").value,
     prioridad: document.getElementById("opod-prioridad").value,
     descripcion_problema: document.getElementById("opod-descripcion").value.trim(),
+    precio_referencial: document.getElementById("opod-valor").value || 0,
   };
   try {
     const actualizada = await api(`/api/operativo/ordenes/${id}`, { method: "PUT", body: JSON.stringify(payload) });
@@ -1041,6 +1075,11 @@ document.getElementById("btn-opp-guardar").addEventListener("click", async () =>
   } catch (e) {
     toast(e.message, true);
   }
+});
+
+document.getElementById("btn-opp-descargar-pdf").addEventListener("click", () => {
+  const ordenId = document.getElementById("opod-id").value;
+  window.open(`/api/operativo/ordenes/${ordenId}/presupuesto/pdf`, "_blank");
 });
 
 // ---------------------------------------------------------------------------
@@ -1478,6 +1517,7 @@ document.getElementById("garn-nuevo-equipo").addEventListener("click", () => {
     return;
   }
   document.getElementById("form-op-equipo").reset();
+  document.getElementById("ope-patente-encontrada").style.display = "none";
   document.getElementById("ope-id").value = "";
   renderSelectClienteEquipoModal(clienteId);
   document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";

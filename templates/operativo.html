@@ -331,29 +331,92 @@
         </div>
       </div>
       <div class="campo">
-        <label>Descripción del problema</label>
-        <textarea id="opon-descripcion" rows="3" placeholder="Ej: Caja automática patina en 2da marcha"></textarea>
+        <label>Prioridad</label>
+        <select id="opon-prioridad">
+          <option value="baja">Baja</option>
+          <option value="media" selected>Media</option>
+          <option value="alta">Alta</option>
+          <option value="urgente">Urgente</option>
+        </select>
+      </div>
+
+      <h3 class="subtitulo">Datos del vehículo</h3>
+      <div class="grid-3">
+        <div class="campo">
+          <label>VIN</label>
+          <input type="text" id="opon-vin">
+        </div>
+        <div class="campo">
+          <label>Color</label>
+          <input type="text" id="opon-color" list="dl-op-colores">
+        </div>
+        <div class="campo">
+          <label>Año</label>
+          <input type="number" id="opon-anio" min="1900" step="1">
+        </div>
       </div>
       <div class="grid-3">
         <div class="campo">
-          <label>Mecánico asignado</label>
-          <input type="text" id="opon-mecanico">
+          <label>Modelo de Transmisión</label>
+          <input type="text" id="opon-transmision" list="dl-op-transmisiones">
         </div>
         <div class="campo">
-          <label>Entrega estimada</label>
-          <input type="date" id="opon-fecha-estimada">
-        </div>
-        <div class="campo">
-          <label>Prioridad</label>
-          <select id="opon-prioridad">
-            <option value="baja">Baja</option>
-            <option value="media" selected>Media</option>
-            <option value="alta">Alta</option>
-            <option value="urgente">Urgente</option>
+          <label>Puertas</label>
+          <select id="opon-puertas">
+            <option value="">—</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
           </select>
         </div>
+        <div class="campo">
+          <label>Motor (cc)</label>
+          <input type="text" id="opon-motor-cc">
+        </div>
       </div>
-      <p class="ayuda-inline">Los datos completos de recepción (VIN, kilometraje, equipamiento, etc.) se completan después desde el botón "Recepción" dentro de la orden ya creada.</p>
+
+      <h3 class="subtitulo">Recepción</h3>
+      <div class="grid-3">
+        <div class="campo">
+          <label>RUT Cliente</label>
+          <input type="text" id="opon-rut-cliente" disabled>
+        </div>
+        <div class="campo">
+          <label>Encargado</label>
+          <input type="text" id="opon-encargado" disabled>
+        </div>
+        <div class="campo">
+          <label>Kilometraje</label>
+          <input type="number" id="opon-kilometraje" min="0" step="1">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Estanque <span class="mono" id="opon-estanque-valor">0 / 8</span></label>
+        <input type="range" id="opon-estanque" min="0" max="8" step="1" value="0">
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Referencia</label>
+          <input type="text" id="opon-referencia" list="dl-op-referencias">
+        </div>
+        <div class="campo">
+          <label>Precio ($)</label>
+          <input type="number" id="opon-precio" min="0" step="1">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Trabajo a Realizar</label>
+        <input type="text" id="opon-trabajo" list="dl-op-trabajos">
+      </div>
+      <div class="campo">
+        <label>Comentarios / descripción del problema</label>
+        <textarea id="opon-descripcion" rows="2" placeholder="Ej: Caja automática patina en 2da marcha"></textarea>
+      </div>
+
+      <h3 class="subtitulo">Equipamiento — qué trae el vehículo</h3>
+      <div class="op-equipamiento-grid" id="op-equipamiento-grid-nueva"></div>
+
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-op-orden-nueva">Cancelar</button>
         <button type="submit" class="btn btn-primary">Crear orden</button>
@@ -425,7 +488,7 @@
     <div class="op-resumen-cliente-auto" id="opod-resumen"></div>
     <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-ver-historial" style="display:none">Ver historial de este vehículo</button></p>
 
-    <div class="grid-3">
+    <div class="grid-2">
       <div class="campo">
         <label>Estado</label>
         <select id="opod-estado">
@@ -442,10 +505,6 @@
         </select>
       </div>
       <div class="campo">
-        <label>Mecánico asignado</label>
-        <input type="text" id="opod-mecanico">
-      </div>
-      <div class="campo">
         <label>Prioridad</label>
         <select id="opod-prioridad">
           <option value="baja">Baja</option>
@@ -455,15 +514,9 @@
         </select>
       </div>
     </div>
-    <div class="grid-2">
-      <div class="campo">
-        <label>Entrega estimada</label>
-        <input type="date" id="opod-fecha-estimada">
-      </div>
-      <div class="campo">
-        <label>Entrega real</label>
-        <input type="text" id="opod-fecha-real" disabled>
-      </div>
+    <div class="campo">
+      <label>Entrega real</label>
+      <input type="text" id="opod-fecha-real" disabled>
     </div>
     <div class="campo">
       <label>Comentarios / descripción del problema</label>
@@ -484,106 +537,22 @@
   </div>
 </div>
 
-<!-- Recepción: ingreso del vehículo (datos del auto + checklist de equipamiento) -->
+<!-- Recepción: SOLO LECTURA — estos datos se completan una vez, al crear la orden -->
 <div class="modal-overlay" id="modal-op-recepcion">
   <div class="modal modal-ancho">
     <div class="modal-head">
       <h2>Recepción</h2>
       <button class="modal-close" data-close="modal-op-recepcion">&times;</button>
     </div>
-    <input type="hidden" id="oprec-equipo-id">
+    <p class="ayuda-inline">Estos datos se registraron al ingresar el vehículo y no se pueden modificar aquí.</p>
 
-    <div class="grid-3">
-      <div class="campo">
-        <label>VIN</label>
-        <input type="text" id="oprec-vin">
-      </div>
-      <div class="campo">
-        <label>Patente</label>
-        <input type="text" id="oprec-patente">
-      </div>
-      <div class="campo">
-        <label>RUT Cliente</label>
-        <input type="text" id="oprec-rut-cliente" disabled>
-      </div>
-    </div>
-    <div class="grid-3">
-      <div class="campo">
-        <label>Marca</label>
-        <input type="text" id="oprec-marca" list="dl-op-marcas">
-      </div>
-      <div class="campo">
-        <label>Modelo</label>
-        <input type="text" id="oprec-modelo" list="dl-op-modelos">
-      </div>
-      <div class="campo">
-        <label>Color</label>
-        <input type="text" id="oprec-color" list="dl-op-colores">
-      </div>
-    </div>
-    <div class="grid-3">
-      <div class="campo">
-        <label>Año</label>
-        <input type="number" id="oprec-anio" min="1900" step="1">
-      </div>
-      <div class="campo">
-        <label>Modelo de Transmisión</label>
-        <input type="text" id="oprec-transmision" list="dl-op-transmisiones">
-      </div>
-      <div class="campo">
-        <label>Puertas</label>
-        <select id="oprec-puertas">
-          <option value="">—</option>
-          <option value="2">2</option>
-          <option value="3">3</option>
-          <option value="4">4</option>
-          <option value="5">5</option>
-        </select>
-      </div>
-    </div>
-    <div class="grid-3">
-      <div class="campo">
-        <label>Encargado</label>
-        <input type="text" id="oprec-encargado" disabled>
-      </div>
-      <div class="campo">
-        <label>Kilometraje</label>
-        <input type="number" id="oprec-kilometraje" min="0" step="1">
-      </div>
-      <div class="campo">
-        <label>Motor (cc)</label>
-        <input type="text" id="oprec-motor-cc">
-      </div>
-    </div>
-    <div class="campo">
-      <label>Estanque <span class="mono" id="oprec-estanque-valor">— / 8</span></label>
-      <input type="range" id="oprec-estanque" min="0" max="8" step="1">
-    </div>
-    <div class="grid-2">
-      <div class="campo">
-        <label>Referencia</label>
-        <input type="text" id="oprec-referencia" list="dl-op-referencias">
-      </div>
-      <div class="campo">
-        <label>Precio ($)</label>
-        <input type="number" id="oprec-precio" min="0" step="1">
-      </div>
-    </div>
-    <div class="campo">
-      <label>Trabajo a Realizar</label>
-      <input type="text" id="oprec-trabajo" list="dl-op-trabajos">
-    </div>
-    <div class="campo">
-      <label>Comentarios</label>
-      <textarea id="oprec-comentarios" rows="2"></textarea>
-    </div>
+    <div class="op-resumen-cliente-auto" id="op-recepcion-lectura"></div>
 
-    <h3 class="subtitulo">Equipamiento — qué trae el vehículo</h3>
-    <div class="op-equipamiento-grid" id="op-equipamiento-grid"></div>
+    <h3 class="subtitulo">Equipamiento — qué trajo el vehículo</h3>
+    <div class="op-equipamiento-grid op-equipamiento-grid--lectura" id="op-equipamiento-grid-lectura"></div>
 
     <div class="modal-actions">
       <button type="button" class="btn btn-secundario" data-close="modal-op-recepcion">Cerrar</button>
-      <button type="button" class="btn btn-primary" id="btn-oprec-guardar">Guardar recepción</button>
     </div>
   </div>
 </div>

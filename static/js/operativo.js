@@ -219,7 +219,6 @@ function renderTableroOperativo() {
     const partes = [
       orden.cliente ? orden.cliente.nombre : "",
       orden.equipo ? `${orden.equipo.marca} ${orden.equipo.modelo} ${orden.equipo.identificador}` : "",
-      orden.mecanico || "",
       orden.descripcion_problema || "",
     ].join(" ").toLowerCase();
     return partes.includes(busqueda);
@@ -235,14 +234,14 @@ function renderTableroOperativo() {
       return;
     }
     cont.innerHTML = ordenes.map(o => `
-      <div class="op-card" data-id="${o.id}">
+      <div class="op-card op-card--${o.prioridad || "media"}" data-id="${o.id}" draggable="true">
         <div class="op-card-cliente">${escapeHtml(o.cliente ? o.cliente.nombre : "Sin cliente")}
           ${o.prioridad && o.prioridad !== "media" ? `<span class="badge-prioridad badge-prioridad--${o.prioridad}">${escapeHtml(o.prioridad)}</span>` : ""}
         </div>
         ${o.equipo ? `<div class="op-card-equipo">${escapeHtml([o.equipo.marca, o.equipo.modelo, o.equipo.identificador].filter(Boolean).join(" · "))}</div>` : ""}
         ${o.descripcion_problema ? `<div class="op-card-descripcion">${escapeHtml(o.descripcion_problema)}</div>` : ""}
         <div class="op-card-meta">
-          <span>${escapeHtml(o.mecanico || "Sin asignar")}</span>
+          <span>${escapeHtml(o.recepcionado_por || "—")}</span>
           <span>${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</span>
         </div>
       </div>
@@ -251,8 +250,47 @@ function renderTableroOperativo() {
 
   document.querySelectorAll(".op-card").forEach(card => {
     card.addEventListener("click", () => abrirDetalleOrden(parseInt(card.dataset.id, 10)));
+    card.addEventListener("dragstart", (e) => {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", card.dataset.id);
+      card.classList.add("dragging");
+    });
+    card.addEventListener("dragend", () => {
+      card.classList.remove("dragging");
+    });
   });
 }
+
+// ---- Kanban interactivo: arrastrar una OT de una columna a otra cambia su
+// estado. Los drop-zones son las columnas mismas (elementos fijos del HTML),
+// así que los listeners se conectan una sola vez al cargar la página — solo
+// el contenido interno de tarjetas se vuelve a pintar en cada render.
+document.querySelectorAll(".op-columna").forEach(columna => {
+  columna.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    columna.classList.add("drag-over");
+  });
+  columna.addEventListener("dragleave", () => {
+    columna.classList.remove("drag-over");
+  });
+  columna.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    columna.classList.remove("drag-over");
+    const ordenId = parseInt(e.dataTransfer.getData("text/plain"), 10);
+    const nuevoEstado = columna.dataset.estado;
+    if (!ordenId || !nuevoEstado) return;
+    const orden = state.opOrdenes.find(o => o.id === ordenId);
+    if (orden && orden.estado === nuevoEstado) return; // soltada en su propia columna
+    try {
+      await api(`/api/operativo/ordenes/${ordenId}`, { method: "PUT", body: JSON.stringify({ estado: nuevoEstado }) });
+      toast(`Orden #${ordenId} movida a "${OP_ESTADOS_LABEL[nuevoEstado] || nuevoEstado}".`);
+      await cargarOperativo();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+});
 
 document.getElementById("op-buscar").addEventListener("input", renderTableroOperativo);
 document.getElementById("op-filtro-estado").addEventListener("change", renderTableroOperativo);
@@ -404,10 +442,26 @@ async function renderSelectEquiposOperativo(clienteId, valorActual) {
 
 document.getElementById("opon-cliente-id").addEventListener("change", (e) => {
   renderSelectEquiposOperativo(e.target.value || null);
+  const cliente = state.opClientes.find(c => c.id === parseInt(e.target.value, 10));
+  document.getElementById("opon-rut-cliente").value = (cliente && cliente.rut) || "";
 });
+
+// Al elegir (o crear) un vehículo, se precargan sus datos persistentes
+// (VIN/color/año/transmisión/puertas/motor) para revisarlos o completarlos
+// — si el vehículo ya existía, aquí se ven los datos que ya tenía.
+function poblarCamposVehiculoNuevaOrden(equipoId) {
+  const eq = state.opEquiposClienteActual.find(x => x.id === parseInt(equipoId, 10));
+  document.getElementById("opon-vin").value = eq ? (eq.vin || "") : "";
+  document.getElementById("opon-color").value = eq ? (eq.color || "") : "";
+  document.getElementById("opon-anio").value = eq && eq.anio != null ? eq.anio : "";
+  document.getElementById("opon-transmision").value = eq ? (eq.modelo_transmision || "") : "";
+  document.getElementById("opon-puertas").value = eq ? (eq.puertas || "") : "";
+  document.getElementById("opon-motor-cc").value = eq ? (eq.motor_cc || "") : "";
+}
 
 document.getElementById("opon-equipo-id").addEventListener("change", (e) => {
   document.getElementById("opon-ver-historial").style.display = e.target.value ? "" : "none";
+  poblarCamposVehiculoNuevaOrden(e.target.value);
 });
 
 document.getElementById("opon-ver-historial").addEventListener("click", () => {
@@ -436,6 +490,7 @@ document.getElementById("opon-nuevo-equipo").addEventListener("click", () => {
   document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
   opEquipoCallback = async (nuevo, payload) => {
     await renderSelectEquiposOperativo(payload.cliente_id, nuevo.id);
+    poblarCamposVehiculoNuevaOrden(nuevo.id);
   };
   abrirModal("modal-op-equipo");
 });
@@ -486,36 +541,83 @@ document.getElementById("btn-rep-ordenes-pdf").addEventListener("click", () => {
   window.location.href = `/api/operativo/reportes/ordenes/pdf?${rangoFechasParamsOperativo()}`;
 });
 
-// ---- Nueva orden (minimal — recepción completa se hace después desde la OT) ----
+// ---- Nueva orden — el ingreso completo del auto (recepción + checklist de
+// equipamiento) se hace acá, al momento de crear la orden, tal como se hace
+// una sola vez cuando el vehículo entra al taller. ----
 
-document.getElementById("btn-op-nueva-orden").addEventListener("click", () => {
+document.getElementById("btn-op-nueva-orden").addEventListener("click", async () => {
   document.getElementById("form-op-orden-nueva").reset();
   renderSelectClientesOperativo("opon-cliente-id", "");
   renderSelectEquiposOperativo(null);
   document.getElementById("opon-ver-historial").style.display = "none";
+  document.getElementById("opon-rut-cliente").value = "";
+  poblarCamposVehiculoNuevaOrden(null);
+  document.getElementById("opon-encargado").value = state.sesion.nombre || "";
+  document.getElementById("opon-estanque").value = 0;
+  document.getElementById("opon-estanque-valor").textContent = "0 / 8";
+  if (state.opOrdenes.length === 0) {
+    const dataOrdenes = await api("/api/operativo/ordenes");
+    state.opOrdenes = dataOrdenes.ordenes;
+  }
+  poblarDatalistsOperativo();
+  renderEquipamientoChecklist("op-equipamiento-grid-nueva", null, { lectura: false });
   abrirModal("modal-op-orden-nueva");
+});
+
+document.getElementById("opon-estanque").addEventListener("input", (e) => {
+  document.getElementById("opon-estanque-valor").textContent = `${e.target.value} / 8`;
 });
 
 document.getElementById("form-op-orden-nueva").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const payload = {
-    cliente_id: document.getElementById("opon-cliente-id").value,
-    equipo_id: document.getElementById("opon-equipo-id").value || null,
-    descripcion_problema: document.getElementById("opon-descripcion").value.trim(),
-    mecanico: document.getElementById("opon-mecanico").value.trim(),
-    fecha_entrega_estimada: document.getElementById("opon-fecha-estimada").value || null,
-    prioridad: document.getElementById("opon-prioridad").value,
-  };
-  if (!payload.cliente_id) {
+  const clienteId = document.getElementById("opon-cliente-id").value;
+  const equipoId = document.getElementById("opon-equipo-id").value || null;
+  if (!clienteId) {
     toast("Selecciona un cliente.", true);
     return;
   }
-  if (!payload.equipo_id) {
+  if (!equipoId) {
     toast("Selecciona o crea el vehículo que ingresa al taller.", true);
     return;
   }
+
+  const equipamiento = {};
+  document.querySelectorAll('#op-equipamiento-grid-nueva [data-equipamiento-item]').forEach(chk => {
+    equipamiento[chk.dataset.equipamientoItem] = chk.checked;
+  });
+
   try {
-    const nueva = await api("/api/operativo/ordenes", { method: "POST", body: JSON.stringify(payload) });
+    await api(`/api/operativo/equipos/${equipoId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        vin: document.getElementById("opon-vin").value.trim(),
+        color: document.getElementById("opon-color").value.trim(),
+        anio: document.getElementById("opon-anio").value || null,
+        modelo_transmision: document.getElementById("opon-transmision").value.trim(),
+        puertas: document.getElementById("opon-puertas").value,
+        motor_cc: document.getElementById("opon-motor-cc").value.trim(),
+      }),
+    });
+    const nueva = await api("/api/operativo/ordenes", {
+      method: "POST",
+      body: JSON.stringify({
+        cliente_id: clienteId,
+        equipo_id: equipoId,
+        prioridad: document.getElementById("opon-prioridad").value,
+        descripcion_problema: document.getElementById("opon-descripcion").value.trim(),
+        kilometraje: document.getElementById("opon-kilometraje").value || null,
+      }),
+    });
+    await api(`/api/operativo/ordenes/${nueva.id}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        estanque_nivel: document.getElementById("opon-estanque").value,
+        referencia: document.getElementById("opon-referencia").value.trim(),
+        trabajo_a_realizar: document.getElementById("opon-trabajo").value.trim(),
+        precio_referencial: document.getElementById("opon-precio").value || null,
+        equipamiento,
+      }),
+    });
     cerrarModal("modal-op-orden-nueva");
     toast("Orden creada.");
     await cargarOperativo();
@@ -563,9 +665,7 @@ async function abrirDetalleOrden(id) {
     renderResumenClienteAuto(orden);
 
     document.getElementById("opod-estado").value = orden.estado;
-    document.getElementById("opod-mecanico").value = orden.mecanico || "";
     document.getElementById("opod-prioridad").value = orden.prioridad || "media";
-    document.getElementById("opod-fecha-estimada").value = (orden.fecha_entrega_estimada || "").slice(0, 10);
     document.getElementById("opod-fecha-real").value = orden.fecha_entrega_real ? fmtFecha(orden.fecha_entrega_real) : "Todavía no";
     document.getElementById("opod-descripcion").value = orden.descripcion_problema || "";
 
@@ -602,9 +702,7 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
   const id = document.getElementById("opod-id").value;
   const payload = {
     estado: document.getElementById("opod-estado").value,
-    mecanico: document.getElementById("opod-mecanico").value.trim(),
     prioridad: document.getElementById("opod-prioridad").value,
-    fecha_entrega_estimada: document.getElementById("opod-fecha-estimada").value || null,
     descripcion_problema: document.getElementById("opod-descripcion").value.trim(),
   };
   try {
@@ -622,114 +720,84 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
 // Recepción — datos del vehículo + checklist de equipamiento
 // ---------------------------------------------------------------------------
 
-function renderEquipamientoChecklist(equipamiento) {
-  const eq = equipamiento || {};
-  document.getElementById("op-equipamiento-grid").innerHTML = EQUIPAMIENTO_ITEMS.map(item => `
-    <label class="op-equipamiento-item">
-      <input type="checkbox" data-equipamiento-item="${escapeHtml(item)}" ${eq[item] ? "checked" : ""}>
-      <span>${escapeHtml(item)}</span>
-    </label>
-  `).join("");
-}
-
 const EQUIPAMIENTO_ITEMS = [
   "Encendedor", "Cenicero", "Gata", "Tapa Combustible", "Padron", "Tag",
   "Gancho Tiro", "Llave Rueda", "Radio", "Neumatico Repuesto", "Conos",
   "Extintor", "P. Circulacion", "Revision Tecnica", "S.O.A.P", "Certificado Gases",
 ];
 
-document.getElementById("btn-abrir-recepcion").addEventListener("click", () => abrirRecepcion());
+// containerId: id del contenedor donde se pinta el checklist.
+// opts.lectura=true -> solo muestra marcado/no marcado, sin checkboxes (para
+// el visor de Recepción). opts.lectura=false -> checkboxes editables (para
+// Nueva Orden, que es donde se completa una única vez al ingresar el auto).
+function renderEquipamientoChecklist(containerId, equipamiento, opts) {
+  const eq = equipamiento || {};
+  const lectura = !!(opts && opts.lectura);
+  const cont = document.getElementById(containerId);
+  if (lectura) {
+    cont.innerHTML = EQUIPAMIENTO_ITEMS.map(item => `
+      <div class="op-equipamiento-item op-equipamiento-item--lectura ${eq[item] ? "marcado" : ""}">
+        <span>${eq[item] ? "✓" : "—"}</span> ${escapeHtml(item)}
+      </div>
+    `).join("");
+  } else {
+    cont.innerHTML = EQUIPAMIENTO_ITEMS.map(item => `
+      <label class="op-equipamiento-item">
+        <input type="checkbox" data-equipamiento-item="${escapeHtml(item)}" ${eq[item] ? "checked" : ""}>
+        <span>${escapeHtml(item)}</span>
+      </label>
+    `).join("");
+  }
+}
 
-async function abrirRecepcion() {
+// ---- Recepción: SOLO LECTURA — se completó una vez, al crear la orden ----
+
+document.getElementById("btn-abrir-recepcion").addEventListener("click", () => abrirRecepcionLectura());
+
+async function abrirRecepcionLectura() {
   const ordenId = document.getElementById("opod-id").value;
   try {
-    if (state.opOrdenes.length === 0) {
-      const dataOrdenes = await api("/api/operativo/ordenes");
-      state.opOrdenes = dataOrdenes.ordenes;
-    }
-    poblarDatalistsOperativo();
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     const equipo = orden.equipo || {};
-    document.getElementById("oprec-equipo-id").value = equipo.id || "";
-    document.getElementById("oprec-vin").value = equipo.vin || "";
-    document.getElementById("oprec-patente").value = equipo.identificador || "";
-    document.getElementById("oprec-rut-cliente").value = (orden.cliente && orden.cliente.rut) || "";
-    document.getElementById("oprec-marca").value = equipo.marca || "";
-    document.getElementById("oprec-modelo").value = equipo.modelo || "";
-    document.getElementById("oprec-color").value = equipo.color || "";
-    document.getElementById("oprec-anio").value = equipo.anio ?? "";
-    document.getElementById("oprec-transmision").value = equipo.modelo_transmision || "";
-    document.getElementById("oprec-puertas").value = equipo.puertas || "";
-    document.getElementById("oprec-encargado").value = orden.recepcionado_por || "";
-    document.getElementById("oprec-kilometraje").value = orden.kilometraje ?? "";
-    document.getElementById("oprec-motor-cc").value = equipo.motor_cc || "";
-    const estanque = orden.estanque_nivel ?? 0;
-    document.getElementById("oprec-estanque").value = estanque;
-    document.getElementById("oprec-estanque-valor").textContent = `${estanque} / 8`;
-    document.getElementById("oprec-referencia").value = orden.referencia || "";
-    document.getElementById("oprec-precio").value = orden.precio_referencial ?? "";
-    document.getElementById("oprec-trabajo").value = orden.trabajo_a_realizar || "";
-    document.getElementById("oprec-comentarios").value = orden.descripcion_problema || "";
-    renderEquipamientoChecklist(orden.equipamiento);
+    const cliente = orden.cliente || {};
+    const estanque = orden.estanque_nivel;
 
-    if (!equipo.id) {
-      toast("Esta orden no tiene un vehículo asociado — algunos datos no se podrán guardar.", true);
-    }
+    const filasVehiculo = [
+      ["VIN", equipo.vin || "—"],
+      ["Patente", equipo.identificador || "—"],
+      ["Marca", equipo.marca || "—"],
+      ["Modelo", equipo.modelo || "—"],
+      ["Color", equipo.color || "—"],
+      ["Año", equipo.anio || "—"],
+      ["Modelo de Transmisión", equipo.modelo_transmision || "—"],
+      ["Puertas", equipo.puertas || "—"],
+      ["Motor (cc)", equipo.motor_cc || "—"],
+    ];
+    const filasRecepcion = [
+      ["RUT Cliente", cliente.rut || "—"],
+      ["Encargado", orden.recepcionado_por || "—"],
+      ["Kilometraje", orden.kilometraje != null ? orden.kilometraje : "—"],
+      ["Estanque", estanque != null ? `${estanque} / 8` : "—"],
+      ["Referencia", orden.referencia || "—"],
+      ["Precio", orden.precio_referencial != null ? fmtMoney(orden.precio_referencial) : "—"],
+      ["Trabajo a Realizar", orden.trabajo_a_realizar || "—"],
+      ["Comentarios", orden.descripcion_problema || "—"],
+    ];
+
+    const bloque = (titulo, filas) => `
+      <div class="op-resumen-bloque">
+        <h4>${titulo}</h4>
+        ${filas.map(([k, v]) => `<div class="op-resumen-fila"><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}
+      </div>`;
+    document.getElementById("op-recepcion-lectura").innerHTML = bloque("Vehículo", filasVehiculo) + bloque("Recepción", filasRecepcion);
+
+    renderEquipamientoChecklist("op-equipamiento-grid-lectura", orden.equipamiento, { lectura: true });
 
     abrirModal("modal-op-recepcion");
   } catch (e) {
     toast(e.message, true);
   }
 }
-
-document.getElementById("oprec-estanque").addEventListener("input", (e) => {
-  document.getElementById("oprec-estanque-valor").textContent = `${e.target.value} / 8`;
-});
-
-document.getElementById("btn-oprec-guardar").addEventListener("click", async () => {
-  const ordenId = document.getElementById("opod-id").value;
-  const equipoId = document.getElementById("oprec-equipo-id").value;
-
-  const equipamiento = {};
-  document.querySelectorAll("[data-equipamiento-item]").forEach(chk => {
-    equipamiento[chk.dataset.equipamientoItem] = chk.checked;
-  });
-
-  try {
-    if (equipoId) {
-      await api(`/api/operativo/equipos/${equipoId}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          vin: document.getElementById("oprec-vin").value.trim(),
-          identificador: document.getElementById("oprec-patente").value.trim(),
-          marca: document.getElementById("oprec-marca").value.trim(),
-          modelo: document.getElementById("oprec-modelo").value.trim(),
-          color: document.getElementById("oprec-color").value.trim(),
-          anio: document.getElementById("oprec-anio").value || null,
-          modelo_transmision: document.getElementById("oprec-transmision").value.trim(),
-          puertas: document.getElementById("oprec-puertas").value,
-          motor_cc: document.getElementById("oprec-motor-cc").value.trim(),
-        }),
-      });
-    }
-    await api(`/api/operativo/ordenes/${ordenId}`, {
-      method: "PUT",
-      body: JSON.stringify({
-        kilometraje: document.getElementById("oprec-kilometraje").value || null,
-        estanque_nivel: document.getElementById("oprec-estanque").value,
-        referencia: document.getElementById("oprec-referencia").value.trim(),
-        trabajo_a_realizar: document.getElementById("oprec-trabajo").value.trim(),
-        precio_referencial: document.getElementById("oprec-precio").value || null,
-        equipamiento,
-        descripcion_problema: document.getElementById("oprec-comentarios").value.trim(),
-      }),
-    });
-    toast("Recepción guardada.");
-    await refrescarResumenHub(ordenId);
-  } catch (e) {
-    toast(e.message, true);
-  }
-});
 
 // ---------------------------------------------------------------------------
 // Diagnóstico

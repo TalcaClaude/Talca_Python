@@ -559,6 +559,63 @@ body::before { content: none; }
   padding: 4px 0;
 }
 .op-resumen-linea strong { color: var(--text); }
+.op-resumen-linea--utilidad {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 15px;
+}
+.op-resumen-linea--utilidad strong { color: var(--success); }
+
+.op-divisor {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 10px 0;
+}
+
+/* Pestañas dentro de la ventana de una OT: "OT" (info + valor) y "Costos"
+   (ítems cargados + utilidad estimada). */
+.op-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+.op-tab {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 8px 4px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.op-tab:hover { color: var(--text); }
+.op-tab.activo {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.op-tab-panel + .op-tab-panel { margin-top: 0; }
+
+.campo-inline-check {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.campo-inline-check input[type="number"] { flex: 1; }
+.check-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.check-inline input { width: auto; }
 
 .op-garantia-card {
   background: var(--panel-2);

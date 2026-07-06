@@ -195,6 +195,7 @@ def init_operativo_db(db):
         "referencia": "TEXT DEFAULT ''",
         "trabajo_a_realizar": "TEXT DEFAULT ''",
         "precio_referencial": "REAL",
+        "precio_iva": "INTEGER NOT NULL DEFAULT 0",
         "equipamiento_json": "TEXT DEFAULT ''",
         "recepcionado_por": "TEXT DEFAULT ''",
         # Diagnóstico (3.5.4)
@@ -569,7 +570,7 @@ def eliminar_equipo(equipo_id):
 
 def _orden_dict(db, row):
     d = dict(row)
-    cliente = db.execute("SELECT id, nombre, telefono, rut FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+    cliente = db.execute("SELECT id, nombre, telefono, rut, email FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
     d["cliente"] = dict(cliente) if cliente else None
     equipo = None
     if d["equipo_id"]:
@@ -586,6 +587,33 @@ def _orden_dict(db, row):
     ).fetchall()
     d["pagos"] = [dict(p) for p in pagos]
     d["total_pagado"] = sum(p["monto"] for p in pagos)
+
+    # Resumen de plata de la OT (Neto/IVA/Total/Pagado/Por pagar) — se
+    # muestra siempre en la ventana principal de la orden. El Neto es el
+    # valor cobrado al cliente (precio_referencial); el IVA solo se suma si
+    # se marcó la casilla correspondiente.
+    valor_neto = d["precio_referencial"] or 0
+    valor_iva_monto = round(valor_neto * IVA_PORCENTAJE, 2) if d.get("precio_iva") else 0.0
+    valor_total = round(valor_neto + valor_iva_monto, 2)
+    d["valor_neto"] = valor_neto
+    d["valor_iva_monto"] = valor_iva_monto
+    d["valor_total"] = valor_total
+    d["total_por_pagar"] = round(max(0, valor_total - d["total_pagado"]), 2)
+
+    # Costo real de los repuestos cargados (a costo promedio ponderado, sin
+    # margen) — para poder mostrar una utilidad estimada en la pestaña
+    # "Costos". La mano de obra cargada no tiene un costo registrado en el
+    # sistema (no se lleva sueldo por OT), así que no resta de la utilidad.
+    costo_repuestos = sum(
+        i["cantidad"] * i["costo_unitario"] for i in items if i["tipo"] == "repuesto"
+    )
+    mano_obra_cargada = sum(
+        i["cantidad"] * i["costo_unitario"] for i in items if i["tipo"] == "mano_obra"
+    )
+    d["costo_repuestos"] = round(costo_repuestos, 2)
+    d["mano_obra_cargada"] = round(mano_obra_cargada, 2)
+    d["utilidad_estimada"] = round(valor_neto - costo_repuestos, 2)
+
     try:
         d["equipamiento"] = json.loads(d["equipamiento_json"]) if d.get("equipamiento_json") else {}
     except (TypeError, ValueError):
@@ -813,6 +841,10 @@ def editar_orden(orden_id):
             except (TypeError, ValueError):
                 return jsonify({"error": "El precio referencial debe ser un número"}), 400
 
+    precio_iva = row["precio_iva"]
+    if "precio_iva" in data:
+        precio_iva = 1 if data.get("precio_iva") else 0
+
     equipamiento_json = row["equipamiento_json"]
     if "equipamiento" in data:
         equipamiento = data.get("equipamiento") or {}
@@ -831,7 +863,7 @@ def editar_orden(orden_id):
         UPDATE ordenes_trabajo SET
             estado = ?, descripcion_problema = ?, diagnostico = ?, mecanico = ?,
             fecha_entrega_estimada = ?, fecha_entrega_real = ?, actualizado_en = ?,
-            prioridad = ?, kilometraje = ?, estanque_nivel = ?, precio_referencial = ?,
+            prioridad = ?, kilometraje = ?, estanque_nivel = ?, precio_referencial = ?, precio_iva = ?,
             equipamiento_json = ?,
             sintoma = ?, diagnostico_tecnico = ?, falla_detectada = ?, componentes_danados = ?,
             mediciones = ?, resultado_pruebas = ?, responsable_diagnostico = ?,
@@ -846,7 +878,7 @@ def editar_orden(orden_id):
             (data.get("fecha_entrega_estimada", row["fecha_entrega_estimada"]) or "").strip() or None,
             fecha_entrega_real,
             now_iso(),
-            prioridad, kilometraje, estanque_nivel, precio_referencial,
+            prioridad, kilometraje, estanque_nivel, precio_referencial, precio_iva,
             equipamiento_json,
             valores_simples["sintoma"], valores_simples["diagnostico_tecnico"],
             valores_simples["falla_detectada"], valores_simples["componentes_danados"],

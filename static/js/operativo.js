@@ -681,6 +681,8 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
 // Detalle de orden: SOLO resumen de cliente/auto + botones de acceso.
 // ---------------------------------------------------------------------------
 
+// Pestaña "OT": toda la info del cliente y del vehículo (sin el checklist
+// de equipamiento, que solo se ve en "Recepción").
 function renderResumenClienteAuto(orden) {
   const cliente = orden.cliente;
   const equipo = orden.equipo;
@@ -688,22 +690,24 @@ function renderResumenClienteAuto(orden) {
     ["Cliente", cliente.nombre],
     ["Teléfono", cliente.telefono || "—"],
     ["RUT", cliente.rut || "—"],
+    ["Email", cliente.email || "—"],
   ] : [["Cliente", "Sin cliente"]];
   const filasAuto = equipo ? [
-    ["Vehículo", [equipo.marca, equipo.modelo].filter(Boolean).join(" ") || "—"],
+    ["Marca", equipo.marca || "—"],
+    ["Modelo", equipo.modelo || "—"],
     ["Patente", equipo.identificador || "—"],
     ["Color", equipo.color || "—"],
     ["Año", equipo.anio || "—"],
+    ["Transmisión", equipo.modelo_transmision || "—"],
+    ["Puertas", equipo.puertas || "—"],
+    ["Motor (cc)", equipo.motor_cc || "—"],
     ["VIN", equipo.vin || "—"],
   ] : [["Vehículo", "Sin vehículo asociado"]];
 
-  const bloque = (titulo, filas) => `
-    <div class="op-resumen-bloque">
-      <h4>${titulo}</h4>
-      ${filas.map(([k, v]) => `<div class="op-resumen-fila"><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}
-    </div>`;
+  const filas = (arr) => arr.map(([k, v]) => `<div class="op-resumen-fila"><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join("");
 
-  document.getElementById("opod-resumen").innerHTML = bloque("Cliente", filasCliente) + bloque("Vehículo", filasAuto);
+  document.getElementById("opod-resumen-cliente").innerHTML = filas(filasCliente);
+  document.getElementById("opod-resumen-vehiculo").innerHTML = filas(filasAuto);
 }
 
 // Pinta el recuadro de valor/pagado-saldo y la tabla de pagos de la OT
@@ -711,10 +715,13 @@ function renderResumenClienteAuto(orden) {
 // acción que pueda cambiar el valor o los pagos (guardar cambios,
 // registrar/eliminar un pago, refrescos automáticos de estado).
 function renderValorYPagosOrden(orden) {
-  const valor = orden.precio_referencial != null ? orden.precio_referencial : 0;
-  const pagado = orden.total_pagado || 0;
-  document.getElementById("opod-valor").value = valor;
-  document.getElementById("opod-pagado-saldo").value = `${fmtMoney(pagado)} pagado · saldo ${fmtMoney(Math.max(0, valor - pagado))}`;
+  document.getElementById("opod-valor").value = orden.valor_neto != null ? orden.valor_neto : 0;
+  document.getElementById("opod-iva-check").checked = !!orden.precio_iva;
+  document.getElementById("opod-r-neto").textContent = fmtMoney(orden.valor_neto || 0);
+  document.getElementById("opod-r-iva").textContent = fmtMoney(orden.valor_iva_monto || 0);
+  document.getElementById("opod-r-total").textContent = fmtMoney(orden.valor_total || 0);
+  document.getElementById("opod-r-pagado").textContent = fmtMoney(orden.total_pagado || 0);
+  document.getElementById("opod-r-por-pagar").textContent = fmtMoney(orden.total_por_pagar || 0);
 
   const tbody = document.getElementById("tbody-opod-pagos");
   const pagos = orden.pagos || [];
@@ -736,18 +743,66 @@ function renderValorYPagosOrden(orden) {
   }
 }
 
+// Pestaña "Costos": todos los ítems (repuestos y mano de obra) cargados a
+// la orden, con el resumen de plata y la utilidad estimada.
+const OPOI_TIPO_LABEL = { repuesto: "Repuesto", mano_obra: "Mano de obra" };
+
+function renderCostosOrden(orden) {
+  const tbody = document.getElementById("tbody-opod-costos-items");
+  const items = orden.items || [];
+  if (items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Sin ítems cargados.</td></tr>`;
+  } else {
+    tbody.innerHTML = items.map(it => `
+      <tr>
+        <td>${escapeHtml(OPOI_TIPO_LABEL[it.tipo] || it.tipo)}</td>
+        <td>${escapeHtml(it.descripcion)}</td>
+        <td class="num">${it.cantidad}</td>
+        <td class="num">${fmtMoney(it.costo_unitario)}</td>
+        <td class="num">${fmtMoney(it.cantidad * it.costo_unitario)}</td>
+      </tr>
+    `).join("");
+  }
+  document.getElementById("opod-c-costo-repuestos").textContent = fmtMoney(orden.costo_repuestos || 0);
+  document.getElementById("opod-c-mano-obra").textContent = fmtMoney(orden.mano_obra_cargada || 0);
+  document.getElementById("opod-c-neto").textContent = fmtMoney(orden.valor_neto || 0);
+  document.getElementById("opod-c-total").textContent = fmtMoney(orden.valor_total || 0);
+  document.getElementById("opod-c-pagado").textContent = fmtMoney(orden.total_pagado || 0);
+  document.getElementById("opod-c-por-pagar").textContent = fmtMoney(orden.total_por_pagar || 0);
+  document.getElementById("opod-c-utilidad").textContent = fmtMoney(orden.utilidad_estimada || 0);
+}
+
+// Pestañas "OT" / "Costos" dentro de la ventana de la orden.
+document.querySelectorAll("#modal-op-orden-detalle .op-tab").forEach(tab => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll("#modal-op-orden-detalle .op-tab").forEach(t => t.classList.remove("activo"));
+    tab.classList.add("activo");
+    document.getElementById("opod-panel-ot").style.display = tab.dataset.opodTab === "ot" ? "" : "none";
+    document.getElementById("opod-panel-costos").style.display = tab.dataset.opodTab === "costos" ? "" : "none";
+  });
+});
+
+function activarTabOtPorDefecto() {
+  document.querySelectorAll("#modal-op-orden-detalle .op-tab").forEach(t => t.classList.remove("activo"));
+  document.querySelector('#modal-op-orden-detalle .op-tab[data-opod-tab="ot"]').classList.add("activo");
+  document.getElementById("opod-panel-ot").style.display = "";
+  document.getElementById("opod-panel-costos").style.display = "none";
+}
+
 async function abrirDetalleOrden(id) {
   try {
     const orden = await api(`/api/operativo/ordenes/${id}`);
     state.opOrdenActivaId = id;
     document.getElementById("opod-id").value = id;
     document.getElementById("opod-titulo").textContent = `Orden #${id}`;
+    activarTabOtPorDefecto();
     renderResumenClienteAuto(orden);
 
     document.getElementById("opod-estado").value = orden.estado;
     document.getElementById("opod-prioridad").value = orden.prioridad || "media";
     document.getElementById("opod-descripcion").value = orden.descripcion_problema || "";
     renderValorYPagosOrden(orden);
+    renderCostosOrden(orden);
 
     const btnHistorial = document.getElementById("btn-opod-ver-historial");
     if (orden.equipo) {
@@ -772,6 +827,7 @@ async function refrescarResumenHub(ordenId) {
     renderResumenClienteAuto(orden);
     document.getElementById("opod-estado").value = orden.estado;
     renderValorYPagosOrden(orden);
+    renderCostosOrden(orden);
     cargarOperativo();
   } catch (e) {
     // silencioso: esto es un refresco de fondo, no una acción explícita del usuario
@@ -785,12 +841,14 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
     prioridad: document.getElementById("opod-prioridad").value,
     descripcion_problema: document.getElementById("opod-descripcion").value.trim(),
     precio_referencial: document.getElementById("opod-valor").value || 0,
+    precio_iva: document.getElementById("opod-iva-check").checked,
   };
   try {
     const actualizada = await api(`/api/operativo/ordenes/${id}`, { method: "PUT", body: JSON.stringify(payload) });
     toast("Orden actualizada.");
     renderResumenClienteAuto(actualizada);
     renderValorYPagosOrden(actualizada);
+    renderCostosOrden(actualizada);
     cargarOperativo();
   } catch (e) {
     toast(e.message, true);
@@ -826,6 +884,7 @@ document.getElementById("form-op-pago-nuevo").addEventListener("submit", async (
     toast("Pago registrado.");
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderValorYPagosOrden(orden);
+    renderCostosOrden(orden);
   } catch (e2) {
     toast(e2.message, true);
   }
@@ -838,6 +897,7 @@ async function eliminarPagoOrden(pagoId) {
     toast("Pago eliminado.");
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderValorYPagosOrden(orden);
+    renderCostosOrden(orden);
   } catch (e) {
     toast(e.message, true);
   }
@@ -1164,6 +1224,7 @@ document.getElementById("form-op-item").addEventListener("submit", async (e) => 
     toast("Ítem agregado.");
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderItemsOrden(orden);
+    renderCostosOrden(orden);
     document.getElementById("form-op-item").reset();
     document.getElementById("opoi-tipo").dispatchEvent(new Event("change"));
     // Refresca el stock mostrado en el selector de productos.
@@ -1187,6 +1248,7 @@ async function eliminarItemOrden(itemId) {
     toast("Ítem eliminado.");
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderItemsOrden(orden);
+    renderCostosOrden(orden);
   } catch (e) {
     toast(e.message, true);
   }

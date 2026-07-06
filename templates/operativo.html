@@ -496,80 +496,123 @@
     </div>
     <input type="hidden" id="opod-id">
 
-    <div class="op-resumen-cliente-auto" id="opod-resumen"></div>
-    <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-ver-historial" style="display:none">Ver historial de este vehículo</button></p>
-
-    <div class="grid-2">
-      <div class="campo">
-        <label>Estado</label>
-        <select id="opod-estado">
-          <option value="recibido">Recibido</option>
-          <option value="diagnostico">Diagnóstico</option>
-          <option value="presupuesto">Presupuesto</option>
-          <option value="esperando_aprobacion">Esperando aprobación</option>
-          <option value="reparacion">Reparación</option>
-          <option value="esperando_repuesto">Esperando repuesto</option>
-          <option value="control_calidad">Pruebas de ruta</option>
-          <option value="listo">Listo</option>
-          <option value="entregado">Entregado</option>
-          <option value="cancelado">Cancelado</option>
-        </select>
-      </div>
-      <div class="campo">
-        <label>Prioridad</label>
-        <select id="opod-prioridad">
-          <option value="baja">Baja</option>
-          <option value="media">Media</option>
-          <option value="alta">Alta</option>
-          <option value="urgente">Urgente</option>
-        </select>
-      </div>
-    </div>
-    <div class="grid-2">
-      <div class="campo">
-        <label>Valor de la OT ($)</label>
-        <input type="number" id="opod-valor" min="0" step="1">
-      </div>
-      <div class="campo">
-        <label>Pagado / Saldo</label>
-        <input type="text" id="opod-pagado-saldo" disabled>
-      </div>
-    </div>
-    <div class="campo">
-      <label>Comentarios / descripción del problema</label>
-      <textarea id="opod-descripcion" rows="2"></textarea>
-    </div>
-    <div class="modal-actions modal-actions--start">
-      <button type="button" class="btn btn-primary" id="btn-opod-guardar">Guardar cambios</button>
+    <div class="op-tabs">
+      <button type="button" class="op-tab activo" data-opod-tab="ot">OT</button>
+      <button type="button" class="op-tab" data-opod-tab="costos">Costos</button>
     </div>
 
-    <div class="op-pagos">
-      <div class="op-pagos-head">
-        <h4>Pagos</h4>
-        <button type="button" class="btn btn-secundario btn-chico" id="btn-opod-nuevo-pago">+ Registrar pago</button>
+    <div class="op-tab-panel" id="opod-panel-ot">
+      <h3 class="subtitulo">Cliente</h3>
+      <div class="op-resumen-cliente-auto" id="opod-resumen-cliente"></div>
+      <h3 class="subtitulo">Vehículo</h3>
+      <div class="op-resumen-cliente-auto" id="opod-resumen-vehiculo"></div>
+      <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-ver-historial" style="display:none">Ver historial de este vehículo</button></p>
+
+      <div class="grid-2">
+        <div class="campo">
+          <label>Estado</label>
+          <select id="opod-estado">
+            <option value="recibido">Recibido</option>
+            <option value="diagnostico">Diagnóstico</option>
+            <option value="presupuesto">Presupuesto</option>
+            <option value="esperando_aprobacion">Esperando aprobación</option>
+            <option value="reparacion">Reparación</option>
+            <option value="esperando_repuesto">Esperando repuesto</option>
+            <option value="control_calidad">Pruebas de ruta</option>
+            <option value="listo">Listo</option>
+            <option value="entregado">Entregado</option>
+            <option value="cancelado">Cancelado</option>
+          </select>
+        </div>
+        <div class="campo">
+          <label>Prioridad</label>
+          <select id="opod-prioridad">
+            <option value="baja">Baja</option>
+            <option value="media">Media</option>
+            <option value="alta">Alta</option>
+            <option value="urgente">Urgente</option>
+          </select>
+        </div>
       </div>
+
+      <h3 class="subtitulo">Valor de la OT</h3>
+      <div class="campo">
+        <label>Neto ($)</label>
+        <div class="campo-inline-check">
+          <input type="number" id="opod-valor" min="0" step="1">
+          <label class="check-inline"><input type="checkbox" id="opod-iva-check"> IVA (19%)</label>
+        </div>
+      </div>
+      <div class="op-resumen-linea"><span>Neto</span><strong id="opod-r-neto">—</strong></div>
+      <div class="op-resumen-linea"><span>IVA</span><strong id="opod-r-iva">—</strong></div>
+      <div class="op-resumen-linea"><span>Total OT</span><strong id="opod-r-total">—</strong></div>
+      <div class="op-resumen-linea"><span>Total pagado</span><strong id="opod-r-pagado">—</strong></div>
+      <div class="op-resumen-linea"><span>Total por pagar</span><strong id="opod-r-por-pagar">—</strong></div>
+
+      <div class="campo">
+        <label>Comentarios / descripción del problema</label>
+        <textarea id="opod-descripcion" rows="2"></textarea>
+      </div>
+      <div class="modal-actions modal-actions--start">
+        <button type="button" class="btn btn-primary" id="btn-opod-guardar">Guardar cambios</button>
+      </div>
+
+      <div class="op-pagos">
+        <div class="op-pagos-head">
+          <h4>Pagos</h4>
+          <button type="button" class="btn btn-secundario btn-chico" id="btn-opod-nuevo-pago">+ Registrar pago</button>
+        </div>
+        <table class="tabla">
+          <thead>
+            <tr>
+              <th>N°</th>
+              <th>Fecha</th>
+              <th>Método</th>
+              <th class="num">Monto</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="tbody-opod-pagos">
+            <tr><td colspan="5" class="vacio">Sin pagos registrados.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="op-botones-acceso">
+        <button type="button" class="btn btn-secundario" id="btn-abrir-recepcion">Recepción</button>
+        <button type="button" class="btn btn-secundario" id="btn-abrir-diagnostico">Diagnóstico</button>
+        <button type="button" class="btn btn-secundario" id="btn-abrir-presupuesto">Presupuesto</button>
+        <button type="button" class="btn btn-secundario" id="btn-abrir-repuestos">Carga de repuestos</button>
+        <button type="button" class="btn btn-secundario" id="btn-abrir-qc">Pruebas de ruta</button>
+      </div>
+    </div>
+
+    <div class="op-tab-panel" id="opod-panel-costos" style="display:none">
+      <h3 class="subtitulo">Ítems cargados (repuestos y mano de obra)</h3>
       <table class="tabla">
         <thead>
           <tr>
-            <th>N°</th>
-            <th>Fecha</th>
-            <th>Método</th>
-            <th class="num">Monto</th>
-            <th></th>
+            <th>Tipo</th>
+            <th>Descripción</th>
+            <th class="num">Cantidad</th>
+            <th class="num">Costo unit.</th>
+            <th class="num">Subtotal</th>
           </tr>
         </thead>
-        <tbody id="tbody-opod-pagos">
-          <tr><td colspan="5" class="vacio">Sin pagos registrados.</td></tr>
+        <tbody id="tbody-opod-costos-items">
+          <tr><td colspan="5" class="vacio">Sin ítems cargados.</td></tr>
         </tbody>
       </table>
-    </div>
 
-    <div class="op-botones-acceso">
-      <button type="button" class="btn btn-secundario" id="btn-abrir-recepcion">Recepción</button>
-      <button type="button" class="btn btn-secundario" id="btn-abrir-diagnostico">Diagnóstico</button>
-      <button type="button" class="btn btn-secundario" id="btn-abrir-presupuesto">Presupuesto</button>
-      <button type="button" class="btn btn-secundario" id="btn-abrir-repuestos">Carga de repuestos</button>
-      <button type="button" class="btn btn-secundario" id="btn-abrir-qc">Pruebas de ruta</button>
+      <div class="op-resumen-linea"><span>Costo de repuestos</span><strong id="opod-c-costo-repuestos">—</strong></div>
+      <div class="op-resumen-linea"><span>Mano de obra cargada</span><strong id="opod-c-mano-obra">—</strong></div>
+      <hr class="op-divisor">
+      <div class="op-resumen-linea"><span>Valor cobrado (Neto)</span><strong id="opod-c-neto">—</strong></div>
+      <div class="op-resumen-linea"><span>Total OT (con IVA si aplica)</span><strong id="opod-c-total">—</strong></div>
+      <div class="op-resumen-linea"><span>Total pagado</span><strong id="opod-c-pagado">—</strong></div>
+      <div class="op-resumen-linea"><span>Total por pagar</span><strong id="opod-c-por-pagar">—</strong></div>
+      <div class="op-resumen-linea op-resumen-linea--utilidad"><span>Utilidad estimada</span><strong id="opod-c-utilidad">—</strong></div>
+      <p class="ayuda-inline">Utilidad estimada = valor cobrado (Neto) − costo de los repuestos cargados. No incluye mano de obra ni otros costos, porque el sistema no registra un costo por la mano de obra.</p>
     </div>
 
   </div>

@@ -28,6 +28,17 @@ function fmtFechaSolo(isoFecha) {
   return `${d}-${m}-${y}`;
 }
 
+// Días que lleva (o llevó) el vehículo en el taller: desde la recepción
+// hasta hoy, o hasta la entrega real si la orden ya se entregó (para que
+// el contador se congele en vez de seguir subiendo).
+function diasEnTaller(orden) {
+  const inicio = new Date(orden.fecha_recepcion);
+  if (isNaN(inicio)) return "—";
+  const fin = orden.fecha_entrega_real ? new Date(orden.fecha_entrega_real) : new Date();
+  const dias = Math.max(0, Math.floor((fin - inicio) / 86400000));
+  return `${dias} día${dias === 1 ? "" : "s"} en el taller`;
+}
+
 function toast(msg, isError = false) {
   const el = document.getElementById("toast");
   el.textContent = msg;
@@ -152,7 +163,7 @@ const OP_ESTADOS_TABLERO = [
 const OP_ESTADOS_LABEL = {
   recibido: "Recibido", diagnostico: "Diagnóstico", presupuesto: "Presupuesto",
   esperando_aprobacion: "Esperando aprobación", reparacion: "Reparación",
-  esperando_repuesto: "Esperando repuesto", control_calidad: "Control de calidad",
+  esperando_repuesto: "Esperando repuesto", control_calidad: "Pruebas de ruta",
   listo: "Listo", entregado: "Entregado", cancelado: "Cancelado",
 };
 
@@ -235,14 +246,16 @@ function renderTableroOperativo() {
     }
     cont.innerHTML = ordenes.map(o => `
       <div class="op-card op-card--${o.prioridad || "media"}" data-id="${o.id}" draggable="true">
-        <div class="op-card-cliente">${escapeHtml(o.cliente ? o.cliente.nombre : "Sin cliente")}
+        <div class="op-card-top">
+          <span class="op-card-ot">OT #${o.id}</span>
           ${o.prioridad && o.prioridad !== "media" ? `<span class="badge-prioridad badge-prioridad--${o.prioridad}">${escapeHtml(o.prioridad)}</span>` : ""}
         </div>
-        ${o.equipo ? `<div class="op-card-equipo">${escapeHtml([o.equipo.marca, o.equipo.modelo, o.equipo.identificador].filter(Boolean).join(" · "))}</div>` : ""}
-        ${o.descripcion_problema ? `<div class="op-card-descripcion">${escapeHtml(o.descripcion_problema)}</div>` : ""}
+        <div class="op-card-cliente">${escapeHtml(o.cliente ? o.cliente.nombre : "Sin cliente")}</div>
+        ${o.equipo ? `<div class="op-card-equipo">${escapeHtml([o.equipo.marca, o.equipo.modelo].filter(Boolean).join(" · ") || o.equipo.identificador || "")}</div>` : ""}
+        <div class="op-card-valor">${fmtMoney(o.precio_referencial || 0)}</div>
         <div class="op-card-meta">
-          <span>${escapeHtml(o.recepcionado_por || "—")}</span>
-          <span>${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</span>
+          <span>Recepción: ${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</span>
+          <span>${diasEnTaller(o)}</span>
         </div>
       </div>
     `).join("");
@@ -451,6 +464,8 @@ document.getElementById("opon-cliente-id").addEventListener("change", (e) => {
 // — si el vehículo ya existía, aquí se ven los datos que ya tenía.
 function poblarCamposVehiculoNuevaOrden(equipoId) {
   const eq = state.opEquiposClienteActual.find(x => x.id === parseInt(equipoId, 10));
+  document.getElementById("opon-marca").value = eq ? (eq.marca || "") : "";
+  document.getElementById("opon-modelo").value = eq ? (eq.modelo || "") : "";
   document.getElementById("opon-vin").value = eq ? (eq.vin || "") : "";
   document.getElementById("opon-color").value = eq ? (eq.color || "") : "";
   document.getElementById("opon-anio").value = eq && eq.anio != null ? eq.anio : "";
@@ -590,6 +605,8 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     await api(`/api/operativo/equipos/${equipoId}`, {
       method: "PUT",
       body: JSON.stringify({
+        marca: document.getElementById("opon-marca").value.trim(),
+        modelo: document.getElementById("opon-modelo").value.trim(),
         vin: document.getElementById("opon-vin").value.trim(),
         color: document.getElementById("opon-color").value.trim(),
         anio: document.getElementById("opon-anio").value || null,
@@ -656,6 +673,36 @@ function renderResumenClienteAuto(orden) {
   document.getElementById("opod-resumen").innerHTML = bloque("Cliente", filasCliente) + bloque("Vehículo", filasAuto);
 }
 
+// Pinta el recuadro de valor/pagado-saldo y la tabla de pagos de la OT
+// abierta en el hub. Se llama al abrir la orden y después de cada
+// acción que pueda cambiar el valor o los pagos (guardar cambios,
+// registrar/eliminar un pago, refrescos automáticos de estado).
+function renderValorYPagosOrden(orden) {
+  const valor = orden.precio_referencial != null ? orden.precio_referencial : 0;
+  const pagado = orden.total_pagado || 0;
+  document.getElementById("opod-valor").value = fmtMoney(valor);
+  document.getElementById("opod-pagado-saldo").value = `${fmtMoney(pagado)} pagado · saldo ${fmtMoney(Math.max(0, valor - pagado))}`;
+
+  const tbody = document.getElementById("tbody-opod-pagos");
+  const pagos = orden.pagos || [];
+  if (pagos.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Sin pagos registrados.</td></tr>`;
+  } else {
+    tbody.innerHTML = pagos.map((p, idx) => `
+      <tr>
+        <td>${idx + 1}</td>
+        <td>${fmtFechaSolo((p.fecha || "").slice(0, 10))}</td>
+        <td>${escapeHtml(METODOS_PAGO_LABEL[p.metodo_pago] || p.metodo_pago)}</td>
+        <td class="num">${fmtMoney(p.monto)}</td>
+        <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-pago="${p.id}">Eliminar</button></td>
+      </tr>
+    `).join("");
+    tbody.querySelectorAll("[data-eliminar-pago]").forEach(btn => {
+      btn.addEventListener("click", () => eliminarPagoOrden(parseInt(btn.dataset.eliminarPago, 10)));
+    });
+  }
+}
+
 async function abrirDetalleOrden(id) {
   try {
     const orden = await api(`/api/operativo/ordenes/${id}`);
@@ -666,8 +713,8 @@ async function abrirDetalleOrden(id) {
 
     document.getElementById("opod-estado").value = orden.estado;
     document.getElementById("opod-prioridad").value = orden.prioridad || "media";
-    document.getElementById("opod-fecha-real").value = orden.fecha_entrega_real ? fmtFecha(orden.fecha_entrega_real) : "Todavía no";
     document.getElementById("opod-descripcion").value = orden.descripcion_problema || "";
+    renderValorYPagosOrden(orden);
 
     const btnHistorial = document.getElementById("btn-opod-ver-historial");
     if (orden.equipo) {
@@ -691,7 +738,7 @@ async function refrescarResumenHub(ordenId) {
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderResumenClienteAuto(orden);
     document.getElementById("opod-estado").value = orden.estado;
-    document.getElementById("opod-fecha-real").value = orden.fecha_entrega_real ? fmtFecha(orden.fecha_entrega_real) : "Todavía no";
+    renderValorYPagosOrden(orden);
     cargarOperativo();
   } catch (e) {
     // silencioso: esto es un refresco de fondo, no una acción explícita del usuario
@@ -709,12 +756,58 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
     const actualizada = await api(`/api/operativo/ordenes/${id}`, { method: "PUT", body: JSON.stringify(payload) });
     toast("Orden actualizada.");
     renderResumenClienteAuto(actualizada);
-    document.getElementById("opod-fecha-real").value = actualizada.fecha_entrega_real ? fmtFecha(actualizada.fecha_entrega_real) : "Todavía no";
+    renderValorYPagosOrden(actualizada);
     cargarOperativo();
   } catch (e) {
     toast(e.message, true);
   }
 });
+
+// ---- Pagos de la OT ----
+
+const METODOS_PAGO_LABEL = {
+  efectivo: "Efectivo", tarjeta: "Tarjeta", transferencia: "Transferencia",
+  cheque: "Cheque", otro: "Otro",
+};
+
+document.getElementById("btn-opod-nuevo-pago").addEventListener("click", () => {
+  const ordenId = document.getElementById("opod-id").value;
+  document.getElementById("form-op-pago-nuevo").reset();
+  document.getElementById("opag-orden-id").value = ordenId;
+  document.getElementById("opag-fecha").value = new Date().toISOString().slice(0, 10);
+  abrirModal("modal-op-pago-nuevo");
+});
+
+document.getElementById("form-op-pago-nuevo").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ordenId = document.getElementById("opag-orden-id").value;
+  const payload = {
+    metodo_pago: document.getElementById("opag-metodo").value,
+    monto: document.getElementById("opag-monto").value,
+    fecha: document.getElementById("opag-fecha").value,
+  };
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/pagos`, { method: "POST", body: JSON.stringify(payload) });
+    cerrarModal("modal-op-pago-nuevo");
+    toast("Pago registrado.");
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderValorYPagosOrden(orden);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function eliminarPagoOrden(pagoId) {
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/pagos/${pagoId}`, { method: "DELETE" });
+    toast("Pago eliminado.");
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderValorYPagosOrden(orden);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Recepción — datos del vehículo + checklist de equipamiento
@@ -1285,6 +1378,26 @@ document.getElementById("gar-filtro-estado").addEventListener("change", cargarGa
 
 // ---- Nueva garantía ----
 
+// Conceptos frecuentes de motivo de garantía: al hacer clic se agregan al
+// textarea, para no tener que escribirlos siempre desde cero.
+const MOTIVOS_GARANTIA_SUGERIDOS = [
+  "Ruido", "No se mueve", "Patina entre marchas", "Golpe al aplicar",
+  "Golpe al pasar marchas", "Pierde fluido", "Falla eléctrica", "Vuelve a fallar",
+];
+
+function renderMotivoChipsGarantia() {
+  const cont = document.getElementById("garn-motivo-chips");
+  cont.innerHTML = MOTIVOS_GARANTIA_SUGERIDOS.map(m => `<button type="button" class="chip" data-motivo-chip="${escapeHtml(m)}">${escapeHtml(m)}</button>`).join("");
+  cont.querySelectorAll("[data-motivo-chip]").forEach(chip => {
+    chip.addEventListener("click", () => {
+      const textarea = document.getElementById("garn-motivo");
+      const texto = chip.dataset.motivoChip;
+      textarea.value = textarea.value.trim() ? `${textarea.value.trim()}, ${texto}` : texto;
+      textarea.focus();
+    });
+  });
+}
+
 function renderSelectEquiposGarantia(equipos, valorActual) {
   const select = document.getElementById("garn-equipo-id");
   select.innerHTML = '<option value="">Selecciona un vehículo…</option>' +
@@ -1299,8 +1412,21 @@ function renderSelectOrdenesGarantia(ordenes, valorActual) {
   select.value = valorActual || "";
 }
 
+async function cargarOrdenesGarantiaParaEquipo(equipoId, valorActual) {
+  const ayuda = document.getElementById("garn-orden-origen-ayuda");
+  if (!equipoId) {
+    renderSelectOrdenesGarantia([], "");
+    ayuda.style.display = "";
+    return;
+  }
+  ayuda.style.display = "none";
+  const dataOrdenes = await api(`/api/operativo/ordenes?equipo_id=${equipoId}`);
+  renderSelectOrdenesGarantia(dataOrdenes.ordenes, valorActual || "");
+}
+
 async function abrirNuevaGarantia(prefill) {
   document.getElementById("form-op-garantia-nueva").reset();
+  renderMotivoChipsGarantia();
   if (state.opClientes.length === 0) {
     const dataClientes = await api("/api/operativo/clientes");
     state.opClientes = dataClientes.clientes;
@@ -1309,10 +1435,10 @@ async function abrirNuevaGarantia(prefill) {
   if (prefill && prefill.clienteId) {
     const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${prefill.clienteId}`);
     renderSelectEquiposGarantia(dataEquipos.equipos, prefill.equipoId);
-    renderSelectOrdenesGarantia(prefill.ordenes, "");
+    await cargarOrdenesGarantiaParaEquipo(prefill.equipoId, "");
   } else {
     renderSelectEquiposGarantia([], "");
-    renderSelectOrdenesGarantia([], "");
+    await cargarOrdenesGarantiaParaEquipo(null, "");
   }
   abrirModal("modal-op-garantia-nueva");
 }
@@ -1323,12 +1449,16 @@ document.getElementById("garn-cliente-id").addEventListener("change", async (e) 
   const clienteId = e.target.value;
   if (!clienteId) {
     renderSelectEquiposGarantia([], "");
-    renderSelectOrdenesGarantia([], "");
+    await cargarOrdenesGarantiaParaEquipo(null, "");
     return;
   }
   const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${clienteId}`);
   renderSelectEquiposGarantia(dataEquipos.equipos, "");
-  renderSelectOrdenesGarantia([], "");
+  await cargarOrdenesGarantiaParaEquipo(null, "");
+});
+
+document.getElementById("garn-equipo-id").addEventListener("change", (e) => {
+  cargarOrdenesGarantiaParaEquipo(e.target.value || null, "");
 });
 
 document.getElementById("garn-nuevo-cliente").addEventListener("click", () => {
@@ -1354,6 +1484,7 @@ document.getElementById("garn-nuevo-equipo").addEventListener("click", () => {
   opEquipoCallback = async (nuevo, payload) => {
     const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${payload.cliente_id}`);
     renderSelectEquiposGarantia(dataEquipos.equipos, nuevo.id);
+    await cargarOrdenesGarantiaParaEquipo(nuevo.id, "");
   };
   abrirModal("modal-op-equipo");
 });
@@ -1365,8 +1496,6 @@ document.getElementById("form-op-garantia-nueva").addEventListener("submit", asy
     equipo_id: document.getElementById("garn-equipo-id").value || null,
     orden_origen_id: document.getElementById("garn-orden-origen-id").value || null,
     motivo: document.getElementById("garn-motivo").value.trim(),
-    diagnostico: document.getElementById("garn-diagnostico").value.trim(),
-    responsable: document.getElementById("garn-responsable").value.trim(),
   };
   if (!payload.cliente_id) {
     toast("Selecciona un cliente.", true);

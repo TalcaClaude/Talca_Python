@@ -267,24 +267,36 @@ body::before { content: none; }
 .op-card {
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-left: 4px solid var(--line);
   border-radius: 6px;
   padding: 10px 12px;
   cursor: grab;
-  transition: border-color 0.15s, opacity 0.15s;
+  transition: border-color 0.15s, opacity 0.15s, background-color 0.15s;
 }
 
 .op-card:hover {
   border-color: var(--accent);
-  border-left-color: var(--accent);
 }
 
-/* Colores por prioridad, para distinguir de un vistazo sin tener que leer
-   la etiqueta de cada tarjeta. */
-.op-card--baja { border-left-color: var(--text-muted); }
-.op-card--media { border-left-color: var(--accent-2); }
-.op-card--alta { border-left-color: var(--danger); }
-.op-card--urgente { border-left-color: var(--danger); background: var(--danger-soft); }
+/* Colores por prioridad: todo el recuadro queda teñido (no solo un borde),
+   para distinguir la urgencia de un vistazo sin tener que leer nada. Van de
+   más calmo (baja) a más intenso (urgente). */
+.op-card--baja {
+  background: var(--panel-2);
+  border-color: var(--line);
+}
+.op-card--media {
+  background: rgba(245, 166, 35, 0.10);
+  border-color: rgba(245, 166, 35, 0.35);
+}
+.op-card--alta {
+  background: var(--accent-soft);
+  border-color: rgba(232, 114, 12, 0.55);
+}
+.op-card--urgente {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+.op-card--urgente .op-card-cliente { color: var(--danger); }
 
 .op-card.dragging {
   opacity: 0.45;
@@ -296,6 +308,19 @@ body::before { content: none; }
   background: var(--accent-soft);
 }
 
+.op-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.op-card-ot {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .op-card-cliente {
   font-weight: 600;
   font-size: 13.5px;
@@ -305,6 +330,13 @@ body::before { content: none; }
 .op-card-equipo {
   font-size: 12px;
   color: var(--accent-2);
+  margin-bottom: 6px;
+}
+
+.op-card-valor {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 13px;
   margin-bottom: 6px;
 }
 
@@ -424,6 +456,51 @@ body::before { content: none; }
   margin: 18px 0 6px 0;
   padding-top: 16px;
   border-top: 1px solid var(--line);
+}
+
+/* Chips de conceptos sugeridos (ej. motivo de garantía): clic para
+   agregarlos al campo de texto en vez de tener que escribirlos siempre. */
+.chips-sugeridos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.chip {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* Pagos de una OT: cabecera con botón + tabla de abonos. */
+.op-pagos {
+  margin: 10px 0 18px 0;
+}
+.op-pagos-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.op-pagos-head h4 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+.btn-chico {
+  padding: 4px 10px;
+  font-size: 12.5px;
 }
 
 .op-equipamiento-grid {

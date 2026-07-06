@@ -64,6 +64,9 @@ RESULTADOS_QC_ITEM = ["ok", "falla", "na"]  # resultado de cada punto del checkl
 RESULTADOS_QC = ["pendiente", "aprobado", "rechazado"]  # veredicto general de la orden
 IVA_PORCENTAJE = 0.19
 
+# Pagos de una OT: métodos aceptados.
+METODOS_PAGO = ["efectivo", "tarjeta", "transferencia", "cheque", "otro"]
+
 # Ítems fijos del checklist de "qué trae el vehículo" (recepción). Es una
 # lista fija del taller (no un catálogo editable), así que se guarda como
 # JSON en la orden en vez de una tabla aparte — más simple que el checklist
@@ -282,6 +285,28 @@ def init_operativo_db(db):
             CREATE INDEX IF NOT EXISTS idx_garantias_equipo_id ON garantias (equipo_id);
             CREATE INDEX IF NOT EXISTS idx_garantias_estado ON garantias (estado);
             CREATE INDEX IF NOT EXISTS idx_garantia_items_garantia_id ON garantia_items (garantia_id);
+            """
+        )
+        db.commit()
+
+    # Pagos de una orden: un abono a la vez (efectivo, tarjeta, etc.), para
+    # llevar el registro de cuánto se ha pagado y cuánto queda pendiente
+    # sobre el valor de la OT (precio_referencial).
+    columnas_pagos = [c[1] for c in db.execute("PRAGMA table_info(pagos_orden)").fetchall()]
+    if not columnas_pagos:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS pagos_orden (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+                metodo_pago TEXT NOT NULL DEFAULT 'efectivo',
+                monto REAL NOT NULL DEFAULT 0,
+                fecha TEXT NOT NULL,
+                usuario TEXT DEFAULT '',
+                creado_en TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_pagos_orden_orden_id ON pagos_orden (orden_id);
             """
         )
         db.commit()
@@ -545,6 +570,11 @@ def _orden_dict(db, row):
     items = db.execute("SELECT * FROM orden_items WHERE orden_id = ? ORDER BY creado_en ASC", (d["id"],)).fetchall()
     d["items"] = [dict(i) for i in items]
     d["total"] = sum(i["cantidad"] * i["costo_unitario"] for i in items)
+    pagos = db.execute(
+        "SELECT * FROM pagos_orden WHERE orden_id = ? ORDER BY fecha ASC, creado_en ASC", (d["id"],)
+    ).fetchall()
+    d["pagos"] = [dict(p) for p in pagos]
+    d["total_pagado"] = sum(p["monto"] for p in pagos)
     try:
         d["equipamiento"] = json.loads(d["equipamiento_json"]) if d.get("equipamiento_json") else {}
     except (TypeError, ValueError):
@@ -608,6 +638,7 @@ def listar_ordenes():
     db = get_db()
     estado = (request.args.get("estado") or "").strip()
     cliente_id = request.args.get("cliente_id")
+    equipo_id = request.args.get("equipo_id")
     sql = "SELECT * FROM ordenes_trabajo WHERE 1=1"
     params = []
     if estado:
@@ -618,6 +649,9 @@ def listar_ordenes():
     if cliente_id:
         sql += " AND cliente_id = ?"
         params.append(cliente_id)
+    if equipo_id:
+        sql += " AND equipo_id = ?"
+        params.append(equipo_id)
     sql += " ORDER BY creado_en DESC"
     rows = db.execute(sql, params).fetchall()
     return jsonify({"ordenes": [_orden_dict(db, r) for r in rows], "total": len(rows)})
@@ -814,6 +848,57 @@ def editar_orden(orden_id):
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     return jsonify(_orden_dict(db, actualizada))
+
+
+# ---------------------------------------------------------------------------
+# Pagos de la orden (abonos sobre el valor de la OT)
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/pagos", methods=["POST"])
+def agregar_pago_orden(orden_id):
+    db = get_db()
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    metodo_pago = (data.get("metodo_pago") or "").strip().lower()
+    if metodo_pago not in METODOS_PAGO:
+        return jsonify({"error": f"Método de pago inválido. Usa uno de: {', '.join(METODOS_PAGO)}"}), 400
+
+    try:
+        monto = float(data.get("monto"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto debe ser un número"}), 400
+    if monto <= 0:
+        return jsonify({"error": "El monto del pago debe ser mayor a 0"}), 400
+
+    fecha = (data.get("fecha") or "").strip() or now_iso()
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO pagos_orden (orden_id, metodo_pago, monto, fecha, usuario, creado_en)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (orden_id, metodo_pago, monto, fecha, usuario_actual(), ts),
+    )
+    db.commit()
+    nuevo = db.execute("SELECT * FROM pagos_orden WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nuevo)), 201
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/pagos/<int:pago_id>", methods=["DELETE"])
+def eliminar_pago_orden(orden_id, pago_id):
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM pagos_orden WHERE id = ? AND orden_id = ?", (pago_id, orden_id)
+    ).fetchone()
+    if row is None:
+        return jsonify({"error": "Pago no encontrado"}), 404
+    db.execute("DELETE FROM pagos_orden WHERE id = ?", (pago_id,))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1439,7 +1524,7 @@ ESTADOS_LABEL = {
     "esperando_aprobacion": "Esperando aprobación",
     "reparacion": "Reparación",
     "esperando_repuesto": "Esperando repuesto",
-    "control_calidad": "Control de calidad",
+    "control_calidad": "Pruebas de ruta",
     "listo": "Listo",
     "entregado": "Entregado",
     "cancelado": "Cancelado",

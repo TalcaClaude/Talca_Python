@@ -74,7 +74,7 @@
       <option value="esperando_aprobacion">Esperando aprobación</option>
       <option value="reparacion">Reparación</option>
       <option value="esperando_repuesto">Esperando repuesto</option>
-      <option value="control_calidad">Control de calidad</option>
+      <option value="control_calidad">Pruebas de ruta</option>
       <option value="listo">Listo</option>
       <option value="entregado">Entregado</option>
       <option value="cancelado">Cancelado</option>
@@ -109,7 +109,7 @@
       <div class="op-columna-cards" id="op-cards-esperando_repuesto"></div>
     </div>
     <div class="op-columna" data-estado="control_calidad">
-      <h3>Control de calidad <span class="op-columna-count" id="op-count-control_calidad">0</span></h3>
+      <h3>Pruebas de ruta <span class="op-columna-count" id="op-count-control_calidad">0</span></h3>
       <div class="op-columna-cards" id="op-cards-control_calidad"></div>
     </div>
     <div class="op-columna" data-estado="listo">
@@ -341,6 +341,16 @@
       </div>
 
       <h3 class="subtitulo">Datos del vehículo</h3>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Marca</label>
+          <input type="text" id="opon-marca" list="dl-op-marcas">
+        </div>
+        <div class="campo">
+          <label>Modelo</label>
+          <input type="text" id="opon-modelo" list="dl-op-modelos">
+        </div>
+      </div>
       <div class="grid-3">
         <div class="campo">
           <label>VIN</label>
@@ -498,7 +508,7 @@
           <option value="esperando_aprobacion">Esperando aprobación</option>
           <option value="reparacion">Reparación</option>
           <option value="esperando_repuesto">Esperando repuesto</option>
-          <option value="control_calidad">Control de calidad</option>
+          <option value="control_calidad">Pruebas de ruta</option>
           <option value="listo">Listo</option>
           <option value="entregado">Entregado</option>
           <option value="cancelado">Cancelado</option>
@@ -514,9 +524,15 @@
         </select>
       </div>
     </div>
-    <div class="campo">
-      <label>Entrega real</label>
-      <input type="text" id="opod-fecha-real" disabled>
+    <div class="grid-2">
+      <div class="campo">
+        <label>Valor de la OT</label>
+        <input type="text" id="opod-valor" disabled>
+      </div>
+      <div class="campo">
+        <label>Pagado / Saldo</label>
+        <input type="text" id="opod-pagado-saldo" disabled>
+      </div>
     </div>
     <div class="campo">
       <label>Comentarios / descripción del problema</label>
@@ -526,14 +542,72 @@
       <button type="button" class="btn btn-primary" id="btn-opod-guardar">Guardar cambios</button>
     </div>
 
+    <div class="op-pagos">
+      <div class="op-pagos-head">
+        <h4>Pagos</h4>
+        <button type="button" class="btn btn-secundario btn-chico" id="btn-opod-nuevo-pago">+ Registrar pago</button>
+      </div>
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>N°</th>
+            <th>Fecha</th>
+            <th>Método</th>
+            <th class="num">Monto</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="tbody-opod-pagos">
+          <tr><td colspan="5" class="vacio">Sin pagos registrados.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
     <div class="op-botones-acceso">
       <button type="button" class="btn btn-secundario" id="btn-abrir-recepcion">Recepción</button>
       <button type="button" class="btn btn-secundario" id="btn-abrir-diagnostico">Diagnóstico</button>
       <button type="button" class="btn btn-secundario" id="btn-abrir-presupuesto">Presupuesto</button>
       <button type="button" class="btn btn-secundario" id="btn-abrir-repuestos">Carga de repuestos</button>
-      <button type="button" class="btn btn-secundario" id="btn-abrir-qc">Control de calidad</button>
+      <button type="button" class="btn btn-secundario" id="btn-abrir-qc">Pruebas de ruta</button>
     </div>
 
+  </div>
+</div>
+
+<!-- Registrar pago de una OT -->
+<div class="modal-overlay" id="modal-op-pago-nuevo">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Registrar pago</h2>
+      <button class="modal-close" data-close="modal-op-pago-nuevo">&times;</button>
+    </div>
+    <form id="form-op-pago-nuevo">
+      <input type="hidden" id="opag-orden-id">
+      <div class="campo">
+        <label>Método de pago *</label>
+        <select id="opag-metodo" required>
+          <option value="efectivo">Efectivo</option>
+          <option value="tarjeta">Tarjeta</option>
+          <option value="transferencia">Transferencia</option>
+          <option value="cheque">Cheque</option>
+          <option value="otro">Otro</option>
+        </select>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Monto ($) *</label>
+          <input type="number" id="opag-monto" min="1" step="1" required>
+        </div>
+        <div class="campo">
+          <label>Fecha *</label>
+          <input type="date" id="opag-fecha" required>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-op-pago-nuevo">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar pago</button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -773,7 +847,7 @@
 <div class="modal-overlay" id="modal-op-qc">
   <div class="modal modal-ancho">
     <div class="modal-head">
-      <h2>Control de calidad</h2>
+      <h2>Pruebas de ruta</h2>
       <button class="modal-close" data-close="modal-op-qc">&times;</button>
     </div>
     <div id="op-qc-checklist"></div>
@@ -851,22 +925,14 @@
         </div>
       </div>
       <div class="campo">
-        <label>OT original (opcional)</label>
+        <label>OT asociada (opcional)</label>
         <select id="garn-orden-origen-id"><option value="">Sin OT asociada</option></select>
+        <p class="ayuda-inline" id="garn-orden-origen-ayuda" style="display:none">Selecciona primero el vehículo para ver sus OTs anteriores.</p>
       </div>
       <div class="campo">
         <label>Motivo *</label>
         <textarea id="garn-motivo" rows="2" required placeholder="Ej: Ruido reapareció a los 10 días"></textarea>
-      </div>
-      <div class="grid-2">
-        <div class="campo">
-          <label>Diagnóstico</label>
-          <input type="text" id="garn-diagnostico">
-        </div>
-        <div class="campo">
-          <label>Responsable</label>
-          <input type="text" id="garn-responsable">
-        </div>
+        <div class="chips-sugeridos" id="garn-motivo-chips"></div>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-op-garantia-nueva">Cancelar</button>

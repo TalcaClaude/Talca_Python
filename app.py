@@ -16,6 +16,8 @@ import smtplib
 import uuid
 import statistics
 import math
+import logging
+import traceback
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
@@ -77,6 +79,27 @@ EXTENSIONES_FOTO_PERMITIDAS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "cambia-esta-clave-en-produccion-usando-la-variable-SECRET_KEY")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("taller")
+
+
+@app.errorhandler(Exception)
+def _manejar_error_inesperado(e):
+    """Cualquier excepción no controlada por una ruta específica cae acá.
+    Antes esto lo mostraba el servidor de desarrollo como una página HTML
+    (que el frontend no puede parsear como JSON y termina mostrando el
+    genérico "Error inesperado"), y en un deploy de producción se veía
+    todavía peor. Ahora: se registra el traceback completo en el log del
+    servidor (para poder diagnosticarlo) y se le devuelve al navegador un
+    JSON con el mensaje real del error, para saber altiro qué pasó."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    logger.error("Error no controlado en %s %s:\n%s", request.method, request.path, traceback.format_exc())
+    if request.path.startswith("/api/"):
+        return jsonify({"error": f"Error interno del servidor: {e}"}), 500
+    raise e
 
 # Railway (y la mayoría de los hosts) sirven la app detrás de un proxy: esto
 # le permite a Flask reconocer correctamente el HTTPS real del navegador.

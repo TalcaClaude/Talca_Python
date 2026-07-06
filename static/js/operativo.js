@@ -5,6 +5,7 @@ const state = {
   opEquiposClienteActual: [],
   opOrdenActivaId: null,
   opProductos: [],
+  opGarantias: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -94,7 +95,7 @@ async function cargarSesion() {
 }
 
 // ---------------------------------------------------------------------------
-// Pestañas: Dashboard / Órdenes de Trabajo / Clientes / Reportes
+// Pestañas: Dashboard / Órdenes de Trabajo / Clientes / Garantías / Reportes
 // ---------------------------------------------------------------------------
 
 document.querySelectorAll(".tab").forEach(tabBtn => {
@@ -105,17 +106,20 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-dashboard").style.display = vista === "dashboard" ? "block" : "none";
     document.getElementById("vista-ordenes").style.display = vista === "ordenes" ? "block" : "none";
     document.getElementById("vista-clientes").style.display = vista === "clientes" ? "block" : "none";
+    document.getElementById("vista-garantias").style.display = vista === "garantias" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
       dashboard: "Operativo — Dashboard",
       ordenes: "Operativo — Órdenes de Trabajo",
       clientes: "Operativo — Clientes",
+      garantias: "Operativo — Garantías",
       reportes: "Operativo — Reportes",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "dashboard") cargarDashboardOperativo();
     if (vista === "ordenes") cargarOperativo();
     if (vista === "clientes") cargarClientesTab();
+    if (vista === "garantias") cargarGarantiasTab();
   });
 });
 
@@ -130,6 +134,7 @@ async function cargarDashboardOperativo() {
     document.getElementById("op-s-cerradas-mes").textContent = data.ots_cerradas_mes;
     document.getElementById("op-s-monto-cerradas-mes").textContent = fmtMoney(data.monto_cerradas_mes);
     document.getElementById("op-s-monto-por-cerrar").textContent = fmtMoney(data.monto_por_cerrar);
+    document.getElementById("op-s-garantias-abiertas").textContent = data.garantias_abiertas;
   } catch (e) {
     toast(e.message, true);
   }
@@ -144,6 +149,13 @@ const OP_ESTADOS_TABLERO = [
   "esperando_repuesto", "control_calidad", "listo", "entregado", "cancelado",
 ];
 
+const OP_ESTADOS_LABEL = {
+  recibido: "Recibido", diagnostico: "Diagnóstico", presupuesto: "Presupuesto",
+  esperando_aprobacion: "Esperando aprobación", reparacion: "Reparación",
+  esperando_repuesto: "Esperando repuesto", control_calidad: "Control de calidad",
+  listo: "Listo", entregado: "Entregado", cancelado: "Cancelado",
+};
+
 async function cargarOperativo() {
   try {
     const [dataOrdenes, dataClientes, dataProductos] = await Promise.all([
@@ -155,9 +167,37 @@ async function cargarOperativo() {
     state.opClientes = dataClientes.clientes;
     state.opProductos = dataProductos.productos;
     renderTableroOperativo();
+    poblarDatalistsOperativo();
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+// Datalists de "select con texto libre" para Marca/Modelo/Color/Modelo de
+// Transmisión/Referencia/Trabajo a Realizar: se arman a partir del historial
+// ya cargado (sin necesitar una pantalla de catálogo aparte).
+function poblarDatalistsOperativo() {
+  const marcas = new Set(), modelos = new Set(), colores = new Set();
+  const transmisiones = new Set(), referencias = new Set(), trabajos = new Set();
+  state.opOrdenes.forEach(o => {
+    if (o.equipo) {
+      if (o.equipo.marca) marcas.add(o.equipo.marca);
+      if (o.equipo.modelo) modelos.add(o.equipo.modelo);
+      if (o.equipo.color) colores.add(o.equipo.color);
+      if (o.equipo.modelo_transmision) transmisiones.add(o.equipo.modelo_transmision);
+    }
+    if (o.referencia) referencias.add(o.referencia);
+    if (o.trabajo_a_realizar) trabajos.add(o.trabajo_a_realizar);
+  });
+  const llenar = (id, valores) => {
+    document.getElementById(id).innerHTML = [...valores].map(v => `<option value="${escapeHtml(v)}">`).join("");
+  };
+  llenar("dl-op-marcas", marcas);
+  llenar("dl-op-modelos", modelos);
+  llenar("dl-op-colores", colores);
+  llenar("dl-op-transmisiones", transmisiones);
+  llenar("dl-op-referencias", referencias);
+  llenar("dl-op-trabajos", trabajos);
 }
 
 function renderTableroOperativo() {
@@ -226,7 +266,7 @@ function renderSelectClientesOperativo(selectId, valorActual) {
   select.value = valorActual || "";
 }
 
-let opClienteCallback = null; // si viene desde "+ Nuevo" del formulario de orden, para preseleccionar al guardar
+let opClienteCallback = null; // se llama con el cliente recién creado/editado, según de dónde se abrió el modal
 
 function abrirNuevoClienteOperativo() {
   document.getElementById("form-op-cliente").reset();
@@ -348,13 +388,13 @@ document.getElementById("form-op-cliente").addEventListener("submit", async (e) 
 async function renderSelectEquiposOperativo(clienteId, valorActual) {
   const select = document.getElementById("opon-equipo-id");
   if (!clienteId) {
-    select.innerHTML = '<option value="">Sin equipo específico</option>';
+    select.innerHTML = '<option value="">Selecciona un vehículo…</option>';
     document.getElementById("opon-ver-historial").style.display = "none";
     return;
   }
   const data = await api(`/api/operativo/equipos?cliente_id=${clienteId}`);
   state.opEquiposClienteActual = data.equipos;
-  select.innerHTML = '<option value="">Sin equipo específico</option>' +
+  select.innerHTML = '<option value="">Selecciona un vehículo…</option>' +
     data.equipos.map(eq => `<option value="${eq.id}">${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</option>`).join("");
   select.value = valorActual || "";
   // select.value = ... no dispara "change", así que el link de historial se
@@ -446,7 +486,7 @@ document.getElementById("btn-rep-ordenes-pdf").addEventListener("click", () => {
   window.location.href = `/api/operativo/reportes/ordenes/pdf?${rangoFechasParamsOperativo()}`;
 });
 
-// ---- Nueva orden ----
+// ---- Nueva orden (minimal — recepción completa se hace después desde la OT) ----
 
 document.getElementById("btn-op-nueva-orden").addEventListener("click", () => {
   document.getElementById("form-op-orden-nueva").reset();
@@ -465,15 +505,13 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     mecanico: document.getElementById("opon-mecanico").value.trim(),
     fecha_entrega_estimada: document.getElementById("opon-fecha-estimada").value || null,
     prioridad: document.getElementById("opon-prioridad").value,
-    vin: document.getElementById("opon-vin").value.trim(),
-    kilometraje: document.getElementById("opon-kilometraje").value || null,
-    anio: document.getElementById("opon-anio").value || null,
-    caja_automatica: document.getElementById("opon-caja-automatica").value.trim(),
-    accesorios: document.getElementById("opon-accesorios").value.trim(),
-    estado_visual: document.getElementById("opon-estado-visual").value.trim(),
   };
   if (!payload.cliente_id) {
     toast("Selecciona un cliente.", true);
+    return;
+  }
+  if (!payload.equipo_id) {
+    toast("Selecciona o crea el vehículo que ingresa al taller.", true);
     return;
   }
   try {
@@ -487,7 +525,34 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
   }
 });
 
-// ---- Detalle de orden ----
+// ---------------------------------------------------------------------------
+// Detalle de orden: SOLO resumen de cliente/auto + botones de acceso.
+// ---------------------------------------------------------------------------
+
+function renderResumenClienteAuto(orden) {
+  const cliente = orden.cliente;
+  const equipo = orden.equipo;
+  const filasCliente = cliente ? [
+    ["Cliente", cliente.nombre],
+    ["Teléfono", cliente.telefono || "—"],
+    ["RUT", cliente.rut || "—"],
+  ] : [["Cliente", "Sin cliente"]];
+  const filasAuto = equipo ? [
+    ["Vehículo", [equipo.marca, equipo.modelo].filter(Boolean).join(" ") || "—"],
+    ["Patente", equipo.identificador || "—"],
+    ["Color", equipo.color || "—"],
+    ["Año", equipo.anio || "—"],
+    ["VIN", equipo.vin || "—"],
+  ] : [["Vehículo", "Sin vehículo asociado"]];
+
+  const bloque = (titulo, filas) => `
+    <div class="op-resumen-bloque">
+      <h4>${titulo}</h4>
+      ${filas.map(([k, v]) => `<div class="op-resumen-fila"><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join("")}
+    </div>`;
+
+  document.getElementById("opod-resumen").innerHTML = bloque("Cliente", filasCliente) + bloque("Vehículo", filasAuto);
+}
 
 async function abrirDetalleOrden(id) {
   try {
@@ -495,35 +560,15 @@ async function abrirDetalleOrden(id) {
     state.opOrdenActivaId = id;
     document.getElementById("opod-id").value = id;
     document.getElementById("opod-titulo").textContent = `Orden #${id}`;
-    document.getElementById("opod-cliente-equipo").textContent =
-      `${orden.cliente ? orden.cliente.nombre : "Sin cliente"}` +
-      (orden.equipo ? ` — ${[orden.equipo.marca, orden.equipo.modelo, orden.equipo.identificador].filter(Boolean).join(" ")}` : "");
+    renderResumenClienteAuto(orden);
+
     document.getElementById("opod-estado").value = orden.estado;
     document.getElementById("opod-mecanico").value = orden.mecanico || "";
     document.getElementById("opod-prioridad").value = orden.prioridad || "media";
     document.getElementById("opod-fecha-estimada").value = (orden.fecha_entrega_estimada || "").slice(0, 10);
     document.getElementById("opod-fecha-real").value = orden.fecha_entrega_real ? fmtFecha(orden.fecha_entrega_real) : "Todavía no";
     document.getElementById("opod-descripcion").value = orden.descripcion_problema || "";
-    document.getElementById("opod-diagnostico").value = orden.diagnostico || "";
 
-    // Recepción
-    document.getElementById("opod-vin").value = orden.vin || "";
-    document.getElementById("opod-kilometraje").value = orden.kilometraje ?? "";
-    document.getElementById("opod-anio").value = orden.anio ?? "";
-    document.getElementById("opod-caja-automatica").value = orden.caja_automatica || "";
-    document.getElementById("opod-accesorios").value = orden.accesorios || "";
-    document.getElementById("opod-estado-visual").value = orden.estado_visual || "";
-
-    // Diagnóstico
-    document.getElementById("opod-sintoma").value = orden.sintoma || "";
-    document.getElementById("opod-diagnostico-tecnico").value = orden.diagnostico_tecnico || "";
-    document.getElementById("opod-falla-detectada").value = orden.falla_detectada || "";
-    document.getElementById("opod-componentes-danados").value = orden.componentes_danados || "";
-    document.getElementById("opod-mediciones").value = orden.mediciones || "";
-    document.getElementById("opod-resultado-pruebas").value = orden.resultado_pruebas || "";
-    document.getElementById("opod-responsable-diagnostico").value = orden.responsable_diagnostico || "";
-
-    // Ver historial del vehículo
     const btnHistorial = document.getElementById("btn-opod-ver-historial");
     if (orden.equipo) {
       btnHistorial.style.display = "";
@@ -532,56 +577,25 @@ async function abrirDetalleOrden(id) {
       btnHistorial.style.display = "none";
     }
 
-    renderItemsOrden(orden);
-    renderPresupuesto(orden);
-    renderTiempos(orden);
-    renderQcChecklist(orden);
-    renderGarantias(orden);
-
-    // Planificación / tiempos
-    document.getElementById("opod-horas-presupuestadas").value = orden.horas_presupuestadas ?? "";
-
-    // Entrega
-    document.getElementById("ope-recibido-por").value = orden.entrega_recibido_por || "";
-    document.getElementById("ope-documento").value = orden.entrega_documento || "";
-    document.getElementById("ope-observaciones").value = orden.entrega_observaciones || "";
-
-    if (state.opProductos.length === 0) {
-      const dataProductos = await api("/api/productos");
-      state.opProductos = dataProductos.productos;
-    }
-    const selectProducto = document.getElementById("opoi-producto-id");
-    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
-      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
-    document.getElementById("form-op-item").reset();
-    document.getElementById("opoi-tipo").dispatchEvent(new Event("change"));
-
     abrirModal("modal-op-orden-detalle");
   } catch (e) {
     toast(e.message, true);
   }
 }
 
-function renderItemsOrden(orden) {
-  const tbody = document.getElementById("tbody-op-items");
-  if (orden.items.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>`;
-  } else {
-    tbody.innerHTML = orden.items.map(it => `
-      <tr>
-        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}</td>
-        <td>${escapeHtml(it.descripcion)}</td>
-        <td class="num">${it.cantidad}</td>
-        <td class="num">${fmtMoney(it.costo_unitario)}</td>
-        <td class="num">${fmtMoney(it.cantidad * it.costo_unitario)}</td>
-        <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-item="${it.id}">Eliminar</button></td>
-      </tr>
-    `).join("");
+// Refresca solo el resumen/estado de la OT ya abierta (sin volver a abrir el
+// modal), para reflejar transiciones automáticas de estado que ocurren desde
+// un sub-modal (ej. aprobar presupuesto -> Reparación; QC aprobado -> Listo).
+async function refrescarResumenHub(ordenId) {
+  try {
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderResumenClienteAuto(orden);
+    document.getElementById("opod-estado").value = orden.estado;
+    document.getElementById("opod-fecha-real").value = orden.fecha_entrega_real ? fmtFecha(orden.fecha_entrega_real) : "Todavía no";
+    cargarOperativo();
+  } catch (e) {
+    // silencioso: esto es un refresco de fondo, no una acción explícita del usuario
   }
-  document.getElementById("opod-total").innerHTML = `<strong>${fmtMoney(orden.total)}</strong>`;
-  tbody.querySelectorAll("[data-eliminar-item]").forEach(btn => {
-    btn.addEventListener("click", () => eliminarItemOrden(parseInt(btn.dataset.eliminarItem, 10)));
-  });
 }
 
 document.getElementById("btn-opod-guardar").addEventListener("click", async () => {
@@ -592,102 +606,197 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
     prioridad: document.getElementById("opod-prioridad").value,
     fecha_entrega_estimada: document.getElementById("opod-fecha-estimada").value || null,
     descripcion_problema: document.getElementById("opod-descripcion").value.trim(),
-    diagnostico: document.getElementById("opod-diagnostico").value.trim(),
-    vin: document.getElementById("opod-vin").value.trim(),
-    kilometraje: document.getElementById("opod-kilometraje").value || null,
-    anio: document.getElementById("opod-anio").value || null,
-    caja_automatica: document.getElementById("opod-caja-automatica").value.trim(),
-    accesorios: document.getElementById("opod-accesorios").value.trim(),
-    estado_visual: document.getElementById("opod-estado-visual").value.trim(),
-    sintoma: document.getElementById("opod-sintoma").value.trim(),
-    diagnostico_tecnico: document.getElementById("opod-diagnostico-tecnico").value.trim(),
-    falla_detectada: document.getElementById("opod-falla-detectada").value.trim(),
-    componentes_danados: document.getElementById("opod-componentes-danados").value.trim(),
-    mediciones: document.getElementById("opod-mediciones").value.trim(),
-    resultado_pruebas: document.getElementById("opod-resultado-pruebas").value.trim(),
-    responsable_diagnostico: document.getElementById("opod-responsable-diagnostico").value.trim(),
-    horas_presupuestadas: document.getElementById("opod-horas-presupuestadas").value || null,
   };
   try {
-    await api(`/api/operativo/ordenes/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+    const actualizada = await api(`/api/operativo/ordenes/${id}`, { method: "PUT", body: JSON.stringify(payload) });
     toast("Orden actualizada.");
-    await cargarOperativo();
-    abrirDetalleOrden(parseInt(id, 10));
+    renderResumenClienteAuto(actualizada);
+    document.getElementById("opod-fecha-real").value = actualizada.fecha_entrega_real ? fmtFecha(actualizada.fecha_entrega_real) : "Todavía no";
+    cargarOperativo();
   } catch (e) {
     toast(e.message, true);
   }
 });
 
-document.getElementById("opoi-tipo").addEventListener("change", (e) => {
-  const esRepuesto = e.target.value === "repuesto";
-  document.getElementById("opoi-campo-producto").style.display = esRepuesto ? "flex" : "none";
-  document.getElementById("opoi-campo-descripcion").style.display = esRepuesto ? "none" : "flex";
-  document.getElementById("opoi-campo-costo").style.display = esRepuesto ? "none" : "flex";
-});
+// ---------------------------------------------------------------------------
+// Recepción — datos del vehículo + checklist de equipamiento
+// ---------------------------------------------------------------------------
 
-document.getElementById("form-op-item").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const tipo = document.getElementById("opoi-tipo").value;
-  const ordenId = document.getElementById("opod-id").value;
-  const payload = {
-    tipo,
-    cantidad: document.getElementById("opoi-cantidad").value,
-  };
-  if (tipo === "repuesto") {
-    payload.producto_id = document.getElementById("opoi-producto-id").value;
-    if (!payload.producto_id) {
-      toast("Selecciona un producto.", true);
-      return;
-    }
-  } else {
-    payload.descripcion = document.getElementById("opoi-descripcion").value.trim();
-    payload.costo_unitario = document.getElementById("opoi-costo").value || 0;
-    if (!payload.descripcion) {
-      toast("Describe la mano de obra realizada.", true);
-      return;
-    }
-  }
-  try {
-    await api(`/api/operativo/ordenes/${ordenId}/items`, { method: "POST", body: JSON.stringify(payload) });
-    toast("Ítem agregado.");
-    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
-    renderItemsOrden(orden);
-    document.getElementById("form-op-item").reset();
-    document.getElementById("opoi-tipo").dispatchEvent(new Event("change"));
-    // Refresca el stock mostrado en el selector de productos si era un repuesto.
-    const dataProductos = await api("/api/productos");
-    state.opProductos = dataProductos.productos;
-    const selectProducto = document.getElementById("opoi-producto-id");
-    const valorActual = selectProducto.value;
-    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
-      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
-    selectProducto.value = valorActual;
-  } catch (e2) {
-    toast(e2.message, true);
-  }
-});
+function renderEquipamientoChecklist(equipamiento) {
+  const eq = equipamiento || {};
+  document.getElementById("op-equipamiento-grid").innerHTML = EQUIPAMIENTO_ITEMS.map(item => `
+    <label class="op-equipamiento-item">
+      <input type="checkbox" data-equipamiento-item="${escapeHtml(item)}" ${eq[item] ? "checked" : ""}>
+      <span>${escapeHtml(item)}</span>
+    </label>
+  `).join("");
+}
 
-async function eliminarItemOrden(itemId) {
-  if (!confirm("¿Eliminar este ítem? Si era un repuesto, el stock consumido se devuelve al inventario.")) return;
+const EQUIPAMIENTO_ITEMS = [
+  "Encendedor", "Cenicero", "Gata", "Tapa Combustible", "Padron", "Tag",
+  "Gancho Tiro", "Llave Rueda", "Radio", "Neumatico Repuesto", "Conos",
+  "Extintor", "P. Circulacion", "Revision Tecnica", "S.O.A.P", "Certificado Gases",
+];
+
+document.getElementById("btn-abrir-recepcion").addEventListener("click", () => abrirRecepcion());
+
+async function abrirRecepcion() {
   const ordenId = document.getElementById("opod-id").value;
   try {
-    await api(`/api/operativo/ordenes/${ordenId}/items/${itemId}`, { method: "DELETE" });
-    toast("Ítem eliminado.");
+    if (state.opOrdenes.length === 0) {
+      const dataOrdenes = await api("/api/operativo/ordenes");
+      state.opOrdenes = dataOrdenes.ordenes;
+    }
+    poblarDatalistsOperativo();
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
-    renderItemsOrden(orden);
+    const equipo = orden.equipo || {};
+    document.getElementById("oprec-equipo-id").value = equipo.id || "";
+    document.getElementById("oprec-vin").value = equipo.vin || "";
+    document.getElementById("oprec-patente").value = equipo.identificador || "";
+    document.getElementById("oprec-rut-cliente").value = (orden.cliente && orden.cliente.rut) || "";
+    document.getElementById("oprec-marca").value = equipo.marca || "";
+    document.getElementById("oprec-modelo").value = equipo.modelo || "";
+    document.getElementById("oprec-color").value = equipo.color || "";
+    document.getElementById("oprec-anio").value = equipo.anio ?? "";
+    document.getElementById("oprec-transmision").value = equipo.modelo_transmision || "";
+    document.getElementById("oprec-puertas").value = equipo.puertas || "";
+    document.getElementById("oprec-encargado").value = orden.recepcionado_por || "";
+    document.getElementById("oprec-kilometraje").value = orden.kilometraje ?? "";
+    document.getElementById("oprec-motor-cc").value = equipo.motor_cc || "";
+    const estanque = orden.estanque_nivel ?? 0;
+    document.getElementById("oprec-estanque").value = estanque;
+    document.getElementById("oprec-estanque-valor").textContent = `${estanque} / 8`;
+    document.getElementById("oprec-referencia").value = orden.referencia || "";
+    document.getElementById("oprec-precio").value = orden.precio_referencial ?? "";
+    document.getElementById("oprec-trabajo").value = orden.trabajo_a_realizar || "";
+    document.getElementById("oprec-comentarios").value = orden.descripcion_problema || "";
+    renderEquipamientoChecklist(orden.equipamiento);
+
+    if (!equipo.id) {
+      toast("Esta orden no tiene un vehículo asociado — algunos datos no se podrán guardar.", true);
+    }
+
+    abrirModal("modal-op-recepcion");
   } catch (e) {
     toast(e.message, true);
   }
 }
 
+document.getElementById("oprec-estanque").addEventListener("input", (e) => {
+  document.getElementById("oprec-estanque-valor").textContent = `${e.target.value} / 8`;
+});
+
+document.getElementById("btn-oprec-guardar").addEventListener("click", async () => {
+  const ordenId = document.getElementById("opod-id").value;
+  const equipoId = document.getElementById("oprec-equipo-id").value;
+
+  const equipamiento = {};
+  document.querySelectorAll("[data-equipamiento-item]").forEach(chk => {
+    equipamiento[chk.dataset.equipamientoItem] = chk.checked;
+  });
+
+  try {
+    if (equipoId) {
+      await api(`/api/operativo/equipos/${equipoId}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          vin: document.getElementById("oprec-vin").value.trim(),
+          identificador: document.getElementById("oprec-patente").value.trim(),
+          marca: document.getElementById("oprec-marca").value.trim(),
+          modelo: document.getElementById("oprec-modelo").value.trim(),
+          color: document.getElementById("oprec-color").value.trim(),
+          anio: document.getElementById("oprec-anio").value || null,
+          modelo_transmision: document.getElementById("oprec-transmision").value.trim(),
+          puertas: document.getElementById("oprec-puertas").value,
+          motor_cc: document.getElementById("oprec-motor-cc").value.trim(),
+        }),
+      });
+    }
+    await api(`/api/operativo/ordenes/${ordenId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        kilometraje: document.getElementById("oprec-kilometraje").value || null,
+        estanque_nivel: document.getElementById("oprec-estanque").value,
+        referencia: document.getElementById("oprec-referencia").value.trim(),
+        trabajo_a_realizar: document.getElementById("oprec-trabajo").value.trim(),
+        precio_referencial: document.getElementById("oprec-precio").value || null,
+        equipamiento,
+        descripcion_problema: document.getElementById("oprec-comentarios").value.trim(),
+      }),
+    });
+    toast("Recepción guardada.");
+    await refrescarResumenHub(ordenId);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
 // ---------------------------------------------------------------------------
-// Fase 3.5.3 — Presupuesto
+// Diagnóstico
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-abrir-diagnostico").addEventListener("click", () => abrirDiagnostico());
+
+async function abrirDiagnostico() {
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    document.getElementById("opdi-sintoma").value = orden.sintoma || "";
+    document.getElementById("opdi-diagnostico-tecnico").value = orden.diagnostico_tecnico || "";
+    document.getElementById("opdi-falla-detectada").value = orden.falla_detectada || "";
+    document.getElementById("opdi-componentes-danados").value = orden.componentes_danados || "";
+    document.getElementById("opdi-mediciones").value = orden.mediciones || "";
+    document.getElementById("opdi-resultado-pruebas").value = orden.resultado_pruebas || "";
+    document.getElementById("opdi-responsable-diagnostico").value = orden.responsable_diagnostico || "";
+    document.getElementById("opdi-diagnostico").value = orden.diagnostico || "";
+    abrirModal("modal-op-diagnostico");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-opdi-guardar").addEventListener("click", async () => {
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = {
+    sintoma: document.getElementById("opdi-sintoma").value.trim(),
+    diagnostico_tecnico: document.getElementById("opdi-diagnostico-tecnico").value.trim(),
+    falla_detectada: document.getElementById("opdi-falla-detectada").value.trim(),
+    componentes_danados: document.getElementById("opdi-componentes-danados").value.trim(),
+    mediciones: document.getElementById("opdi-mediciones").value.trim(),
+    resultado_pruebas: document.getElementById("opdi-resultado-pruebas").value.trim(),
+    responsable_diagnostico: document.getElementById("opdi-responsable-diagnostico").value.trim(),
+    diagnostico: document.getElementById("opdi-diagnostico").value.trim(),
+  };
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}`, { method: "PUT", body: JSON.stringify(payload) });
+    toast("Diagnóstico guardado.");
+    await refrescarResumenHub(ordenId);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Presupuesto
 // ---------------------------------------------------------------------------
 
 const OPP_TIPO_LABEL = {
   mano_obra: "Mano de obra", repuesto: "Repuesto", insumo: "Insumo",
   servicio_externo: "Servicio externo", descuento: "Descuento",
 };
+
+document.getElementById("btn-abrir-presupuesto").addEventListener("click", () => abrirPresupuestoModal());
+
+async function abrirPresupuestoModal() {
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPresupuesto(orden);
+    abrirModal("modal-op-presupuesto");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 function renderPresupuesto(orden) {
   const tbody = document.getElementById("tbody-op-presupuesto");
@@ -717,8 +826,6 @@ function renderPresupuesto(orden) {
     btn.addEventListener("click", () => eliminarItemPresupuesto(parseInt(btn.dataset.eliminarPresupuestoItem, 10)));
   });
 }
-
-document.getElementById("oppi-tipo").addEventListener("change", () => {});
 
 document.getElementById("form-op-presupuesto-item").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -766,52 +873,143 @@ document.getElementById("btn-opp-guardar").addEventListener("click", async () =>
     notas: document.getElementById("opp-notas").value.trim(),
   };
   try {
-    await api(`/api/operativo/ordenes/${ordenId}/presupuesto`, { method: "PUT", body: JSON.stringify(payload) });
+    const actualizada = await api(`/api/operativo/ordenes/${ordenId}/presupuesto`, { method: "PUT", body: JSON.stringify(payload) });
     toast("Presupuesto actualizado.");
-    await cargarOperativo();
-    abrirDetalleOrden(parseInt(ordenId, 10));
+    renderPresupuesto(actualizada);
+    await refrescarResumenHub(ordenId);
   } catch (e) {
     toast(e.message, true);
   }
 });
 
 // ---------------------------------------------------------------------------
-// Fase 3.5.5 — Planificación y tiempos
+// Carga de repuestos (antes "Repuestos y mano de obra")
 // ---------------------------------------------------------------------------
 
-const OP_TIEMPO_EVENTO_LABEL = { inicio: "Inicio", pausa: "Pausa", reanudar: "Reanudó", termino: "Término" };
+document.getElementById("btn-abrir-repuestos").addEventListener("click", () => abrirRepuestosModal());
 
-function renderTiempos(orden) {
-  document.getElementById("opod-horas-reales").value = `${orden.horas_reales} h`;
-  const lista = document.getElementById("op-tiempos-lista");
-  if (!orden.tiempos || orden.tiempos.length === 0) {
-    lista.innerHTML = `<li>Sin registros de tiempo todavía.</li>`;
-    return;
+async function abrirRepuestosModal() {
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    if (state.opProductos.length === 0) {
+      const dataProductos = await api("/api/productos");
+      state.opProductos = dataProductos.productos;
+    }
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderItemsOrden(orden);
+    const selectProducto = document.getElementById("opoi-producto-id");
+    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
+      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
+    document.getElementById("form-op-item").reset();
+    document.getElementById("opoi-tipo").dispatchEvent(new Event("change"));
+    abrirModal("modal-op-repuestos");
+  } catch (e) {
+    toast(e.message, true);
   }
-  lista.innerHTML = orden.tiempos.map(t => `<li>${OP_TIEMPO_EVENTO_LABEL[t.evento] || t.evento} — ${fmtFecha(t.marca_tiempo)}${t.usuario ? " · " + escapeHtml(t.usuario) : ""}</li>`).join("");
 }
 
-document.querySelectorAll("[data-tiempo-evento]").forEach(btn => {
-  btn.addEventListener("click", async () => {
-    const ordenId = document.getElementById("opod-id").value;
-    try {
-      await api(`/api/operativo/ordenes/${ordenId}/tiempos`, {
-        method: "POST", body: JSON.stringify({ evento: btn.dataset.tiempoEvento }),
-      });
-      toast("Registro de tiempo agregado.");
-      const orden = await api(`/api/operativo/ordenes/${ordenId}`);
-      renderTiempos(orden);
-    } catch (e) {
-      toast(e.message, true);
-    }
+function renderItemsOrden(orden) {
+  const tbody = document.getElementById("tbody-op-items");
+  if (orden.items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>`;
+  } else {
+    tbody.innerHTML = orden.items.map(it => `
+      <tr>
+        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}</td>
+        <td>${escapeHtml(it.descripcion)}</td>
+        <td class="num">${it.cantidad}</td>
+        <td class="num">${fmtMoney(it.costo_unitario)}</td>
+        <td class="num">${fmtMoney(it.cantidad * it.costo_unitario)}</td>
+        <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-item="${it.id}">Eliminar</button></td>
+      </tr>
+    `).join("");
+  }
+  document.getElementById("opod-total").innerHTML = `<strong>${fmtMoney(orden.total)}</strong>`;
+  tbody.querySelectorAll("[data-eliminar-item]").forEach(btn => {
+    btn.addEventListener("click", () => eliminarItemOrden(parseInt(btn.dataset.eliminarItem, 10)));
   });
+}
+
+document.getElementById("opoi-tipo").addEventListener("change", (e) => {
+  const esRepuesto = e.target.value === "repuesto";
+  document.getElementById("opoi-campo-producto").style.display = esRepuesto ? "flex" : "none";
+  document.getElementById("opoi-campo-descripcion").style.display = esRepuesto ? "none" : "flex";
+  document.getElementById("opoi-campo-costo").style.display = esRepuesto ? "none" : "flex";
 });
 
+document.getElementById("form-op-item").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const tipo = document.getElementById("opoi-tipo").value;
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = {
+    tipo,
+    cantidad: document.getElementById("opoi-cantidad").value,
+  };
+  if (tipo === "repuesto") {
+    payload.producto_id = document.getElementById("opoi-producto-id").value;
+    if (!payload.producto_id) {
+      toast("Selecciona un producto.", true);
+      return;
+    }
+  } else {
+    payload.descripcion = document.getElementById("opoi-descripcion").value.trim();
+    payload.costo_unitario = document.getElementById("opoi-costo").value || 0;
+    if (!payload.descripcion) {
+      toast("Describe la mano de obra realizada.", true);
+      return;
+    }
+  }
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/items`, { method: "POST", body: JSON.stringify(payload) });
+    toast("Ítem agregado.");
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderItemsOrden(orden);
+    document.getElementById("form-op-item").reset();
+    document.getElementById("opoi-tipo").dispatchEvent(new Event("change"));
+    // Refresca el stock mostrado en el selector de productos.
+    const dataProductos = await api("/api/productos");
+    state.opProductos = dataProductos.productos;
+    const selectProducto = document.getElementById("opoi-producto-id");
+    const valorActual = selectProducto.value;
+    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
+      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
+    selectProducto.value = valorActual;
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function eliminarItemOrden(itemId) {
+  if (!confirm("¿Eliminar este ítem? Si era un repuesto, el stock consumido se devuelve al inventario.")) return;
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/items/${itemId}`, { method: "DELETE" });
+    toast("Ítem eliminado.");
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderItemsOrden(orden);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Fase 3.5.6 — Control de Calidad
+// Control de Calidad — cada punto queda con fecha y persona
 // ---------------------------------------------------------------------------
 
 const OPQC_RESULTADO_LABEL = { ok: "OK", falla: "Falla", na: "N/A" };
+
+document.getElementById("btn-abrir-qc").addEventListener("click", () => abrirQcModal());
+
+async function abrirQcModal() {
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderQcChecklist(orden);
+    abrirModal("modal-op-qc");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 function renderQcChecklist(orden) {
   const cont = document.getElementById("op-qc-checklist");
@@ -821,6 +1019,7 @@ function renderQcChecklist(orden) {
     cont.innerHTML = orden.qc_checklist.map(it => `
       <div class="op-checklist-row">
         <span class="op-checklist-item">${escapeHtml(it.item)}${it.observacion ? " — " + escapeHtml(it.observacion) : ""}</span>
+        <span class="op-checklist-meta">${it.usuario ? escapeHtml(it.usuario) + " · " : ""}${fmtFecha(it.creado_en)}</span>
         <span class="badge-urgencia ${it.resultado === "falla" ? "badge-urgencia--critico" : ""}">${OPQC_RESULTADO_LABEL[it.resultado] || it.resultado}</span>
         <button type="button" class="btn-link btn-link--peligro" data-eliminar-qc-item="${it.id}">Eliminar</button>
       </div>
@@ -878,93 +1077,25 @@ document.getElementById("btn-opqc-guardar").addEventListener("click", async () =
     observaciones: document.getElementById("opqc-observaciones-generales").value.trim(),
   };
   try {
-    await api(`/api/operativo/ordenes/${ordenId}/qc`, { method: "PUT", body: JSON.stringify(payload) });
+    const actualizada = await api(`/api/operativo/ordenes/${ordenId}/qc`, { method: "PUT", body: JSON.stringify(payload) });
     toast("Control de calidad actualizado.");
-    await cargarOperativo();
-    abrirDetalleOrden(parseInt(ordenId, 10));
+    renderQcChecklist(actualizada);
+    await refrescarResumenHub(ordenId);
   } catch (e) {
     toast(e.message, true);
   }
 });
 
 // ---------------------------------------------------------------------------
-// Fase 3.5.7 — Garantía
+// Historial de vehículo
 // ---------------------------------------------------------------------------
 
-function renderGarantias(orden) {
-  const cont = document.getElementById("op-garantias-lista");
-  if (!orden.garantias || orden.garantias.length === 0) {
-    cont.innerHTML = `<p class="vacio-inline">Sin garantías registradas para esta orden.</p>`;
-    return;
-  }
-  cont.innerHTML = orden.garantias.map(g => `
-    <div class="op-garantia-card">
-      <div>${escapeHtml(g.motivo)}</div>
-      <div class="op-garantia-meta">
-        Estado: ${escapeHtml(g.estado)} · Costo asumido: ${fmtMoney(g.costo_asumido)}
-        ${g.responsable ? " · " + escapeHtml(g.responsable) : ""} · ${fmtFecha(g.creado_en)}
-      </div>
-    </div>
-  `).join("");
-}
-
-document.getElementById("form-op-garantia").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const ordenId = document.getElementById("opod-id").value;
-  const payload = {
-    motivo: document.getElementById("opg-motivo").value.trim(),
-    diagnostico: document.getElementById("opg-diagnostico").value.trim(),
-    responsable: document.getElementById("opg-responsable").value.trim(),
-    costo_asumido: document.getElementById("opg-costo").value || 0,
-  };
-  if (!payload.motivo) {
-    toast("Describe el motivo de la garantía.", true);
-    return;
-  }
-  try {
-    await api(`/api/operativo/ordenes/${ordenId}/garantias`, { method: "POST", body: JSON.stringify(payload) });
-    toast("Garantía registrada.");
-    document.getElementById("form-op-garantia").reset();
-    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
-    renderGarantias(orden);
-  } catch (e2) {
-    toast(e2.message, true);
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Fase 3.5.8 — Entrega
-// ---------------------------------------------------------------------------
-
-document.getElementById("btn-ope-entregar").addEventListener("click", async () => {
-  if (!confirm("¿Marcar esta orden como entregada?")) return;
-  const ordenId = document.getElementById("opod-id").value;
-  const payload = {
-    recibido_por: document.getElementById("ope-recibido-por").value.trim(),
-    documento: document.getElementById("ope-documento").value,
-    observaciones: document.getElementById("ope-observaciones").value.trim(),
-  };
-  if (!payload.recibido_por) {
-    toast("Indica quién retira el vehículo.", true);
-    return;
-  }
-  try {
-    await api(`/api/operativo/ordenes/${ordenId}/entregar`, { method: "POST", body: JSON.stringify(payload) });
-    toast("Orden marcada como entregada.");
-    await cargarOperativo();
-    abrirDetalleOrden(parseInt(ordenId, 10));
-  } catch (e) {
-    toast(e.message, true);
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Fase 3.5.1 — Historial de vehículo
-// ---------------------------------------------------------------------------
+let opHistorialEquipoActivo = null; // { equipo, cliente, ordenes } — para "Crear garantía"
 
 async function abrirHistorialEquipo(equipoId) {
   try {
     const data = await api(`/api/operativo/equipos/${equipoId}/historial`);
+    opHistorialEquipoActivo = data;
     document.getElementById("modal-op-equipo-historial-titulo").textContent =
       `Historial — ${[data.equipo.marca, data.equipo.modelo, data.equipo.identificador].filter(Boolean).join(" ") || "Equipo #" + data.equipo.id}`;
     document.getElementById("opeh-cliente").textContent = data.cliente ? `Cliente: ${data.cliente.nombre}` : "";
@@ -988,18 +1119,34 @@ async function abrirHistorialEquipo(equipoId) {
         });
       });
     }
+    const contGarantias = document.getElementById("opeh-garantias");
+    if (!data.garantias || data.garantias.length === 0) {
+      contGarantias.innerHTML = `<p class="vacio-inline">Sin garantías registradas para este vehículo.</p>`;
+    } else {
+      contGarantias.innerHTML = data.garantias.map(g => `
+        <div class="op-garantia-card">
+          <div>${escapeHtml(g.motivo)}</div>
+          <div class="op-garantia-meta">
+            Estado: ${escapeHtml(GAR_ESTADO_LABEL[g.estado] || g.estado)}
+            ${g.responsable ? " · " + escapeHtml(g.responsable) : ""} · ${fmtFecha(g.creado_en)}
+          </div>
+        </div>
+      `).join("");
+    }
     abrirModal("modal-op-equipo-historial");
   } catch (e) {
     toast(e.message, true);
   }
 }
 
-const OP_ESTADOS_LABEL = {
-  recibido: "Recibido", diagnostico: "Diagnóstico", presupuesto: "Presupuesto",
-  esperando_aprobacion: "Esperando aprobación", reparacion: "Reparación",
-  esperando_repuesto: "Esperando repuesto", control_calidad: "Control de calidad",
-  listo: "Listo", entregado: "Entregado", cancelado: "Cancelado",
-};
+document.getElementById("btn-opeh-crear-garantia").addEventListener("click", () => {
+  if (!opHistorialEquipoActivo) return;
+  abrirNuevaGarantia({
+    clienteId: opHistorialEquipoActivo.cliente ? opHistorialEquipoActivo.cliente.id : null,
+    equipoId: opHistorialEquipoActivo.equipo.id,
+    ordenes: opHistorialEquipoActivo.ordenes,
+  });
+});
 
 // ---- Pestaña Clientes: ver equipos / historial ----
 
@@ -1022,6 +1169,288 @@ async function abrirEquiposDeCliente(clienteId) {
       });
     }
     abrirModal("modal-op-cliente-equipos");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Garantías — entidad propia, con su propia vista y su propio proceso
+// (no viven dentro del tablero de OTs).
+// ---------------------------------------------------------------------------
+
+const GAR_ESTADO_LABEL = {
+  pendiente: "Pendiente", en_reparacion: "En reparación",
+  resuelta: "Resuelta", rechazada: "Rechazada",
+};
+
+async function cargarGarantiasTab() {
+  try {
+    const estado = document.getElementById("gar-filtro-estado").value;
+    const data = await api(`/api/operativo/garantias${estado ? "?estado=" + encodeURIComponent(estado) : ""}`);
+    state.opGarantias = data.garantias;
+    const tbody = document.getElementById("tbody-garantias");
+    if (data.garantias.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="vacio">Sin garantías registradas todavía.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.garantias.map(g => `
+      <tr data-ver-garantia="${g.id}">
+        <td>${fmtFechaSolo((g.fecha_recepcion || "").slice(0, 10))}</td>
+        <td>${escapeHtml(g.cliente ? g.cliente.nombre : "—")}</td>
+        <td>${escapeHtml(g.equipo ? [g.equipo.marca, g.equipo.modelo, g.equipo.identificador].filter(Boolean).join(" · ") : "—")}</td>
+        <td>${escapeHtml(g.motivo)}</td>
+        <td>${escapeHtml(GAR_ESTADO_LABEL[g.estado] || g.estado)}</td>
+        <td>${escapeHtml(g.responsable || "—")}</td>
+        <td class="num">${fmtMoney(g.total)}</td>
+      </tr>
+    `).join("");
+    tbody.querySelectorAll("[data-ver-garantia]").forEach(tr => {
+      tr.addEventListener("click", () => abrirDetalleGarantia(parseInt(tr.dataset.verGarantia, 10)));
+    });
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("gar-filtro-estado").addEventListener("change", cargarGarantiasTab);
+
+// ---- Nueva garantía ----
+
+function renderSelectEquiposGarantia(equipos, valorActual) {
+  const select = document.getElementById("garn-equipo-id");
+  select.innerHTML = '<option value="">Selecciona un vehículo…</option>' +
+    equipos.map(eq => `<option value="${eq.id}">${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</option>`).join("");
+  select.value = valorActual || "";
+}
+
+function renderSelectOrdenesGarantia(ordenes, valorActual) {
+  const select = document.getElementById("garn-orden-origen-id");
+  select.innerHTML = '<option value="">Sin OT asociada</option>' +
+    (ordenes || []).map(o => `<option value="${o.id}">OT #${o.id} — ${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</option>`).join("");
+  select.value = valorActual || "";
+}
+
+async function abrirNuevaGarantia(prefill) {
+  document.getElementById("form-op-garantia-nueva").reset();
+  if (state.opClientes.length === 0) {
+    const dataClientes = await api("/api/operativo/clientes");
+    state.opClientes = dataClientes.clientes;
+  }
+  renderSelectClientesOperativo("garn-cliente-id", prefill ? prefill.clienteId : "");
+  if (prefill && prefill.clienteId) {
+    const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${prefill.clienteId}`);
+    renderSelectEquiposGarantia(dataEquipos.equipos, prefill.equipoId);
+    renderSelectOrdenesGarantia(prefill.ordenes, "");
+  } else {
+    renderSelectEquiposGarantia([], "");
+    renderSelectOrdenesGarantia([], "");
+  }
+  abrirModal("modal-op-garantia-nueva");
+}
+
+document.getElementById("btn-gar-nueva").addEventListener("click", () => abrirNuevaGarantia(null));
+
+document.getElementById("garn-cliente-id").addEventListener("change", async (e) => {
+  const clienteId = e.target.value;
+  if (!clienteId) {
+    renderSelectEquiposGarantia([], "");
+    renderSelectOrdenesGarantia([], "");
+    return;
+  }
+  const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${clienteId}`);
+  renderSelectEquiposGarantia(dataEquipos.equipos, "");
+  renderSelectOrdenesGarantia([], "");
+});
+
+document.getElementById("garn-nuevo-cliente").addEventListener("click", () => {
+  opClienteCallback = async (nuevo) => {
+    const data = await api("/api/operativo/clientes");
+    state.opClientes = data.clientes;
+    renderSelectClientesOperativo("garn-cliente-id", nuevo.id);
+    document.getElementById("garn-cliente-id").dispatchEvent(new Event("change"));
+  };
+  abrirNuevoClienteOperativo();
+});
+
+document.getElementById("garn-nuevo-equipo").addEventListener("click", () => {
+  const clienteId = document.getElementById("garn-cliente-id").value;
+  if (!clienteId) {
+    toast("Primero selecciona (o crea) un cliente.", true);
+    return;
+  }
+  document.getElementById("form-op-equipo").reset();
+  document.getElementById("ope-id").value = "";
+  renderSelectClienteEquipoModal(clienteId);
+  document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
+  opEquipoCallback = async (nuevo, payload) => {
+    const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${payload.cliente_id}`);
+    renderSelectEquiposGarantia(dataEquipos.equipos, nuevo.id);
+  };
+  abrirModal("modal-op-equipo");
+});
+
+document.getElementById("form-op-garantia-nueva").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const payload = {
+    cliente_id: document.getElementById("garn-cliente-id").value,
+    equipo_id: document.getElementById("garn-equipo-id").value || null,
+    orden_origen_id: document.getElementById("garn-orden-origen-id").value || null,
+    motivo: document.getElementById("garn-motivo").value.trim(),
+    diagnostico: document.getElementById("garn-diagnostico").value.trim(),
+    responsable: document.getElementById("garn-responsable").value.trim(),
+  };
+  if (!payload.cliente_id) {
+    toast("Selecciona un cliente.", true);
+    return;
+  }
+  if (!payload.equipo_id) {
+    toast("Selecciona o crea el vehículo de la garantía.", true);
+    return;
+  }
+  if (!payload.motivo) {
+    toast("Describe el motivo de la garantía.", true);
+    return;
+  }
+  try {
+    await api("/api/operativo/garantias", { method: "POST", body: JSON.stringify(payload) });
+    cerrarModal("modal-op-garantia-nueva");
+    toast("Garantía creada.");
+    cargarGarantiasTab();
+    cargarDashboardOperativo();
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+// ---- Detalle de garantía ----
+
+function renderItemsGarantia(garantia) {
+  const tbody = document.getElementById("tbody-gar-items");
+  if (garantia.items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>`;
+  } else {
+    tbody.innerHTML = garantia.items.map(it => `
+      <tr>
+        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}</td>
+        <td>${escapeHtml(it.descripcion)}</td>
+        <td class="num">${it.cantidad}</td>
+        <td class="num">${fmtMoney(it.costo_unitario)}</td>
+        <td class="num">${fmtMoney(it.cantidad * it.costo_unitario)}</td>
+        <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-gar-item="${it.id}">Eliminar</button></td>
+      </tr>
+    `).join("");
+  }
+  document.getElementById("gard-total").innerHTML = `<strong>${fmtMoney(garantia.total)}</strong>`;
+  tbody.querySelectorAll("[data-eliminar-gar-item]").forEach(btn => {
+    btn.addEventListener("click", () => eliminarItemGarantia(parseInt(btn.dataset.eliminarGarItem, 10)));
+  });
+}
+
+async function abrirDetalleGarantia(id) {
+  try {
+    const garantia = await api(`/api/operativo/garantias/${id}`);
+    document.getElementById("gard-id").value = id;
+    document.getElementById("gard-titulo").textContent = `Garantía #${id}`;
+    document.getElementById("gard-cliente-equipo").textContent =
+      `${garantia.cliente ? garantia.cliente.nombre : "Sin cliente"}` +
+      (garantia.equipo ? ` — ${[garantia.equipo.marca, garantia.equipo.modelo, garantia.equipo.identificador].filter(Boolean).join(" ")}` : "");
+    document.getElementById("gard-estado").value = garantia.estado;
+    document.getElementById("gard-responsable").value = garantia.responsable || "";
+    document.getElementById("gard-motivo").value = garantia.motivo || "";
+    document.getElementById("gard-diagnostico").value = garantia.diagnostico || "";
+    renderItemsGarantia(garantia);
+
+    if (state.opProductos.length === 0) {
+      const dataProductos = await api("/api/productos");
+      state.opProductos = dataProductos.productos;
+    }
+    const selectProducto = document.getElementById("gari-producto-id");
+    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
+      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
+    document.getElementById("form-gar-item").reset();
+    document.getElementById("gari-tipo").dispatchEvent(new Event("change"));
+
+    abrirModal("modal-op-garantia-detalle");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-gard-guardar").addEventListener("click", async () => {
+  const id = document.getElementById("gard-id").value;
+  const payload = {
+    estado: document.getElementById("gard-estado").value,
+    responsable: document.getElementById("gard-responsable").value.trim(),
+    motivo: document.getElementById("gard-motivo").value.trim(),
+    diagnostico: document.getElementById("gard-diagnostico").value.trim(),
+  };
+  try {
+    await api(`/api/operativo/garantias/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+    toast("Garantía actualizada.");
+    cargarGarantiasTab();
+    cargarDashboardOperativo();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+document.getElementById("gari-tipo").addEventListener("change", (e) => {
+  const esRepuesto = e.target.value === "repuesto";
+  document.getElementById("gari-campo-producto").style.display = esRepuesto ? "flex" : "none";
+  document.getElementById("gari-campo-descripcion").style.display = esRepuesto ? "none" : "flex";
+  document.getElementById("gari-campo-costo").style.display = esRepuesto ? "none" : "flex";
+});
+
+document.getElementById("form-gar-item").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const tipo = document.getElementById("gari-tipo").value;
+  const garantiaId = document.getElementById("gard-id").value;
+  const payload = {
+    tipo,
+    cantidad: document.getElementById("gari-cantidad").value,
+  };
+  if (tipo === "repuesto") {
+    payload.producto_id = document.getElementById("gari-producto-id").value;
+    if (!payload.producto_id) {
+      toast("Selecciona un producto.", true);
+      return;
+    }
+  } else {
+    payload.descripcion = document.getElementById("gari-descripcion").value.trim();
+    payload.costo_unitario = document.getElementById("gari-costo").value || 0;
+    if (!payload.descripcion) {
+      toast("Describe la mano de obra realizada.", true);
+      return;
+    }
+  }
+  try {
+    await api(`/api/operativo/garantias/${garantiaId}/items`, { method: "POST", body: JSON.stringify(payload) });
+    toast("Ítem agregado.");
+    const garantia = await api(`/api/operativo/garantias/${garantiaId}`);
+    renderItemsGarantia(garantia);
+    document.getElementById("form-gar-item").reset();
+    document.getElementById("gari-tipo").dispatchEvent(new Event("change"));
+    const dataProductos = await api("/api/productos");
+    state.opProductos = dataProductos.productos;
+    const selectProducto = document.getElementById("gari-producto-id");
+    const valorActual = selectProducto.value;
+    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
+      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
+    selectProducto.value = valorActual;
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function eliminarItemGarantia(itemId) {
+  if (!confirm("¿Eliminar este ítem? Si era un repuesto, el stock consumido se devuelve al inventario.")) return;
+  const garantiaId = document.getElementById("gard-id").value;
+  try {
+    await api(`/api/operativo/garantias/${garantiaId}/items/${itemId}`, { method: "DELETE" });
+    toast("Ítem eliminado.");
+    const garantia = await api(`/api/operativo/garantias/${garantiaId}`);
+    renderItemsGarantia(garantia);
   } catch (e) {
     toast(e.message, true);
   }

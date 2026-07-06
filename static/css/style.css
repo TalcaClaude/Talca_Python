@@ -350,7 +350,77 @@ body::before { content: none; }
 }
 .op-checklist-row:last-child { border-bottom: none; }
 .op-checklist-row .op-checklist-item { flex: 1; }
+.op-checklist-row .op-checklist-meta { color: var(--text-muted); font-size: 11.5px; white-space: nowrap; }
 .op-checklist-row select { width: auto; }
+
+/* ---------- Operativo: resumen cliente/auto + botones de acceso (rediseño OT) ---------- */
+
+.op-resumen-cliente-auto {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.op-resumen-bloque h4 {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--accent-2);
+  margin: 0 0 8px 0;
+}
+
+.op-resumen-fila {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.op-resumen-fila span { color: var(--text-muted); }
+.op-resumen-fila strong { text-align: right; }
+
+@media (max-width: 760px) {
+  .op-resumen-cliente-auto { grid-template-columns: 1fr; }
+}
+
+.op-botones-acceso {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 18px 0 6px 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.op-equipamiento-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px 14px;
+  margin: 10px 0 18px 0;
+}
+
+.op-equipamiento-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.op-equipamiento-item input { width: auto; }
+
+@media (max-width: 760px) {
+  .op-equipamiento-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.tabla tbody tr[data-ver-garantia],
+.tabla tbody tr[data-ver-orden] {
+  cursor: pointer;
+}
 
 .op-tiempos-lista {
   list-style: none;

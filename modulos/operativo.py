@@ -21,6 +21,7 @@ app.py:init_db(), después de que existan las tablas productos y
 movimientos (los repuestos de una orden las referencian).
 """
 
+import json
 from datetime import datetime
 
 from flask import Blueprint, jsonify, request
@@ -59,22 +60,34 @@ TIPOS_ITEM = ["repuesto", "mano_obra"]
 PRIORIDADES_ORDEN = ["baja", "media", "alta", "urgente"]
 TIPOS_PRESUPUESTO_ITEM = ["mano_obra", "repuesto", "insumo", "servicio_externo", "descuento"]
 ESTADOS_PRESUPUESTO = ["pendiente", "enviado", "aprobado", "rechazado"]
-EVENTOS_TIEMPO = ["inicio", "pausa", "reanudar", "termino"]
 RESULTADOS_QC_ITEM = ["ok", "falla", "na"]  # resultado de cada punto del checklist
 RESULTADOS_QC = ["pendiente", "aprobado", "rechazado"]  # veredicto general de la orden
-ESTADOS_GARANTIA = ["abierta", "cerrada"]
 IVA_PORCENTAJE = 0.19
 
+# Ítems fijos del checklist de "qué trae el vehículo" (recepción). Es una
+# lista fija del taller (no un catálogo editable), así que se guarda como
+# JSON en la orden en vez de una tabla aparte — más simple que el checklist
+# de Control de Calidad, que sí necesita ítems libres por orden.
+EQUIPAMIENTO_ITEMS = [
+    "Encendedor", "Cenicero", "Gata", "Tapa Combustible", "Padron", "Tag",
+    "Gancho Tiro", "Llave Rueda", "Radio", "Neumatico Repuesto", "Conos",
+    "Extintor", "P. Circulacion", "Revision Tecnica", "S.O.A.P", "Certificado Gases",
+]
+
+# Garantías: proceso propio, más simple que el de una OT normal (no pasa
+# por presupuesto/control de calidad/etc.).
+ESTADOS_GARANTIA = ["pendiente", "en_reparacion", "resuelta", "rechazada"]
+ESTADOS_GARANTIA_CERRADOS = {"resuelta", "rechazada"}
+
 # Campos "simples" (sin efectos secundarios) que se pueden actualizar desde
-# el PUT general de la orden — recepción, diagnóstico, planificación y
-# entrega. Los que sí disparan una transición automática de estado
-# (presupuesto_estado, qc_resultado) viven en sus propios endpoints más
-# abajo, para que ese efecto secundario quede explícito y sea auditable.
+# el PUT general de la orden — diagnóstico. Los que sí disparan una
+# transición automática de estado (presupuesto_estado, qc_resultado) viven
+# en sus propios endpoints más abajo, para que ese efecto secundario quede
+# explícito y sea auditable.
 CAMPOS_SIMPLES_ORDEN = [
-    "vin", "caja_automatica", "accesorios", "estado_visual",
     "sintoma", "diagnostico_tecnico", "falla_detectada", "componentes_danados",
     "mediciones", "resultado_pruebas", "responsable_diagnostico",
-    "entrega_recibido_por", "entrega_documento", "entrega_observaciones",
+    "referencia", "trabajo_a_realizar",
 ]
 
 
@@ -142,21 +155,41 @@ def init_operativo_db(db):
 
     # -----------------------------------------------------------------
     # Migración Fase 3.5: recepción enriquecida, diagnóstico, presupuesto,
-    # planificación/tiempos, control de calidad, garantía y entrega.
-    # Todo aditivo (ALTER TABLE ADD COLUMN sobre la tabla ya existente +
-    # CREATE TABLE IF NOT EXISTS), siguiendo el mismo patrón de migración
-    # incremental que usa app.py:init_db() — no rompe datos existentes.
+    # control de calidad y garantías (como entidad propia). Todo aditivo
+    # (ALTER TABLE ADD COLUMN sobre tablas ya existentes + CREATE TABLE IF
+    # NOT EXISTS), siguiendo el mismo patrón de migración incremental que
+    # usa app.py:init_db() — no rompe datos existentes.
     # -----------------------------------------------------------------
+
+    # Datos del vehículo en sí (no cambian entre visitas) viven en equipos,
+    # no en la orden — así el historial de vehículo no obliga a
+    # re-escribirlos cada vez que el mismo auto vuelve al taller.
+    columnas_equipo = [c[1] for c in db.execute("PRAGMA table_info(equipos)").fetchall()]
+    columnas_nuevas_equipo = {
+        "color": "TEXT DEFAULT ''",
+        "anio": "INTEGER",
+        "modelo_transmision": "TEXT DEFAULT ''",
+        "puertas": "TEXT DEFAULT ''",
+        "motor_cc": "TEXT DEFAULT ''",
+        "vin": "TEXT DEFAULT ''",
+    }
+    for columna, definicion in columnas_nuevas_equipo.items():
+        if columna not in columnas_equipo:
+            db.execute(f"ALTER TABLE equipos ADD COLUMN {columna} {definicion}")
+    db.commit()
+
     columnas_orden = [c[1] for c in db.execute("PRAGMA table_info(ordenes_trabajo)").fetchall()]
     columnas_nuevas_orden = {
-        # Recepción (3.5.2)
-        "vin": "TEXT DEFAULT ''",
+        # Recepción (3.5.2) — solo lo que cambia entre visitas del mismo
+        # vehículo; lo demás (marca/modelo/color/año/etc.) vive en equipos.
         "kilometraje": "INTEGER",
-        "anio": "INTEGER",
-        "caja_automatica": "TEXT DEFAULT ''",
         "prioridad": "TEXT NOT NULL DEFAULT 'media'",
-        "accesorios": "TEXT DEFAULT ''",
-        "estado_visual": "TEXT DEFAULT ''",
+        "estanque_nivel": "INTEGER",
+        "referencia": "TEXT DEFAULT ''",
+        "trabajo_a_realizar": "TEXT DEFAULT ''",
+        "precio_referencial": "REAL",
+        "equipamiento_json": "TEXT DEFAULT ''",
+        "recepcionado_por": "TEXT DEFAULT ''",
         # Diagnóstico (3.5.4)
         "sintoma": "TEXT DEFAULT ''",
         "diagnostico_tecnico": "TEXT DEFAULT ''",
@@ -169,16 +202,10 @@ def init_operativo_db(db):
         "presupuesto_estado": "TEXT NOT NULL DEFAULT 'pendiente'",
         "presupuesto_iva": "INTEGER NOT NULL DEFAULT 0",
         "presupuesto_notas": "TEXT DEFAULT ''",
-        # Planificación / tiempos (3.5.5)
-        "horas_presupuestadas": "REAL",
         # Control de calidad (3.5.6)
         "qc_resultado": "TEXT DEFAULT ''",
         "qc_inspector": "TEXT DEFAULT ''",
         "qc_observaciones": "TEXT DEFAULT ''",
-        # Entrega (3.5.8)
-        "entrega_recibido_por": "TEXT DEFAULT ''",
-        "entrega_documento": "TEXT DEFAULT ''",
-        "entrega_observaciones": "TEXT DEFAULT ''",
     }
     for columna, definicion in columnas_nuevas_orden.items():
         if columna not in columnas_orden:
@@ -198,43 +225,66 @@ def init_operativo_db(db):
             creado_en TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS orden_tiempos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
-            evento TEXT NOT NULL,
-            marca_tiempo TEXT NOT NULL,
-            usuario TEXT DEFAULT ''
-        );
-
         CREATE TABLE IF NOT EXISTS qc_checklist_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
             item TEXT NOT NULL,
             resultado TEXT NOT NULL DEFAULT 'na',
             observacion TEXT DEFAULT '',
+            usuario TEXT DEFAULT '',
             creado_en TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS garantias (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id),
-            motivo TEXT DEFAULT '',
-            diagnostico TEXT DEFAULT '',
-            costo_asumido REAL NOT NULL DEFAULT 0,
-            responsable TEXT DEFAULT '',
-            estado TEXT NOT NULL DEFAULT 'abierta',
-            usuario TEXT DEFAULT '',
-            creado_en TEXT NOT NULL,
-            cerrado_en TEXT
-        );
-
         CREATE INDEX IF NOT EXISTS idx_presupuesto_items_orden_id ON presupuesto_items (orden_id);
-        CREATE INDEX IF NOT EXISTS idx_orden_tiempos_orden_id ON orden_tiempos (orden_id);
         CREATE INDEX IF NOT EXISTS idx_qc_checklist_items_orden_id ON qc_checklist_items (orden_id);
-        CREATE INDEX IF NOT EXISTS idx_garantias_orden_id ON garantias (orden_id);
         """
     )
     db.commit()
+
+    # Garantías: entidad propia (no un sub-registro de una orden) — se crea
+    # a partir de los datos de un cliente/equipo, con su propio proceso más
+    # simple que el de una OT normal, y puede opcionalmente referenciar la
+    # OT original que tuvo el problema (solo para trazabilidad).
+    columnas_garantia = [c[1] for c in db.execute("PRAGMA table_info(garantias)").fetchall()]
+    if not columnas_garantia:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS garantias (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cliente_id INTEGER NOT NULL REFERENCES clientes(id),
+                equipo_id INTEGER REFERENCES equipos(id),
+                orden_origen_id INTEGER REFERENCES ordenes_trabajo(id),
+                motivo TEXT DEFAULT '',
+                diagnostico TEXT DEFAULT '',
+                responsable TEXT DEFAULT '',
+                estado TEXT NOT NULL DEFAULT 'pendiente',
+                fecha_recepcion TEXT NOT NULL,
+                fecha_cierre TEXT,
+                usuario TEXT DEFAULT '',
+                creado_en TEXT NOT NULL,
+                actualizado_en TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS garantia_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                garantia_id INTEGER NOT NULL REFERENCES garantias(id) ON DELETE CASCADE,
+                tipo TEXT NOT NULL,
+                producto_id INTEGER REFERENCES productos(id),
+                descripcion TEXT DEFAULT '',
+                cantidad REAL NOT NULL DEFAULT 1,
+                costo_unitario REAL NOT NULL DEFAULT 0,
+                movimiento_id INTEGER REFERENCES movimientos(id),
+                usuario TEXT DEFAULT '',
+                creado_en TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_garantias_cliente_id ON garantias (cliente_id);
+            CREATE INDEX IF NOT EXISTS idx_garantias_equipo_id ON garantias (equipo_id);
+            CREATE INDEX IF NOT EXISTS idx_garantias_estado ON garantias (estado);
+            CREATE INDEX IF NOT EXISTS idx_garantia_items_garantia_id ON garantia_items (garantia_id);
+            """
+        )
+        db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -379,9 +429,21 @@ def crear_equipo():
     if cliente is None:
         return jsonify({"error": "El cliente indicado no existe"}), 400
 
+    anio = None
+    if data.get("anio") not in (None, ""):
+        try:
+            anio = int(data.get("anio"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "El año debe ser un número entero"}), 400
+
     ts = now_iso()
     cur = db.execute(
-        "INSERT INTO equipos (cliente_id, identificador, marca, modelo, notas, creado_en) VALUES (?, ?, ?, ?, ?, ?)",
+        """
+        INSERT INTO equipos (
+            cliente_id, identificador, marca, modelo, notas, creado_en,
+            color, anio, modelo_transmision, puertas, motor_cc, vin
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
         (
             cliente_id,
             (data.get("identificador") or "").strip(),
@@ -389,6 +451,12 @@ def crear_equipo():
             (data.get("modelo") or "").strip(),
             (data.get("notas") or "").strip(),
             ts,
+            (data.get("color") or "").strip(),
+            anio,
+            (data.get("modelo_transmision") or "").strip(),
+            (data.get("puertas") or "").strip(),
+            (data.get("motor_cc") or "").strip(),
+            (data.get("vin") or "").strip(),
         ),
     )
     db.commit()
@@ -404,13 +472,35 @@ def editar_equipo(equipo_id):
         return jsonify({"error": "Equipo no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
+
+    anio = row["anio"]
+    if "anio" in data:
+        if data.get("anio") in (None, ""):
+            anio = None
+        else:
+            try:
+                anio = int(data.get("anio"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "El año debe ser un número entero"}), 400
+
     db.execute(
-        "UPDATE equipos SET identificador = ?, marca = ?, modelo = ?, notas = ? WHERE id = ?",
+        """
+        UPDATE equipos SET
+            identificador = ?, marca = ?, modelo = ?, notas = ?,
+            color = ?, anio = ?, modelo_transmision = ?, puertas = ?, motor_cc = ?, vin = ?
+        WHERE id = ?
+        """,
         (
             (data.get("identificador", row["identificador"]) or "").strip(),
             (data.get("marca", row["marca"]) or "").strip(),
             (data.get("modelo", row["modelo"]) or "").strip(),
             (data.get("notas", row["notas"]) or "").strip(),
+            (data.get("color", row["color"]) or "").strip(),
+            anio,
+            (data.get("modelo_transmision", row["modelo_transmision"]) or "").strip(),
+            (data.get("puertas", row["puertas"]) or "").strip(),
+            (data.get("motor_cc", row["motor_cc"]) or "").strip(),
+            (data.get("vin", row["vin"]) or "").strip(),
             equipo_id,
         ),
     )
@@ -443,15 +533,22 @@ def eliminar_equipo(equipo_id):
 
 def _orden_dict(db, row):
     d = dict(row)
-    cliente = db.execute("SELECT id, nombre, telefono FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+    cliente = db.execute("SELECT id, nombre, telefono, rut FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
     d["cliente"] = dict(cliente) if cliente else None
     equipo = None
     if d["equipo_id"]:
-        equipo = db.execute("SELECT id, identificador, marca, modelo FROM equipos WHERE id = ?", (d["equipo_id"],)).fetchone()
+        equipo = db.execute(
+            "SELECT id, identificador, marca, modelo, color, anio, modelo_transmision, puertas, motor_cc, vin "
+            "FROM equipos WHERE id = ?", (d["equipo_id"],)
+        ).fetchone()
     d["equipo"] = dict(equipo) if equipo else None
     items = db.execute("SELECT * FROM orden_items WHERE orden_id = ? ORDER BY creado_en ASC", (d["id"],)).fetchall()
     d["items"] = [dict(i) for i in items]
     d["total"] = sum(i["cantidad"] * i["costo_unitario"] for i in items)
+    try:
+        d["equipamiento"] = json.loads(d["equipamiento_json"]) if d.get("equipamiento_json") else {}
+    except (TypeError, ValueError):
+        d["equipamiento"] = {}
     return d
 
 
@@ -491,11 +588,18 @@ def dashboard_operativo():
         ).fetchone()
         return fila["total"] or 0
 
+    placeholders_garantia_cerrados = ", ".join("?" for _ in ESTADOS_GARANTIA_CERRADOS)
+    garantias_abiertas = db.execute(
+        f"SELECT COUNT(*) AS n FROM garantias WHERE estado NOT IN ({placeholders_garantia_cerrados})",
+        list(ESTADOS_GARANTIA_CERRADOS),
+    ).fetchone()["n"]
+
     return jsonify({
         "ots_abiertas": len(ids_abiertas),
         "ots_cerradas_mes": len(ids_cerradas_mes),
         "monto_cerradas_mes": _suma_items(ids_cerradas_mes),
         "monto_por_cerrar": _suma_items(ids_abiertas),
+        "garantias_abiertas": garantias_abiertas,
     })
 
 
@@ -521,23 +625,15 @@ def listar_ordenes():
 
 def _orden_dict_detalle(db, row):
     """Versión completa de la orden para la vista de detalle: agrega
-    presupuesto, tiempos, control de calidad y garantías. Deliberadamente
-    NO se usa en listar_ordenes/dashboard (eso reintroduciría el problema
-    N+1 que ya se corrigió antes en este proyecto) — solo en obtener_orden
-    y en las acciones (presupuesto/qc/entregar) que devuelven la orden
-    completa después de un cambio."""
+    presupuesto y control de calidad. Deliberadamente NO se usa en
+    listar_ordenes/dashboard (eso reintroduciría el problema N+1 que ya se
+    corrigió antes en este proyecto) — solo en obtener_orden y en las
+    acciones (presupuesto/qc) que devuelven la orden completa después de
+    un cambio."""
     d = _orden_dict(db, row)
     d["presupuesto"] = _presupuesto_dict(db, row["id"], row["presupuesto_iva"])
-    tiempos = db.execute(
-        "SELECT * FROM orden_tiempos WHERE orden_id = ? ORDER BY marca_tiempo ASC", (row["id"],)
-    ).fetchall()
-    d["tiempos"] = [dict(t) for t in tiempos]
-    d["horas_reales"] = _calcular_horas_reales(tiempos)
     d["qc_checklist"] = [dict(i) for i in db.execute(
         "SELECT * FROM qc_checklist_items WHERE orden_id = ? ORDER BY creado_en ASC", (row["id"],)
-    ).fetchall()]
-    d["garantias"] = [dict(g) for g in db.execute(
-        "SELECT * FROM garantias WHERE orden_id = ? ORDER BY creado_en DESC", (row["id"],)
     ).fetchall()]
     return d
 
@@ -585,21 +681,14 @@ def crear_orden():
         except (TypeError, ValueError):
             return jsonify({"error": "El kilometraje debe ser un número entero"}), 400
 
-    anio = None
-    if data.get("anio") not in (None, ""):
-        try:
-            anio = int(data.get("anio"))
-        except (TypeError, ValueError):
-            return jsonify({"error": "El año debe ser un número entero"}), 400
-
     ts = now_iso()
     cur = db.execute(
         """
         INSERT INTO ordenes_trabajo (
             cliente_id, equipo_id, estado, descripcion_problema, mecanico,
             fecha_recepcion, fecha_entrega_estimada, usuario, creado_en, actualizado_en,
-            vin, kilometraje, anio, caja_automatica, prioridad, accesorios, estado_visual
-        ) VALUES (?, ?, 'recibido', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            kilometraje, prioridad, recepcionado_por
+        ) VALUES (?, ?, 'recibido', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             cliente_id, equipo_id,
@@ -608,13 +697,9 @@ def crear_orden():
             ts,
             (data.get("fecha_entrega_estimada") or "").strip() or None,
             usuario_actual(), ts, ts,
-            (data.get("vin") or "").strip(),
             kilometraje,
-            anio,
-            (data.get("caja_automatica") or "").strip(),
             prioridad,
-            (data.get("accesorios") or "").strip(),
-            (data.get("estado_visual") or "").strip(),
+            usuario_actual(),
         ),
     )
     db.commit()
@@ -661,27 +746,36 @@ def editar_orden(orden_id):
             except (TypeError, ValueError):
                 return jsonify({"error": "El kilometraje debe ser un número entero"}), 400
 
-    anio = row["anio"]
-    if "anio" in data:
-        if data.get("anio") in (None, ""):
-            anio = None
+    estanque_nivel = row["estanque_nivel"]
+    if "estanque_nivel" in data:
+        if data.get("estanque_nivel") in (None, ""):
+            estanque_nivel = None
         else:
             try:
-                anio = int(data.get("anio"))
+                estanque_nivel = int(data.get("estanque_nivel"))
             except (TypeError, ValueError):
-                return jsonify({"error": "El año debe ser un número entero"}), 400
+                return jsonify({"error": "El nivel de estanque debe ser un número entero"}), 400
+            if not (0 <= estanque_nivel <= 8):
+                return jsonify({"error": "El nivel de estanque debe estar entre 0 y 8 (octavos)"}), 400
 
-    horas_presupuestadas = row["horas_presupuestadas"]
-    if "horas_presupuestadas" in data:
-        if data.get("horas_presupuestadas") in (None, ""):
-            horas_presupuestadas = None
+    precio_referencial = row["precio_referencial"]
+    if "precio_referencial" in data:
+        if data.get("precio_referencial") in (None, ""):
+            precio_referencial = None
         else:
             try:
-                horas_presupuestadas = float(data.get("horas_presupuestadas"))
+                precio_referencial = float(data.get("precio_referencial"))
             except (TypeError, ValueError):
-                return jsonify({"error": "Las horas presupuestadas deben ser un número"}), 400
+                return jsonify({"error": "El precio referencial debe ser un número"}), 400
 
-    # Campos de texto simples (recepción, diagnóstico, entrega): mismo
+    equipamiento_json = row["equipamiento_json"]
+    if "equipamiento" in data:
+        equipamiento = data.get("equipamiento") or {}
+        if not isinstance(equipamiento, dict):
+            return jsonify({"error": "El equipamiento debe ser un objeto de casillas marcadas"}), 400
+        equipamiento_json = json.dumps({k: bool(v) for k, v in equipamiento.items() if k in EQUIPAMIENTO_ITEMS})
+
+    # Campos de texto simples (diagnóstico, recepción de tipo texto): mismo
     # patrón de "usa lo nuevo si viene, si no deja lo que ya había".
     valores_simples = {
         campo: (data.get(campo, row[campo]) or "").strip() for campo in CAMPOS_SIMPLES_ORDEN
@@ -692,11 +786,11 @@ def editar_orden(orden_id):
         UPDATE ordenes_trabajo SET
             estado = ?, descripcion_problema = ?, diagnostico = ?, mecanico = ?,
             fecha_entrega_estimada = ?, fecha_entrega_real = ?, actualizado_en = ?,
-            prioridad = ?, kilometraje = ?, anio = ?, horas_presupuestadas = ?,
-            vin = ?, caja_automatica = ?, accesorios = ?, estado_visual = ?,
+            prioridad = ?, kilometraje = ?, estanque_nivel = ?, precio_referencial = ?,
+            equipamiento_json = ?,
             sintoma = ?, diagnostico_tecnico = ?, falla_detectada = ?, componentes_danados = ?,
             mediciones = ?, resultado_pruebas = ?, responsable_diagnostico = ?,
-            entrega_recibido_por = ?, entrega_documento = ?, entrega_observaciones = ?
+            referencia = ?, trabajo_a_realizar = ?
         WHERE id = ?
         """,
         (
@@ -707,15 +801,13 @@ def editar_orden(orden_id):
             (data.get("fecha_entrega_estimada", row["fecha_entrega_estimada"]) or "").strip() or None,
             fecha_entrega_real,
             now_iso(),
-            prioridad, kilometraje, anio, horas_presupuestadas,
-            valores_simples["vin"], valores_simples["caja_automatica"],
-            valores_simples["accesorios"], valores_simples["estado_visual"],
+            prioridad, kilometraje, estanque_nivel, precio_referencial,
+            equipamiento_json,
             valores_simples["sintoma"], valores_simples["diagnostico_tecnico"],
             valores_simples["falla_detectada"], valores_simples["componentes_danados"],
             valores_simples["mediciones"], valores_simples["resultado_pruebas"],
             valores_simples["responsable_diagnostico"],
-            valores_simples["entrega_recibido_por"], valores_simples["entrega_documento"],
-            valores_simples["entrega_observaciones"],
+            valores_simples["referencia"], valores_simples["trabajo_a_realizar"],
             orden_id,
         ),
     )
@@ -854,10 +946,14 @@ def historial_equipo(equipo_id):
     ordenes = db.execute(
         "SELECT * FROM ordenes_trabajo WHERE equipo_id = ? ORDER BY fecha_recepcion DESC", (equipo_id,)
     ).fetchall()
+    garantias = db.execute(
+        "SELECT * FROM garantias WHERE equipo_id = ? ORDER BY creado_en DESC", (equipo_id,)
+    ).fetchall()
     return jsonify({
         "equipo": dict(equipo),
         "cliente": dict(cliente) if cliente else None,
         "ordenes": [_orden_dict(db, r) for r in ordenes],
+        "garantias": [_garantia_dict(db, g) for g in garantias],
     })
 
 
@@ -983,77 +1079,6 @@ def actualizar_presupuesto(orden_id):
 
 
 # ---------------------------------------------------------------------------
-# Fase 3.5.5 — Planificación y control de tiempos
-# ---------------------------------------------------------------------------
-
-def _calcular_horas_reales(eventos):
-    """Suma el tiempo efectivamente trabajado a partir de una lista de
-    eventos (dict/Row con 'evento' y 'marca_tiempo', ISO, ordenados
-    ascendentemente por marca_tiempo). 'inicio'/'reanudar' abren un
-    intervalo; 'pausa'/'termino' lo cierran y lo suman. Eventos fuera de
-    secuencia o con timestamp inválido simplemente no se cuentan, en vez de
-    reventar — esto es un cálculo informativo, no debe tumbar la vista de
-    la orden si el historial de eventos quedó imperfecto."""
-    total_segundos = 0.0
-    inicio_actual = None
-    for ev in eventos:
-        tipo = ev["evento"]
-        try:
-            momento = datetime.fromisoformat(ev["marca_tiempo"])
-        except (TypeError, ValueError):
-            continue
-        if tipo in ("inicio", "reanudar"):
-            if inicio_actual is None:
-                inicio_actual = momento
-        elif tipo in ("pausa", "termino"):
-            if inicio_actual is not None:
-                total_segundos += (momento - inicio_actual).total_seconds()
-                inicio_actual = None
-    return round(total_segundos / 3600, 2)
-
-
-@bp.route("/api/operativo/ordenes/<int:orden_id>/tiempos", methods=["POST"])
-def registrar_tiempo_orden(orden_id):
-    db = get_db()
-    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
-    if orden is None:
-        return jsonify({"error": "Orden no encontrada"}), 404
-
-    data = request.get_json(force=True, silent=True) or {}
-    evento = (data.get("evento") or "").strip().lower()
-    if evento not in EVENTOS_TIEMPO:
-        return jsonify({"error": f"Evento inválido. Usa uno de: {', '.join(EVENTOS_TIEMPO)}"}), 400
-
-    ultima_fila = db.execute(
-        "SELECT evento FROM orden_tiempos WHERE orden_id = ? ORDER BY id DESC LIMIT 1", (orden_id,)
-    ).fetchone()
-    ultimo = ultima_fila["evento"] if ultima_fila else None
-
-    # Validación de secuencia: evita registros que no tendrían sentido
-    # (pausar sin haber iniciado, iniciar dos veces seguidas, etc.) — el
-    # cálculo de horas reales asume que la secuencia es coherente.
-    if evento == "inicio" and ultimo is not None:
-        return jsonify({"error": "Esta orden ya tiene un registro de tiempo iniciado."}), 409
-    if evento == "reanudar" and ultimo != "pausa":
-        return jsonify({"error": "Solo se puede reanudar un trabajo que está pausado."}), 409
-    if evento in ("pausa", "termino") and ultimo not in ("inicio", "reanudar"):
-        return jsonify({"error": "No hay un trabajo en curso para pausar o terminar."}), 409
-
-    ts = now_iso()
-    db.execute(
-        "INSERT INTO orden_tiempos (orden_id, evento, marca_tiempo, usuario) VALUES (?, ?, ?, ?)",
-        (orden_id, evento, ts, usuario_actual()),
-    )
-    db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
-    db.commit()
-
-    eventos = db.execute(
-        "SELECT evento, marca_tiempo FROM orden_tiempos WHERE orden_id = ? ORDER BY marca_tiempo ASC", (orden_id,)
-    ).fetchall()
-    return jsonify({"ok": True, "evento": evento, "marca_tiempo": ts, "horas_reales": _calcular_horas_reales(eventos)})
-
-
-# ---------------------------------------------------------------------------
 # Fase 3.5.6 — Control de Calidad
 # ---------------------------------------------------------------------------
 
@@ -1073,8 +1098,9 @@ def agregar_item_qc(orden_id):
     observacion = (data.get("observacion") or "").strip()
     ts = now_iso()
     cur = db.execute(
-        "INSERT INTO qc_checklist_items (orden_id, item, resultado, observacion, creado_en) VALUES (?, ?, ?, ?, ?)",
-        (orden_id, item, resultado, observacion, ts),
+        "INSERT INTO qc_checklist_items (orden_id, item, resultado, observacion, usuario, creado_en) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (orden_id, item, resultado, observacion, usuario_actual(), ts),
     )
     db.commit()
     nuevo = db.execute("SELECT * FROM qc_checklist_items WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -1155,72 +1181,110 @@ def actualizar_qc(orden_id):
 
 
 # ---------------------------------------------------------------------------
-# Fase 3.5.7 — Garantía
+# Fase 3.5.7 (rediseñada) — Garantías como entidad propia
+#
+# Una garantía ya NO es un sub-registro de una orden: se crea "a partir de
+# los datos del auto" (cliente + equipo), con su propio proceso, más simple
+# que el de una OT normal (pendiente -> en_reparacion -> resuelta/rechazada),
+# y puede opcionalmente referenciar la OT original solo para trazabilidad.
+# Vive en su propia vista dentro del módulo, separada del tablero de OTs.
 # ---------------------------------------------------------------------------
 
-@bp.route("/api/operativo/ordenes/<int:orden_id>/garantias", methods=["POST"])
-def crear_garantia(orden_id):
+def _garantia_dict(db, row):
+    d = dict(row)
+    cliente = db.execute("SELECT id, nombre, telefono FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+    d["cliente"] = dict(cliente) if cliente else None
+    equipo = None
+    if d["equipo_id"]:
+        equipo = db.execute(
+            "SELECT id, identificador, marca, modelo FROM equipos WHERE id = ?", (d["equipo_id"],)
+        ).fetchone()
+    d["equipo"] = dict(equipo) if equipo else None
+    items = db.execute(
+        "SELECT * FROM garantia_items WHERE garantia_id = ? ORDER BY creado_en ASC", (d["id"],)
+    ).fetchall()
+    d["items"] = [dict(i) for i in items]
+    d["total"] = sum(i["cantidad"] * i["costo_unitario"] for i in items)
+    return d
+
+
+@bp.route("/api/operativo/garantias", methods=["POST"])
+def crear_garantia():
     db = get_db()
-    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
-    if orden is None:
-        return jsonify({"error": "Orden no encontrada"}), 404
     data = request.get_json(force=True, silent=True) or {}
+
+    try:
+        cliente_id = int(data.get("cliente_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Debes indicar un cliente válido"}), 400
+    cliente = db.execute("SELECT id FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
+    if cliente is None:
+        return jsonify({"error": "El cliente indicado no existe"}), 400
+
+    equipo_id = None
+    if data.get("equipo_id") not in (None, ""):
+        try:
+            equipo_id = int(data.get("equipo_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Equipo inválido"}), 400
+        equipo = db.execute("SELECT id FROM equipos WHERE id = ? AND cliente_id = ?", (equipo_id, cliente_id)).fetchone()
+        if equipo is None:
+            return jsonify({"error": "Ese equipo no existe o no pertenece a este cliente"}), 400
+
+    orden_origen_id = None
+    if data.get("orden_origen_id") not in (None, ""):
+        try:
+            orden_origen_id = int(data.get("orden_origen_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "OT original inválida"}), 400
+        if db.execute("SELECT id FROM ordenes_trabajo WHERE id = ?", (orden_origen_id,)).fetchone() is None:
+            return jsonify({"error": "La OT original indicada no existe"}), 400
+
     motivo = (data.get("motivo") or "").strip()
     if not motivo:
         return jsonify({"error": "Describe el motivo de la garantía"}), 400
-    try:
-        costo_asumido = float(data.get("costo_asumido") or 0)
-    except (TypeError, ValueError):
-        return jsonify({"error": "El costo asumido debe ser un número válido"}), 400
 
     ts = now_iso()
     cur = db.execute(
         """
-        INSERT INTO garantias (orden_id, motivo, diagnostico, costo_asumido, responsable, estado, usuario, creado_en)
-        VALUES (?, ?, ?, ?, ?, 'abierta', ?, ?)
+        INSERT INTO garantias (
+            cliente_id, equipo_id, orden_origen_id, motivo, diagnostico, responsable,
+            estado, fecha_recepcion, usuario, creado_en, actualizado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?)
         """,
         (
-            orden_id, motivo,
+            cliente_id, equipo_id, orden_origen_id, motivo,
             (data.get("diagnostico") or "").strip(),
-            costo_asumido,
             (data.get("responsable") or "").strip(),
-            usuario_actual(), ts,
+            ts, usuario_actual(), ts, ts,
         ),
     )
     db.commit()
     nueva = db.execute("SELECT * FROM garantias WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(dict(nueva)), 201
+    return jsonify(_garantia_dict(db, nueva)), 201
 
 
 @bp.route("/api/operativo/garantias", methods=["GET"])
 def listar_garantias():
     db = get_db()
     estado = (request.args.get("estado") or "").strip()
-    sql = (
-        "SELECT g.*, o.cliente_id, o.equipo_id, o.mecanico AS mecanico_orden "
-        "FROM garantias g JOIN ordenes_trabajo o ON o.id = g.orden_id WHERE 1=1"
-    )
+    sql = "SELECT * FROM garantias WHERE 1=1"
     params = []
     if estado:
-        sql += " AND g.estado = ?"
+        sql += " AND estado = ?"
         params.append(estado)
-    sql += " ORDER BY g.creado_en DESC"
+    sql += " ORDER BY creado_en DESC"
     rows = db.execute(sql, params).fetchall()
-    garantias = []
-    for r in rows:
-        d = dict(r)
-        cliente = db.execute("SELECT nombre FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
-        equipo = None
-        if d["equipo_id"]:
-            equipo = db.execute(
-                "SELECT marca, modelo, identificador FROM equipos WHERE id = ?", (d["equipo_id"],)
-            ).fetchone()
-        d["cliente_nombre"] = cliente["nombre"] if cliente else None
-        d["equipo_texto"] = (
-            " ".join(filter(None, [equipo["marca"], equipo["modelo"], equipo["identificador"]])) if equipo else None
-        )
-        garantias.append(d)
-    return jsonify({"garantias": garantias, "total": len(garantias)})
+    return jsonify({"garantias": [_garantia_dict(db, r) for r in rows], "total": len(rows)})
+
+
+@bp.route("/api/operativo/garantias/<int:garantia_id>", methods=["GET"])
+def obtener_garantia(garantia_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Garantía no encontrada"}), 404
+    return jsonify(_garantia_dict(db, row))
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>", methods=["PUT"])
@@ -1230,73 +1294,138 @@ def editar_garantia(garantia_id):
     if row is None:
         return jsonify({"error": "Garantía no encontrada"}), 404
     data = request.get_json(force=True, silent=True) or {}
-    estado = (data.get("estado", row["estado"]) or "").strip().lower()
-    if estado not in ESTADOS_GARANTIA:
-        return jsonify({"error": f"Estado inválido. Usa uno de: {', '.join(ESTADOS_GARANTIA)}"}), 400
-    cerrado_en = row["cerrado_en"]
-    if estado == "cerrada" and not cerrado_en:
-        cerrado_en = now_iso()
-    elif estado == "abierta":
-        cerrado_en = None
-    try:
-        costo_asumido = float(data.get("costo_asumido", row["costo_asumido"]) or 0)
-    except (TypeError, ValueError):
-        return jsonify({"error": "El costo asumido debe ser un número válido"}), 400
+
+    estado = row["estado"]
+    if "estado" in data:
+        estado = (data.get("estado") or "").strip().lower()
+        if estado not in ESTADOS_GARANTIA:
+            return jsonify({"error": f"Estado inválido. Usa uno de: {', '.join(ESTADOS_GARANTIA)}"}), 400
+
+    fecha_cierre = row["fecha_cierre"]
+    if estado in ESTADOS_GARANTIA_CERRADOS and not fecha_cierre:
+        fecha_cierre = now_iso()
+    elif estado not in ESTADOS_GARANTIA_CERRADOS:
+        fecha_cierre = None
+
     db.execute(
-        "UPDATE garantias SET motivo = ?, diagnostico = ?, costo_asumido = ?, responsable = ?, "
-        "estado = ?, cerrado_en = ? WHERE id = ?",
+        """
+        UPDATE garantias SET motivo = ?, diagnostico = ?, responsable = ?,
+            estado = ?, fecha_cierre = ?, actualizado_en = ?
+        WHERE id = ?
+        """,
         (
             (data.get("motivo", row["motivo"]) or "").strip(),
             (data.get("diagnostico", row["diagnostico"]) or "").strip(),
-            costo_asumido,
             (data.get("responsable", row["responsable"]) or "").strip(),
-            estado, cerrado_en, garantia_id,
+            estado, fecha_cierre, now_iso(), garantia_id,
         ),
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
-    return jsonify(dict(actualizada))
+    return jsonify(_garantia_dict(db, actualizada))
 
 
-# ---------------------------------------------------------------------------
-# Fase 3.5.8 — Entrega
-# ---------------------------------------------------------------------------
-
-@bp.route("/api/operativo/ordenes/<int:orden_id>/entregar", methods=["POST"])
-def entregar_orden(orden_id):
-    """Acción explícita de entrega: exige saber quién retira el vehículo
-    antes de poder cerrar la orden como 'entregado' (evita que quede
-    marcada como entregada sin ese dato mínimo). Fotos y firma digital
-    quedan pendientes de la decisión de almacenamiento externo (bloqueo
-    3.1 del plan de Fase 3.5 — Railway no garantiza disco persistente)."""
+@bp.route("/api/operativo/garantias/<int:garantia_id>/items", methods=["POST"])
+def agregar_item_garantia(garantia_id):
     db = get_db()
-    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
-    if row is None:
-        return jsonify({"error": "Orden no encontrada"}), 404
-    if row["estado"] == "cancelado":
-        return jsonify({"error": "Esta orden está cancelada y no se puede entregar."}), 409
+    _iniciar_transaccion_stock(db)
+    garantia = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
+    if garantia is None:
+        return jsonify({"error": "Garantía no encontrada"}), 404
+    if garantia["estado"] in ESTADOS_GARANTIA_CERRADOS:
+        return jsonify({"error": f"La garantía está '{garantia['estado']}' y no admite más ítems."}), 409
 
     data = request.get_json(force=True, silent=True) or {}
-    recibido_por = (data.get("recibido_por") or "").strip()
-    if not recibido_por:
-        return jsonify({"error": "Indica quién retira el vehículo"}), 400
-    documento = (data.get("documento") or "").strip()
-    observaciones = (data.get("observaciones") or "").strip()
+    tipo = (data.get("tipo") or "").strip().lower()
+    if tipo not in TIPOS_ITEM:
+        return jsonify({"error": f"Tipo de ítem inválido. Usa uno de: {', '.join(TIPOS_ITEM)}"}), 400
+    try:
+        cantidad = float(data.get("cantidad"))
+        if cantidad <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "La cantidad debe ser un número mayor a 0"}), 400
 
+    usuario = usuario_actual()
     ts = now_iso()
-    fecha_entrega_real = row["fecha_entrega_real"] or ts
-    db.execute(
+    producto_id = None
+    movimiento_id = None
+    descripcion = (data.get("descripcion") or "").strip()
+
+    if tipo == "repuesto":
+        try:
+            producto_id = int(data.get("producto_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Debes indicar el repuesto (producto) a usar"}), 400
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        if producto is None:
+            return jsonify({"error": "El producto indicado no existe"}), 400
+        costo_unitario = producto["costo_compra"]
+        if data.get("costo_unitario") not in (None, ""):
+            try:
+                costo_unitario = float(data.get("costo_unitario"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+        cantidad_stock = int(round(cantidad))
+        try:
+            _aplicar_salida_stock(
+                db, producto, cantidad_stock,
+                motivo=f"GARANTÍA #{garantia_id}" + (f" - {descripcion}" if descripcion else ""),
+                usuario=usuario, categoria="Garantía",
+            )
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        movimiento_id = db.execute(
+            "SELECT id FROM movimientos WHERE producto_id = ? ORDER BY id DESC LIMIT 1", (producto_id,)
+        ).fetchone()[0]
+        if not descripcion:
+            descripcion = producto["nombre"]
+    else:  # mano_obra
+        if not descripcion:
+            return jsonify({"error": "Describe la mano de obra realizada"}), 400
+        try:
+            costo_unitario = float(data.get("costo_unitario") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+
+    cur = db.execute(
         """
-        UPDATE ordenes_trabajo SET
-            estado = 'entregado', fecha_entrega_real = ?, entrega_recibido_por = ?,
-            entrega_documento = ?, entrega_observaciones = ?, actualizado_en = ?
-        WHERE id = ?
+        INSERT INTO garantia_items (
+            garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
+            movimiento_id, usuario, creado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (fecha_entrega_real, recibido_por, documento, observaciones, ts, orden_id),
+        (garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts),
     )
+    db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (ts, garantia_id))
     db.commit()
-    actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
-    return jsonify(_orden_dict_detalle(db, actualizada))
+    nuevo_item = db.execute("SELECT * FROM garantia_items WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nuevo_item)), 201
+
+
+@bp.route("/api/operativo/garantias/<int:garantia_id>/items/<int:item_id>", methods=["DELETE"])
+def eliminar_item_garantia(garantia_id, item_id):
+    db = get_db()
+    _iniciar_transaccion_stock(db)
+    item = db.execute(
+        "SELECT * FROM garantia_items WHERE id = ? AND garantia_id = ?", (item_id, garantia_id)
+    ).fetchone()
+    if item is None:
+        return jsonify({"error": "Ítem no encontrado en esta garantía"}), 404
+
+    if item["tipo"] == "repuesto" and item["producto_id"]:
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (item["producto_id"],)).fetchone()
+        if producto is not None:
+            _aplicar_entrada_stock(
+                db, producto, int(round(item["cantidad"])), item["costo_unitario"],
+                motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE GARANTÍA #{garantia_id}",
+                usuario=usuario_actual(), factura=None, categoria="Devolución",
+            )
+
+    db.execute("DELETE FROM garantia_items WHERE id = ?", (item_id,))
+    db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (now_iso(), garantia_id))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1403,65 +1532,59 @@ def reporte_ordenes_pdf():
 @bp.route("/api/operativo/reportes/garantias", methods=["GET"])
 def reporte_garantias():
     """Excel con el detalle de garantías del período y dos resúmenes
-    (por técnico y por equipo) — el análisis que el bosquejo original
-    pedía para detectar qué mecánico, modelo o proveedor genera más
-    reclamos de garantía."""
+    (por responsable y por equipo) — para detectar qué técnico, modelo o
+    proveedor genera más reclamos de garantía."""
     desde, hasta = _rango_fechas()
     db = get_db()
-    sql = (
-        "SELECT g.*, o.cliente_id, o.equipo_id, o.mecanico AS mecanico_orden "
-        "FROM garantias g JOIN ordenes_trabajo o ON o.id = g.orden_id WHERE 1=1"
-    )
+    sql = "SELECT * FROM garantias WHERE 1=1"
     params = []
     if desde:
-        sql += " AND substr(g.creado_en, 1, 10) >= ?"
+        sql += " AND substr(creado_en, 1, 10) >= ?"
         params.append(desde)
     if hasta:
-        sql += " AND substr(g.creado_en, 1, 10) <= ?"
+        sql += " AND substr(creado_en, 1, 10) <= ?"
         params.append(hasta)
-    sql += " ORDER BY g.creado_en DESC"
+    sql += " ORDER BY creado_en DESC"
     rows = db.execute(sql, params).fetchall()
 
     detalle = []
-    conteo_tecnico = {}
+    conteo_responsable = {}
     conteo_equipo = {}
+    costo_total_general = 0
     for r in rows:
-        d = dict(r)
-        cliente = db.execute("SELECT nombre FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+        g = _garantia_dict(db, r)
         equipo_txt = "—"
-        if d["equipo_id"]:
-            eq = db.execute(
-                "SELECT marca, modelo, identificador FROM equipos WHERE id = ?", (d["equipo_id"],)
-            ).fetchone()
-            if eq:
-                equipo_txt = " ".join(filter(None, [eq["marca"], eq["modelo"], eq["identificador"]])) or "—"
-        tecnico = d["mecanico_orden"] or "Sin asignar"
-        conteo_tecnico[tecnico] = conteo_tecnico.get(tecnico, 0) + 1
+        if g["equipo"]:
+            equipo_txt = " ".join(filter(None, [g["equipo"].get("marca"), g["equipo"].get("modelo"), g["equipo"].get("identificador")])) or "—"
+        responsable = g["responsable"] or "Sin asignar"
+        conteo_responsable[responsable] = conteo_responsable.get(responsable, 0) + 1
         conteo_equipo[equipo_txt] = conteo_equipo.get(equipo_txt, 0) + 1
+        costo_total_general += g["total"]
         detalle.append([
-            (d["creado_en"] or "")[:10],
-            f"OT #{d['orden_id']}",
-            cliente["nombre"] if cliente else "—",
+            (g["creado_en"] or "")[:10],
+            g["cliente"]["nombre"] if g["cliente"] else "—",
             equipo_txt,
-            tecnico,
-            d["motivo"],
-            d["estado"].capitalize(),
-            round(d["costo_asumido"], 2),
+            responsable,
+            g["motivo"],
+            g["estado"].replace("_", " ").capitalize(),
+            round(g["total"], 2),
         ])
 
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Garantías"
-    ws.append(["Fecha", "Orden", "Cliente", "Equipo", "Mecánico", "Motivo", "Estado", "Costo asumido"])
+    ws.append(["Fecha", "Cliente", "Equipo", "Responsable", "Motivo", "Estado", "Costo (repuestos/mano de obra)"])
     for fila in detalle:
         ws.append(fila)
+    ws.append([])
+    ws.append(["", "", "", "", "", "TOTAL", round(costo_total_general, 2)])
     _estilo_encabezado(ws)
     _autoancho(ws)
 
-    ws2 = wb.create_sheet("Resumen por técnico")
-    ws2.append(["Mecánico", "Cantidad de garantías"])
-    for tecnico, cantidad in sorted(conteo_tecnico.items(), key=lambda x: -x[1]):
-        ws2.append([tecnico, cantidad])
+    ws2 = wb.create_sheet("Resumen por responsable")
+    ws2.append(["Responsable", "Cantidad de garantías"])
+    for responsable, cantidad in sorted(conteo_responsable.items(), key=lambda x: -x[1]):
+        ws2.append([responsable, cantidad])
     _estilo_encabezado(ws2)
     _autoancho(ws2)
 

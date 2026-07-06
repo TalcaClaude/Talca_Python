@@ -94,7 +94,7 @@ async function cargarSesion() {
 }
 
 // ---------------------------------------------------------------------------
-// Pestañas: Dashboard / Órdenes de Trabajo
+// Pestañas: Dashboard / Órdenes de Trabajo / Clientes / Equipos / Reportes
 // ---------------------------------------------------------------------------
 
 document.querySelectorAll(".tab").forEach(tabBtn => {
@@ -104,13 +104,21 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     const vista = tabBtn.dataset.vista;
     document.getElementById("vista-dashboard").style.display = vista === "dashboard" ? "block" : "none";
     document.getElementById("vista-ordenes").style.display = vista === "ordenes" ? "block" : "none";
+    document.getElementById("vista-clientes").style.display = vista === "clientes" ? "block" : "none";
+    document.getElementById("vista-equipos").style.display = vista === "equipos" ? "block" : "none";
+    document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
       dashboard: "Operativo — Dashboard",
       ordenes: "Operativo — Órdenes de Trabajo",
+      clientes: "Operativo — Clientes",
+      equipos: "Operativo — Equipos",
+      reportes: "Operativo — Reportes",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "dashboard") cargarDashboardOperativo();
     if (vista === "ordenes") cargarOperativo();
+    if (vista === "clientes") cargarClientesTab();
+    if (vista === "equipos") cargarEquiposTab();
   });
 });
 
@@ -216,49 +224,7 @@ function renderSelectClientesOperativo(selectId, valorActual) {
   select.value = valorActual || "";
 }
 
-document.getElementById("btn-op-clientes").addEventListener("click", async () => {
-  await cargarListaClientesOperativo();
-  abrirModal("modal-op-clientes-lista");
-});
-
-async function cargarListaClientesOperativo() {
-  try {
-    const busqueda = document.getElementById("opcl-buscar").value.trim();
-    const data = await api(`/api/operativo/clientes${busqueda ? "?q=" + encodeURIComponent(busqueda) : ""}`);
-    state.opClientes = data.clientes;
-    const tbody = document.getElementById("tbody-op-clientes");
-    if (data.clientes.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" class="vacio">Sin clientes todavía.</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = data.clientes.map(c => `
-      <tr>
-        <td>${escapeHtml(c.nombre)}</td>
-        <td>${escapeHtml(c.telefono || "—")}</td>
-        <td>${escapeHtml(c.email || "—")}</td>
-        <td class="num">${c.n_equipos}</td>
-        <td><button type="button" class="btn-link" data-editar-cliente="${c.id}">Editar</button></td>
-      </tr>
-    `).join("");
-    tbody.querySelectorAll("[data-editar-cliente]").forEach(btn => {
-      btn.addEventListener("click", () => abrirEdicionClienteOperativo(parseInt(btn.dataset.editarCliente, 10)));
-    });
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
 let opClienteCallback = null; // si viene desde "+ Nuevo" del formulario de orden, para preseleccionar al guardar
-
-document.getElementById("opcl-buscar").addEventListener("input", () => {
-  clearTimeout(document.getElementById("opcl-buscar")._t);
-  document.getElementById("opcl-buscar")._t = setTimeout(cargarListaClientesOperativo, 250);
-});
-
-document.getElementById("btn-opcl-nuevo").addEventListener("click", () => {
-  opClienteCallback = cargarListaClientesOperativo;
-  abrirNuevoClienteOperativo();
-});
 
 function abrirNuevoClienteOperativo() {
   document.getElementById("form-op-cliente").reset();
@@ -277,7 +243,7 @@ function abrirEdicionClienteOperativo(id) {
   document.getElementById("opc-rut").value = c.rut || "";
   document.getElementById("opc-notas").value = c.notas || "";
   document.getElementById("modal-op-cliente-titulo").textContent = "Editar cliente";
-  opClienteCallback = cargarListaClientesOperativo;
+  opClienteCallback = cargarClientesTab;
   abrirModal("modal-op-cliente");
 }
 
@@ -290,6 +256,75 @@ document.getElementById("opon-nuevo-cliente").addEventListener("click", () => {
   };
   abrirNuevoClienteOperativo();
 });
+
+// ---- Pestaña Clientes ----
+
+async function cargarClientesTab() {
+  try {
+    const busqueda = document.getElementById("cli-buscar").value.trim();
+    const data = await api(`/api/operativo/clientes${busqueda ? "?q=" + encodeURIComponent(busqueda) : ""}`);
+    state.opClientes = data.clientes;
+    const tbody = document.getElementById("tbody-clientes");
+    if (data.clientes.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" class="vacio">Sin clientes todavía.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.clientes.map(c => `
+      <tr>
+        <td>${escapeHtml(c.nombre)}</td>
+        <td>${escapeHtml(c.telefono || "—")}</td>
+        <td>${escapeHtml(c.email || "—")}</td>
+        <td>${escapeHtml(c.rut || "—")}</td>
+        <td class="num">${c.n_equipos}</td>
+        <td>
+          <button type="button" class="btn-link" data-ver-equipos-cliente="${c.id}">Ver equipos</button>
+          <button type="button" class="btn-link" data-editar-cliente-tab="${c.id}">Editar</button>
+          <button type="button" class="btn-link btn-link--peligro" data-eliminar-cliente="${c.id}">Eliminar</button>
+        </td>
+      </tr>
+    `).join("");
+    tbody.querySelectorAll("[data-editar-cliente-tab]").forEach(btn => {
+      btn.addEventListener("click", () => abrirEdicionClienteOperativo(parseInt(btn.dataset.editarClienteTab, 10)));
+    });
+    tbody.querySelectorAll("[data-ver-equipos-cliente]").forEach(btn => {
+      btn.addEventListener("click", () => verEquiposDeCliente(parseInt(btn.dataset.verEquiposCliente, 10)));
+    });
+    tbody.querySelectorAll("[data-eliminar-cliente]").forEach(btn => {
+      btn.addEventListener("click", () => eliminarClienteTab(parseInt(btn.dataset.eliminarCliente, 10)));
+    });
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("cli-buscar").addEventListener("input", () => {
+  clearTimeout(document.getElementById("cli-buscar")._t);
+  document.getElementById("cli-buscar")._t = setTimeout(cargarClientesTab, 250);
+});
+
+document.getElementById("btn-cli-nuevo").addEventListener("click", () => {
+  opClienteCallback = cargarClientesTab;
+  abrirNuevoClienteOperativo();
+});
+
+async function eliminarClienteTab(id) {
+  if (!confirm("¿Eliminar este cliente? Solo se puede si no tiene órdenes de trabajo asociadas.")) return;
+  try {
+    await api(`/api/operativo/clientes/${id}`, { method: "DELETE" });
+    toast("Cliente eliminado.");
+    cargarClientesTab();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function verEquiposDeCliente(clienteId) {
+  document.querySelector('.tab[data-vista="equipos"]').click();
+  setTimeout(() => {
+    document.getElementById("equ-filtro-cliente").value = String(clienteId);
+    cargarEquiposTab();
+  }, 50);
+}
 
 document.getElementById("form-op-cliente").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -333,6 +368,15 @@ document.getElementById("opon-cliente-id").addEventListener("change", (e) => {
   renderSelectEquiposOperativo(e.target.value || null);
 });
 
+let opEquipoCallback = null; // se llama con (nuevoEquipo, payload) tras guardar, según de dónde se abrió el modal
+
+function renderSelectClienteEquipoModal(valorActual) {
+  const select = document.getElementById("ope-cliente-id");
+  select.innerHTML = '<option value="">Selecciona un cliente…</option>' +
+    state.opClientes.map(c => `<option value="${c.id}">${escapeHtml(c.nombre)}</option>`).join("");
+  select.value = valorActual || "";
+}
+
 document.getElementById("opon-nuevo-equipo").addEventListener("click", () => {
   const clienteId = document.getElementById("opon-cliente-id").value;
   if (!clienteId) {
@@ -341,16 +385,24 @@ document.getElementById("opon-nuevo-equipo").addEventListener("click", () => {
   }
   document.getElementById("form-op-equipo").reset();
   document.getElementById("ope-id").value = "";
-  document.getElementById("ope-cliente-id").value = clienteId;
+  renderSelectClienteEquipoModal(clienteId);
   document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
+  opEquipoCallback = async (nuevo, payload) => {
+    await renderSelectEquiposOperativo(payload.cliente_id, nuevo.id);
+  };
   abrirModal("modal-op-equipo");
 });
 
 document.getElementById("form-op-equipo").addEventListener("submit", async (e) => {
   e.preventDefault();
   const id = document.getElementById("ope-id").value;
+  const clienteId = document.getElementById("ope-cliente-id").value;
+  if (!clienteId) {
+    toast("Selecciona un cliente.", true);
+    return;
+  }
   const payload = {
-    cliente_id: document.getElementById("ope-cliente-id").value,
+    cliente_id: clienteId,
     identificador: document.getElementById("ope-identificador").value.trim(),
     marca: document.getElementById("ope-marca").value.trim(),
     modelo: document.getElementById("ope-modelo").value.trim(),
@@ -362,10 +414,118 @@ document.getElementById("form-op-equipo").addEventListener("submit", async (e) =
       : await api("/api/operativo/equipos", { method: "POST", body: JSON.stringify(payload) });
     cerrarModal("modal-op-equipo");
     toast("Equipo guardado.");
-    await renderSelectEquiposOperativo(payload.cliente_id, nuevo.id);
+    if (opEquipoCallback) await opEquipoCallback(nuevo, payload);
+    opEquipoCallback = null;
   } catch (e2) {
     toast(e2.message, true);
   }
+});
+
+// ---- Pestaña Equipos ----
+
+async function cargarSelectFiltroClienteEquipos() {
+  if (state.opClientes.length === 0) {
+    const data = await api("/api/operativo/clientes");
+    state.opClientes = data.clientes;
+  }
+  const select = document.getElementById("equ-filtro-cliente");
+  const valorActual = select.value;
+  select.innerHTML = '<option value="">Todos los clientes</option>' +
+    state.opClientes.map(c => `<option value="${c.id}">${escapeHtml(c.nombre)}</option>`).join("");
+  select.value = valorActual || "";
+}
+
+async function cargarEquiposTab() {
+  try {
+    await cargarSelectFiltroClienteEquipos();
+    const clienteId = document.getElementById("equ-filtro-cliente").value;
+    const data = await api(`/api/operativo/equipos${clienteId ? "?cliente_id=" + clienteId : ""}`);
+    const tbody = document.getElementById("tbody-equipos");
+    if (data.equipos.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="vacio">Sin equipos todavía.</td></tr>`;
+      return;
+    }
+    const clientesPorId = Object.fromEntries(state.opClientes.map(c => [c.id, c.nombre]));
+    tbody.innerHTML = data.equipos.map(eq => `
+      <tr>
+        <td>${escapeHtml(clientesPorId[eq.cliente_id] || "—")}</td>
+        <td>${escapeHtml(eq.identificador || "—")}</td>
+        <td>${escapeHtml(eq.marca || "—")}</td>
+        <td>${escapeHtml(eq.modelo || "—")}</td>
+        <td>
+          <button type="button" class="btn-link" data-editar-equipo-tab="${eq.id}">Editar</button>
+          <button type="button" class="btn-link btn-link--peligro" data-eliminar-equipo="${eq.id}">Eliminar</button>
+        </td>
+      </tr>
+    `).join("");
+    tbody.querySelectorAll("[data-editar-equipo-tab]").forEach(btn => {
+      const eq = data.equipos.find(x => x.id === parseInt(btn.dataset.editarEquipoTab, 10));
+      btn.addEventListener("click", () => abrirEdicionEquipoTab(eq));
+    });
+    tbody.querySelectorAll("[data-eliminar-equipo]").forEach(btn => {
+      btn.addEventListener("click", () => eliminarEquipoTab(parseInt(btn.dataset.eliminarEquipo, 10)));
+    });
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("equ-filtro-cliente").addEventListener("change", cargarEquiposTab);
+
+document.getElementById("btn-equ-nuevo").addEventListener("click", async () => {
+  if (state.opClientes.length === 0) {
+    const data = await api("/api/operativo/clientes");
+    state.opClientes = data.clientes;
+  }
+  document.getElementById("form-op-equipo").reset();
+  document.getElementById("ope-id").value = "";
+  renderSelectClienteEquipoModal(document.getElementById("equ-filtro-cliente").value || "");
+  document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
+  opEquipoCallback = cargarEquiposTab;
+  abrirModal("modal-op-equipo");
+});
+
+function abrirEdicionEquipoTab(eq) {
+  if (!eq) return;
+  document.getElementById("form-op-equipo").reset();
+  document.getElementById("ope-id").value = eq.id;
+  renderSelectClienteEquipoModal(eq.cliente_id);
+  document.getElementById("ope-identificador").value = eq.identificador || "";
+  document.getElementById("ope-marca").value = eq.marca || "";
+  document.getElementById("ope-modelo").value = eq.modelo || "";
+  document.getElementById("ope-notas").value = eq.notas || "";
+  document.getElementById("modal-op-equipo-titulo").textContent = "Editar equipo";
+  opEquipoCallback = cargarEquiposTab;
+  abrirModal("modal-op-equipo");
+}
+
+async function eliminarEquipoTab(id) {
+  if (!confirm("¿Eliminar este equipo? Solo se puede si no tiene órdenes de trabajo asociadas.")) return;
+  try {
+    await api(`/api/operativo/equipos/${id}`, { method: "DELETE" });
+    toast("Equipo eliminado.");
+    cargarEquiposTab();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---- Pestaña Reportes ----
+
+function rangoFechasParamsOperativo() {
+  const desde = document.getElementById("rep-ordenes-desde").value;
+  const hasta = document.getElementById("rep-ordenes-hasta").value;
+  const params = new URLSearchParams();
+  if (desde) params.set("desde", desde);
+  if (hasta) params.set("hasta", hasta);
+  return params.toString();
+}
+
+document.getElementById("btn-rep-ordenes-excel").addEventListener("click", () => {
+  window.location.href = `/api/operativo/reportes/ordenes?${rangoFechasParamsOperativo()}`;
+});
+document.getElementById("btn-rep-ordenes-pdf").addEventListener("click", () => {
+  window.location.href = `/api/operativo/reportes/ordenes/pdf?${rangoFechasParamsOperativo()}`;
 });
 
 // ---- Nueva orden ----

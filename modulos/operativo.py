@@ -28,7 +28,16 @@ from flask import Blueprint, jsonify, request
 from core import (
     _aplicar_entrada_stock,
     _aplicar_salida_stock,
+    _autoancho,
+    _crear_libro_excel,
+    _estilo_encabezado,
+    _excel_response,
     _iniciar_transaccion_stock,
+    _pdf_documento,
+    _pdf_response,
+    _pdf_tabla,
+    _rango_fechas,
+    fmt_money_pdf,
     get_db,
     now_iso,
     usuario_actual,
@@ -605,3 +614,101 @@ def eliminar_item_orden(orden_id, item_id):
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (now_iso(), orden_id))
     db.commit()
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Reportes
+# ---------------------------------------------------------------------------
+
+ESTADOS_LABEL = {
+    "recibido": "Recibido",
+    "diagnostico": "Diagnóstico",
+    "reparacion": "Reparación",
+    "esperando_repuesto": "Esperando repuesto",
+    "listo": "Listo",
+    "entregado": "Entregado",
+    "cancelado": "Cancelado",
+}
+
+
+def _ordenes_para_reporte(desde, hasta):
+    db = get_db()
+    sql = "SELECT * FROM ordenes_trabajo WHERE 1=1"
+    params = []
+    if desde:
+        sql += " AND substr(fecha_recepcion, 1, 10) >= ?"
+        params.append(desde)
+    if hasta:
+        sql += " AND substr(fecha_recepcion, 1, 10) <= ?"
+        params.append(hasta)
+    sql += " ORDER BY fecha_recepcion DESC"
+    rows = db.execute(sql, params).fetchall()
+    return [_orden_dict(db, r) for r in rows]
+
+
+@bp.route("/api/operativo/reportes/ordenes", methods=["GET"])
+def reporte_ordenes():
+    desde, hasta = _rango_fechas()
+    ordenes = _ordenes_para_reporte(desde, hasta)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Órdenes de trabajo"
+    ws.append(["Fecha recepción", "Cliente", "Equipo", "Estado", "Mecánico", "Entrega estimada", "Entrega real", "Total"])
+    total_general = 0
+    for o in ordenes:
+        total_general += o["total"]
+        equipo_txt = ""
+        if o["equipo"]:
+            equipo_txt = " ".join(filter(None, [o["equipo"].get("marca"), o["equipo"].get("modelo"), o["equipo"].get("identificador")]))
+        ws.append([
+            (o["fecha_recepcion"] or "")[:10],
+            o["cliente"]["nombre"] if o["cliente"] else "—",
+            equipo_txt or "—",
+            ESTADOS_LABEL.get(o["estado"], o["estado"]),
+            o["mecanico"] or "—",
+            (o["fecha_entrega_estimada"] or "")[:10],
+            (o["fecha_entrega_real"] or "")[:10],
+            round(o["total"], 2),
+        ])
+    ws.append([])
+    ws.append(["", "", "", "", "", "", "TOTAL", round(total_general, 2)])
+    _estilo_encabezado(ws)
+    _autoancho(ws)
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"ordenes_trabajo{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)
+
+
+@bp.route("/api/operativo/reportes/ordenes/pdf", methods=["GET"])
+def reporte_ordenes_pdf():
+    desde, hasta = _rango_fechas()
+    ordenes = _ordenes_para_reporte(desde, hasta)
+
+    rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
+    buffer, doc, elementos, estilos = _pdf_documento(f"Órdenes de trabajo{rango_txt}")
+
+    total_general = sum(o["total"] for o in ordenes)
+    filas = []
+    for o in ordenes:
+        equipo_txt = ""
+        if o["equipo"]:
+            equipo_txt = " ".join(filter(None, [o["equipo"].get("marca"), o["equipo"].get("modelo"), o["equipo"].get("identificador")]))
+        filas.append([
+            (o["fecha_recepcion"] or "")[:10],
+            o["cliente"]["nombre"] if o["cliente"] else "—",
+            equipo_txt or "—",
+            ESTADOS_LABEL.get(o["estado"], o["estado"]),
+            o["mecanico"] or "—",
+            fmt_money_pdf(o["total"]),
+        ])
+    _pdf_tabla(
+        elementos, estilos, f"Total: {fmt_money_pdf(total_general)} — {len(ordenes)} orden(es)",
+        ["Fecha", "Cliente", "Equipo", "Estado", "Mecánico", "Total"],
+        filas,
+    )
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"ordenes_trabajo{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)

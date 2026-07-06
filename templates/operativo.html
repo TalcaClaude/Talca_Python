@@ -30,6 +30,9 @@
   <nav class="tabs">
     <button class="tab activo" data-vista="dashboard">Dashboard</button>
     <button class="tab" data-vista="ordenes">Órdenes de Trabajo</button>
+    <button class="tab" data-vista="clientes">Clientes</button>
+    <button class="tab" data-vista="equipos">Equipos</button>
+    <button class="tab" data-vista="reportes">Reportes</button>
   </nav>
 
   <section class="vista" id="vista-dashboard">
@@ -70,7 +73,6 @@
       <option value="cancelado">Cancelado</option>
     </select>
     <span style="flex:1"></span>
-    <button class="btn btn-secundario" id="btn-op-clientes">Clientes</button>
     <button class="btn btn-primary" id="btn-op-nueva-orden">+ Nueva orden</button>
   </section>
 
@@ -103,6 +105,84 @@
       <h3>Cancelado <span class="op-columna-count" id="op-count-cancelado">0</span></h3>
       <div class="op-columna-cards" id="op-cards-cancelado"></div>
     </div>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-clientes" style="display:none">
+
+  <section class="toolbar">
+    <input type="text" id="cli-buscar" placeholder="Buscar por nombre, RUT o teléfono…">
+    <span style="flex:1"></span>
+    <button type="button" class="btn btn-primary" id="btn-cli-nuevo">+ Nuevo cliente</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Nombre</th>
+          <th>Teléfono</th>
+          <th>Email</th>
+          <th>RUT</th>
+          <th class="num">Equipos</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-clientes">
+        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-equipos" style="display:none">
+
+  <section class="toolbar">
+    <select id="equ-filtro-cliente">
+      <option value="">Todos los clientes</option>
+    </select>
+    <span style="flex:1"></span>
+    <button type="button" class="btn btn-primary" id="btn-equ-nuevo">+ Nuevo equipo</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Cliente</th>
+          <th>Identificador</th>
+          <th>Marca</th>
+          <th>Modelo</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-equipos">
+        <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-reportes" style="display:none">
+
+  <section class="dash-grid">
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Órdenes de trabajo</h3>
+      <p class="bodega-intro">Todas las órdenes registradas con su cliente, equipo, estado y total — filtrable por rango de fechas de recepción. Deja las fechas vacías para exportar todo.</p>
+      <div class="reportes-rango">
+        <label>Desde <input type="date" id="rep-ordenes-desde"></label>
+        <label>Hasta <input type="date" id="rep-ordenes-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-rep-ordenes-excel">Descargar Excel</button>
+        <button class="btn btn-secundario" id="btn-rep-ordenes-pdf">Descargar PDF</button>
+      </div>
+    </div>
+
   </section>
 
   </section>
@@ -148,37 +228,6 @@
   </div>
 </div>
 
-<!-- Módulo Operativo: lista de clientes -->
-<div class="modal-overlay" id="modal-op-clientes-lista">
-  <div class="modal modal-ancho">
-    <div class="modal-head">
-      <h2>Clientes</h2>
-      <button class="modal-close" data-close="modal-op-clientes-lista">&times;</button>
-    </div>
-    <div class="toolbar">
-      <input type="text" id="opcl-buscar" placeholder="Buscar por nombre, RUT o teléfono…">
-      <span style="flex:1"></span>
-      <button type="button" class="btn btn-primary" id="btn-opcl-nuevo">+ Nuevo cliente</button>
-    </div>
-    <div class="tabla-wrap">
-      <table class="tabla">
-        <thead>
-          <tr>
-            <th>Nombre</th>
-            <th>Teléfono</th>
-            <th>Email</th>
-            <th class="num">Equipos</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="tbody-op-clientes">
-          <tr><td colspan="5" class="vacio">Cargando…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
 <!-- Módulo Operativo: equipo -->
 <div class="modal-overlay" id="modal-op-equipo">
   <div class="modal">
@@ -188,7 +237,10 @@
     </div>
     <form id="form-op-equipo">
       <input type="hidden" id="ope-id">
-      <input type="hidden" id="ope-cliente-id">
+      <div class="campo">
+        <label>Cliente *</label>
+        <select id="ope-cliente-id" required><option value="">Selecciona un cliente…</option></select>
+      </div>
       <div class="grid-2">
         <div class="campo">
           <label>Patente / identificador</label>

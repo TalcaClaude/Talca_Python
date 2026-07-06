@@ -263,28 +263,36 @@ def init_operativo_db(db):
     # OJO: antes esto estaba condicionado a "if not columnas_garantia" (solo
     # se creaba si la tabla 'garantias' no existía todavía) — eso hacía que
     # 'garantia_items' NUNCA se creara en una base de datos donde 'garantias'
-    # ya existía de una versión anterior (el CREATE TABLE quedaba adentro de
-    # un bloque que nunca se volvía a ejecutar), causando
-    # "no such table: garantia_items" en producción. Los CREATE TABLE/INDEX
-    # ya son "IF NOT EXISTS" por sí solos, así que no hace falta (ni es
-    # seguro) condicionarlos a la existencia de otra tabla: se ejecutan
-    # siempre, sin gate.
+    # ya existía de una versión anterior, causando
+    # "no such table: garantia_items" en producción.
+    #
+    # OJO 2: al sacar ese gate, esto pasó a ejecutar siempre
+    # "CREATE INDEX ... ON garantias (cliente_id)" sin condición — y en la
+    # base de datos real de producción la tabla 'garantias' venía de una
+    # versión TODAVÍA más vieja que ni siquiera tenía la columna
+    # 'cliente_id'. CREATE TABLE IF NOT EXISTS no toca una tabla que ya
+    # existe, así que esa columna nunca se agregaba, y el CREATE INDEX
+    # fallaba con "no such column: cliente_id" — como esto corre al
+    # importar el módulo, tumbaba toda la app (Railway: "Application failed
+    # to respond"). Por eso ahora se verifica columna por columna con
+    # PRAGMA table_info y se agregan las que falten con ALTER TABLE ADD
+    # COLUMN ANTES de crear cualquier índice sobre ellas.
     db.executescript(
         """
         CREATE TABLE IF NOT EXISTS garantias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            cliente_id INTEGER NOT NULL REFERENCES clientes(id),
+            cliente_id INTEGER REFERENCES clientes(id),
             equipo_id INTEGER REFERENCES equipos(id),
             orden_origen_id INTEGER REFERENCES ordenes_trabajo(id),
             motivo TEXT DEFAULT '',
             diagnostico TEXT DEFAULT '',
             responsable TEXT DEFAULT '',
             estado TEXT NOT NULL DEFAULT 'pendiente',
-            fecha_recepcion TEXT NOT NULL,
+            fecha_recepcion TEXT,
             fecha_cierre TEXT,
             usuario TEXT DEFAULT '',
-            creado_en TEXT NOT NULL,
-            actualizado_en TEXT NOT NULL
+            creado_en TEXT,
+            actualizado_en TEXT
         );
 
         CREATE TABLE IF NOT EXISTS garantia_items (
@@ -299,7 +307,43 @@ def init_operativo_db(db):
             usuario TEXT DEFAULT '',
             creado_en TEXT NOT NULL
         );
+        """
+    )
+    db.commit()
 
+    # Columnas que 'garantias' debe tener sí o sí. Si la tabla viene de una
+    # versión anterior del proyecto puede que falten una o más (por ejemplo
+    # 'cliente_id', que es justo la que causó el incidente en producción).
+    # Se agregan de forma incremental — nunca se recrea la tabla ni se
+    # tocan columnas ya existentes.
+    columnas_garantias_actuales = {
+        c[1] for c in db.execute("PRAGMA table_info(garantias)").fetchall()
+    }
+    columnas_garantias_requeridas = {
+        "cliente_id": "INTEGER REFERENCES clientes(id)",
+        "equipo_id": "INTEGER REFERENCES equipos(id)",
+        "orden_origen_id": "INTEGER REFERENCES ordenes_trabajo(id)",
+        "motivo": "TEXT DEFAULT ''",
+        "diagnostico": "TEXT DEFAULT ''",
+        "responsable": "TEXT DEFAULT ''",
+        "estado": "TEXT NOT NULL DEFAULT 'pendiente'",
+        "fecha_recepcion": "TEXT",
+        "fecha_cierre": "TEXT",
+        "usuario": "TEXT DEFAULT ''",
+        "creado_en": "TEXT",
+        "actualizado_en": "TEXT",
+    }
+    for columna, definicion in columnas_garantias_requeridas.items():
+        if columna not in columnas_garantias_actuales:
+            db.execute(f"ALTER TABLE garantias ADD COLUMN {columna} {definicion}")
+    db.commit()
+
+    # Recién ahora es seguro crear los índices: todas las columnas que
+    # referencian ya están garantizadas presentes (por el CREATE TABLE si
+    # es una base nueva, o por los ALTER TABLE de arriba si es una base
+    # vieja).
+    db.executescript(
+        """
         CREATE INDEX IF NOT EXISTS idx_garantias_cliente_id ON garantias (cliente_id);
         CREATE INDEX IF NOT EXISTS idx_garantias_equipo_id ON garantias (equipo_id);
         CREATE INDEX IF NOT EXISTS idx_garantias_estado ON garantias (estado);

@@ -46,13 +46,36 @@ from core import (
 bp = Blueprint("operativo", __name__)
 
 ESTADOS_ORDEN = [
-    "recibido", "diagnostico", "reparacion", "esperando_repuesto", "listo", "entregado", "cancelado",
+    "recibido", "diagnostico", "presupuesto", "esperando_aprobacion", "reparacion",
+    "esperando_repuesto", "control_calidad", "listo", "entregado", "cancelado",
 ]
 # Estados que cuentan como "la orden ya terminó" — no deberían poder seguir
 # recibiendo repuestos o mano de obra nueva sin primero reabrirlas.
 ESTADOS_CERRADOS = {"entregado", "cancelado"}
 
 TIPOS_ITEM = ["repuesto", "mano_obra"]
+
+# ---- Fase 3.5: constantes de los sub-flujos ampliados ----
+PRIORIDADES_ORDEN = ["baja", "media", "alta", "urgente"]
+TIPOS_PRESUPUESTO_ITEM = ["mano_obra", "repuesto", "insumo", "servicio_externo", "descuento"]
+ESTADOS_PRESUPUESTO = ["pendiente", "enviado", "aprobado", "rechazado"]
+EVENTOS_TIEMPO = ["inicio", "pausa", "reanudar", "termino"]
+RESULTADOS_QC_ITEM = ["ok", "falla", "na"]  # resultado de cada punto del checklist
+RESULTADOS_QC = ["pendiente", "aprobado", "rechazado"]  # veredicto general de la orden
+ESTADOS_GARANTIA = ["abierta", "cerrada"]
+IVA_PORCENTAJE = 0.19
+
+# Campos "simples" (sin efectos secundarios) que se pueden actualizar desde
+# el PUT general de la orden — recepción, diagnóstico, planificación y
+# entrega. Los que sí disparan una transición automática de estado
+# (presupuesto_estado, qc_resultado) viven en sus propios endpoints más
+# abajo, para que ese efecto secundario quede explícito y sea auditable.
+CAMPOS_SIMPLES_ORDEN = [
+    "vin", "caja_automatica", "accesorios", "estado_visual",
+    "sintoma", "diagnostico_tecnico", "falla_detectada", "componentes_danados",
+    "mediciones", "resultado_pruebas", "responsable_diagnostico",
+    "entrega_recibido_por", "entrega_documento", "entrega_observaciones",
+]
 
 
 def init_operativo_db(db):
@@ -113,6 +136,102 @@ def init_operativo_db(db):
         CREATE INDEX IF NOT EXISTS idx_ordenes_estado ON ordenes_trabajo (estado);
         CREATE INDEX IF NOT EXISTS idx_orden_items_orden_id ON orden_items (orden_id);
         CREATE INDEX IF NOT EXISTS idx_orden_items_producto_id ON orden_items (producto_id);
+        """
+    )
+    db.commit()
+
+    # -----------------------------------------------------------------
+    # Migración Fase 3.5: recepción enriquecida, diagnóstico, presupuesto,
+    # planificación/tiempos, control de calidad, garantía y entrega.
+    # Todo aditivo (ALTER TABLE ADD COLUMN sobre la tabla ya existente +
+    # CREATE TABLE IF NOT EXISTS), siguiendo el mismo patrón de migración
+    # incremental que usa app.py:init_db() — no rompe datos existentes.
+    # -----------------------------------------------------------------
+    columnas_orden = [c[1] for c in db.execute("PRAGMA table_info(ordenes_trabajo)").fetchall()]
+    columnas_nuevas_orden = {
+        # Recepción (3.5.2)
+        "vin": "TEXT DEFAULT ''",
+        "kilometraje": "INTEGER",
+        "anio": "INTEGER",
+        "caja_automatica": "TEXT DEFAULT ''",
+        "prioridad": "TEXT NOT NULL DEFAULT 'media'",
+        "accesorios": "TEXT DEFAULT ''",
+        "estado_visual": "TEXT DEFAULT ''",
+        # Diagnóstico (3.5.4)
+        "sintoma": "TEXT DEFAULT ''",
+        "diagnostico_tecnico": "TEXT DEFAULT ''",
+        "falla_detectada": "TEXT DEFAULT ''",
+        "componentes_danados": "TEXT DEFAULT ''",
+        "mediciones": "TEXT DEFAULT ''",
+        "resultado_pruebas": "TEXT DEFAULT ''",
+        "responsable_diagnostico": "TEXT DEFAULT ''",
+        # Presupuesto (3.5.3)
+        "presupuesto_estado": "TEXT NOT NULL DEFAULT 'pendiente'",
+        "presupuesto_iva": "INTEGER NOT NULL DEFAULT 0",
+        "presupuesto_notas": "TEXT DEFAULT ''",
+        # Planificación / tiempos (3.5.5)
+        "horas_presupuestadas": "REAL",
+        # Control de calidad (3.5.6)
+        "qc_resultado": "TEXT DEFAULT ''",
+        "qc_inspector": "TEXT DEFAULT ''",
+        "qc_observaciones": "TEXT DEFAULT ''",
+        # Entrega (3.5.8)
+        "entrega_recibido_por": "TEXT DEFAULT ''",
+        "entrega_documento": "TEXT DEFAULT ''",
+        "entrega_observaciones": "TEXT DEFAULT ''",
+    }
+    for columna, definicion in columnas_nuevas_orden.items():
+        if columna not in columnas_orden:
+            db.execute(f"ALTER TABLE ordenes_trabajo ADD COLUMN {columna} {definicion}")
+    db.commit()
+
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS presupuesto_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+            tipo TEXT NOT NULL,
+            descripcion TEXT DEFAULT '',
+            cantidad REAL NOT NULL DEFAULT 1,
+            precio_unitario REAL NOT NULL DEFAULT 0,
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS orden_tiempos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+            evento TEXT NOT NULL,
+            marca_tiempo TEXT NOT NULL,
+            usuario TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS qc_checklist_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+            item TEXT NOT NULL,
+            resultado TEXT NOT NULL DEFAULT 'na',
+            observacion TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS garantias (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id),
+            motivo TEXT DEFAULT '',
+            diagnostico TEXT DEFAULT '',
+            costo_asumido REAL NOT NULL DEFAULT 0,
+            responsable TEXT DEFAULT '',
+            estado TEXT NOT NULL DEFAULT 'abierta',
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            cerrado_en TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_presupuesto_items_orden_id ON presupuesto_items (orden_id);
+        CREATE INDEX IF NOT EXISTS idx_orden_tiempos_orden_id ON orden_tiempos (orden_id);
+        CREATE INDEX IF NOT EXISTS idx_qc_checklist_items_orden_id ON qc_checklist_items (orden_id);
+        CREATE INDEX IF NOT EXISTS idx_garantias_orden_id ON garantias (orden_id);
         """
     )
     db.commit()
@@ -400,13 +519,36 @@ def listar_ordenes():
     return jsonify({"ordenes": [_orden_dict(db, r) for r in rows], "total": len(rows)})
 
 
+def _orden_dict_detalle(db, row):
+    """Versión completa de la orden para la vista de detalle: agrega
+    presupuesto, tiempos, control de calidad y garantías. Deliberadamente
+    NO se usa en listar_ordenes/dashboard (eso reintroduciría el problema
+    N+1 que ya se corrigió antes en este proyecto) — solo en obtener_orden
+    y en las acciones (presupuesto/qc/entregar) que devuelven la orden
+    completa después de un cambio."""
+    d = _orden_dict(db, row)
+    d["presupuesto"] = _presupuesto_dict(db, row["id"], row["presupuesto_iva"])
+    tiempos = db.execute(
+        "SELECT * FROM orden_tiempos WHERE orden_id = ? ORDER BY marca_tiempo ASC", (row["id"],)
+    ).fetchall()
+    d["tiempos"] = [dict(t) for t in tiempos]
+    d["horas_reales"] = _calcular_horas_reales(tiempos)
+    d["qc_checklist"] = [dict(i) for i in db.execute(
+        "SELECT * FROM qc_checklist_items WHERE orden_id = ? ORDER BY creado_en ASC", (row["id"],)
+    ).fetchall()]
+    d["garantias"] = [dict(g) for g in db.execute(
+        "SELECT * FROM garantias WHERE orden_id = ? ORDER BY creado_en DESC", (row["id"],)
+    ).fetchall()]
+    return d
+
+
 @bp.route("/api/operativo/ordenes/<int:orden_id>", methods=["GET"])
 def obtener_orden(orden_id):
     db = get_db()
     row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     if row is None:
         return jsonify({"error": "Orden no encontrada"}), 404
-    return jsonify(_orden_dict(db, row))
+    return jsonify(_orden_dict_detalle(db, row))
 
 
 @bp.route("/api/operativo/ordenes", methods=["POST"])
@@ -432,13 +574,32 @@ def crear_orden():
         if equipo is None:
             return jsonify({"error": "Ese equipo no existe o no pertenece a este cliente"}), 400
 
+    prioridad = (data.get("prioridad") or "media").strip().lower()
+    if prioridad not in PRIORIDADES_ORDEN:
+        return jsonify({"error": f"Prioridad inválida. Usa una de: {', '.join(PRIORIDADES_ORDEN)}"}), 400
+
+    kilometraje = None
+    if data.get("kilometraje") not in (None, ""):
+        try:
+            kilometraje = int(data.get("kilometraje"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "El kilometraje debe ser un número entero"}), 400
+
+    anio = None
+    if data.get("anio") not in (None, ""):
+        try:
+            anio = int(data.get("anio"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "El año debe ser un número entero"}), 400
+
     ts = now_iso()
     cur = db.execute(
         """
         INSERT INTO ordenes_trabajo (
             cliente_id, equipo_id, estado, descripcion_problema, mecanico,
-            fecha_recepcion, fecha_entrega_estimada, usuario, creado_en, actualizado_en
-        ) VALUES (?, ?, 'recibido', ?, ?, ?, ?, ?, ?, ?)
+            fecha_recepcion, fecha_entrega_estimada, usuario, creado_en, actualizado_en,
+            vin, kilometraje, anio, caja_automatica, prioridad, accesorios, estado_visual
+        ) VALUES (?, ?, 'recibido', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             cliente_id, equipo_id,
@@ -447,6 +608,13 @@ def crear_orden():
             ts,
             (data.get("fecha_entrega_estimada") or "").strip() or None,
             usuario_actual(), ts, ts,
+            (data.get("vin") or "").strip(),
+            kilometraje,
+            anio,
+            (data.get("caja_automatica") or "").strip(),
+            prioridad,
+            (data.get("accesorios") or "").strip(),
+            (data.get("estado_visual") or "").strip(),
         ),
     )
     db.commit()
@@ -477,11 +645,58 @@ def editar_orden(orden_id):
     elif "fecha_entrega_real" in data:
         fecha_entrega_real = (data.get("fecha_entrega_real") or "").strip() or None
 
+    prioridad = row["prioridad"]
+    if "prioridad" in data:
+        prioridad = (data.get("prioridad") or "media").strip().lower()
+        if prioridad not in PRIORIDADES_ORDEN:
+            return jsonify({"error": f"Prioridad inválida. Usa una de: {', '.join(PRIORIDADES_ORDEN)}"}), 400
+
+    kilometraje = row["kilometraje"]
+    if "kilometraje" in data:
+        if data.get("kilometraje") in (None, ""):
+            kilometraje = None
+        else:
+            try:
+                kilometraje = int(data.get("kilometraje"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "El kilometraje debe ser un número entero"}), 400
+
+    anio = row["anio"]
+    if "anio" in data:
+        if data.get("anio") in (None, ""):
+            anio = None
+        else:
+            try:
+                anio = int(data.get("anio"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "El año debe ser un número entero"}), 400
+
+    horas_presupuestadas = row["horas_presupuestadas"]
+    if "horas_presupuestadas" in data:
+        if data.get("horas_presupuestadas") in (None, ""):
+            horas_presupuestadas = None
+        else:
+            try:
+                horas_presupuestadas = float(data.get("horas_presupuestadas"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Las horas presupuestadas deben ser un número"}), 400
+
+    # Campos de texto simples (recepción, diagnóstico, entrega): mismo
+    # patrón de "usa lo nuevo si viene, si no deja lo que ya había".
+    valores_simples = {
+        campo: (data.get(campo, row[campo]) or "").strip() for campo in CAMPOS_SIMPLES_ORDEN
+    }
+
     db.execute(
         """
         UPDATE ordenes_trabajo SET
             estado = ?, descripcion_problema = ?, diagnostico = ?, mecanico = ?,
-            fecha_entrega_estimada = ?, fecha_entrega_real = ?, actualizado_en = ?
+            fecha_entrega_estimada = ?, fecha_entrega_real = ?, actualizado_en = ?,
+            prioridad = ?, kilometraje = ?, anio = ?, horas_presupuestadas = ?,
+            vin = ?, caja_automatica = ?, accesorios = ?, estado_visual = ?,
+            sintoma = ?, diagnostico_tecnico = ?, falla_detectada = ?, componentes_danados = ?,
+            mediciones = ?, resultado_pruebas = ?, responsable_diagnostico = ?,
+            entrega_recibido_por = ?, entrega_documento = ?, entrega_observaciones = ?
         WHERE id = ?
         """,
         (
@@ -492,6 +707,15 @@ def editar_orden(orden_id):
             (data.get("fecha_entrega_estimada", row["fecha_entrega_estimada"]) or "").strip() or None,
             fecha_entrega_real,
             now_iso(),
+            prioridad, kilometraje, anio, horas_presupuestadas,
+            valores_simples["vin"], valores_simples["caja_automatica"],
+            valores_simples["accesorios"], valores_simples["estado_visual"],
+            valores_simples["sintoma"], valores_simples["diagnostico_tecnico"],
+            valores_simples["falla_detectada"], valores_simples["componentes_danados"],
+            valores_simples["mediciones"], valores_simples["resultado_pruebas"],
+            valores_simples["responsable_diagnostico"],
+            valores_simples["entrega_recibido_por"], valores_simples["entrega_documento"],
+            valores_simples["entrega_observaciones"],
             orden_id,
         ),
     )
@@ -617,14 +841,476 @@ def eliminar_item_orden(orden_id, item_id):
 
 
 # ---------------------------------------------------------------------------
+# Fase 3.5.1 — Historial de vehículo
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/operativo/equipos/<int:equipo_id>/historial", methods=["GET"])
+def historial_equipo(equipo_id):
+    db = get_db()
+    equipo = db.execute("SELECT * FROM equipos WHERE id = ?", (equipo_id,)).fetchone()
+    if equipo is None:
+        return jsonify({"error": "Equipo no encontrado"}), 404
+    cliente = db.execute("SELECT id, nombre FROM clientes WHERE id = ?", (equipo["cliente_id"],)).fetchone()
+    ordenes = db.execute(
+        "SELECT * FROM ordenes_trabajo WHERE equipo_id = ? ORDER BY fecha_recepcion DESC", (equipo_id,)
+    ).fetchall()
+    return jsonify({
+        "equipo": dict(equipo),
+        "cliente": dict(cliente) if cliente else None,
+        "ordenes": [_orden_dict(db, r) for r in ordenes],
+    })
+
+
+# ---------------------------------------------------------------------------
+# Fase 3.5.3 — Presupuesto con aprobación
+# ---------------------------------------------------------------------------
+
+def _presupuesto_dict(db, orden_id, presupuesto_iva):
+    items = db.execute(
+        "SELECT * FROM presupuesto_items WHERE orden_id = ? ORDER BY creado_en ASC", (orden_id,)
+    ).fetchall()
+    items_dict = []
+    subtotal = 0.0
+    for i in items:
+        it = dict(i)
+        linea = it["cantidad"] * it["precio_unitario"]
+        if it["tipo"] == "descuento":
+            linea = -abs(linea)
+        it["subtotal"] = round(linea, 2)
+        subtotal += linea
+        items_dict.append(it)
+    iva_monto = round(subtotal * IVA_PORCENTAJE, 2) if presupuesto_iva else 0.0
+    return {
+        "items": items_dict,
+        "subtotal": round(subtotal, 2),
+        "iva_monto": iva_monto,
+        "total": round(subtotal + iva_monto, 2),
+    }
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/items", methods=["POST"])
+def agregar_item_presupuesto(orden_id):
+    db = get_db()
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    if orden["estado"] in ESTADOS_CERRADOS:
+        return jsonify({"error": f"La orden está '{orden['estado']}' y no admite cambios al presupuesto."}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    tipo = (data.get("tipo") or "").strip().lower()
+    if tipo not in TIPOS_PRESUPUESTO_ITEM:
+        return jsonify({"error": f"Tipo inválido. Usa uno de: {', '.join(TIPOS_PRESUPUESTO_ITEM)}"}), 400
+    descripcion = (data.get("descripcion") or "").strip()
+    if not descripcion:
+        return jsonify({"error": "Describe el ítem del presupuesto"}), 400
+    try:
+        cantidad = float(data.get("cantidad") or 1)
+        if cantidad <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "La cantidad debe ser un número mayor a 0"}), 400
+    try:
+        precio_unitario = float(data.get("precio_unitario") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El precio unitario debe ser un número válido"}), 400
+
+    ts = now_iso()
+    cur = db.execute(
+        "INSERT INTO presupuesto_items (orden_id, tipo, descripcion, cantidad, precio_unitario, usuario, creado_en) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (orden_id, tipo, descripcion, cantidad, precio_unitario, usuario_actual(), ts),
+    )
+    db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
+    db.commit()
+    nuevo = db.execute("SELECT * FROM presupuesto_items WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nuevo)), 201
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/items/<int:item_id>", methods=["DELETE"])
+def eliminar_item_presupuesto(orden_id, item_id):
+    db = get_db()
+    item = db.execute(
+        "SELECT * FROM presupuesto_items WHERE id = ? AND orden_id = ?", (item_id, orden_id)
+    ).fetchone()
+    if item is None:
+        return jsonify({"error": "Ítem de presupuesto no encontrado"}), 404
+    db.execute("DELETE FROM presupuesto_items WHERE id = ?", (item_id,))
+    db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (now_iso(), orden_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto", methods=["PUT"])
+def actualizar_presupuesto(orden_id):
+    """Cambia el estado del presupuesto (pendiente/enviado/aprobado/rechazado),
+    el IVA y las notas. Al quedar 'aprobado' la orden pasa sola a
+    'reparacion' — así nadie tiene que acordarse de mover el tablero a mano
+    después de que el cliente dio el visto bueno."""
+    db = get_db()
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    if row["estado"] in ESTADOS_CERRADOS:
+        return jsonify({"error": f"La orden está '{row['estado']}' y no admite cambios al presupuesto."}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    estado_presupuesto = row["presupuesto_estado"]
+    if "estado" in data:
+        estado_presupuesto = (data.get("estado") or "").strip().lower()
+        if estado_presupuesto not in ESTADOS_PRESUPUESTO:
+            return jsonify({"error": f"Estado de presupuesto inválido. Usa uno de: {', '.join(ESTADOS_PRESUPUESTO)}"}), 400
+
+    iva = row["presupuesto_iva"]
+    if "iva" in data:
+        iva = 1 if data.get("iva") else 0
+
+    notas = (data.get("notas", row["presupuesto_notas"]) or "").strip()
+
+    nuevo_estado_orden = row["estado"]
+    if estado_presupuesto == "aprobado" and row["presupuesto_estado"] != "aprobado":
+        nuevo_estado_orden = "reparacion"
+
+    ts = now_iso()
+    db.execute(
+        "UPDATE ordenes_trabajo SET presupuesto_estado = ?, presupuesto_iva = ?, presupuesto_notas = ?, "
+        "estado = ?, actualizado_en = ? WHERE id = ?",
+        (estado_presupuesto, iva, notas, nuevo_estado_orden, ts, orden_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    return jsonify(_orden_dict_detalle(db, actualizada))
+
+
+# ---------------------------------------------------------------------------
+# Fase 3.5.5 — Planificación y control de tiempos
+# ---------------------------------------------------------------------------
+
+def _calcular_horas_reales(eventos):
+    """Suma el tiempo efectivamente trabajado a partir de una lista de
+    eventos (dict/Row con 'evento' y 'marca_tiempo', ISO, ordenados
+    ascendentemente por marca_tiempo). 'inicio'/'reanudar' abren un
+    intervalo; 'pausa'/'termino' lo cierran y lo suman. Eventos fuera de
+    secuencia o con timestamp inválido simplemente no se cuentan, en vez de
+    reventar — esto es un cálculo informativo, no debe tumbar la vista de
+    la orden si el historial de eventos quedó imperfecto."""
+    total_segundos = 0.0
+    inicio_actual = None
+    for ev in eventos:
+        tipo = ev["evento"]
+        try:
+            momento = datetime.fromisoformat(ev["marca_tiempo"])
+        except (TypeError, ValueError):
+            continue
+        if tipo in ("inicio", "reanudar"):
+            if inicio_actual is None:
+                inicio_actual = momento
+        elif tipo in ("pausa", "termino"):
+            if inicio_actual is not None:
+                total_segundos += (momento - inicio_actual).total_seconds()
+                inicio_actual = None
+    return round(total_segundos / 3600, 2)
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/tiempos", methods=["POST"])
+def registrar_tiempo_orden(orden_id):
+    db = get_db()
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    evento = (data.get("evento") or "").strip().lower()
+    if evento not in EVENTOS_TIEMPO:
+        return jsonify({"error": f"Evento inválido. Usa uno de: {', '.join(EVENTOS_TIEMPO)}"}), 400
+
+    ultima_fila = db.execute(
+        "SELECT evento FROM orden_tiempos WHERE orden_id = ? ORDER BY id DESC LIMIT 1", (orden_id,)
+    ).fetchone()
+    ultimo = ultima_fila["evento"] if ultima_fila else None
+
+    # Validación de secuencia: evita registros que no tendrían sentido
+    # (pausar sin haber iniciado, iniciar dos veces seguidas, etc.) — el
+    # cálculo de horas reales asume que la secuencia es coherente.
+    if evento == "inicio" and ultimo is not None:
+        return jsonify({"error": "Esta orden ya tiene un registro de tiempo iniciado."}), 409
+    if evento == "reanudar" and ultimo != "pausa":
+        return jsonify({"error": "Solo se puede reanudar un trabajo que está pausado."}), 409
+    if evento in ("pausa", "termino") and ultimo not in ("inicio", "reanudar"):
+        return jsonify({"error": "No hay un trabajo en curso para pausar o terminar."}), 409
+
+    ts = now_iso()
+    db.execute(
+        "INSERT INTO orden_tiempos (orden_id, evento, marca_tiempo, usuario) VALUES (?, ?, ?, ?)",
+        (orden_id, evento, ts, usuario_actual()),
+    )
+    db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
+    db.commit()
+
+    eventos = db.execute(
+        "SELECT evento, marca_tiempo FROM orden_tiempos WHERE orden_id = ? ORDER BY marca_tiempo ASC", (orden_id,)
+    ).fetchall()
+    return jsonify({"ok": True, "evento": evento, "marca_tiempo": ts, "horas_reales": _calcular_horas_reales(eventos)})
+
+
+# ---------------------------------------------------------------------------
+# Fase 3.5.6 — Control de Calidad
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/qc/items", methods=["POST"])
+def agregar_item_qc(orden_id):
+    db = get_db()
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    item = (data.get("item") or "").strip()
+    if not item:
+        return jsonify({"error": "Describe el punto a revisar"}), 400
+    resultado = (data.get("resultado") or "na").strip().lower()
+    if resultado not in RESULTADOS_QC_ITEM:
+        return jsonify({"error": f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_QC_ITEM)}"}), 400
+    observacion = (data.get("observacion") or "").strip()
+    ts = now_iso()
+    cur = db.execute(
+        "INSERT INTO qc_checklist_items (orden_id, item, resultado, observacion, creado_en) VALUES (?, ?, ?, ?, ?)",
+        (orden_id, item, resultado, observacion, ts),
+    )
+    db.commit()
+    nuevo = db.execute("SELECT * FROM qc_checklist_items WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nuevo)), 201
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/qc/items/<int:item_id>", methods=["PUT"])
+def editar_item_qc(orden_id, item_id):
+    db = get_db()
+    item = db.execute(
+        "SELECT * FROM qc_checklist_items WHERE id = ? AND orden_id = ?", (item_id, orden_id)
+    ).fetchone()
+    if item is None:
+        return jsonify({"error": "Punto de control no encontrado"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    resultado = (data.get("resultado", item["resultado"]) or "na").strip().lower()
+    if resultado not in RESULTADOS_QC_ITEM:
+        return jsonify({"error": f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_QC_ITEM)}"}), 400
+    observacion = (data.get("observacion", item["observacion"]) or "").strip()
+    db.execute(
+        "UPDATE qc_checklist_items SET resultado = ?, observacion = ? WHERE id = ?",
+        (resultado, observacion, item_id),
+    )
+    db.commit()
+    actualizado = db.execute("SELECT * FROM qc_checklist_items WHERE id = ?", (item_id,)).fetchone()
+    return jsonify(dict(actualizado))
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/qc/items/<int:item_id>", methods=["DELETE"])
+def eliminar_item_qc(orden_id, item_id):
+    db = get_db()
+    item = db.execute(
+        "SELECT * FROM qc_checklist_items WHERE id = ? AND orden_id = ?", (item_id, orden_id)
+    ).fetchone()
+    if item is None:
+        return jsonify({"error": "Punto de control no encontrado"}), 404
+    db.execute("DELETE FROM qc_checklist_items WHERE id = ?", (item_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/qc", methods=["PUT"])
+def actualizar_qc(orden_id):
+    """Resultado general del control de calidad. 'rechazado' devuelve la
+    orden a 'reparacion' automáticamente (algo hay que corregir antes de
+    poder entregar); 'aprobado' la pasa a 'listo'."""
+    db = get_db()
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    if row["estado"] in ESTADOS_CERRADOS:
+        return jsonify({"error": f"La orden está '{row['estado']}' y no admite cambios de control de calidad."}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    resultado = row["qc_resultado"] or "pendiente"
+    if "resultado" in data:
+        resultado = (data.get("resultado") or "").strip().lower()
+        if resultado not in RESULTADOS_QC:
+            return jsonify({"error": f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_QC)}"}), 400
+    inspector = (data.get("inspector", row["qc_inspector"]) or "").strip()
+    observaciones = (data.get("observaciones", row["qc_observaciones"]) or "").strip()
+
+    nuevo_estado_orden = row["estado"]
+    if resultado == "rechazado":
+        nuevo_estado_orden = "reparacion"
+    elif resultado == "aprobado":
+        nuevo_estado_orden = "listo"
+
+    ts = now_iso()
+    db.execute(
+        "UPDATE ordenes_trabajo SET qc_resultado = ?, qc_inspector = ?, qc_observaciones = ?, "
+        "estado = ?, actualizado_en = ? WHERE id = ?",
+        (resultado, inspector, observaciones, nuevo_estado_orden, ts, orden_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    return jsonify(_orden_dict_detalle(db, actualizada))
+
+
+# ---------------------------------------------------------------------------
+# Fase 3.5.7 — Garantía
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/garantias", methods=["POST"])
+def crear_garantia(orden_id):
+    db = get_db()
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    motivo = (data.get("motivo") or "").strip()
+    if not motivo:
+        return jsonify({"error": "Describe el motivo de la garantía"}), 400
+    try:
+        costo_asumido = float(data.get("costo_asumido") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El costo asumido debe ser un número válido"}), 400
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO garantias (orden_id, motivo, diagnostico, costo_asumido, responsable, estado, usuario, creado_en)
+        VALUES (?, ?, ?, ?, ?, 'abierta', ?, ?)
+        """,
+        (
+            orden_id, motivo,
+            (data.get("diagnostico") or "").strip(),
+            costo_asumido,
+            (data.get("responsable") or "").strip(),
+            usuario_actual(), ts,
+        ),
+    )
+    db.commit()
+    nueva = db.execute("SELECT * FROM garantias WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nueva)), 201
+
+
+@bp.route("/api/operativo/garantias", methods=["GET"])
+def listar_garantias():
+    db = get_db()
+    estado = (request.args.get("estado") or "").strip()
+    sql = (
+        "SELECT g.*, o.cliente_id, o.equipo_id, o.mecanico AS mecanico_orden "
+        "FROM garantias g JOIN ordenes_trabajo o ON o.id = g.orden_id WHERE 1=1"
+    )
+    params = []
+    if estado:
+        sql += " AND g.estado = ?"
+        params.append(estado)
+    sql += " ORDER BY g.creado_en DESC"
+    rows = db.execute(sql, params).fetchall()
+    garantias = []
+    for r in rows:
+        d = dict(r)
+        cliente = db.execute("SELECT nombre FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+        equipo = None
+        if d["equipo_id"]:
+            equipo = db.execute(
+                "SELECT marca, modelo, identificador FROM equipos WHERE id = ?", (d["equipo_id"],)
+            ).fetchone()
+        d["cliente_nombre"] = cliente["nombre"] if cliente else None
+        d["equipo_texto"] = (
+            " ".join(filter(None, [equipo["marca"], equipo["modelo"], equipo["identificador"]])) if equipo else None
+        )
+        garantias.append(d)
+    return jsonify({"garantias": garantias, "total": len(garantias)})
+
+
+@bp.route("/api/operativo/garantias/<int:garantia_id>", methods=["PUT"])
+def editar_garantia(garantia_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Garantía no encontrada"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    estado = (data.get("estado", row["estado"]) or "").strip().lower()
+    if estado not in ESTADOS_GARANTIA:
+        return jsonify({"error": f"Estado inválido. Usa uno de: {', '.join(ESTADOS_GARANTIA)}"}), 400
+    cerrado_en = row["cerrado_en"]
+    if estado == "cerrada" and not cerrado_en:
+        cerrado_en = now_iso()
+    elif estado == "abierta":
+        cerrado_en = None
+    try:
+        costo_asumido = float(data.get("costo_asumido", row["costo_asumido"]) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El costo asumido debe ser un número válido"}), 400
+    db.execute(
+        "UPDATE garantias SET motivo = ?, diagnostico = ?, costo_asumido = ?, responsable = ?, "
+        "estado = ?, cerrado_en = ? WHERE id = ?",
+        (
+            (data.get("motivo", row["motivo"]) or "").strip(),
+            (data.get("diagnostico", row["diagnostico"]) or "").strip(),
+            costo_asumido,
+            (data.get("responsable", row["responsable"]) or "").strip(),
+            estado, cerrado_en, garantia_id,
+        ),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
+    return jsonify(dict(actualizada))
+
+
+# ---------------------------------------------------------------------------
+# Fase 3.5.8 — Entrega
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/entregar", methods=["POST"])
+def entregar_orden(orden_id):
+    """Acción explícita de entrega: exige saber quién retira el vehículo
+    antes de poder cerrar la orden como 'entregado' (evita que quede
+    marcada como entregada sin ese dato mínimo). Fotos y firma digital
+    quedan pendientes de la decisión de almacenamiento externo (bloqueo
+    3.1 del plan de Fase 3.5 — Railway no garantiza disco persistente)."""
+    db = get_db()
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    if row["estado"] == "cancelado":
+        return jsonify({"error": "Esta orden está cancelada y no se puede entregar."}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    recibido_por = (data.get("recibido_por") or "").strip()
+    if not recibido_por:
+        return jsonify({"error": "Indica quién retira el vehículo"}), 400
+    documento = (data.get("documento") or "").strip()
+    observaciones = (data.get("observaciones") or "").strip()
+
+    ts = now_iso()
+    fecha_entrega_real = row["fecha_entrega_real"] or ts
+    db.execute(
+        """
+        UPDATE ordenes_trabajo SET
+            estado = 'entregado', fecha_entrega_real = ?, entrega_recibido_por = ?,
+            entrega_documento = ?, entrega_observaciones = ?, actualizado_en = ?
+        WHERE id = ?
+        """,
+        (fecha_entrega_real, recibido_por, documento, observaciones, ts, orden_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    return jsonify(_orden_dict_detalle(db, actualizada))
+
+
+# ---------------------------------------------------------------------------
 # Reportes
 # ---------------------------------------------------------------------------
 
 ESTADOS_LABEL = {
     "recibido": "Recibido",
     "diagnostico": "Diagnóstico",
+    "presupuesto": "Presupuesto",
+    "esperando_aprobacion": "Esperando aprobación",
     "reparacion": "Reparación",
     "esperando_repuesto": "Esperando repuesto",
+    "control_calidad": "Control de calidad",
     "listo": "Listo",
     "entregado": "Entregado",
     "cancelado": "Cancelado",
@@ -712,3 +1398,80 @@ def reporte_ordenes_pdf():
     sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
     nombre = f"ordenes_trabajo{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     return _pdf_response(buffer, doc, elementos, nombre)
+
+
+@bp.route("/api/operativo/reportes/garantias", methods=["GET"])
+def reporte_garantias():
+    """Excel con el detalle de garantías del período y dos resúmenes
+    (por técnico y por equipo) — el análisis que el bosquejo original
+    pedía para detectar qué mecánico, modelo o proveedor genera más
+    reclamos de garantía."""
+    desde, hasta = _rango_fechas()
+    db = get_db()
+    sql = (
+        "SELECT g.*, o.cliente_id, o.equipo_id, o.mecanico AS mecanico_orden "
+        "FROM garantias g JOIN ordenes_trabajo o ON o.id = g.orden_id WHERE 1=1"
+    )
+    params = []
+    if desde:
+        sql += " AND substr(g.creado_en, 1, 10) >= ?"
+        params.append(desde)
+    if hasta:
+        sql += " AND substr(g.creado_en, 1, 10) <= ?"
+        params.append(hasta)
+    sql += " ORDER BY g.creado_en DESC"
+    rows = db.execute(sql, params).fetchall()
+
+    detalle = []
+    conteo_tecnico = {}
+    conteo_equipo = {}
+    for r in rows:
+        d = dict(r)
+        cliente = db.execute("SELECT nombre FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+        equipo_txt = "—"
+        if d["equipo_id"]:
+            eq = db.execute(
+                "SELECT marca, modelo, identificador FROM equipos WHERE id = ?", (d["equipo_id"],)
+            ).fetchone()
+            if eq:
+                equipo_txt = " ".join(filter(None, [eq["marca"], eq["modelo"], eq["identificador"]])) or "—"
+        tecnico = d["mecanico_orden"] or "Sin asignar"
+        conteo_tecnico[tecnico] = conteo_tecnico.get(tecnico, 0) + 1
+        conteo_equipo[equipo_txt] = conteo_equipo.get(equipo_txt, 0) + 1
+        detalle.append([
+            (d["creado_en"] or "")[:10],
+            f"OT #{d['orden_id']}",
+            cliente["nombre"] if cliente else "—",
+            equipo_txt,
+            tecnico,
+            d["motivo"],
+            d["estado"].capitalize(),
+            round(d["costo_asumido"], 2),
+        ])
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Garantías"
+    ws.append(["Fecha", "Orden", "Cliente", "Equipo", "Mecánico", "Motivo", "Estado", "Costo asumido"])
+    for fila in detalle:
+        ws.append(fila)
+    _estilo_encabezado(ws)
+    _autoancho(ws)
+
+    ws2 = wb.create_sheet("Resumen por técnico")
+    ws2.append(["Mecánico", "Cantidad de garantías"])
+    for tecnico, cantidad in sorted(conteo_tecnico.items(), key=lambda x: -x[1]):
+        ws2.append([tecnico, cantidad])
+    _estilo_encabezado(ws2)
+    _autoancho(ws2)
+
+    ws3 = wb.create_sheet("Resumen por equipo")
+    ws3.append(["Equipo", "Cantidad de garantías"])
+    for equipo_txt, cantidad in sorted(conteo_equipo.items(), key=lambda x: -x[1]):
+        ws3.append([equipo_txt, cantidad])
+    _estilo_encabezado(ws3)
+    _autoancho(ws3)
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    nombre = f"garantias{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)

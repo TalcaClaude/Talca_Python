@@ -94,7 +94,7 @@ async function cargarSesion() {
 }
 
 // ---------------------------------------------------------------------------
-// Pestañas: Dashboard / Órdenes de Trabajo / Clientes / Equipos / Reportes
+// Pestañas: Dashboard / Órdenes de Trabajo / Clientes / Reportes
 // ---------------------------------------------------------------------------
 
 document.querySelectorAll(".tab").forEach(tabBtn => {
@@ -105,20 +105,17 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-dashboard").style.display = vista === "dashboard" ? "block" : "none";
     document.getElementById("vista-ordenes").style.display = vista === "ordenes" ? "block" : "none";
     document.getElementById("vista-clientes").style.display = vista === "clientes" ? "block" : "none";
-    document.getElementById("vista-equipos").style.display = vista === "equipos" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
       dashboard: "Operativo — Dashboard",
       ordenes: "Operativo — Órdenes de Trabajo",
       clientes: "Operativo — Clientes",
-      equipos: "Operativo — Equipos",
       reportes: "Operativo — Reportes",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "dashboard") cargarDashboardOperativo();
     if (vista === "ordenes") cargarOperativo();
     if (vista === "clientes") cargarClientesTab();
-    if (vista === "equipos") cargarEquiposTab();
   });
 });
 
@@ -142,7 +139,10 @@ async function cargarDashboardOperativo() {
 // Módulo Operativo: órdenes de trabajo
 // ---------------------------------------------------------------------------
 
-const OP_ESTADOS_TABLERO = ["recibido", "diagnostico", "reparacion", "esperando_repuesto", "listo", "entregado", "cancelado"];
+const OP_ESTADOS_TABLERO = [
+  "recibido", "diagnostico", "presupuesto", "esperando_aprobacion", "reparacion",
+  "esperando_repuesto", "control_calidad", "listo", "entregado", "cancelado",
+];
 
 async function cargarOperativo() {
   try {
@@ -196,7 +196,9 @@ function renderTableroOperativo() {
     }
     cont.innerHTML = ordenes.map(o => `
       <div class="op-card" data-id="${o.id}">
-        <div class="op-card-cliente">${escapeHtml(o.cliente ? o.cliente.nombre : "Sin cliente")}</div>
+        <div class="op-card-cliente">${escapeHtml(o.cliente ? o.cliente.nombre : "Sin cliente")}
+          ${o.prioridad && o.prioridad !== "media" ? `<span class="badge-prioridad badge-prioridad--${o.prioridad}">${escapeHtml(o.prioridad)}</span>` : ""}
+        </div>
         ${o.equipo ? `<div class="op-card-equipo">${escapeHtml([o.equipo.marca, o.equipo.modelo, o.equipo.identificador].filter(Boolean).join(" · "))}</div>` : ""}
         ${o.descripcion_problema ? `<div class="op-card-descripcion">${escapeHtml(o.descripcion_problema)}</div>` : ""}
         <div class="op-card-meta">
@@ -283,11 +285,11 @@ async function cargarClientesTab() {
         </td>
       </tr>
     `).join("");
+    tbody.querySelectorAll("[data-ver-equipos-cliente]").forEach(btn => {
+      btn.addEventListener("click", () => abrirEquiposDeCliente(parseInt(btn.dataset.verEquiposCliente, 10)));
+    });
     tbody.querySelectorAll("[data-editar-cliente-tab]").forEach(btn => {
       btn.addEventListener("click", () => abrirEdicionClienteOperativo(parseInt(btn.dataset.editarClienteTab, 10)));
-    });
-    tbody.querySelectorAll("[data-ver-equipos-cliente]").forEach(btn => {
-      btn.addEventListener("click", () => verEquiposDeCliente(parseInt(btn.dataset.verEquiposCliente, 10)));
     });
     tbody.querySelectorAll("[data-eliminar-cliente]").forEach(btn => {
       btn.addEventListener("click", () => eliminarClienteTab(parseInt(btn.dataset.eliminarCliente, 10)));
@@ -316,14 +318,6 @@ async function eliminarClienteTab(id) {
   } catch (e) {
     toast(e.message, true);
   }
-}
-
-function verEquiposDeCliente(clienteId) {
-  document.querySelector('.tab[data-vista="equipos"]').click();
-  setTimeout(() => {
-    document.getElementById("equ-filtro-cliente").value = String(clienteId);
-    cargarEquiposTab();
-  }, 50);
 }
 
 document.getElementById("form-op-cliente").addEventListener("submit", async (e) => {
@@ -355,6 +349,7 @@ async function renderSelectEquiposOperativo(clienteId, valorActual) {
   const select = document.getElementById("opon-equipo-id");
   if (!clienteId) {
     select.innerHTML = '<option value="">Sin equipo específico</option>';
+    document.getElementById("opon-ver-historial").style.display = "none";
     return;
   }
   const data = await api(`/api/operativo/equipos?cliente_id=${clienteId}`);
@@ -362,10 +357,22 @@ async function renderSelectEquiposOperativo(clienteId, valorActual) {
   select.innerHTML = '<option value="">Sin equipo específico</option>' +
     data.equipos.map(eq => `<option value="${eq.id}">${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</option>`).join("");
   select.value = valorActual || "";
+  // select.value = ... no dispara "change", así que el link de historial se
+  // actualiza acá también (cubre el caso de equipo recién creado inline).
+  document.getElementById("opon-ver-historial").style.display = valorActual ? "" : "none";
 }
 
 document.getElementById("opon-cliente-id").addEventListener("change", (e) => {
   renderSelectEquiposOperativo(e.target.value || null);
+});
+
+document.getElementById("opon-equipo-id").addEventListener("change", (e) => {
+  document.getElementById("opon-ver-historial").style.display = e.target.value ? "" : "none";
+});
+
+document.getElementById("opon-ver-historial").addEventListener("click", () => {
+  const equipoId = document.getElementById("opon-equipo-id").value;
+  if (equipoId) abrirHistorialEquipo(parseInt(equipoId, 10));
 });
 
 let opEquipoCallback = null; // se llama con (nuevoEquipo, payload) tras guardar, según de dónde se abrió el modal
@@ -421,95 +428,6 @@ document.getElementById("form-op-equipo").addEventListener("submit", async (e) =
   }
 });
 
-// ---- Pestaña Equipos ----
-
-async function cargarSelectFiltroClienteEquipos() {
-  if (state.opClientes.length === 0) {
-    const data = await api("/api/operativo/clientes");
-    state.opClientes = data.clientes;
-  }
-  const select = document.getElementById("equ-filtro-cliente");
-  const valorActual = select.value;
-  select.innerHTML = '<option value="">Todos los clientes</option>' +
-    state.opClientes.map(c => `<option value="${c.id}">${escapeHtml(c.nombre)}</option>`).join("");
-  select.value = valorActual || "";
-}
-
-async function cargarEquiposTab() {
-  try {
-    await cargarSelectFiltroClienteEquipos();
-    const clienteId = document.getElementById("equ-filtro-cliente").value;
-    const data = await api(`/api/operativo/equipos${clienteId ? "?cliente_id=" + clienteId : ""}`);
-    const tbody = document.getElementById("tbody-equipos");
-    if (data.equipos.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" class="vacio">Sin equipos todavía.</td></tr>`;
-      return;
-    }
-    const clientesPorId = Object.fromEntries(state.opClientes.map(c => [c.id, c.nombre]));
-    tbody.innerHTML = data.equipos.map(eq => `
-      <tr>
-        <td>${escapeHtml(clientesPorId[eq.cliente_id] || "—")}</td>
-        <td>${escapeHtml(eq.identificador || "—")}</td>
-        <td>${escapeHtml(eq.marca || "—")}</td>
-        <td>${escapeHtml(eq.modelo || "—")}</td>
-        <td>
-          <button type="button" class="btn-link" data-editar-equipo-tab="${eq.id}">Editar</button>
-          <button type="button" class="btn-link btn-link--peligro" data-eliminar-equipo="${eq.id}">Eliminar</button>
-        </td>
-      </tr>
-    `).join("");
-    tbody.querySelectorAll("[data-editar-equipo-tab]").forEach(btn => {
-      const eq = data.equipos.find(x => x.id === parseInt(btn.dataset.editarEquipoTab, 10));
-      btn.addEventListener("click", () => abrirEdicionEquipoTab(eq));
-    });
-    tbody.querySelectorAll("[data-eliminar-equipo]").forEach(btn => {
-      btn.addEventListener("click", () => eliminarEquipoTab(parseInt(btn.dataset.eliminarEquipo, 10)));
-    });
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-document.getElementById("equ-filtro-cliente").addEventListener("change", cargarEquiposTab);
-
-document.getElementById("btn-equ-nuevo").addEventListener("click", async () => {
-  if (state.opClientes.length === 0) {
-    const data = await api("/api/operativo/clientes");
-    state.opClientes = data.clientes;
-  }
-  document.getElementById("form-op-equipo").reset();
-  document.getElementById("ope-id").value = "";
-  renderSelectClienteEquipoModal(document.getElementById("equ-filtro-cliente").value || "");
-  document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
-  opEquipoCallback = cargarEquiposTab;
-  abrirModal("modal-op-equipo");
-});
-
-function abrirEdicionEquipoTab(eq) {
-  if (!eq) return;
-  document.getElementById("form-op-equipo").reset();
-  document.getElementById("ope-id").value = eq.id;
-  renderSelectClienteEquipoModal(eq.cliente_id);
-  document.getElementById("ope-identificador").value = eq.identificador || "";
-  document.getElementById("ope-marca").value = eq.marca || "";
-  document.getElementById("ope-modelo").value = eq.modelo || "";
-  document.getElementById("ope-notas").value = eq.notas || "";
-  document.getElementById("modal-op-equipo-titulo").textContent = "Editar equipo";
-  opEquipoCallback = cargarEquiposTab;
-  abrirModal("modal-op-equipo");
-}
-
-async function eliminarEquipoTab(id) {
-  if (!confirm("¿Eliminar este equipo? Solo se puede si no tiene órdenes de trabajo asociadas.")) return;
-  try {
-    await api(`/api/operativo/equipos/${id}`, { method: "DELETE" });
-    toast("Equipo eliminado.");
-    cargarEquiposTab();
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
 // ---- Pestaña Reportes ----
 
 function rangoFechasParamsOperativo() {
@@ -534,6 +452,7 @@ document.getElementById("btn-op-nueva-orden").addEventListener("click", () => {
   document.getElementById("form-op-orden-nueva").reset();
   renderSelectClientesOperativo("opon-cliente-id", "");
   renderSelectEquiposOperativo(null);
+  document.getElementById("opon-ver-historial").style.display = "none";
   abrirModal("modal-op-orden-nueva");
 });
 
@@ -545,6 +464,13 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     descripcion_problema: document.getElementById("opon-descripcion").value.trim(),
     mecanico: document.getElementById("opon-mecanico").value.trim(),
     fecha_entrega_estimada: document.getElementById("opon-fecha-estimada").value || null,
+    prioridad: document.getElementById("opon-prioridad").value,
+    vin: document.getElementById("opon-vin").value.trim(),
+    kilometraje: document.getElementById("opon-kilometraje").value || null,
+    anio: document.getElementById("opon-anio").value || null,
+    caja_automatica: document.getElementById("opon-caja-automatica").value.trim(),
+    accesorios: document.getElementById("opon-accesorios").value.trim(),
+    estado_visual: document.getElementById("opon-estado-visual").value.trim(),
   };
   if (!payload.cliente_id) {
     toast("Selecciona un cliente.", true);
@@ -574,12 +500,51 @@ async function abrirDetalleOrden(id) {
       (orden.equipo ? ` — ${[orden.equipo.marca, orden.equipo.modelo, orden.equipo.identificador].filter(Boolean).join(" ")}` : "");
     document.getElementById("opod-estado").value = orden.estado;
     document.getElementById("opod-mecanico").value = orden.mecanico || "";
+    document.getElementById("opod-prioridad").value = orden.prioridad || "media";
     document.getElementById("opod-fecha-estimada").value = (orden.fecha_entrega_estimada || "").slice(0, 10);
     document.getElementById("opod-fecha-real").value = orden.fecha_entrega_real ? fmtFecha(orden.fecha_entrega_real) : "Todavía no";
     document.getElementById("opod-descripcion").value = orden.descripcion_problema || "";
     document.getElementById("opod-diagnostico").value = orden.diagnostico || "";
 
+    // Recepción
+    document.getElementById("opod-vin").value = orden.vin || "";
+    document.getElementById("opod-kilometraje").value = orden.kilometraje ?? "";
+    document.getElementById("opod-anio").value = orden.anio ?? "";
+    document.getElementById("opod-caja-automatica").value = orden.caja_automatica || "";
+    document.getElementById("opod-accesorios").value = orden.accesorios || "";
+    document.getElementById("opod-estado-visual").value = orden.estado_visual || "";
+
+    // Diagnóstico
+    document.getElementById("opod-sintoma").value = orden.sintoma || "";
+    document.getElementById("opod-diagnostico-tecnico").value = orden.diagnostico_tecnico || "";
+    document.getElementById("opod-falla-detectada").value = orden.falla_detectada || "";
+    document.getElementById("opod-componentes-danados").value = orden.componentes_danados || "";
+    document.getElementById("opod-mediciones").value = orden.mediciones || "";
+    document.getElementById("opod-resultado-pruebas").value = orden.resultado_pruebas || "";
+    document.getElementById("opod-responsable-diagnostico").value = orden.responsable_diagnostico || "";
+
+    // Ver historial del vehículo
+    const btnHistorial = document.getElementById("btn-opod-ver-historial");
+    if (orden.equipo) {
+      btnHistorial.style.display = "";
+      btnHistorial.onclick = () => abrirHistorialEquipo(orden.equipo.id);
+    } else {
+      btnHistorial.style.display = "none";
+    }
+
     renderItemsOrden(orden);
+    renderPresupuesto(orden);
+    renderTiempos(orden);
+    renderQcChecklist(orden);
+    renderGarantias(orden);
+
+    // Planificación / tiempos
+    document.getElementById("opod-horas-presupuestadas").value = orden.horas_presupuestadas ?? "";
+
+    // Entrega
+    document.getElementById("ope-recibido-por").value = orden.entrega_recibido_por || "";
+    document.getElementById("ope-documento").value = orden.entrega_documento || "";
+    document.getElementById("ope-observaciones").value = orden.entrega_observaciones || "";
 
     if (state.opProductos.length === 0) {
       const dataProductos = await api("/api/productos");
@@ -624,9 +589,24 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
   const payload = {
     estado: document.getElementById("opod-estado").value,
     mecanico: document.getElementById("opod-mecanico").value.trim(),
+    prioridad: document.getElementById("opod-prioridad").value,
     fecha_entrega_estimada: document.getElementById("opod-fecha-estimada").value || null,
     descripcion_problema: document.getElementById("opod-descripcion").value.trim(),
     diagnostico: document.getElementById("opod-diagnostico").value.trim(),
+    vin: document.getElementById("opod-vin").value.trim(),
+    kilometraje: document.getElementById("opod-kilometraje").value || null,
+    anio: document.getElementById("opod-anio").value || null,
+    caja_automatica: document.getElementById("opod-caja-automatica").value.trim(),
+    accesorios: document.getElementById("opod-accesorios").value.trim(),
+    estado_visual: document.getElementById("opod-estado-visual").value.trim(),
+    sintoma: document.getElementById("opod-sintoma").value.trim(),
+    diagnostico_tecnico: document.getElementById("opod-diagnostico-tecnico").value.trim(),
+    falla_detectada: document.getElementById("opod-falla-detectada").value.trim(),
+    componentes_danados: document.getElementById("opod-componentes-danados").value.trim(),
+    mediciones: document.getElementById("opod-mediciones").value.trim(),
+    resultado_pruebas: document.getElementById("opod-resultado-pruebas").value.trim(),
+    responsable_diagnostico: document.getElementById("opod-responsable-diagnostico").value.trim(),
+    horas_presupuestadas: document.getElementById("opod-horas-presupuestadas").value || null,
   };
   try {
     await api(`/api/operativo/ordenes/${id}`, { method: "PUT", body: JSON.stringify(payload) });
@@ -699,6 +679,368 @@ async function eliminarItemOrden(itemId) {
     toast(e.message, true);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Fase 3.5.3 — Presupuesto
+// ---------------------------------------------------------------------------
+
+const OPP_TIPO_LABEL = {
+  mano_obra: "Mano de obra", repuesto: "Repuesto", insumo: "Insumo",
+  servicio_externo: "Servicio externo", descuento: "Descuento",
+};
+
+function renderPresupuesto(orden) {
+  const tbody = document.getElementById("tbody-op-presupuesto");
+  const items = orden.presupuesto.items;
+  if (items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>`;
+  } else {
+    tbody.innerHTML = items.map(it => `
+      <tr>
+        <td>${escapeHtml(OPP_TIPO_LABEL[it.tipo] || it.tipo)}</td>
+        <td>${escapeHtml(it.descripcion)}</td>
+        <td class="num">${it.cantidad}</td>
+        <td class="num">${fmtMoney(it.precio_unitario)}</td>
+        <td class="num">${fmtMoney(it.subtotal)}</td>
+        <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-presupuesto-item="${it.id}">Eliminar</button></td>
+      </tr>
+    `).join("");
+  }
+  document.getElementById("opp-subtotal").textContent = fmtMoney(orden.presupuesto.subtotal);
+  document.getElementById("opp-iva").textContent = fmtMoney(orden.presupuesto.iva_monto);
+  document.getElementById("opp-total").textContent = fmtMoney(orden.presupuesto.total);
+  document.getElementById("opp-estado").value = orden.presupuesto_estado || "pendiente";
+  document.getElementById("opp-iva-check").checked = !!orden.presupuesto_iva;
+  document.getElementById("opp-notas").value = orden.presupuesto_notas || "";
+
+  tbody.querySelectorAll("[data-eliminar-presupuesto-item]").forEach(btn => {
+    btn.addEventListener("click", () => eliminarItemPresupuesto(parseInt(btn.dataset.eliminarPresupuestoItem, 10)));
+  });
+}
+
+document.getElementById("oppi-tipo").addEventListener("change", () => {});
+
+document.getElementById("form-op-presupuesto-item").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = {
+    tipo: document.getElementById("oppi-tipo").value,
+    descripcion: document.getElementById("oppi-descripcion").value.trim(),
+    cantidad: document.getElementById("oppi-cantidad").value,
+    precio_unitario: document.getElementById("oppi-precio").value || 0,
+  };
+  if (!payload.descripcion) {
+    toast("Describe el ítem del presupuesto.", true);
+    return;
+  }
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/presupuesto/items`, { method: "POST", body: JSON.stringify(payload) });
+    toast("Ítem de presupuesto agregado.");
+    document.getElementById("form-op-presupuesto-item").reset();
+    document.getElementById("oppi-cantidad").value = 1;
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPresupuesto(orden);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function eliminarItemPresupuesto(itemId) {
+  if (!confirm("¿Eliminar este ítem del presupuesto?")) return;
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/presupuesto/items/${itemId}`, { method: "DELETE" });
+    toast("Ítem eliminado.");
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPresupuesto(orden);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-opp-guardar").addEventListener("click", async () => {
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = {
+    estado: document.getElementById("opp-estado").value,
+    iva: document.getElementById("opp-iva-check").checked,
+    notas: document.getElementById("opp-notas").value.trim(),
+  };
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/presupuesto`, { method: "PUT", body: JSON.stringify(payload) });
+    toast("Presupuesto actualizado.");
+    await cargarOperativo();
+    abrirDetalleOrden(parseInt(ordenId, 10));
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fase 3.5.5 — Planificación y tiempos
+// ---------------------------------------------------------------------------
+
+const OP_TIEMPO_EVENTO_LABEL = { inicio: "Inicio", pausa: "Pausa", reanudar: "Reanudó", termino: "Término" };
+
+function renderTiempos(orden) {
+  document.getElementById("opod-horas-reales").value = `${orden.horas_reales} h`;
+  const lista = document.getElementById("op-tiempos-lista");
+  if (!orden.tiempos || orden.tiempos.length === 0) {
+    lista.innerHTML = `<li>Sin registros de tiempo todavía.</li>`;
+    return;
+  }
+  lista.innerHTML = orden.tiempos.map(t => `<li>${OP_TIEMPO_EVENTO_LABEL[t.evento] || t.evento} — ${fmtFecha(t.marca_tiempo)}${t.usuario ? " · " + escapeHtml(t.usuario) : ""}</li>`).join("");
+}
+
+document.querySelectorAll("[data-tiempo-evento]").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const ordenId = document.getElementById("opod-id").value;
+    try {
+      await api(`/api/operativo/ordenes/${ordenId}/tiempos`, {
+        method: "POST", body: JSON.stringify({ evento: btn.dataset.tiempoEvento }),
+      });
+      toast("Registro de tiempo agregado.");
+      const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+      renderTiempos(orden);
+    } catch (e) {
+      toast(e.message, true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fase 3.5.6 — Control de Calidad
+// ---------------------------------------------------------------------------
+
+const OPQC_RESULTADO_LABEL = { ok: "OK", falla: "Falla", na: "N/A" };
+
+function renderQcChecklist(orden) {
+  const cont = document.getElementById("op-qc-checklist");
+  if (!orden.qc_checklist || orden.qc_checklist.length === 0) {
+    cont.innerHTML = `<p class="vacio-inline">Sin puntos de control todavía.</p>`;
+  } else {
+    cont.innerHTML = orden.qc_checklist.map(it => `
+      <div class="op-checklist-row">
+        <span class="op-checklist-item">${escapeHtml(it.item)}${it.observacion ? " — " + escapeHtml(it.observacion) : ""}</span>
+        <span class="badge-urgencia ${it.resultado === "falla" ? "badge-urgencia--critico" : ""}">${OPQC_RESULTADO_LABEL[it.resultado] || it.resultado}</span>
+        <button type="button" class="btn-link btn-link--peligro" data-eliminar-qc-item="${it.id}">Eliminar</button>
+      </div>
+    `).join("");
+    cont.querySelectorAll("[data-eliminar-qc-item]").forEach(btn => {
+      btn.addEventListener("click", () => eliminarItemQc(parseInt(btn.dataset.eliminarQcItem, 10)));
+    });
+  }
+  document.getElementById("opqc-veredicto").value = orden.qc_resultado || "pendiente";
+  document.getElementById("opqc-inspector").value = orden.qc_inspector || "";
+  document.getElementById("opqc-observaciones-generales").value = orden.qc_observaciones || "";
+}
+
+document.getElementById("form-op-qc-item").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = {
+    item: document.getElementById("opqc-item").value.trim(),
+    resultado: document.getElementById("opqc-resultado").value,
+    observacion: document.getElementById("opqc-observacion").value.trim(),
+  };
+  if (!payload.item) {
+    toast("Describe el punto a revisar.", true);
+    return;
+  }
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/qc/items`, { method: "POST", body: JSON.stringify(payload) });
+    toast("Punto de control agregado.");
+    document.getElementById("form-op-qc-item").reset();
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderQcChecklist(orden);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function eliminarItemQc(itemId) {
+  if (!confirm("¿Eliminar este punto de control?")) return;
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/qc/items/${itemId}`, { method: "DELETE" });
+    toast("Punto de control eliminado.");
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderQcChecklist(orden);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-opqc-guardar").addEventListener("click", async () => {
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = {
+    resultado: document.getElementById("opqc-veredicto").value,
+    inspector: document.getElementById("opqc-inspector").value.trim(),
+    observaciones: document.getElementById("opqc-observaciones-generales").value.trim(),
+  };
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/qc`, { method: "PUT", body: JSON.stringify(payload) });
+    toast("Control de calidad actualizado.");
+    await cargarOperativo();
+    abrirDetalleOrden(parseInt(ordenId, 10));
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fase 3.5.7 — Garantía
+// ---------------------------------------------------------------------------
+
+function renderGarantias(orden) {
+  const cont = document.getElementById("op-garantias-lista");
+  if (!orden.garantias || orden.garantias.length === 0) {
+    cont.innerHTML = `<p class="vacio-inline">Sin garantías registradas para esta orden.</p>`;
+    return;
+  }
+  cont.innerHTML = orden.garantias.map(g => `
+    <div class="op-garantia-card">
+      <div>${escapeHtml(g.motivo)}</div>
+      <div class="op-garantia-meta">
+        Estado: ${escapeHtml(g.estado)} · Costo asumido: ${fmtMoney(g.costo_asumido)}
+        ${g.responsable ? " · " + escapeHtml(g.responsable) : ""} · ${fmtFecha(g.creado_en)}
+      </div>
+    </div>
+  `).join("");
+}
+
+document.getElementById("form-op-garantia").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = {
+    motivo: document.getElementById("opg-motivo").value.trim(),
+    diagnostico: document.getElementById("opg-diagnostico").value.trim(),
+    responsable: document.getElementById("opg-responsable").value.trim(),
+    costo_asumido: document.getElementById("opg-costo").value || 0,
+  };
+  if (!payload.motivo) {
+    toast("Describe el motivo de la garantía.", true);
+    return;
+  }
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/garantias`, { method: "POST", body: JSON.stringify(payload) });
+    toast("Garantía registrada.");
+    document.getElementById("form-op-garantia").reset();
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderGarantias(orden);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fase 3.5.8 — Entrega
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-ope-entregar").addEventListener("click", async () => {
+  if (!confirm("¿Marcar esta orden como entregada?")) return;
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = {
+    recibido_por: document.getElementById("ope-recibido-por").value.trim(),
+    documento: document.getElementById("ope-documento").value,
+    observaciones: document.getElementById("ope-observaciones").value.trim(),
+  };
+  if (!payload.recibido_por) {
+    toast("Indica quién retira el vehículo.", true);
+    return;
+  }
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/entregar`, { method: "POST", body: JSON.stringify(payload) });
+    toast("Orden marcada como entregada.");
+    await cargarOperativo();
+    abrirDetalleOrden(parseInt(ordenId, 10));
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fase 3.5.1 — Historial de vehículo
+// ---------------------------------------------------------------------------
+
+async function abrirHistorialEquipo(equipoId) {
+  try {
+    const data = await api(`/api/operativo/equipos/${equipoId}/historial`);
+    document.getElementById("modal-op-equipo-historial-titulo").textContent =
+      `Historial — ${[data.equipo.marca, data.equipo.modelo, data.equipo.identificador].filter(Boolean).join(" ") || "Equipo #" + data.equipo.id}`;
+    document.getElementById("opeh-cliente").textContent = data.cliente ? `Cliente: ${data.cliente.nombre}` : "";
+    const tbody = document.getElementById("tbody-equipo-historial");
+    if (data.ordenes.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="4" class="vacio">Este vehículo no tiene órdenes registradas todavía.</td></tr>`;
+    } else {
+      tbody.innerHTML = data.ordenes.map(o => `
+        <tr data-ver-orden="${o.id}">
+          <td>${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</td>
+          <td>${escapeHtml(OP_ESTADOS_LABEL[o.estado] || o.estado)}</td>
+          <td>${escapeHtml(o.diagnostico || o.descripcion_problema || "—")}</td>
+          <td class="num">${fmtMoney(o.total)}</td>
+        </tr>
+      `).join("");
+      tbody.querySelectorAll("[data-ver-orden]").forEach(tr => {
+        tr.addEventListener("click", () => {
+          cerrarModal("modal-op-equipo-historial");
+          cerrarModal("modal-op-orden-nueva");
+          abrirDetalleOrden(parseInt(tr.dataset.verOrden, 10));
+        });
+      });
+    }
+    abrirModal("modal-op-equipo-historial");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+const OP_ESTADOS_LABEL = {
+  recibido: "Recibido", diagnostico: "Diagnóstico", presupuesto: "Presupuesto",
+  esperando_aprobacion: "Esperando aprobación", reparacion: "Reparación",
+  esperando_repuesto: "Esperando repuesto", control_calidad: "Control de calidad",
+  listo: "Listo", entregado: "Entregado", cancelado: "Cancelado",
+};
+
+// ---- Pestaña Clientes: ver equipos / historial ----
+
+async function abrirEquiposDeCliente(clienteId) {
+  try {
+    const data = await api(`/api/operativo/clientes/${clienteId}`);
+    document.getElementById("modal-op-cliente-equipos-titulo").textContent = `Equipos de ${data.nombre}`;
+    const tbody = document.getElementById("tbody-cliente-equipos");
+    if (data.equipos.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="2" class="vacio">Este cliente no tiene equipos registrados todavía.</td></tr>`;
+    } else {
+      tbody.innerHTML = data.equipos.map(eq => `
+        <tr>
+          <td>${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</td>
+          <td><button type="button" class="btn-link" data-ver-historial-equipo="${eq.id}">Ver historial</button></td>
+        </tr>
+      `).join("");
+      tbody.querySelectorAll("[data-ver-historial-equipo]").forEach(btn => {
+        btn.addEventListener("click", () => abrirHistorialEquipo(parseInt(btn.dataset.verHistorialEquipo, 10)));
+      });
+    }
+    abrirModal("modal-op-cliente-equipos");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---- Reportes: garantías ----
+
+function rangoFechasGarantiasOperativo() {
+  const desde = document.getElementById("rep-garantias-desde").value;
+  const hasta = document.getElementById("rep-garantias-hasta").value;
+  const params = new URLSearchParams();
+  if (desde) params.set("desde", desde);
+  if (hasta) params.set("hasta", hasta);
+  return params.toString();
+}
+
+document.getElementById("btn-rep-garantias-excel").addEventListener("click", () => {
+  window.location.href = `/api/operativo/reportes/garantias?${rangoFechasGarantiasOperativo()}`;
+});
 
 // ---------------------------------------------------------------------------
 // Init

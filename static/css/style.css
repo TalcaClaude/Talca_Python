@@ -209,7 +209,8 @@ body::before { content: none; }
 
 .op-kanban {
   display: grid;
-  grid-template-columns: repeat(6, minmax(150px, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(190px, 1fr);
   gap: 10px;
   overflow-x: auto;
   align-items: start;
@@ -219,7 +220,7 @@ body::before { content: none; }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
-  min-width: 150px;
+  min-width: 190px;
   display: flex;
   flex-direction: column;
   max-height: calc(100vh - 260px);
@@ -296,13 +297,87 @@ body::before { content: none; }
   justify-content: space-between;
 }
 
-@media (max-width: 900px) {
-  .op-kanban { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
-}
 @media (max-width: 760px) {
-  .op-kanban { grid-template-columns: 1fr; }
+  .op-kanban { grid-auto-columns: minmax(78vw, 1fr); }
   .op-columna { max-height: none; }
 }
+
+/* ---------- Operativo: badges de prioridad, secciones del detalle, checklist, tiempos ---------- */
+
+.badge-prioridad {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.badge-prioridad--baja { color: var(--text-muted); background: var(--panel-2); }
+.badge-prioridad--media { color: var(--accent-2); background: var(--accent-soft); }
+.badge-prioridad--alta { color: var(--danger); background: var(--danger-soft); }
+.badge-prioridad--urgente { color: #fff; background: var(--danger); }
+
+.op-seccion {
+  border-top: 1px solid var(--line);
+  margin-top: 18px;
+  padding-top: 16px;
+}
+
+.op-seccion h3 {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  margin: 0 0 12px 0;
+  color: var(--accent-2);
+}
+
+.op-seccion-acciones {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.op-checklist-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13.5px;
+}
+.op-checklist-row:last-child { border-bottom: none; }
+.op-checklist-row .op-checklist-item { flex: 1; }
+.op-checklist-row select { width: auto; }
+
+.op-tiempos-lista {
+  list-style: none;
+  margin: 10px 0 0 0;
+  padding: 0;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.op-tiempos-lista li { padding: 3px 0; }
+
+.op-resumen-linea {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13.5px;
+  padding: 4px 0;
+}
+.op-resumen-linea strong { color: var(--text); }
+
+.op-garantia-card {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.op-garantia-card .op-garantia-meta { color: var(--text-muted); font-size: 11.5px; margin-top: 4px; }
 
 /* ---------- Table ---------- */
 

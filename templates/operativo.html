@@ -31,7 +31,6 @@
     <button class="tab activo" data-vista="dashboard">Dashboard</button>
     <button class="tab" data-vista="ordenes">Órdenes de Trabajo</button>
     <button class="tab" data-vista="clientes">Clientes</button>
-    <button class="tab" data-vista="equipos">Equipos</button>
     <button class="tab" data-vista="reportes">Reportes</button>
   </nav>
 
@@ -66,8 +65,11 @@
       <option value="">Todos los estados (excepto cancelado)</option>
       <option value="recibido">Recibido</option>
       <option value="diagnostico">Diagnóstico</option>
+      <option value="presupuesto">Presupuesto</option>
+      <option value="esperando_aprobacion">Esperando aprobación</option>
       <option value="reparacion">Reparación</option>
       <option value="esperando_repuesto">Esperando repuesto</option>
+      <option value="control_calidad">Control de calidad</option>
       <option value="listo">Listo</option>
       <option value="entregado">Entregado</option>
       <option value="cancelado">Cancelado</option>
@@ -85,6 +87,14 @@
       <h3>Diagnóstico <span class="op-columna-count" id="op-count-diagnostico">0</span></h3>
       <div class="op-columna-cards" id="op-cards-diagnostico"></div>
     </div>
+    <div class="op-columna" data-estado="presupuesto">
+      <h3>Presupuesto <span class="op-columna-count" id="op-count-presupuesto">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-presupuesto"></div>
+    </div>
+    <div class="op-columna" data-estado="esperando_aprobacion">
+      <h3>Esperando aprobación <span class="op-columna-count" id="op-count-esperando_aprobacion">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-esperando_aprobacion"></div>
+    </div>
     <div class="op-columna" data-estado="reparacion">
       <h3>Reparación <span class="op-columna-count" id="op-count-reparacion">0</span></h3>
       <div class="op-columna-cards" id="op-cards-reparacion"></div>
@@ -92,6 +102,10 @@
     <div class="op-columna" data-estado="esperando_repuesto">
       <h3>Esperando repuesto <span class="op-columna-count" id="op-count-esperando_repuesto">0</span></h3>
       <div class="op-columna-cards" id="op-cards-esperando_repuesto"></div>
+    </div>
+    <div class="op-columna" data-estado="control_calidad">
+      <h3>Control de calidad <span class="op-columna-count" id="op-count-control_calidad">0</span></h3>
+      <div class="op-columna-cards" id="op-cards-control_calidad"></div>
     </div>
     <div class="op-columna" data-estado="listo">
       <h3>Listo <span class="op-columna-count" id="op-count-listo">0</span></h3>
@@ -137,35 +151,6 @@
 
   </section>
 
-  <section class="vista" id="vista-equipos" style="display:none">
-
-  <section class="toolbar">
-    <select id="equ-filtro-cliente">
-      <option value="">Todos los clientes</option>
-    </select>
-    <span style="flex:1"></span>
-    <button type="button" class="btn btn-primary" id="btn-equ-nuevo">+ Nuevo equipo</button>
-  </section>
-
-  <section class="tabla-wrap">
-    <table class="tabla">
-      <thead>
-        <tr>
-          <th>Cliente</th>
-          <th>Identificador</th>
-          <th>Marca</th>
-          <th>Modelo</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody id="tbody-equipos">
-        <tr><td colspan="5" class="vacio">Cargando…</td></tr>
-      </tbody>
-    </table>
-  </section>
-
-  </section>
-
   <section class="vista" id="vista-reportes" style="display:none">
 
   <section class="dash-grid">
@@ -180,6 +165,18 @@
       <div class="reportes-botones">
         <button class="btn btn-secundario" id="btn-rep-ordenes-excel">Descargar Excel</button>
         <button class="btn btn-secundario" id="btn-rep-ordenes-pdf">Descargar PDF</button>
+      </div>
+    </div>
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Garantías</h3>
+      <p class="bodega-intro">Detalle de garantías registradas, con resumen por técnico y por equipo — útil para detectar qué mecánico, modelo o proveedor genera más reclamos. Filtrable por rango de fecha de registro.</p>
+      <div class="reportes-rango">
+        <label>Desde <input type="date" id="rep-garantias-desde"></label>
+        <label>Hasta <input type="date" id="rep-garantias-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-rep-garantias-excel">Descargar Excel</button>
       </div>
     </div>
 
@@ -288,6 +285,7 @@
           <div class="campo-select-mas">
             <select id="opon-equipo-id"><option value="">Sin equipo específico</option></select>
             <button type="button" class="btn-link" id="opon-nuevo-equipo">+ Nuevo</button>
+            <button type="button" class="btn-link" id="opon-ver-historial" style="display:none">Ver historial</button>
           </div>
         </div>
       </div>
@@ -295,7 +293,7 @@
         <label>Descripción del problema</label>
         <textarea id="opon-descripcion" rows="3" placeholder="Ej: Caja automática patina en 2da marcha"></textarea>
       </div>
-      <div class="grid-2">
+      <div class="grid-3">
         <div class="campo">
           <label>Mecánico asignado</label>
           <input type="text" id="opon-mecanico">
@@ -304,12 +302,96 @@
           <label>Entrega estimada</label>
           <input type="date" id="opon-fecha-estimada">
         </div>
+        <div class="campo">
+          <label>Prioridad</label>
+          <select id="opon-prioridad">
+            <option value="baja">Baja</option>
+            <option value="media" selected>Media</option>
+            <option value="alta">Alta</option>
+            <option value="urgente">Urgente</option>
+          </select>
+        </div>
+      </div>
+      <h3 class="subtitulo">Datos de recepción</h3>
+      <div class="grid-3">
+        <div class="campo">
+          <label>VIN / N° chasis</label>
+          <input type="text" id="opon-vin">
+        </div>
+        <div class="campo">
+          <label>Kilometraje</label>
+          <input type="number" id="opon-kilometraje" min="0" step="1">
+        </div>
+        <div class="campo">
+          <label>Año</label>
+          <input type="number" id="opon-anio" min="1900" step="1">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Caja / transmisión</label>
+        <input type="text" id="opon-caja-automatica" placeholder="Ej: Automática 6 velocidades">
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Accesorios que trae el vehículo</label>
+          <textarea id="opon-accesorios" rows="2" placeholder="Ej: Rueda de repuesto, herramientas, pisos de goma"></textarea>
+        </div>
+        <div class="campo">
+          <label>Estado visual / observaciones</label>
+          <textarea id="opon-estado-visual" rows="2" placeholder="Ej: Rayón puerta izquierda"></textarea>
+        </div>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-op-orden-nueva">Cancelar</button>
         <button type="submit" class="btn btn-primary">Crear orden</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Módulo Operativo: equipos de un cliente (historial de vehículo) -->
+<div class="modal-overlay" id="modal-op-cliente-equipos">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-op-cliente-equipos-titulo">Equipos del cliente</h2>
+      <button class="modal-close" data-close="modal-op-cliente-equipos">&times;</button>
+    </div>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr><th>Equipo</th><th></th></tr>
+        </thead>
+        <tbody id="tbody-cliente-equipos">
+          <tr><td colspan="2" class="vacio">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Módulo Operativo: historial de un equipo -->
+<div class="modal-overlay" id="modal-op-equipo-historial">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="modal-op-equipo-historial-titulo">Historial del vehículo</h2>
+      <button class="modal-close" data-close="modal-op-equipo-historial">&times;</button>
+    </div>
+    <p class="ayuda-inline" id="opeh-cliente"></p>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Fecha recepción</th>
+            <th>Estado</th>
+            <th>Diagnóstico</th>
+            <th class="num">Total</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-equipo-historial">
+          <tr><td colspan="4" class="vacio">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -322,15 +404,19 @@
     </div>
     <input type="hidden" id="opod-id">
     <p class="ayuda-inline" id="opod-cliente-equipo"></p>
+    <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-ver-historial" style="display:none">Ver historial de este vehículo</button></p>
 
-    <div class="grid-2">
+    <div class="grid-3">
       <div class="campo">
         <label>Estado</label>
         <select id="opod-estado">
           <option value="recibido">Recibido</option>
           <option value="diagnostico">Diagnóstico</option>
+          <option value="presupuesto">Presupuesto</option>
+          <option value="esperando_aprobacion">Esperando aprobación</option>
           <option value="reparacion">Reparación</option>
           <option value="esperando_repuesto">Esperando repuesto</option>
+          <option value="control_calidad">Control de calidad</option>
           <option value="listo">Listo</option>
           <option value="entregado">Entregado</option>
           <option value="cancelado">Cancelado</option>
@@ -339,6 +425,15 @@
       <div class="campo">
         <label>Mecánico asignado</label>
         <input type="text" id="opod-mecanico">
+      </div>
+      <div class="campo">
+        <label>Prioridad</label>
+        <select id="opod-prioridad">
+          <option value="baja">Baja</option>
+          <option value="media">Media</option>
+          <option value="alta">Alta</option>
+          <option value="urgente">Urgente</option>
+        </select>
       </div>
     </div>
     <div class="grid-2">
@@ -355,12 +450,180 @@
       <label>Descripción del problema</label>
       <textarea id="opod-descripcion" rows="2"></textarea>
     </div>
-    <div class="campo">
-      <label>Diagnóstico</label>
-      <textarea id="opod-diagnostico" rows="2"></textarea>
+
+    <div class="op-seccion">
+      <h3>Recepción</h3>
+      <div class="grid-3">
+        <div class="campo">
+          <label>VIN / N° chasis</label>
+          <input type="text" id="opod-vin">
+        </div>
+        <div class="campo">
+          <label>Kilometraje</label>
+          <input type="number" id="opod-kilometraje" min="0" step="1">
+        </div>
+        <div class="campo">
+          <label>Año</label>
+          <input type="number" id="opod-anio" min="1900" step="1">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Caja / transmisión</label>
+        <input type="text" id="opod-caja-automatica">
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Accesorios que trae el vehículo</label>
+          <textarea id="opod-accesorios" rows="2"></textarea>
+        </div>
+        <div class="campo">
+          <label>Estado visual / observaciones</label>
+          <textarea id="opod-estado-visual" rows="2"></textarea>
+        </div>
+      </div>
     </div>
+
+    <div class="op-seccion">
+      <h3>Diagnóstico</h3>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Síntoma reportado</label>
+          <textarea id="opod-sintoma" rows="2"></textarea>
+        </div>
+        <div class="campo">
+          <label>Diagnóstico técnico</label>
+          <textarea id="opod-diagnostico-tecnico" rows="2"></textarea>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Falla detectada</label>
+          <input type="text" id="opod-falla-detectada">
+        </div>
+        <div class="campo">
+          <label>Componentes dañados</label>
+          <input type="text" id="opod-componentes-danados">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Mediciones</label>
+          <textarea id="opod-mediciones" rows="2" placeholder="Ej: Presión línea: 45 psi"></textarea>
+        </div>
+        <div class="campo">
+          <label>Resultado de pruebas</label>
+          <textarea id="opod-resultado-pruebas" rows="2"></textarea>
+        </div>
+      </div>
+      <div class="campo">
+        <label>Responsable del diagnóstico</label>
+        <input type="text" id="opod-responsable-diagnostico">
+      </div>
+      <div class="campo">
+        <label>Diagnóstico (resumen para el cliente)</label>
+        <textarea id="opod-diagnostico" rows="2"></textarea>
+      </div>
+    </div>
+
     <div class="modal-actions modal-actions--start">
       <button type="button" class="btn btn-primary" id="btn-opod-guardar">Guardar cambios</button>
+    </div>
+
+    <div class="op-seccion">
+      <h3>Presupuesto</h3>
+      <div class="tabla-wrap">
+        <table class="tabla">
+          <thead>
+            <tr>
+              <th>Tipo</th><th>Descripción</th><th class="num">Cantidad</th>
+              <th class="num">Precio unit.</th><th class="num">Subtotal</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="tbody-op-presupuesto">
+            <tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <form id="form-op-presupuesto-item">
+        <div class="grid-3">
+          <div class="campo">
+            <label>Tipo</label>
+            <select id="oppi-tipo">
+              <option value="mano_obra">Mano de obra</option>
+              <option value="repuesto">Repuesto</option>
+              <option value="insumo">Insumo</option>
+              <option value="servicio_externo">Servicio externo</option>
+              <option value="descuento">Descuento</option>
+            </select>
+          </div>
+          <div class="campo">
+            <label>Descripción</label>
+            <input type="text" id="oppi-descripcion">
+          </div>
+          <div class="campo">
+            <label>Cantidad</label>
+            <input type="number" id="oppi-cantidad" min="0.01" step="0.01" value="1">
+          </div>
+        </div>
+        <div class="grid-3">
+          <div class="campo">
+            <label>Precio unitario ($)</label>
+            <input type="number" id="oppi-precio" min="0" step="1">
+          </div>
+          <div class="campo" style="justify-content:flex-end">
+            <button type="submit" class="btn btn-secundario">+ Agregar ítem</button>
+          </div>
+        </div>
+      </form>
+      <div class="op-resumen-linea"><span>Subtotal</span><strong id="opp-subtotal">—</strong></div>
+      <div class="op-resumen-linea"><span>IVA (19%)</span><strong id="opp-iva">—</strong></div>
+      <div class="op-resumen-linea"><span>Total presupuesto</span><strong id="opp-total">—</strong></div>
+      <div class="grid-3" style="margin-top:10px">
+        <div class="campo">
+          <label>Estado del presupuesto</label>
+          <select id="opp-estado">
+            <option value="pendiente">Pendiente</option>
+            <option value="enviado">Enviado al cliente</option>
+            <option value="aprobado">Aprobado</option>
+            <option value="rechazado">Rechazado</option>
+          </select>
+        </div>
+        <div class="campo">
+          <label>&nbsp;</label>
+          <label style="flex-direction:row; align-items:center; gap:8px; display:flex;">
+            <input type="checkbox" id="opp-iva-check" style="width:auto"> Incluir IVA (19%)
+          </label>
+        </div>
+      </div>
+      <div class="campo">
+        <label>Notas del presupuesto</label>
+        <textarea id="opp-notas" rows="2"></textarea>
+      </div>
+      <div class="op-seccion-acciones">
+        <button type="button" class="btn btn-primary" id="btn-opp-guardar">Guardar presupuesto</button>
+      </div>
+      <p class="ayuda-inline">Al marcar el presupuesto como "Aprobado", la orden pasa automáticamente a Reparación.</p>
+    </div>
+
+    <div class="op-seccion">
+      <h3>Planificación y tiempos</h3>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Horas presupuestadas</label>
+          <input type="number" id="opod-horas-presupuestadas" min="0" step="0.5">
+        </div>
+        <div class="campo">
+          <label>Horas reales trabajadas</label>
+          <input type="text" id="opod-horas-reales" disabled>
+        </div>
+      </div>
+      <div class="op-seccion-acciones">
+        <button type="button" class="btn btn-secundario" data-tiempo-evento="inicio">▶ Iniciar</button>
+        <button type="button" class="btn btn-secundario" data-tiempo-evento="pausa">⏸ Pausar</button>
+        <button type="button" class="btn btn-secundario" data-tiempo-evento="reanudar">▶ Reanudar</button>
+        <button type="button" class="btn btn-secundario" data-tiempo-evento="termino">⏹ Terminar</button>
+      </div>
+      <ul class="op-tiempos-lista" id="op-tiempos-lista"></ul>
     </div>
 
     <h3 class="subtitulo">Repuestos y mano de obra</h3>
@@ -421,6 +684,112 @@
         </div>
       </div>
     </form>
+
+    <div class="op-seccion">
+      <h3>Control de calidad</h3>
+      <div id="op-qc-checklist"></div>
+      <form id="form-op-qc-item">
+        <div class="grid-3">
+          <div class="campo">
+            <label>Punto a revisar</label>
+            <input type="text" id="opqc-item" placeholder="Ej: Prueba de ruta">
+          </div>
+          <div class="campo">
+            <label>Resultado</label>
+            <select id="opqc-resultado">
+              <option value="ok">OK</option>
+              <option value="falla">Falla</option>
+              <option value="na">N/A</option>
+            </select>
+          </div>
+          <div class="campo">
+            <label>Observación</label>
+            <input type="text" id="opqc-observacion">
+          </div>
+        </div>
+        <div class="modal-actions modal-actions--start">
+          <button type="submit" class="btn btn-secundario">+ Agregar punto de control</button>
+        </div>
+      </form>
+      <div class="grid-3" style="margin-top:10px">
+        <div class="campo">
+          <label>Veredicto general</label>
+          <select id="opqc-veredicto">
+            <option value="pendiente">Pendiente</option>
+            <option value="aprobado">Aprobado</option>
+            <option value="rechazado">Rechazado</option>
+          </select>
+        </div>
+        <div class="campo">
+          <label>Inspector</label>
+          <input type="text" id="opqc-inspector">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Observaciones generales</label>
+        <textarea id="opqc-observaciones-generales" rows="2"></textarea>
+      </div>
+      <div class="op-seccion-acciones">
+        <button type="button" class="btn btn-primary" id="btn-opqc-guardar">Guardar control de calidad</button>
+      </div>
+      <p class="ayuda-inline">"Rechazado" devuelve la orden a Reparación; "Aprobado" la pasa a Listo.</p>
+    </div>
+
+    <div class="op-seccion">
+      <h3>Garantía</h3>
+      <div id="op-garantias-lista"></div>
+      <form id="form-op-garantia">
+        <div class="campo">
+          <label>Motivo</label>
+          <textarea id="opg-motivo" rows="2" placeholder="Ej: Ruido reapareció a los 10 días"></textarea>
+        </div>
+        <div class="grid-2">
+          <div class="campo">
+            <label>Diagnóstico</label>
+            <input type="text" id="opg-diagnostico">
+          </div>
+          <div class="campo">
+            <label>Responsable</label>
+            <input type="text" id="opg-responsable">
+          </div>
+        </div>
+        <div class="campo">
+          <label>Costo asumido por el taller ($)</label>
+          <input type="number" id="opg-costo" min="0" step="1" value="0">
+        </div>
+        <div class="modal-actions modal-actions--start">
+          <button type="submit" class="btn btn-secundario">+ Registrar garantía</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="op-seccion">
+      <h3>Entrega</h3>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Recibido por</label>
+          <input type="text" id="ope-recibido-por" placeholder="Nombre de quien retira el vehículo">
+        </div>
+        <div class="campo">
+          <label>Documento</label>
+          <select id="ope-documento">
+            <option value="">Sin documento</option>
+            <option value="boleta">Boleta</option>
+            <option value="factura">Factura</option>
+            <option value="guia">Guía de despacho</option>
+          </select>
+        </div>
+      </div>
+      <div class="campo">
+        <label>Observaciones de entrega</label>
+        <textarea id="ope-observaciones" rows="2"></textarea>
+      </div>
+      <div class="op-seccion-acciones">
+        <button type="button" class="btn btn-primary" id="btn-ope-entregar">Marcar como entregada</button>
+      </div>
+      <p class="ayuda-inline">Fotos y firma digital quedan pendientes hasta definir dónde se van a guardar (ver documento de Fase 3.5).</p>
+    </div>
+
   </div>
 </div>
 

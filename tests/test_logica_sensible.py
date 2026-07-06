@@ -418,6 +418,233 @@ class TestOperativo(unittest.TestCase):
         self.assertEqual(resp.status_code, 409)
 
 
+class TestOperativoFase35(unittest.TestCase):
+    """Sub-flujos ampliados del módulo Operativo (Fase 3.5): presupuesto con
+    aprobación, control de calidad, planificación/tiempos, garantía, entrega
+    e historial de vehículo. Estas transiciones automáticas de estado son la
+    lógica más fácil de romper sin darse cuenta (ej. aprobar un presupuesto
+    y que la orden se quede pegada en 'esperando_aprobacion')."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre="Cliente Fase 3.5"):
+        resp = self.client.post("/api/operativo/clientes", json={"nombre": nombre})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_equipo(self, cliente_id, identificador="XX0000"):
+        resp = self.client.post(
+            "/api/operativo/equipos",
+            json={"cliente_id": cliente_id, "identificador": identificador, "marca": "Marca", "modelo": "Modelo"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden(self, cliente_id, equipo_id=None, **extra):
+        payload = {"cliente_id": cliente_id}
+        if equipo_id is not None:
+            payload["equipo_id"] = equipo_id
+        payload.update(extra)
+        resp = self.client.post("/api/operativo/ordenes", json=payload)
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    # ---- Presupuesto ----
+
+    def test_presupuesto_aprobado_transiciona_la_orden_a_reparacion(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/presupuesto/items",
+            json={"tipo": "mano_obra", "descripcion": "Desarme", "cantidad": 1, "precio_unitario": 100000},
+        )
+        resp = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"estado": "aprobado"})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        actualizada = resp.get_json()
+        self.assertEqual(actualizada["estado"], "reparacion")
+        self.assertEqual(actualizada["presupuesto"]["total"], 100000)
+
+    def test_presupuesto_con_descuento_e_iva_calcula_el_total_correcto(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/presupuesto/items",
+            json={"tipo": "mano_obra", "descripcion": "Mano de obra", "cantidad": 1, "precio_unitario": 100000},
+        )
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/presupuesto/items",
+            json={"tipo": "descuento", "descripcion": "Descuento", "cantidad": 1, "precio_unitario": 10000},
+        )
+        resp = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"iva": True})
+        presupuesto = resp.get_json()["presupuesto"]
+        self.assertEqual(presupuesto["subtotal"], 90000)
+        self.assertAlmostEqual(presupuesto["iva_monto"], 17100)
+        self.assertAlmostEqual(presupuesto["total"], 107100)
+
+    def test_no_se_puede_modificar_presupuesto_de_una_orden_cerrada(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/presupuesto/items",
+            json={"tipo": "mano_obra", "descripcion": "Algo", "cantidad": 1, "precio_unitario": 1000},
+        )
+        self.assertEqual(resp.status_code, 409)
+
+    # ---- Control de calidad ----
+
+    def test_qc_rechazado_devuelve_la_orden_a_reparacion(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "control_calidad"})
+        resp = self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}/qc",
+            json={"resultado": "rechazado", "inspector": "Ana", "observaciones": "Ruido"},
+        )
+        self.assertEqual(resp.get_json()["estado"], "reparacion")
+
+    def test_qc_aprobado_pasa_la_orden_a_listo(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "control_calidad"})
+        resp = self.client.put(f"/api/operativo/ordenes/{orden['id']}/qc", json={"resultado": "aprobado"})
+        self.assertEqual(resp.get_json()["estado"], "listo")
+
+    def test_checklist_qc_usa_vocabulario_distinto_al_veredicto_general(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        # El ítem del checklist usa ok/falla/na...
+        ok = self.client.post(f"/api/operativo/ordenes/{orden['id']}/qc/items", json={"item": "Prueba de ruta", "resultado": "ok"})
+        self.assertEqual(ok.status_code, 201, ok.get_data(as_text=True))
+        # ...y "aprobado" (vocabulario del veredicto general) no es válido ahí.
+        invalido = self.client.post(f"/api/operativo/ordenes/{orden['id']}/qc/items", json={"item": "Otro punto", "resultado": "aprobado"})
+        self.assertEqual(invalido.status_code, 400)
+        # A la inversa, "ok" no es un veredicto general válido.
+        veredicto_invalido = self.client.put(f"/api/operativo/ordenes/{orden['id']}/qc", json={"resultado": "ok"})
+        self.assertEqual(veredicto_invalido.status_code, 400)
+
+    # ---- Entrega ----
+
+    def test_entregar_exige_quien_retira_el_vehiculo(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        sin_dato = self.client.post(f"/api/operativo/ordenes/{orden['id']}/entregar", json={})
+        self.assertEqual(sin_dato.status_code, 400)
+
+        con_dato = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/entregar",
+            json={"recibido_por": "Juan Pérez", "documento": "boleta"},
+        )
+        self.assertEqual(con_dato.status_code, 200, con_dato.get_data(as_text=True))
+        actualizada = con_dato.get_json()
+        self.assertEqual(actualizada["estado"], "entregado")
+        self.assertEqual(actualizada["entrega_recibido_por"], "Juan Pérez")
+        self.assertIsNotNone(actualizada["fecha_entrega_real"])
+
+    # ---- Garantía ----
+
+    def test_garantia_queda_asociada_a_la_orden_y_aparece_en_el_listado(self):
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"])
+        orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/garantias",
+            json={"motivo": "Falla reaparecida", "costo_asumido": 15000, "responsable": "Pedro"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+        listado = self.client.get("/api/operativo/garantias").get_json()
+        encontrada = next((g for g in listado["garantias"] if g["orden_id"] == orden["id"]), None)
+        self.assertIsNotNone(encontrada)
+        self.assertEqual(encontrada["estado"], "abierta")
+        self.assertEqual(encontrada["equipo_texto"], "Marca Modelo XX0000")
+
+    # ---- Historial de vehículo (3.5.1) ----
+
+    def test_historial_de_equipo_lista_solo_las_ordenes_de_ese_equipo(self):
+        cliente = self._crear_cliente()
+        equipo_a = self._crear_equipo(cliente["id"], identificador="AAA111")
+        equipo_b = self._crear_equipo(cliente["id"], identificador="BBB222")
+        orden_1 = self._crear_orden(cliente["id"], equipo_id=equipo_a["id"])
+        orden_2 = self._crear_orden(cliente["id"], equipo_id=equipo_a["id"])
+        self._crear_orden(cliente["id"], equipo_id=equipo_b["id"])  # de otro equipo, no debe aparecer
+
+        resp = self.client.get(f"/api/operativo/equipos/{equipo_a['id']}/historial")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        ids = {o["id"] for o in data["ordenes"]}
+        self.assertEqual(ids, {orden_1["id"], orden_2["id"]})
+        self.assertEqual(data["cliente"]["id"], cliente["id"])
+
+    # ---- Recepción ampliada (3.5.2) ----
+
+    def test_prioridad_invalida_es_rechazada_al_crear_la_orden(self):
+        cliente = self._crear_cliente()
+        resp = self.client.post(
+            "/api/operativo/ordenes", json={"cliente_id": cliente["id"], "prioridad": "super-urgente"}
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_campos_de_recepcion_y_diagnostico_se_guardan(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(
+            cliente["id"], vin="9BW1234567890", kilometraje=50000, anio=2018, prioridad="urgente",
+        )
+        self.assertEqual(orden["vin"], "9BW1234567890")
+        self.assertEqual(orden["kilometraje"], 50000)
+        self.assertEqual(orden["prioridad"], "urgente")
+
+        resp = self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}",
+            json={"sintoma": "Ruido al frenar", "falla_detectada": "Pastillas gastadas"},
+        )
+        actualizada = resp.get_json()
+        self.assertEqual(actualizada["sintoma"], "Ruido al frenar")
+        self.assertEqual(actualizada["falla_detectada"], "Pastillas gastadas")
+        # Los campos de recepción ya guardados no deberían borrarse por
+        # actualizar solo el diagnóstico.
+        self.assertEqual(actualizada["vin"], "9BW1234567890")
+
+
+class TestCalculoHorasReales(unittest.TestCase):
+    """Unit test puro (sin HTTP ni base de datos) de la función que suma el
+    tiempo trabajado a partir de una secuencia de eventos inicio/pausa/
+    reanudar/termino — se prueba directo con timestamps fabricados porque
+    depender del reloj real haría el test lento y frágil."""
+
+    def setUp(self):
+        from modulos.operativo import _calcular_horas_reales
+        self.calcular = _calcular_horas_reales
+
+    def test_intervalo_simple_inicio_y_termino(self):
+        eventos = [
+            {"evento": "inicio", "marca_tiempo": "2026-01-01T09:00:00"},
+            {"evento": "termino", "marca_tiempo": "2026-01-01T10:00:00"},
+        ]
+        self.assertEqual(self.calcular(eventos), 1.0)
+
+    def test_pausa_no_cuenta_como_tiempo_trabajado(self):
+        eventos = [
+            {"evento": "inicio", "marca_tiempo": "2026-01-01T09:00:00"},
+            {"evento": "pausa", "marca_tiempo": "2026-01-01T09:30:00"},
+            {"evento": "reanudar", "marca_tiempo": "2026-01-01T09:45:00"},
+            {"evento": "termino", "marca_tiempo": "2026-01-01T10:15:00"},
+        ]
+        # 30 min (09:00-09:30) + 30 min (09:45-10:15) = 60 min = 1 hora,
+        # los 15 min de pausa (09:30-09:45) no deben sumar.
+        self.assertEqual(self.calcular(eventos), 1.0)
+
+    def test_evento_sin_cerrar_no_suma_tiempo_abierto(self):
+        eventos = [
+            {"evento": "inicio", "marca_tiempo": "2026-01-01T09:00:00"},
+        ]
+        self.assertEqual(self.calcular(eventos), 0.0)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

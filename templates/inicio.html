@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario Taller — Módulos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  body { min-height: 100vh; }
+  .inicio-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 28px 24px 0;
+  }
+  .inicio-wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 60px 24px 80px;
+    text-align: center;
+  }
+  .inicio-wrap h1 {
+    font-family: var(--font-display);
+    text-transform: uppercase;
+    font-size: 28px;
+    margin: 0 0 8px;
+  }
+  .inicio-wrap p.subt {
+    color: var(--text-muted);
+    margin: 0 0 48px;
+    font-size: 14.5px;
+  }
+  .modulos-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 20px;
+    text-align: left;
+  }
+  .modulo-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 28px 24px;
+    text-decoration: none;
+    color: var(--text);
+    display: block;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+  .modulo-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .modulo-card .modulo-tag {
+    display: inline-block;
+    background: var(--accent-soft);
+    color: var(--accent-2);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 14px;
+  }
+  .modulo-card h2 {
+    font-family: var(--font-display);
+    text-transform: uppercase;
+    font-size: 18px;
+    margin: 0 0 8px;
+  }
+  .modulo-card p {
+    color: var(--text-muted);
+    font-size: 13.5px;
+    margin: 0;
+    line-height: 1.5;
+  }
+  .modulo-card.proximamente {
+    cursor: default;
+    opacity: 0.55;
+  }
+  .modulo-card.proximamente:hover { border-color: var(--line); transform: none; }
+  .modulo-card.proximamente .modulo-tag { background: var(--panel-2); color: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<div class="inicio-topbar">
+  <span class="sesion-usuario">{{ session.get("nombre", "") }}</span>
+  <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+</div>
+
+<div class="inicio-wrap">
+  <h1>Inventario<span style="color:var(--accent)">Taller</span></h1>
+  <p class="subt">Elige el módulo al que quieres entrar.</p>
+
+  <div class="modulos-grid">
+    <a class="modulo-card" href="/logistica">
+      <span class="modulo-tag">01</span>
+      <h2>Logística</h2>
+      <p>Inventario, bodega, facturas, proveedores, movimientos, mermas, rotación, planificación y reportes.</p>
+    </a>
+
+    <a class="modulo-card" href="/operativo">
+      <span class="modulo-tag">02</span>
+      <h2>Operativo</h2>
+      <p>Órdenes de trabajo, clientes y equipos del taller.</p>
+    </a>
+
+    <div class="modulo-card proximamente">
+      <span class="modulo-tag">03</span>
+      <h2>Finanzas</h2>
+      <p>Caja chica y control financiero. Próximamente.</p>
+    </div>
+
+    <div class="modulo-card proximamente">
+      <span class="modulo-tag">04</span>
+      <h2>RRHH</h2>
+      <p>Ficha de empleados, vacaciones y liquidaciones de sueldo. Próximamente.</p>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -327,6 +327,50 @@ def _orden_dict(db, row):
     return d
 
 
+@bp.route("/api/operativo/dashboard", methods=["GET"])
+def dashboard_operativo():
+    """KPIs para el dashboard del módulo Operativo:
+      - ots_abiertas: órdenes cuyo estado no es un estado cerrado (entregado/cancelado).
+      - ots_cerradas_mes: órdenes entregadas cuya fecha_entrega_real cae en el mes calendario actual.
+      - monto_cerradas_mes: suma de (cantidad * costo_unitario) de los items de esas órdenes cerradas este mes.
+      - monto_por_cerrar: suma de (cantidad * costo_unitario) de los items de todas las órdenes abiertas.
+    """
+    db = get_db()
+    hoy = datetime.now()
+    prefijo_mes = f"{hoy.year:04d}-{hoy.month:02d}"
+
+    placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
+
+    abiertas = db.execute(
+        f"SELECT id FROM ordenes_trabajo WHERE estado NOT IN ({placeholders_cerrados})",
+        list(ESTADOS_CERRADOS),
+    ).fetchall()
+    ids_abiertas = [r["id"] for r in abiertas]
+
+    cerradas_mes = db.execute(
+        "SELECT id FROM ordenes_trabajo WHERE estado = 'entregado' AND substr(fecha_entrega_real, 1, 7) = ?",
+        (prefijo_mes,),
+    ).fetchall()
+    ids_cerradas_mes = [r["id"] for r in cerradas_mes]
+
+    def _suma_items(ids):
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        fila = db.execute(
+            f"SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM orden_items WHERE orden_id IN ({placeholders})",
+            ids,
+        ).fetchone()
+        return fila["total"] or 0
+
+    return jsonify({
+        "ots_abiertas": len(ids_abiertas),
+        "ots_cerradas_mes": len(ids_cerradas_mes),
+        "monto_cerradas_mes": _suma_items(ids_cerradas_mes),
+        "monto_por_cerrar": _suma_items(ids_abiertas),
+    })
+
+
 @bp.route("/api/operativo/ordenes", methods=["GET"])
 def listar_ordenes():
     db = get_db()

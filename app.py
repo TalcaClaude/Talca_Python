@@ -734,7 +734,7 @@ def exigir_login():
 def login():
     if request.method == "GET":
         if session.get("user_id"):
-            return redirect(url_for("index"))
+            return redirect(url_for("inicio"))
         return render_template("login.html")
 
     ip = request.remote_addr or "desconocida"
@@ -760,7 +760,7 @@ def login():
     session["username"] = usuario["username"]
     session["nombre"] = usuario["nombre"] or usuario["username"]
     session.permanent = True
-    return redirect(url_for("index"))
+    return redirect(url_for("inicio"))
 
 
 @app.route("/logout")
@@ -772,10 +772,27 @@ def logout():
 # ---------------------------------------------------------------------------
 # Páginas
 # ---------------------------------------------------------------------------
+#
+# La página de inicio ("/") es el selector de módulos: se ve justo después
+# de iniciar sesión, y desde ahí se entra a cada módulo (Logística,
+# Operativo, y los que se agreguen — Finanzas, RRHH). Cada módulo tiene su
+# propia plantilla y su propio archivo JS (ver static/js/), pero todos
+# comparten el mismo login y la misma sesión — no hay que autenticarse de
+# nuevo al cambiar de módulo.
 
 @app.route("/")
-def index():
+def inicio():
+    return render_template("inicio.html")
+
+
+@app.route("/logistica")
+def vista_logistica():
     return render_template("index.html")
+
+
+@app.route("/operativo")
+def vista_operativo():
+    return render_template("operativo.html")
 
 
 @app.route("/api/sesion", methods=["GET"])

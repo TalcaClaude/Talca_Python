@@ -739,7 +739,11 @@ def _merma_bucket_sumar(db, producto_id, proveedor_id, delta):
 # Autenticación
 # ---------------------------------------------------------------------------
 
-RUTAS_PUBLICAS = {"login", "static"}
+RUTAS_PUBLICAS = {
+    "login", "static",
+    # Seguimiento público de una OT por patente (sin login) — ver modulos/operativo.py.
+    "operativo.seguimiento_publico", "operativo.api_seguimiento_publico",
+}
 
 
 @app.before_request

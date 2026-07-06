@@ -24,7 +24,7 @@ movimientos (los repuestos de una orden las referencian).
 import json
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, render_template, request
 
 from core import (
     _aplicar_entrada_stock,
@@ -39,6 +39,7 @@ from core import (
     _pdf_tabla,
     _rango_fechas,
     fmt_money_pdf,
+    formatear_rut,
     get_db,
     now_iso,
     usuario_actual,
@@ -53,6 +54,11 @@ ESTADOS_ORDEN = [
 # Estados que cuentan como "la orden ya terminó" — no deberían poder seguir
 # recibiendo repuestos o mano de obra nueva sin primero reabrirlas.
 ESTADOS_CERRADOS = {"entregado", "cancelado"}
+
+# Secuencia "normal" de una OT para el stepper del seguimiento público — sin
+# "cancelado", que no es un paso sino un estado terminal alternativo (se
+# muestra aparte, con su propio mensaje).
+PASOS_SEGUIMIENTO_PUBLICO = [e for e in ESTADOS_ORDEN if e != "cancelado"]
 
 TIPOS_ITEM = ["repuesto", "mano_obra"]
 
@@ -361,7 +367,7 @@ def obtener_cliente(cliente_id):
 def crear_cliente():
     db = get_db()
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
+    nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre del cliente es obligatorio"}), 400
 
@@ -372,8 +378,8 @@ def crear_cliente():
             nombre,
             (data.get("telefono") or "").strip(),
             (data.get("email") or "").strip(),
-            (data.get("rut") or "").strip(),
-            (data.get("notas") or "").strip(),
+            formatear_rut((data.get("rut") or "").strip()),
+            (data.get("notas") or "").strip().upper(),
             ts,
         ),
     )
@@ -390,7 +396,7 @@ def editar_cliente(cliente_id):
         return jsonify({"error": "Cliente no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
-    nombre = (data.get("nombre") or row["nombre"]).strip()
+    nombre = (data.get("nombre") or row["nombre"]).strip().upper()
     if not nombre:
         return jsonify({"error": "El nombre del cliente es obligatorio"}), 400
 
@@ -400,8 +406,8 @@ def editar_cliente(cliente_id):
             nombre,
             (data.get("telefono", row["telefono"]) or "").strip(),
             (data.get("email", row["email"]) or "").strip(),
-            (data.get("rut", row["rut"]) or "").strip(),
-            (data.get("notas", row["notas"]) or "").strip(),
+            formatear_rut((data.get("rut", row["rut"]) or "").strip()),
+            (data.get("notas", row["notas"]) or "").strip().upper(),
             cliente_id,
         ),
     )
@@ -483,17 +489,17 @@ def crear_equipo():
         """,
         (
             cliente_id,
-            (data.get("identificador") or "").strip(),
-            (data.get("marca") or "").strip(),
-            (data.get("modelo") or "").strip(),
-            (data.get("notas") or "").strip(),
+            (data.get("identificador") or "").strip().upper(),
+            (data.get("marca") or "").strip().upper(),
+            (data.get("modelo") or "").strip().upper(),
+            (data.get("notas") or "").strip().upper(),
             ts,
-            (data.get("color") or "").strip(),
+            (data.get("color") or "").strip().upper(),
             anio,
-            (data.get("modelo_transmision") or "").strip(),
+            (data.get("modelo_transmision") or "").strip().upper(),
             (data.get("puertas") or "").strip(),
-            (data.get("motor_cc") or "").strip(),
-            (data.get("vin") or "").strip(),
+            (data.get("motor_cc") or "").strip().upper(),
+            (data.get("vin") or "").strip().upper(),
         ),
     )
     db.commit()
@@ -528,16 +534,16 @@ def editar_equipo(equipo_id):
         WHERE id = ?
         """,
         (
-            (data.get("identificador", row["identificador"]) or "").strip(),
-            (data.get("marca", row["marca"]) or "").strip(),
-            (data.get("modelo", row["modelo"]) or "").strip(),
-            (data.get("notas", row["notas"]) or "").strip(),
-            (data.get("color", row["color"]) or "").strip(),
+            (data.get("identificador", row["identificador"]) or "").strip().upper(),
+            (data.get("marca", row["marca"]) or "").strip().upper(),
+            (data.get("modelo", row["modelo"]) or "").strip().upper(),
+            (data.get("notas", row["notas"]) or "").strip().upper(),
+            (data.get("color", row["color"]) or "").strip().upper(),
             anio,
-            (data.get("modelo_transmision", row["modelo_transmision"]) or "").strip(),
+            (data.get("modelo_transmision", row["modelo_transmision"]) or "").strip().upper(),
             (data.get("puertas", row["puertas"]) or "").strip(),
-            (data.get("motor_cc", row["motor_cc"]) or "").strip(),
-            (data.get("vin", row["vin"]) or "").strip(),
+            (data.get("motor_cc", row["motor_cc"]) or "").strip().upper(),
+            (data.get("vin", row["vin"]) or "").strip().upper(),
             equipo_id,
         ),
     )
@@ -626,8 +632,22 @@ def dashboard_operativo():
     """KPIs para el dashboard del módulo Operativo:
       - ots_abiertas: órdenes cuyo estado no es un estado cerrado (entregado/cancelado).
       - ots_cerradas_mes: órdenes entregadas cuya fecha_entrega_real cae en el mes calendario actual.
-      - monto_cerradas_mes: suma de (cantidad * costo_unitario) de los items de esas órdenes cerradas este mes.
-      - monto_por_cerrar: suma de (cantidad * costo_unitario) de los items de todas las órdenes abiertas.
+      - monto_cerradas_mes: valor cobrado (Neto + IVA si aplica) de esas órdenes cerradas este mes.
+      - monto_por_cerrar: valor cobrado (Neto + IVA si aplica) de todas las órdenes abiertas.
+      - costo_ots_cerradas: costo real de los repuestos usados en TODAS las órdenes entregadas
+        (histórico, no solo el mes) — la mano de obra no se cuenta porque no tiene costo registrado.
+      - costo_garantias: costo real de los repuestos/mano de obra usados en TODAS las garantías
+        (histórico) — es dinero que sale sin que se le cobre al cliente.
+      - utilidad_mes: monto_cerradas_mes menos el costo de repuestos de esas mismas órdenes.
+      - ticket_promedio_mes: monto_cerradas_mes dividido por la cantidad de OTs cerradas este mes.
+      - tiempo_promedio_taller_mes: días promedio entre recepción y entrega de las OTs cerradas
+        este mes (qué tan rápido se está resolviendo, en promedio).
+      - tasa_aprobacion_presupuestos: % de presupuestos aprobados sobre (aprobados + rechazados),
+        histórico completo (no depende del mes porque una orden solo tiene un estado de
+        presupuesto vigente, no un registro por mes).
+      - costo_garantias_mes / costo_garantias_pct_ingresos_mes: costo de garantías de este mes y
+        qué porcentaje representa sobre lo facturado este mes (indicador de calidad: si sube,
+        se está reparando peor a la primera).
     """
     db = get_db()
     hoy = datetime.now()
@@ -636,26 +656,53 @@ def dashboard_operativo():
     placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
 
     abiertas = db.execute(
-        f"SELECT id FROM ordenes_trabajo WHERE estado NOT IN ({placeholders_cerrados})",
+        f"SELECT id, precio_referencial, precio_iva FROM ordenes_trabajo WHERE estado NOT IN ({placeholders_cerrados})",
         list(ESTADOS_CERRADOS),
     ).fetchall()
     ids_abiertas = [r["id"] for r in abiertas]
 
     cerradas_mes = db.execute(
-        "SELECT id FROM ordenes_trabajo WHERE estado = 'entregado' AND substr(fecha_entrega_real, 1, 7) = ?",
+        "SELECT id, precio_referencial, precio_iva, fecha_recepcion, fecha_entrega_real "
+        "FROM ordenes_trabajo WHERE estado = 'entregado' AND substr(fecha_entrega_real, 1, 7) = ?",
         (prefijo_mes,),
     ).fetchall()
     ids_cerradas_mes = [r["id"] for r in cerradas_mes]
 
-    def _suma_items(ids):
+    ids_cerradas_todas = [
+        r["id"] for r in db.execute("SELECT id FROM ordenes_trabajo WHERE estado = 'entregado'").fetchall()
+    ]
+
+    def _valor_total_orden(row):
+        neto = row["precio_referencial"] or 0
+        iva_monto = round(neto * IVA_PORCENTAJE, 2) if row["precio_iva"] else 0.0
+        return round(neto + iva_monto, 2)
+
+    def _suma_costo_repuestos(ids):
         if not ids:
             return 0
         placeholders = ", ".join("?" for _ in ids)
         fila = db.execute(
-            f"SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM orden_items WHERE orden_id IN ({placeholders})",
+            f"SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM orden_items "
+            f"WHERE tipo = 'repuesto' AND orden_id IN ({placeholders})",
             ids,
         ).fetchone()
         return fila["total"] or 0
+
+    monto_cerradas_mes = round(sum(_valor_total_orden(r) for r in cerradas_mes), 2)
+    monto_por_cerrar = round(sum(_valor_total_orden(r) for r in abiertas), 2)
+    costo_ots_cerradas = round(_suma_costo_repuestos(ids_cerradas_todas), 2)
+    costo_repuestos_cerradas_mes = _suma_costo_repuestos(ids_cerradas_mes)
+    utilidad_mes = round(monto_cerradas_mes - costo_repuestos_cerradas_mes, 2)
+
+    costo_garantias = db.execute(
+        "SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM garantia_items"
+    ).fetchone()["total"] or 0
+
+    costo_garantias_mes = db.execute(
+        "SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM garantia_items "
+        "WHERE substr(creado_en, 1, 7) = ?",
+        (prefijo_mes,),
+    ).fetchone()["total"] or 0
 
     placeholders_garantia_cerrados = ", ".join("?" for _ in ESTADOS_GARANTIA_CERRADOS)
     garantias_abiertas = db.execute(
@@ -663,12 +710,101 @@ def dashboard_operativo():
         list(ESTADOS_GARANTIA_CERRADOS),
     ).fetchone()["n"]
 
+    # Ticket promedio del mes: cuánto se está facturando en promedio por OT cerrada.
+    ticket_promedio_mes = round(monto_cerradas_mes / len(ids_cerradas_mes), 2) if ids_cerradas_mes else 0
+
+    # Tiempo promedio en el taller (recepción -> entrega) de las OTs cerradas este mes.
+    def _dias(row):
+        try:
+            ini = datetime.fromisoformat(row["fecha_recepcion"])
+            fin = datetime.fromisoformat(row["fecha_entrega_real"])
+        except (TypeError, ValueError):
+            return None
+        return max(0, (fin - ini).total_seconds() / 86400)
+
+    dias_validos = [d for d in (_dias(r) for r in cerradas_mes) if d is not None]
+    tiempo_promedio_taller_mes = round(sum(dias_validos) / len(dias_validos), 1) if dias_validos else 0
+
+    # Tasa de aprobación de presupuestos: histórica (una orden solo tiene un
+    # estado de presupuesto vigente, no un registro por mes).
+    conteo_presupuesto = dict(db.execute(
+        "SELECT presupuesto_estado, COUNT(*) AS n FROM ordenes_trabajo "
+        "WHERE presupuesto_estado IN ('aprobado', 'rechazado') GROUP BY presupuesto_estado"
+    ).fetchall())
+    n_aprobados = conteo_presupuesto.get("aprobado", 0)
+    n_rechazados = conteo_presupuesto.get("rechazado", 0)
+    total_decididos = n_aprobados + n_rechazados
+    tasa_aprobacion_presupuestos = round(n_aprobados / total_decididos * 100, 1) if total_decididos else None
+
+    costo_garantias_pct_ingresos_mes = (
+        round(costo_garantias_mes / monto_cerradas_mes * 100, 1) if monto_cerradas_mes else None
+    )
+
     return jsonify({
         "ots_abiertas": len(ids_abiertas),
         "ots_cerradas_mes": len(ids_cerradas_mes),
-        "monto_cerradas_mes": _suma_items(ids_cerradas_mes),
-        "monto_por_cerrar": _suma_items(ids_abiertas),
+        "monto_cerradas_mes": monto_cerradas_mes,
+        "monto_por_cerrar": monto_por_cerrar,
         "garantias_abiertas": garantias_abiertas,
+        "costo_ots_cerradas": costo_ots_cerradas,
+        "costo_garantias": round(costo_garantias, 2),
+        "utilidad_mes": utilidad_mes,
+        "ticket_promedio_mes": ticket_promedio_mes,
+        "tiempo_promedio_taller_mes": tiempo_promedio_taller_mes,
+        "tasa_aprobacion_presupuestos": tasa_aprobacion_presupuestos,
+        "costo_garantias_mes": round(costo_garantias_mes, 2),
+        "costo_garantias_pct_ingresos_mes": costo_garantias_pct_ingresos_mes,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Seguimiento público (sin login) — el cliente ingresa solo la patente y ve
+# en qué va su vehículo, sin tener que llamar al taller. No expone datos del
+# cliente (nombre/teléfono/RUT/email) ni montos ni notas internas: solo lo
+# necesario para saber el estado. Ver RUTAS_PUBLICAS en app.py, donde se
+# habilitan estos dos endpoints sin sesión iniciada.
+# ---------------------------------------------------------------------------
+
+@bp.route("/seguimiento", methods=["GET"])
+def seguimiento_publico():
+    return render_template("seguimiento.html")
+
+
+@bp.route("/api/seguimiento", methods=["GET"])
+def api_seguimiento_publico():
+    patente = (request.args.get("patente") or "").strip()
+    if not patente:
+        return jsonify({"error": "Ingresa una patente"}), 400
+
+    db = get_db()
+    equipo = db.execute(
+        "SELECT id, marca, modelo FROM equipos WHERE UPPER(TRIM(identificador)) = UPPER(TRIM(?))",
+        (patente,),
+    ).fetchone()
+    if equipo is None:
+        return jsonify({"encontrado": False})
+
+    orden = db.execute(
+        "SELECT id, estado, fecha_recepcion, fecha_entrega_estimada, fecha_entrega_real "
+        "FROM ordenes_trabajo WHERE equipo_id = ? ORDER BY creado_en DESC LIMIT 1",
+        (equipo["id"],),
+    ).fetchone()
+    if orden is None:
+        return jsonify({"encontrado": False})
+
+    return jsonify({
+        "encontrado": True,
+        "patente": patente.strip().upper(),
+        "marca": equipo["marca"] or "",
+        "modelo": equipo["modelo"] or "",
+        "orden_numero": orden["id"],
+        "estado": orden["estado"],
+        "estado_label": ESTADOS_LABEL.get(orden["estado"], orden["estado"]),
+        "fecha_recepcion": orden["fecha_recepcion"],
+        "fecha_entrega_estimada": orden["fecha_entrega_estimada"],
+        "fecha_entrega_real": orden["fecha_entrega_real"],
+        "pasos": PASOS_SEGUIMIENTO_PUBLICO,
+        "pasos_label": {p: ESTADOS_LABEL.get(p, p) for p in PASOS_SEGUIMIENTO_PUBLICO},
     })
 
 
@@ -765,8 +901,8 @@ def crear_orden():
         """,
         (
             cliente_id, equipo_id,
-            (data.get("descripcion_problema") or "").strip(),
-            (data.get("mecanico") or "").strip(),
+            (data.get("descripcion_problema") or "").strip().upper(),
+            (data.get("mecanico") or "").strip().upper(),
             ts,
             (data.get("fecha_entrega_estimada") or "").strip() or None,
             usuario_actual(), ts, ts,
@@ -855,7 +991,7 @@ def editar_orden(orden_id):
     # Campos de texto simples (diagnóstico, recepción de tipo texto): mismo
     # patrón de "usa lo nuevo si viene, si no deja lo que ya había".
     valores_simples = {
-        campo: (data.get(campo, row[campo]) or "").strip() for campo in CAMPOS_SIMPLES_ORDEN
+        campo: (data.get(campo, row[campo]) or "").strip().upper() for campo in CAMPOS_SIMPLES_ORDEN
     }
 
     db.execute(
@@ -872,9 +1008,9 @@ def editar_orden(orden_id):
         """,
         (
             estado,
-            (data.get("descripcion_problema", row["descripcion_problema"]) or "").strip(),
-            (data.get("diagnostico", row["diagnostico"]) or "").strip(),
-            (data.get("mecanico", row["mecanico"]) or "").strip(),
+            (data.get("descripcion_problema", row["descripcion_problema"]) or "").strip().upper(),
+            (data.get("diagnostico", row["diagnostico"]) or "").strip().upper(),
+            (data.get("mecanico", row["mecanico"]) or "").strip().upper(),
             (data.get("fecha_entrega_estimada", row["fecha_entrega_estimada"]) or "").strip() or None,
             fecha_entrega_real,
             now_iso(),
@@ -974,7 +1110,7 @@ def agregar_item_orden(orden_id):
     ts = now_iso()
     producto_id = None
     movimiento_id = None
-    descripcion = (data.get("descripcion") or "").strip()
+    descripcion = (data.get("descripcion") or "").strip().upper()
 
     if tipo == "repuesto":
         try:
@@ -1125,7 +1261,7 @@ def agregar_item_presupuesto(orden_id):
     tipo = (data.get("tipo") or "").strip().lower()
     if tipo not in TIPOS_PRESUPUESTO_ITEM:
         return jsonify({"error": f"Tipo inválido. Usa uno de: {', '.join(TIPOS_PRESUPUESTO_ITEM)}"}), 400
-    descripcion = (data.get("descripcion") or "").strip()
+    descripcion = (data.get("descripcion") or "").strip().upper()
     if not descripcion:
         return jsonify({"error": "Describe el ítem del presupuesto"}), 400
     try:
@@ -1189,7 +1325,7 @@ def actualizar_presupuesto(orden_id):
     if "iva" in data:
         iva = 1 if data.get("iva") else 0
 
-    notas = (data.get("notas", row["presupuesto_notas"]) or "").strip()
+    notas = (data.get("notas", row["presupuesto_notas"]) or "").strip().upper()
 
     nuevo_estado_orden = row["estado"]
     if estado_presupuesto == "aprobado" and row["presupuesto_estado"] != "aprobado":
@@ -1322,13 +1458,13 @@ def agregar_item_qc(orden_id):
     if orden is None:
         return jsonify({"error": "Orden no encontrada"}), 404
     data = request.get_json(force=True, silent=True) or {}
-    item = (data.get("item") or "").strip()
+    item = (data.get("item") or "").strip().upper()
     if not item:
         return jsonify({"error": "Describe el punto a revisar"}), 400
     resultado = (data.get("resultado") or "na").strip().lower()
     if resultado not in RESULTADOS_QC_ITEM:
         return jsonify({"error": f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_QC_ITEM)}"}), 400
-    observacion = (data.get("observacion") or "").strip()
+    observacion = (data.get("observacion") or "").strip().upper()
     ts = now_iso()
     cur = db.execute(
         "INSERT INTO qc_checklist_items (orden_id, item, resultado, observacion, usuario, creado_en) "
@@ -1352,7 +1488,7 @@ def editar_item_qc(orden_id, item_id):
     resultado = (data.get("resultado", item["resultado"]) or "na").strip().lower()
     if resultado not in RESULTADOS_QC_ITEM:
         return jsonify({"error": f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_QC_ITEM)}"}), 400
-    observacion = (data.get("observacion", item["observacion"]) or "").strip()
+    observacion = (data.get("observacion", item["observacion"]) or "").strip().upper()
     db.execute(
         "UPDATE qc_checklist_items SET resultado = ?, observacion = ? WHERE id = ?",
         (resultado, observacion, item_id),
@@ -1393,8 +1529,8 @@ def actualizar_qc(orden_id):
         resultado = (data.get("resultado") or "").strip().lower()
         if resultado not in RESULTADOS_QC:
             return jsonify({"error": f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_QC)}"}), 400
-    inspector = (data.get("inspector", row["qc_inspector"]) or "").strip()
-    observaciones = (data.get("observaciones", row["qc_observaciones"]) or "").strip()
+    inspector = (data.get("inspector", row["qc_inspector"]) or "").strip().upper()
+    observaciones = (data.get("observaciones", row["qc_observaciones"]) or "").strip().upper()
 
     nuevo_estado_orden = row["estado"]
     if resultado == "rechazado":
@@ -1473,7 +1609,7 @@ def crear_garantia():
         if db.execute("SELECT id FROM ordenes_trabajo WHERE id = ?", (orden_origen_id,)).fetchone() is None:
             return jsonify({"error": "La OT original indicada no existe"}), 400
 
-    motivo = (data.get("motivo") or "").strip()
+    motivo = (data.get("motivo") or "").strip().upper()
     if not motivo:
         return jsonify({"error": "Describe el motivo de la garantía"}), 400
 
@@ -1487,8 +1623,8 @@ def crear_garantia():
         """,
         (
             cliente_id, equipo_id, orden_origen_id, motivo,
-            (data.get("diagnostico") or "").strip(),
-            (data.get("responsable") or "").strip(),
+            (data.get("diagnostico") or "").strip().upper(),
+            (data.get("responsable") or "").strip().upper(),
             ts, usuario_actual(), ts, ts,
         ),
     )
@@ -1547,9 +1683,9 @@ def editar_garantia(garantia_id):
         WHERE id = ?
         """,
         (
-            (data.get("motivo", row["motivo"]) or "").strip(),
-            (data.get("diagnostico", row["diagnostico"]) or "").strip(),
-            (data.get("responsable", row["responsable"]) or "").strip(),
+            (data.get("motivo", row["motivo"]) or "").strip().upper(),
+            (data.get("diagnostico", row["diagnostico"]) or "").strip().upper(),
+            (data.get("responsable", row["responsable"]) or "").strip().upper(),
             estado, fecha_cierre, now_iso(), garantia_id,
         ),
     )
@@ -1583,7 +1719,7 @@ def agregar_item_garantia(garantia_id):
     ts = now_iso()
     producto_id = None
     movimiento_id = None
-    descripcion = (data.get("descripcion") or "").strip()
+    descripcion = (data.get("descripcion") or "").strip().upper()
 
     if tipo == "repuesto":
         try:

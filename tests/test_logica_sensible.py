@@ -675,8 +675,9 @@ class TestOperativoFase35(unittest.TestCase):
             json={"sintoma": "Ruido al frenar", "falla_detectada": "Pastillas gastadas"},
         )
         actualizada = resp.get_json()
-        self.assertEqual(actualizada["sintoma"], "Ruido al frenar")
-        self.assertEqual(actualizada["falla_detectada"], "Pastillas gastadas")
+        # El backend normaliza los campos de texto libre a mayúsculas al guardar.
+        self.assertEqual(actualizada["sintoma"], "RUIDO AL FRENAR")
+        self.assertEqual(actualizada["falla_detectada"], "PASTILLAS GASTADAS")
         # Los campos de recepción ya guardados no deberían borrarse por
         # actualizar solo el diagnóstico.
         self.assertEqual(actualizada["kilometraje"], 50000)
@@ -713,10 +714,11 @@ class TestOperativoFase35(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         actualizado = resp.get_json()
+        # El backend normaliza marca/modelo/color/VIN/etc. a mayúsculas al guardar.
         self.assertEqual(actualizado["vin"], "9BW1234567890")
-        self.assertEqual(actualizado["color"], "Rojo")
+        self.assertEqual(actualizado["color"], "ROJO")
         self.assertEqual(actualizado["anio"], 2018)
-        self.assertEqual(actualizado["modelo_transmision"], "Manual")
+        self.assertEqual(actualizado["modelo_transmision"], "MANUAL")
         self.assertEqual(actualizado["puertas"], "4")
         self.assertEqual(actualizado["motor_cc"], "1600")
 

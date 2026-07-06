@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Seguimiento de tu vehículo — Inventario Taller</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  body { display: flex; align-items: flex-start; justify-content: center; min-height: 100vh; padding: 32px 16px; }
+  .seg-box {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 28px;
+    width: 100%;
+    max-width: 480px;
+  }
+  .seg-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; justify-content: center; }
+  .seg-brand h1 { font-family: var(--font-display); text-transform: uppercase; font-size: 20px; margin: 0; }
+  .seg-brand h1 span { color: var(--accent); margin-left: 6px; }
+  .seg-subtitulo { text-align: center; color: var(--text-muted); font-size: 13.5px; margin: 0 0 24px; }
+  .seg-form { display: flex; gap: 8px; margin-bottom: 8px; }
+  .seg-form input { flex: 1; text-transform: uppercase; }
+  .seg-error {
+    background: var(--danger-soft);
+    color: var(--danger);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 13.5px;
+    margin-top: 16px;
+  }
+  .seg-resultado { margin-top: 24px; display: none; }
+  .seg-resultado.visible { display: block; }
+  .seg-vehiculo { text-align: center; margin-bottom: 20px; }
+  .seg-vehiculo h2 { margin: 0 0 4px; font-size: 19px; }
+  .seg-vehiculo p { margin: 0; color: var(--text-muted); font-size: 13px; }
+  .seg-cancelada {
+    background: var(--danger-soft);
+    color: var(--danger);
+    border-radius: 8px;
+    padding: 14px 16px;
+    text-align: center;
+    font-weight: 600;
+  }
+  .seg-stepper { display: flex; flex-direction: column; gap: 0; margin: 20px 0; }
+  .seg-paso { display: flex; align-items: flex-start; gap: 12px; min-height: 44px; }
+  .seg-paso-linea {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 20px;
+  }
+  .seg-paso-punto {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--line);
+    border: 2px solid var(--line);
+    flex-shrink: 0;
+  }
+  .seg-paso-conector { width: 2px; flex: 1; background: var(--line); min-height: 20px; }
+  .seg-paso.completado .seg-paso-punto { background: var(--success); border-color: var(--success); }
+  .seg-paso.completado .seg-paso-conector { background: var(--success); }
+  .seg-paso.actual .seg-paso-punto { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft, rgba(255,140,0,0.2)); }
+  .seg-paso-texto { padding-bottom: 20px; font-size: 14px; color: var(--text-muted); }
+  .seg-paso.completado .seg-paso-texto, .seg-paso.actual .seg-paso-texto { color: var(--text); font-weight: 600; }
+  .seg-fechas { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 8px; }
+  .seg-fechas .op-resumen-fila { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13.5px; }
+  .seg-fechas .op-resumen-fila span { color: var(--text-muted); }
+  .seg-ayuda { text-align: center; color: var(--text-muted); font-size: 12.5px; margin-top: 24px; }
+</style>
+</head>
+<body>
+
+<div class="seg-box">
+  <div class="seg-brand">
+    <span class="brand-tag">02</span>
+    <h1>Inventario<span>Taller</span></h1>
+  </div>
+  <p class="seg-subtitulo">Ingresa la patente de tu vehículo para ver en qué va tu reparación.</p>
+
+  <form class="seg-form" id="form-seguimiento">
+    <input type="text" id="seg-patente" placeholder="Ej: ABCD12" autofocus required>
+    <button type="submit" class="btn btn-primary">Consultar</button>
+  </form>
+
+  <div class="seg-error" id="seg-error" style="display:none"></div>
+
+  <div class="seg-resultado" id="seg-resultado">
+    <div class="seg-vehiculo">
+      <h2 id="seg-vehiculo-nombre">—</h2>
+      <p id="seg-vehiculo-detalle">—</p>
+    </div>
+
+    <div id="seg-cancelada" class="seg-cancelada" style="display:none">
+      Esta orden fue cancelada. Si tienes dudas, contáctanos directamente.
+    </div>
+
+    <div class="seg-stepper" id="seg-stepper"></div>
+
+    <div class="seg-fechas" id="seg-fechas"></div>
+  </div>
+
+  <p class="seg-ayuda">¿No encuentras tu vehículo o tienes dudas? Contacta directamente al taller.</p>
+</div>
+
+<script src="/static/js/seguimiento.js"></script>
+</body>
+</html>

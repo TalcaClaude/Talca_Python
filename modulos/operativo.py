@@ -259,46 +259,54 @@ def init_operativo_db(db):
     # a partir de los datos de un cliente/equipo, con su propio proceso más
     # simple que el de una OT normal, y puede opcionalmente referenciar la
     # OT original que tuvo el problema (solo para trazabilidad).
-    columnas_garantia = [c[1] for c in db.execute("PRAGMA table_info(garantias)").fetchall()]
-    if not columnas_garantia:
-        db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS garantias (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                cliente_id INTEGER NOT NULL REFERENCES clientes(id),
-                equipo_id INTEGER REFERENCES equipos(id),
-                orden_origen_id INTEGER REFERENCES ordenes_trabajo(id),
-                motivo TEXT DEFAULT '',
-                diagnostico TEXT DEFAULT '',
-                responsable TEXT DEFAULT '',
-                estado TEXT NOT NULL DEFAULT 'pendiente',
-                fecha_recepcion TEXT NOT NULL,
-                fecha_cierre TEXT,
-                usuario TEXT DEFAULT '',
-                creado_en TEXT NOT NULL,
-                actualizado_en TEXT NOT NULL
-            );
+    #
+    # OJO: antes esto estaba condicionado a "if not columnas_garantia" (solo
+    # se creaba si la tabla 'garantias' no existía todavía) — eso hacía que
+    # 'garantia_items' NUNCA se creara en una base de datos donde 'garantias'
+    # ya existía de una versión anterior (el CREATE TABLE quedaba adentro de
+    # un bloque que nunca se volvía a ejecutar), causando
+    # "no such table: garantia_items" en producción. Los CREATE TABLE/INDEX
+    # ya son "IF NOT EXISTS" por sí solos, así que no hace falta (ni es
+    # seguro) condicionarlos a la existencia de otra tabla: se ejecutan
+    # siempre, sin gate.
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS garantias (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente_id INTEGER NOT NULL REFERENCES clientes(id),
+            equipo_id INTEGER REFERENCES equipos(id),
+            orden_origen_id INTEGER REFERENCES ordenes_trabajo(id),
+            motivo TEXT DEFAULT '',
+            diagnostico TEXT DEFAULT '',
+            responsable TEXT DEFAULT '',
+            estado TEXT NOT NULL DEFAULT 'pendiente',
+            fecha_recepcion TEXT NOT NULL,
+            fecha_cierre TEXT,
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            actualizado_en TEXT NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS garantia_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                garantia_id INTEGER NOT NULL REFERENCES garantias(id) ON DELETE CASCADE,
-                tipo TEXT NOT NULL,
-                producto_id INTEGER REFERENCES productos(id),
-                descripcion TEXT DEFAULT '',
-                cantidad REAL NOT NULL DEFAULT 1,
-                costo_unitario REAL NOT NULL DEFAULT 0,
-                movimiento_id INTEGER REFERENCES movimientos(id),
-                usuario TEXT DEFAULT '',
-                creado_en TEXT NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS garantia_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            garantia_id INTEGER NOT NULL REFERENCES garantias(id) ON DELETE CASCADE,
+            tipo TEXT NOT NULL,
+            producto_id INTEGER REFERENCES productos(id),
+            descripcion TEXT DEFAULT '',
+            cantidad REAL NOT NULL DEFAULT 1,
+            costo_unitario REAL NOT NULL DEFAULT 0,
+            movimiento_id INTEGER REFERENCES movimientos(id),
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
 
-            CREATE INDEX IF NOT EXISTS idx_garantias_cliente_id ON garantias (cliente_id);
-            CREATE INDEX IF NOT EXISTS idx_garantias_equipo_id ON garantias (equipo_id);
-            CREATE INDEX IF NOT EXISTS idx_garantias_estado ON garantias (estado);
-            CREATE INDEX IF NOT EXISTS idx_garantia_items_garantia_id ON garantia_items (garantia_id);
-            """
-        )
-        db.commit()
+        CREATE INDEX IF NOT EXISTS idx_garantias_cliente_id ON garantias (cliente_id);
+        CREATE INDEX IF NOT EXISTS idx_garantias_equipo_id ON garantias (equipo_id);
+        CREATE INDEX IF NOT EXISTS idx_garantias_estado ON garantias (estado);
+        CREATE INDEX IF NOT EXISTS idx_garantia_items_garantia_id ON garantia_items (garantia_id);
+        """
+    )
+    db.commit()
 
     # Pagos de una orden: un abono a la vez (efectivo, tarjeta, etc.), para
     # llevar el registro de cuánto se ha pagado y cuánto queda pendiente

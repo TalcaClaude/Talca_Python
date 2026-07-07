@@ -161,6 +161,7 @@
   <section class="toolbar">
     <input type="text" id="cli-buscar" placeholder="Buscar por nombre, RUT o teléfono…">
     <span style="flex:1"></span>
+    <button type="button" class="btn btn-secundario" id="btn-revisar-vehiculos">Revisar vehículos</button>
     <button type="button" class="btn btn-primary" id="btn-cli-nuevo">+ Nuevo cliente</button>
   </section>
 
@@ -486,6 +487,32 @@
     <div class="modal-actions">
       <button type="button" class="btn btn-secundario" data-close="modal-op-link-seguimiento">Cerrar</button>
       <button type="button" class="btn btn-primary" id="btn-op-link-seguimiento-copiar">Copiar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Módulo Operativo: revisar vehículos con marca/modelo fuera del catálogo -->
+<div class="modal-overlay" id="modal-op-revisar-vehiculos">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Revisar vehículos fuera del catálogo</h2>
+      <button class="modal-close" data-close="modal-op-revisar-vehiculos">&times;</button>
+    </div>
+    <p class="ayuda-inline">
+      Estos vehículos tienen una marca o modelo que no está en el catálogo de referencia
+      (<span class="mono">catalogo_vehiculos.json</span>) — probablemente fueron escritos a mano
+      con "Otra marca…" / "Otro modelo…", muchas veces al probar el sistema. Revísalos y elimina
+      los que no correspondan a un vehículo real.
+    </p>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr><th>Patente</th><th>Marca</th><th>Modelo</th><th>Cliente</th><th class="num">OTs</th><th class="num">Garantías</th><th></th></tr>
+        </thead>
+        <tbody id="tbody-revisar-vehiculos">
+          <tr><td colspan="7" class="vacio">Cargando…</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </div>

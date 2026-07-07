@@ -660,6 +660,93 @@ document.getElementById("btn-cli-nuevo").addEventListener("click", () => {
   abrirNuevoClienteOperativo();
 });
 
+// Un equipo está "fuera del catálogo" si su marca no está en la lista de
+// referencia, o si su modelo no está entre los modelos conocidos de esa
+// marca — típicamente porque se escribió a mano con "Otra marca…" / "Otro
+// modelo…" al probar el sistema. Si el catálogo todavía no cargó, no se
+// marca nada (mejor no mostrar falsos positivos que perder datos reales).
+function _equipoFueraDeCatalogo(eq) {
+  if (!state.catalogoVehiculos) return false;
+  const marca = (eq.marca || "").trim();
+  const modelo = (eq.modelo || "").trim();
+  if (!marca) return false;
+  const marcaCanonica = state.catalogoVehiculos.marcas.find(m => m.toLowerCase() === marca.toLowerCase());
+  if (!marcaCanonica) return true;
+  if (!modelo) return false;
+  const modelosDeMarca = state.catalogoVehiculos.modelos[marcaCanonica] || [];
+  return !modelosDeMarca.some(m => m.toLowerCase() === modelo.toLowerCase());
+}
+
+document.getElementById("btn-revisar-vehiculos").addEventListener("click", abrirRevisarVehiculos);
+
+async function abrirRevisarVehiculos() {
+  const tbody = document.getElementById("tbody-revisar-vehiculos");
+  tbody.innerHTML = `<tr><td colspan="7" class="vacio">Cargando…</td></tr>`;
+  abrirModal("modal-op-revisar-vehiculos");
+  try {
+    await cargarCatalogoVehiculos();
+    const dataEquipos = await api("/api/operativo/equipos");
+    if (!state.opClientes || state.opClientes.length === 0) {
+      const dataClientes = await api("/api/operativo/clientes");
+      state.opClientes = dataClientes.clientes;
+    }
+    const clientesPorId = new Map(state.opClientes.map(c => [c.id, c.nombre]));
+
+    const fueraDeCatalogo = dataEquipos.equipos.filter(_equipoFueraDeCatalogo);
+
+    if (fueraDeCatalogo.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="vacio">No se encontró ningún vehículo fuera del catálogo. Todo limpio.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = fueraDeCatalogo.map(eq => `
+      <tr>
+        <td>${escapeHtml(eq.identificador || "—")}</td>
+        <td>${escapeHtml(eq.marca || "—")}</td>
+        <td>${escapeHtml(eq.modelo || "—")}</td>
+        <td>${escapeHtml(clientesPorId.get(eq.cliente_id) || "—")}</td>
+        <td class="num">${eq.n_ordenes}</td>
+        <td class="num">${eq.n_garantias}</td>
+        <td><button type="button" class="btn-link" style="color: var(--danger)" data-eliminar-vehiculo-fuera="${eq.id}">Eliminar</button></td>
+      </tr>
+    `).join("");
+
+    tbody.querySelectorAll("[data-eliminar-vehiculo-fuera]").forEach(btn => {
+      btn.addEventListener("click", () => eliminarVehiculoFueraDeCatalogo(parseInt(btn.dataset.eliminarVehiculoFuera, 10)));
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+async function eliminarVehiculoFueraDeCatalogo(equipoId) {
+  try {
+    const data = await api(`/api/operativo/equipos/${equipoId}/historial`);
+    const nOrdenes = data.ordenes.length;
+    const nGarantias = data.garantias.length;
+    let mensaje = "¿Eliminar este vehículo?";
+    if (nOrdenes || nGarantias) {
+      const partes = [];
+      if (nOrdenes) partes.push(`${nOrdenes} orden(es) de trabajo`);
+      if (nGarantias) partes.push(`${nGarantias} garantía(s)`);
+      mensaje = `Este vehículo tiene ${partes.join(" y ")} asociada(s). Para eliminarlo hay que eliminar todo eso también, y no se puede deshacer. ¿Continuar?`;
+    }
+    if (!confirm(mensaje)) return;
+
+    for (const orden of data.ordenes) {
+      await api(`/api/operativo/ordenes/${orden.id}`, { method: "DELETE" });
+    }
+    for (const garantia of data.garantias) {
+      await api(`/api/operativo/garantias/${garantia.id}`, { method: "DELETE" });
+    }
+    await api(`/api/operativo/equipos/${equipoId}`, { method: "DELETE" });
+    toast("Vehículo eliminado.");
+    abrirRevisarVehiculos();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
 async function eliminarClienteTab(id) {
   if (!confirm("¿Eliminar este cliente? Solo se puede si no tiene órdenes de trabajo asociadas.")) return;
   try {

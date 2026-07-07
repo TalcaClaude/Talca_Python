@@ -586,7 +586,17 @@ def listar_equipos():
         params.append(identificador)
     sql += " ORDER BY creado_en DESC"
     rows = db.execute(sql, params).fetchall()
-    return jsonify({"equipos": [dict(r) for r in rows], "total": len(rows)})
+    equipos = []
+    for r in rows:
+        d = dict(r)
+        d["n_ordenes"] = db.execute(
+            "SELECT COUNT(*) FROM ordenes_trabajo WHERE equipo_id = ?", (d["id"],)
+        ).fetchone()[0]
+        d["n_garantias"] = db.execute(
+            "SELECT COUNT(*) FROM garantias WHERE equipo_id = ?", (d["id"],)
+        ).fetchone()[0]
+        equipos.append(d)
+    return jsonify({"equipos": equipos, "total": len(equipos)})
 
 
 @bp.route("/api/operativo/equipos", methods=["POST"])
@@ -692,6 +702,12 @@ def eliminar_equipo(equipo_id):
     if n_ordenes:
         return jsonify({
             "error": f"Este equipo tiene {n_ordenes} orden(es) de trabajo asociada(s) y no se puede eliminar."
+        }), 409
+
+    n_garantias = db.execute("SELECT COUNT(*) FROM garantias WHERE equipo_id = ?", (equipo_id,)).fetchone()[0]
+    if n_garantias:
+        return jsonify({
+            "error": f"Este equipo tiene {n_garantias} garantía(s) asociada(s) y no se puede eliminar."
         }), 409
 
     db.execute("DELETE FROM equipos WHERE id = ?", (equipo_id,))
@@ -1858,6 +1874,38 @@ def editar_garantia(garantia_id):
     db.commit()
     actualizada = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
     return jsonify(_garantia_dict(db, actualizada))
+
+
+@bp.route("/api/operativo/garantias/<int:garantia_id>", methods=["DELETE"])
+def eliminar_garantia(garantia_id):
+    # No existía forma de borrar una garantía completa (solo ítems sueltos
+    # dentro de ella) — hace falta para limpiar datos de prueba. Antes de
+    # borrar hay que devolver el stock de los ítems de tipo repuesto (igual
+    # que al eliminar una orden); garantia_items tiene ON DELETE CASCADE
+    # hacia garantias, así que esos se borran solos una vez que se hace el
+    # DELETE de la garantía.
+    db = get_db()
+    _iniciar_transaccion_stock(db)
+    garantia = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
+    if garantia is None:
+        return jsonify({"error": "Garantía no encontrada"}), 404
+
+    items_repuesto = db.execute(
+        "SELECT * FROM garantia_items WHERE garantia_id = ? AND tipo = 'repuesto' AND producto_id IS NOT NULL",
+        (garantia_id,),
+    ).fetchall()
+    for item in items_repuesto:
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (item["producto_id"],)).fetchone()
+        if producto is not None:
+            _aplicar_entrada_stock(
+                db, producto, int(round(item["cantidad"])), item["costo_unitario"],
+                motivo=f"DEVOLUCIÓN AL ELIMINAR GARANTÍA #{garantia_id}",
+                usuario=usuario_actual(), factura=None, categoria="Devolución",
+            )
+
+    db.execute("DELETE FROM garantias WHERE id = ?", (garantia_id,))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>/items", methods=["POST"])

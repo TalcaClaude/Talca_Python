@@ -1767,7 +1767,7 @@ async function cargarEstadoRespaldoAutomatico() {
   try {
     const info = await api("/api/backup/estado-automatico");
     if (!info.configurado) {
-      cont.innerHTML = `⚠ No está configurado todavía. Se necesita agregar las variables <span class="mono">SMTP_USER</span> y <span class="mono">SMTP_PASSWORD</span> en Railway (ver guía DEPLOY.md).`;
+      cont.innerHTML = `⚠ No está configurado todavía. Se necesita agregar la variable <span class="mono">RESEND_API_KEY</span> en Railway (recomendado), o las variables <span class="mono">SMTP_USER</span> y <span class="mono">SMTP_PASSWORD</span> (ver guía DEPLOY.md).`;
       return;
     }
     const ultimo = info.historial.find(h => h.exito);
@@ -1803,7 +1803,7 @@ async function cargarEstadoAlertasStock() {
   try {
     const info = await api("/api/alertas-stock/estado");
     if (!info.configurado) {
-      cont.innerHTML = `⚠ No está configurado todavía. Se necesita agregar las variables <span class="mono">SMTP_USER</span> y <span class="mono">SMTP_PASSWORD</span> en Railway (ver guía DEPLOY.md) — las mismas que usa el respaldo automático.`;
+      cont.innerHTML = `⚠ No está configurado todavía. Se necesita agregar la variable <span class="mono">RESEND_API_KEY</span> en Railway (recomendado), o las variables <span class="mono">SMTP_USER</span> y <span class="mono">SMTP_PASSWORD</span> (ver guía DEPLOY.md) — las mismas que usa el respaldo automático.`;
       return;
     }
     const ultimoEnviado = info.historial.find(h => h.correo_enviado);

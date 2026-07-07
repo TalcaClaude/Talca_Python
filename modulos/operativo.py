@@ -1158,6 +1158,43 @@ def editar_orden(orden_id):
     return jsonify(_orden_dict(db, actualizada))
 
 
+@bp.route("/api/operativo/ordenes/<int:orden_id>", methods=["DELETE"])
+def eliminar_orden(orden_id):
+    # No existía forma de borrar una orden completa (solo ítems sueltos
+    # dentro de ella) — hacía falta para poder limpiar órdenes de prueba
+    # sin dejar residuos. pagos_orden/orden_items/presupuesto_items/
+    # qc_checklist_items tienen ON DELETE CASCADE hacia ordenes_trabajo, así
+    # que se borran solos; lo único que hay que manejar a mano es devolver
+    # el stock de los repuestos cargados (igual que al eliminar un ítem
+    # suelto) y desvincular -sin borrar- cualquier garantía que referencie
+    # esta orden solo para trazabilidad (orden_origen_id no tiene cascada
+    # a propósito: una garantía es un registro propio, independiente de que
+    # la OT original todavía exista).
+    db = get_db()
+    _iniciar_transaccion_stock(db)
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+
+    items_repuesto = db.execute(
+        "SELECT * FROM orden_items WHERE orden_id = ? AND tipo = 'repuesto' AND producto_id IS NOT NULL",
+        (orden_id,),
+    ).fetchall()
+    for item in items_repuesto:
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (item["producto_id"],)).fetchone()
+        if producto is not None:
+            _aplicar_entrada_stock(
+                db, producto, int(round(item["cantidad"])), item["costo_unitario"],
+                motivo=f"DEVOLUCIÓN AL ELIMINAR ORDEN #{orden_id}",
+                usuario=usuario_actual(), factura=None, categoria="Devolución",
+            )
+
+    db.execute("UPDATE garantias SET orden_origen_id = NULL WHERE orden_origen_id = ?", (orden_id,))
+    db.execute("DELETE FROM ordenes_trabajo WHERE id = ?", (orden_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
 # ---------------------------------------------------------------------------
 # Pagos de la orden (abonos sobre el valor de la OT)
 # ---------------------------------------------------------------------------

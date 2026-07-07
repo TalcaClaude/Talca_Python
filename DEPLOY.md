@@ -141,13 +141,52 @@ como estaba.
 
 Además del botón manual, el sistema puede mandarse solo un respaldo por
 correo cada día — así, aunque te olvides de hacerlo a mano, siempre tienes
-una copia reciente en tu bandeja de entrada. Es gratis, usando tu propio
-Gmail.
+una copia reciente en tu bandeja de entrada. Es gratis.
 
-### Paso 1: crear una "contraseña de aplicación" en Gmail
+**Importante:** Railway, en sus planes gratis/Trial/Hobby, **bloquea el
+tráfico saliente por el protocolo SMTP** (el que usa Gmail tradicional)
+para evitar que se use para mandar spam — aunque las credenciales estén
+perfectas, el envío falla con un error de red ("Network is unreachable").
+Por eso el método recomendado de acá abajo no usa SMTP: usa **Resend**,
+un servicio que manda el correo por HTTPS (el mismo protocolo con el que
+tu navegador carga cualquier página web), que no choca con ese bloqueo.
 
-Gmail no deja usar tu contraseña normal para esto por seguridad, así que
-hay que crear una especial solo para este propósito:
+### Paso 1: crear una cuenta en Resend
+
+1. Ve a https://resend.com y crea una cuenta gratis (no pide tarjeta de
+   crédito). Puedes usar el mismo correo al que quieres que lleguen los
+   respaldos (por ejemplo tu Gmail del taller).
+2. Una vez adentro, ve a la sección "API Keys" y crea una nueva
+   ("Create API Key"). Dale cualquier nombre, por ejemplo
+   "Inventario Taller".
+3. Copia la clave que te muestra (empieza con `re_...`). Solo se muestra
+   una vez — guárdala en un lugar seguro.
+
+Con la cuenta gratis, sin configurar nada más, puedes mandarte correos
+**a ti mismo** (al correo con el que te registraste en Resend) sin límite
+práctico para este uso (100 correos al día). Como el respaldo diario es
+justamente para que te llegue a ti, no hace falta verificar un dominio
+propio ni configurar nada extra.
+
+### Paso 2: agregar las variables en Railway
+
+En la pestaña "Variables" del servicio, agrega:
+
+- `RESEND_API_KEY` — la clave del Paso 1 (empieza con `re_`)
+- `SMTP_DESTINATARIO` — el mismo correo con el que te registraste en
+  Resend (a ese correo es al único que puede mandarte mientras no
+  verifiques un dominio propio)
+
+Railway va a reiniciar la app sola. Desde ese momento, todos los días se
+manda un respaldo solo, y queda registrado en el botón "Respaldo" de la
+aplicación (ahí puedes ver la fecha del último envío exitoso, y mandar uno
+de prueba para confirmar que quedó bien configurado).
+
+### Alternativa: SMTP con Gmail (solo si no usas Railway, o tu plan lo permite)
+
+Si en algún momento corres el sistema en otro lado que sí permita SMTP
+saliente (tu propio PC, u otro hosting), puedes usar Gmail directamente
+en vez de Resend:
 
 1. Ve a https://myaccount.google.com/apppasswords (necesitas tener la
    verificación en dos pasos activada en tu cuenta de Google; si no la
@@ -156,18 +195,11 @@ hay que crear una especial solo para este propósito:
 3. Google te va a mostrar un código de 16 letras (algo como
    `abcd efgh ijkl mnop`). Cópialo — es lo que vas a usar como contraseña
    en el paso siguiente. Guárdalo en un lugar seguro, no lo vuelves a ver.
+4. Agrega estas variables (en Railway o donde corresponda):
+   - `SMTP_USER` — tu correo de Gmail completo (ej: `tutaller@gmail.com`)
+   - `SMTP_PASSWORD` — el código de 16 letras del paso anterior (sin espacios)
+   - `SMTP_DESTINATARIO` — a qué correo quieres que lleguen los respaldos
 
-### Paso 2: agregar las variables en Railway
-
-En la pestaña "Variables" del servicio, agrega:
-
-- `SMTP_USER` — tu correo de Gmail completo (ej: `tutaller@gmail.com`)
-- `SMTP_PASSWORD` — el código de 16 letras del Paso 1 (sin espacios)
-- `SMTP_DESTINATARIO` — a qué correo quieres que lleguen los respaldos
-  (puede ser el mismo Gmail, o cualquier otro que revises seguido)
-
-Railway va a reiniciar la app sola. Desde ese momento, todos los días se
-manda un respaldo solo, y queda registrado en el botón "Respaldo" de la
-aplicación (ahí puedes ver la fecha del último envío exitoso, y mandar uno
-de prueba para confirmar que quedó bien configurado).
+Si están configuradas tanto `RESEND_API_KEY` como las variables de SMTP,
+el sistema usa Resend primero.
 

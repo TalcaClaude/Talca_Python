@@ -457,6 +457,20 @@ function conectarMarcaModelo(marcaSelectId, marcaOtraId, modeloSelectId, modeloO
 conectarMarcaModelo("ope-marca", "ope-marca-otra", "ope-modelo", "ope-modelo-otro");
 conectarMarcaModelo("opon-marca", "opon-marca-otra", "opon-modelo", "opon-modelo-otro");
 
+// Cubre el otro caso: el usuario elige "Otro modelo" directamente en el
+// select de modelo (con una marca normal ya elegida, ej. HONDA, pero el
+// modelo que busca no está en el catálogo) — antes esto no mostraba el
+// campo de texto libre porque solo se revisaba al cambiar la MARCA.
+function conectarModeloOtro(modeloSelectId, modeloOtroId) {
+  document.getElementById(modeloSelectId).addEventListener("change", (e) => {
+    const esOtro = e.target.value === VALOR_OTRO_MODELO;
+    document.getElementById(modeloOtroId).style.display = esOtro ? "" : "none";
+    if (!esOtro) document.getElementById(modeloOtroId).value = "";
+  });
+}
+conectarModeloOtro("ope-modelo", "ope-modelo-otro");
+conectarModeloOtro("opon-modelo", "opon-modelo-otro");
+
 function renderTableroOperativo() {
   const filtroEstado = document.getElementById("op-filtro-estado").value;
   const busqueda = document.getElementById("op-buscar").value.trim().toLowerCase();
@@ -1013,6 +1027,25 @@ document.getElementById("btn-op-link-seguimiento-copiar").addEventListener("clic
     estado.textContent = "Copiado al portapapeles.";
   } catch (err) {
     estado.textContent = "No se pudo copiar automáticamente — el texto ya está seleccionado, usa Ctrl+C.";
+  }
+});
+
+// Elimina la orden completa (no solo un ítem suelto). Antes no existía
+// forma de hacer esto desde la interfaz — hacía falta para poder limpiar
+// órdenes de prueba. El backend devuelve el stock de los repuestos
+// cargados y desvincula (sin borrar) cualquier garantía que la
+// referenciara solo para trazabilidad.
+document.getElementById("btn-opod-eliminar-orden").addEventListener("click", async () => {
+  const id = document.getElementById("opod-id").value;
+  if (!id) return;
+  if (!confirm(`¿Eliminar la orden #${id} por completo? Esta acción no se puede deshacer. Se devolverá al inventario el stock de los repuestos que tenga cargados.`)) return;
+  try {
+    await api(`/api/operativo/ordenes/${id}`, { method: "DELETE" });
+    toast("Orden eliminada.");
+    cerrarModal("modal-op-orden-detalle");
+    await cargarOperativo();
+  } catch (e) {
+    toast(e.message, true);
   }
 });
 
@@ -1729,11 +1762,29 @@ async function abrirEquiposDeCliente(clienteId) {
       tbody.innerHTML = data.equipos.map(eq => `
         <tr>
           <td>${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</td>
-          <td><button type="button" class="btn-link" data-ver-historial-equipo="${eq.id}">Ver historial</button></td>
+          <td>
+            <button type="button" class="btn-link" data-ver-historial-equipo="${eq.id}">Ver historial</button>
+            <button type="button" class="btn-link" style="color: var(--danger)" data-eliminar-equipo="${eq.id}">Eliminar</button>
+          </td>
         </tr>
       `).join("");
       tbody.querySelectorAll("[data-ver-historial-equipo]").forEach(btn => {
         btn.addEventListener("click", () => abrirHistorialEquipo(parseInt(btn.dataset.verHistorialEquipo, 10)));
+      });
+      // Solo se puede eliminar un equipo si no tiene órdenes asociadas
+      // (el backend lo valida igual, esto es solo el mensaje de confirmación).
+      tbody.querySelectorAll("[data-eliminar-equipo]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const equipoId = parseInt(btn.dataset.eliminarEquipo, 10);
+          if (!confirm("¿Eliminar este equipo? Solo se puede si no tiene órdenes de trabajo asociadas.")) return;
+          try {
+            await api(`/api/operativo/equipos/${equipoId}`, { method: "DELETE" });
+            toast("Equipo eliminado.");
+            abrirEquiposDeCliente(clienteId);
+          } catch (e2) {
+            toast(e2.message, true);
+          }
+        });
       });
     }
     abrirModal("modal-op-cliente-equipos");

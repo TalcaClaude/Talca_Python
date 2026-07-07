@@ -18,9 +18,11 @@ import statistics
 import math
 import logging
 import traceback
+import base64
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
+import requests
 from flask import Flask, g, jsonify, request, render_template, send_file, session, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -153,7 +155,26 @@ CLAVE_INICIAL = "taller2026"
 # Respaldo automático por correo (Opción A: sin costo, sin infraestructura
 # nueva). Se configura con variables de entorno; si no están, esta función
 # simplemente no hace nada (el sistema sigue funcionando normal).
+#
+# Hay dos formas de mandar el correo, y se elige sola según qué variables
+# estén configuradas:
+#
+#   1) Resend (recomendado): manda el correo por una API HTTPS normal, no
+#      por el protocolo SMTP. Muchos hostings (Railway incluido, en sus
+#      planes gratis/Trial/Hobby) BLOQUEAN el tráfico saliente por SMTP para
+#      evitar que se use para spam, aunque las credenciales estén bien —
+#      eso es justo lo que causa el error "Network is unreachable". Como
+#      Resend usa HTTPS (el mismo protocolo que usa el navegador para
+#      cargar la página), no choca con ese bloqueo.
+#   2) SMTP tradicional (Gmail): funciona si el hosting no bloquea el
+#      puerto SMTP (por ejemplo, corriendo en tu propio PC, o en un plan de
+#      hosting pago que sí lo permita).
+#
+# Si están configuradas las dos, se usa Resend primero.
 # ---------------------------------------------------------------------------
+
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+RESEND_FROM = os.environ.get("RESEND_FROM", "") or "Inventario Taller <onboarding@resend.dev>"
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
@@ -163,6 +184,13 @@ SMTP_DESTINATARIO = os.environ.get("SMTP_DESTINATARIO", "") or SMTP_USER
 RESPALDO_INTERVALO_HORAS = int(os.environ.get("RESPALDO_INTERVALO_HORAS", "24"))
 ALERTA_STOCK_INTERVALO_HORAS = int(os.environ.get("ALERTA_STOCK_INTERVALO_HORAS", "24"))
 ALERTA_STOCK_DESTINATARIO = os.environ.get("ALERTA_STOCK_DESTINATARIO", "") or SMTP_DESTINATARIO
+
+
+def _correo_transporte_configurado():
+    """True si hay algún método de envío de correo configurado (Resend o
+    SMTP). No verifica el destinatario — eso lo revisa cada función que
+    llama a esta."""
+    return bool(RESEND_API_KEY) or bool(SMTP_USER and SMTP_PASSWORD)
 
 # ---------------------------------------------------------------------------
 # Cálculo automático del stock mínimo (punto de reorden)
@@ -181,13 +209,13 @@ ALERTA_STOCK_DESTINATARIO = os.environ.get("ALERTA_STOCK_DESTINATARIO", "") or S
 # para esto — es la fórmula que usa cualquier sistema de inventario.
 
 def respaldo_automatico_configurado():
-    return bool(SMTP_USER and SMTP_PASSWORD and SMTP_DESTINATARIO)
+    return _correo_transporte_configurado() and bool(SMTP_DESTINATARIO)
 
 
 def alerta_stock_configurada():
-    # Reutiliza las mismas credenciales SMTP que ya se configuran para el
+    # Reutiliza las mismas credenciales que ya se configuran para el
     # respaldo automático (no hace falta configurar dos veces lo mismo).
-    return bool(SMTP_USER and SMTP_PASSWORD and ALERTA_STOCK_DESTINATARIO)
+    return _correo_transporte_configurado() and bool(ALERTA_STOCK_DESTINATARIO)
 
 
 CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
@@ -2490,6 +2518,82 @@ def backup_restaurar():
 
 
 # ---------------------------------------------------------------------------
+# Envío de correo: Resend (HTTPS) primero, SMTP como respaldo
+# ---------------------------------------------------------------------------
+
+def _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None):
+    """Manda un correo usando la API HTTPS de Resend (https://resend.com).
+    No usa el protocolo SMTP, así que no lo afectan los bloqueos de puerto
+    SMTP que aplican varios hostings (incluido Railway en sus planes
+    gratis/Trial/Hobby). Devuelve (exito: bool, detalle: str)."""
+    try:
+        payload = {
+            "from": RESEND_FROM,
+            "to": [destinatario],
+            "subject": asunto,
+            "text": cuerpo_texto,
+        }
+        if adjunto_bytes is not None:
+            payload["attachments"] = [{
+                "filename": adjunto_nombre or "adjunto",
+                "content": base64.b64encode(adjunto_bytes).decode("ascii"),
+            }]
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            detalle_error = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
+            return False, f"Resend respondió con error ({resp.status_code}): {detalle_error}"
+        return True, f"Enviado a {destinatario} (vía Resend)"
+    except requests.RequestException as e:
+        return False, f"Error al enviar por Resend: {e}"
+
+
+def _enviar_correo_smtp(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None):
+    """Manda un correo por SMTP tradicional (ej: Gmail). Solo funciona si
+    el hosting no bloquea el puerto SMTP saliente. Devuelve
+    (exito: bool, detalle: str)."""
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = asunto
+        msg["From"] = SMTP_USER
+        msg["To"] = destinatario
+        msg.set_content(cuerpo_texto)
+        if adjunto_bytes is not None:
+            msg.add_attachment(
+                adjunto_bytes, maintype="application", subtype="octet-stream",
+                filename=adjunto_nombre or "adjunto",
+            )
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(msg)
+
+        return True, f"Enviado a {destinatario} (vía SMTP)"
+    except Exception as e:
+        return False, f"Error al enviar por SMTP: {e}"
+
+
+def _enviar_correo(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None):
+    """Envía un correo por el transporte disponible: Resend si hay
+    RESEND_API_KEY configurada (se prueba primero — funciona incluso si el
+    hosting bloquea SMTP), si no, SMTP tradicional. Devuelve
+    (exito: bool, detalle: str)."""
+    if RESEND_API_KEY:
+        return _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes, adjunto_nombre)
+    if SMTP_USER and SMTP_PASSWORD:
+        return _enviar_correo_smtp(destinatario, asunto, cuerpo_texto, adjunto_bytes, adjunto_nombre)
+    return False, "No hay ningún método de envío de correo configurado (falta RESEND_API_KEY, o SMTP_USER / SMTP_PASSWORD)."
+
+
+# ---------------------------------------------------------------------------
 # Respaldo automático diario por correo
 # ---------------------------------------------------------------------------
 
@@ -2497,38 +2601,28 @@ def _enviar_respaldo_por_correo():
     """Manda el archivo de base de datos como adjunto por correo.
     Devuelve (exito: bool, detalle: str)."""
     if not respaldo_automatico_configurado():
-        return False, "El respaldo automático no está configurado (faltan las variables SMTP_USER / SMTP_PASSWORD)."
+        return False, "El respaldo automático no está configurado (falta RESEND_API_KEY, o SMTP_USER / SMTP_PASSWORD, y en cualquier caso SMTP_DESTINATARIO)."
     if not os.path.exists(DB_PATH):
         return False, "Aún no existe base de datos que respaldar."
 
-    try:
-        fecha = datetime.now().strftime("%Y-%m-%d_%H%M")
-        msg = EmailMessage()
-        msg["Subject"] = f"Respaldo Inventario Taller — {fecha}"
-        msg["From"] = SMTP_USER
-        msg["To"] = SMTP_DESTINATARIO
-        msg.set_content(
-            "Respaldo automático diario del sistema de inventario del taller.\n\n"
-            f"Fecha: {fecha}\n"
-            "Este correo se genera solo, no es necesario responderlo.\n"
-            "Si algún día necesitas restaurar estos datos, guarda el archivo adjunto "
-            "y súbelo desde el botón 'Respaldo' → 'Restaurar' dentro del sistema."
-        )
-        with open(DB_PATH, "rb") as f:
-            contenido = f.read()
-        msg.add_attachment(
-            contenido, maintype="application", subtype="octet-stream",
-            filename=f"inventario_backup_{fecha}.db",
-        )
+    fecha = datetime.now().strftime("%Y-%m-%d_%H%M")
+    cuerpo = (
+        "Respaldo automático diario del sistema de inventario del taller.\n\n"
+        f"Fecha: {fecha}\n"
+        "Este correo se genera solo, no es necesario responderlo.\n"
+        "Si algún día necesitas restaurar estos datos, guarda el archivo adjunto "
+        "y súbelo desde el botón 'Respaldo' → 'Restaurar' dentro del sistema."
+    )
+    with open(DB_PATH, "rb") as f:
+        contenido = f.read()
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
-            smtp.starttls()
-            smtp.login(SMTP_USER, SMTP_PASSWORD)
-            smtp.send_message(msg)
-
-        return True, f"Enviado a {SMTP_DESTINATARIO}"
-    except Exception as e:
-        return False, f"Error al enviar: {e}"
+    return _enviar_correo(
+        SMTP_DESTINATARIO,
+        f"Respaldo Inventario Taller — {fecha}",
+        cuerpo,
+        adjunto_bytes=contenido,
+        adjunto_nombre=f"inventario_backup_{fecha}.db",
+    )
 
 
 def _registrar_respaldo_log(exito, detalle):
@@ -2624,7 +2718,7 @@ def _enviar_alerta_stock_critico(forzar_aunque_vacio=False):
     """Revisa el stock crítico actual y, si hay productos, manda un correo
     con el detalle. Devuelve (exito, detalle, n_productos, correo_enviado)."""
     if not alerta_stock_configurada():
-        return False, "Las alertas de stock no están configuradas (faltan las variables SMTP_USER / SMTP_PASSWORD).", 0, False
+        return False, "Las alertas de stock no están configuradas (falta RESEND_API_KEY, o SMTP_USER / SMTP_PASSWORD).", 0, False
 
     db = _conectar_db()
     try:
@@ -2635,41 +2729,29 @@ def _enviar_alerta_stock_critico(forzar_aunque_vacio=False):
     if not productos and not forzar_aunque_vacio:
         return True, "Sin productos en estado crítico — no se envió correo.", 0, False
 
-    try:
-        fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
-        msg = EmailMessage()
-        if productos:
-            msg["Subject"] = f"⚠ {len(productos)} producto(s) con stock crítico — Inventario Taller"
-        else:
-            msg["Subject"] = "Inventario Taller — sin productos con stock crítico"
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERTA_STOCK_DESTINATARIO
+    fecha = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if productos:
+        asunto = f"⚠ {len(productos)} producto(s) con stock crítico — Inventario Taller"
+        lineas = [
+            f"  - #{p['id_sistema']} {p['nombre']}: {p['stock_disponible']} disponible(s) (mínimo {p['stock_minimo']})"
+            for p in productos
+        ]
+        cuerpo = (
+            f"Se detectaron {len(productos)} producto(s) en o bajo su stock mínimo.\n\n"
+            + "\n".join(lineas)
+            + f"\n\nFecha: {fecha}\n"
+            "Revisa la pestaña 'Planificación' en el sistema para ver cuánto se sugiere comprar "
+            "y a qué proveedor, o la pestaña 'Productos' para ajustar el mínimo si ya no aplica.\n"
+            "Este correo se genera solo, no es necesario responderlo."
+        )
+    else:
+        asunto = "Inventario Taller — sin productos con stock crítico"
+        cuerpo = f"No hay productos con stock crítico al momento de este chequeo manual.\n\nFecha: {fecha}"
 
-        if productos:
-            lineas = [
-                f"  - #{p['id_sistema']} {p['nombre']}: {p['stock_disponible']} disponible(s) (mínimo {p['stock_minimo']})"
-                for p in productos
-            ]
-            cuerpo = (
-                f"Se detectaron {len(productos)} producto(s) en o bajo su stock mínimo.\n\n"
-                + "\n".join(lineas)
-                + f"\n\nFecha: {fecha}\n"
-                "Revisa la pestaña 'Planificación' en el sistema para ver cuánto se sugiere comprar "
-                "y a qué proveedor, o la pestaña 'Productos' para ajustar el mínimo si ya no aplica.\n"
-                "Este correo se genera solo, no es necesario responderlo."
-            )
-        else:
-            cuerpo = f"No hay productos con stock crítico al momento de este chequeo manual.\n\nFecha: {fecha}"
-        msg.set_content(cuerpo)
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
-            smtp.starttls()
-            smtp.login(SMTP_USER, SMTP_PASSWORD)
-            smtp.send_message(msg)
-
-        return True, f"Enviado a {ALERTA_STOCK_DESTINATARIO} ({len(productos)} producto(s))", len(productos), True
-    except Exception as e:
-        return False, f"Error al enviar: {e}", len(productos), False
+    exito, detalle = _enviar_correo(ALERTA_STOCK_DESTINATARIO, asunto, cuerpo)
+    if exito:
+        return True, f"{detalle} ({len(productos)} producto(s))", len(productos), True
+    return False, detalle, len(productos), False
 
 
 def _registrar_alerta_stock_log(exito, detalle, n_productos, correo_enviado):

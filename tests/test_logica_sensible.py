@@ -529,7 +529,7 @@ class TestOperativoFase35(unittest.TestCase):
 
     # ---- Garantía (entidad propia, ya no vive dentro de la OT) ----
 
-    def test_garantia_se_crea_como_entidad_propia_pendiente(self):
+    def test_garantia_se_crea_como_entidad_propia_en_ingreso(self):
         cliente = self._crear_cliente()
         equipo = self._crear_equipo(cliente["id"])
         resp = self.client.post(
@@ -538,7 +538,7 @@ class TestOperativoFase35(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         creada = resp.get_json()
-        self.assertEqual(creada["estado"], "pendiente")
+        self.assertEqual(creada["estado"], "ingreso")
         self.assertIsNone(creada["fecha_cierre"])
 
         listado = self.client.get("/api/operativo/garantias").get_json()
@@ -546,6 +546,35 @@ class TestOperativoFase35(unittest.TestCase):
         self.assertIsNotNone(encontrada)
         self.assertEqual(encontrada["equipo"]["id"], equipo["id"])
         self.assertEqual(encontrada["cliente"]["id"], cliente["id"])
+
+    def test_garantias_con_estados_legados_se_migran_al_proceso_nuevo(self):
+        # El proceso de garantías pasó de 4 pasos (pendiente/en_reparacion/
+        # resuelta/rechazada) a 8 (ingreso/diagnostico/reparacion/prueba/
+        # revision/listo/entregado/rechazada). Una garantía real que haya
+        # quedado guardada con un estado viejo no debería quedar "huérfana"
+        # (invisible en los filtros, con una etiqueta en blanco) — al
+        # reiniciar la app se traduce sola al estado nuevo equivalente.
+        cliente = self._crear_cliente()
+        db = taller_app._conectar_db()
+        ts = taller_app.now_iso()
+        cur = db.execute(
+            """
+            INSERT INTO garantias (cliente_id, motivo, estado, fecha_recepcion, usuario, creado_en, actualizado_en)
+            VALUES (?, 'Motivo legado', 'pendiente', ?, 'test', ?, ?)
+            """,
+            (cliente["id"], ts, ts, ts),
+        )
+        garantia_id = cur.lastrowid
+        db.commit()
+        db.close()
+
+        # Simula un reinicio de la app (es lo que corre init_db() en cada
+        # arranque real) para disparar la migración.
+        db2 = taller_app._conectar_db()
+        taller_app.init_operativo_db(db2)
+        migrada = db2.execute("SELECT estado FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
+        db2.close()
+        self.assertEqual(migrada["estado"], "ingreso")
 
     def test_garantia_puede_asociarse_a_la_orden_original(self):
         cliente = self._crear_cliente()
@@ -561,7 +590,7 @@ class TestOperativoFase35(unittest.TestCase):
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         self.assertEqual(resp.get_json()["orden_origen_id"], orden["id"])
 
-    def test_garantia_al_resolverse_o_rechazarse_registra_fecha_de_cierre(self):
+    def test_garantia_al_entregarse_o_rechazarse_registra_fecha_de_cierre(self):
         cliente = self._crear_cliente()
         equipo = self._crear_equipo(cliente["id"])
         garantia = self.client.post(
@@ -570,15 +599,15 @@ class TestOperativoFase35(unittest.TestCase):
         ).get_json()
         self.assertIsNone(garantia["fecha_cierre"])
 
-        resuelta = self.client.put(
-            f"/api/operativo/garantias/{garantia['id']}", json={"estado": "resuelta"}
+        entregada = self.client.put(
+            f"/api/operativo/garantias/{garantia['id']}", json={"estado": "entregado"}
         ).get_json()
-        self.assertIsNotNone(resuelta["fecha_cierre"])
+        self.assertIsNotNone(entregada["fecha_cierre"])
 
         # Si se reabre (vuelve a un estado no cerrado), la fecha de cierre
         # debería limpiarse otra vez.
         reabierta = self.client.put(
-            f"/api/operativo/garantias/{garantia['id']}", json={"estado": "en_reparacion"}
+            f"/api/operativo/garantias/{garantia['id']}", json={"estado": "reparacion"}
         ).get_json()
         self.assertIsNone(reabierta["fecha_cierre"])
 

@@ -1886,8 +1886,9 @@ async function abrirEquiposDeCliente(clienteId) {
 // ---------------------------------------------------------------------------
 
 const GAR_ESTADO_LABEL = {
-  pendiente: "Pendiente", en_reparacion: "En reparación",
-  resuelta: "Resuelta", rechazada: "Rechazada",
+  ingreso: "Ingreso", diagnostico: "Diagnóstico", reparacion: "Reparación",
+  prueba: "Prueba", revision: "Revisión", listo: "Listo",
+  entregado: "Entregado", rechazada: "Rechazada",
 };
 
 async function cargarGarantiasTab() {
@@ -2121,6 +2122,23 @@ async function abrirDetalleGarantia(id) {
     toast(e.message, true);
   }
 }
+
+// Elimina la garantía completa (no solo un ítem suelto) — igual que
+// "Eliminar orden" en las OT. El backend devuelve al inventario el stock
+// de los repuestos cargados como ítems de la garantía.
+document.getElementById("btn-gard-eliminar-garantia").addEventListener("click", async () => {
+  const id = document.getElementById("gard-id").value;
+  if (!id) return;
+  if (!confirm(`¿Eliminar la garantía #${id} por completo? Esta acción no se puede deshacer. Se devolverá al inventario el stock de los repuestos que tenga cargados.`)) return;
+  try {
+    await api(`/api/operativo/garantias/${id}`, { method: "DELETE" });
+    toast("Garantía eliminada.");
+    cerrarModal("modal-op-garantia-detalle");
+    await cargarGarantiasTab();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
 
 document.getElementById("btn-gard-guardar").addEventListener("click", async () => {
   const id = document.getElementById("gard-id").value;

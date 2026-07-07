@@ -190,9 +190,13 @@
   <section class="toolbar">
     <select id="gar-filtro-estado">
       <option value="">Todos los estados</option>
-      <option value="pendiente">Pendiente</option>
-      <option value="en_reparacion">En reparación</option>
-      <option value="resuelta">Resuelta</option>
+      <option value="ingreso">Ingreso</option>
+      <option value="diagnostico">Diagnóstico</option>
+      <option value="reparacion">Reparación</option>
+      <option value="prueba">Prueba</option>
+      <option value="revision">Revisión</option>
+      <option value="listo">Listo</option>
+      <option value="entregado">Entregado</option>
       <option value="rechazada">Rechazada</option>
     </select>
     <span style="flex:1"></span>
@@ -1020,6 +1024,7 @@
   <div class="modal modal-ancho">
     <div class="modal-head">
       <h2 id="gard-titulo">Garantía</h2>
+      <button type="button" class="btn-link" id="btn-gard-eliminar-garantia" style="color: var(--danger)">Eliminar garantía</button>
       <button class="modal-close" data-close="modal-op-garantia-detalle">&times;</button>
     </div>
     <input type="hidden" id="gard-id">
@@ -1029,9 +1034,13 @@
       <div class="campo">
         <label>Estado</label>
         <select id="gard-estado">
-          <option value="pendiente">Pendiente</option>
-          <option value="en_reparacion">En reparación</option>
-          <option value="resuelta">Resuelta</option>
+          <option value="ingreso">Ingreso</option>
+          <option value="diagnostico">Diagnóstico</option>
+          <option value="reparacion">Reparación</option>
+          <option value="prueba">Prueba</option>
+          <option value="revision">Revisión</option>
+          <option value="listo">Listo</option>
+          <option value="entregado">Entregado</option>
           <option value="rechazada">Rechazada</option>
         </select>
       </div>

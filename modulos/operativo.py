@@ -87,10 +87,17 @@ EQUIPAMIENTO_ITEMS = [
     "Extintor", "P. Circulacion", "Revision Tecnica", "S.O.A.P", "Certificado Gases",
 ]
 
-# Garantías: proceso propio, más simple que el de una OT normal (no pasa
-# por presupuesto/control de calidad/etc.).
-ESTADOS_GARANTIA = ["pendiente", "en_reparacion", "resuelta", "rechazada"]
-ESTADOS_GARANTIA_CERRADOS = {"resuelta", "rechazada"}
+# Garantías: proceso propio (definido por el taller), más simple que el de
+# una OT normal (no pasa por presupuesto/aprobación/etc.). La secuencia
+# esperada es ingreso -> diagnostico -> reparacion -> prueba -> revision ->
+# listo -> entregado; "rechazada" es una salida alternativa disponible desde
+# cualquier paso, para cuando el problema resulta no estar cubierto por la
+# garantía.
+ESTADOS_GARANTIA = [
+    "ingreso", "diagnostico", "reparacion", "prueba", "revision", "listo",
+    "entregado", "rechazada",
+]
+ESTADOS_GARANTIA_CERRADOS = {"entregado", "rechazada"}
 
 # Campos "simples" (sin efectos secundarios) que se pueden actualizar desde
 # el PUT general de la orden — diagnóstico. Los que sí disparan una
@@ -373,7 +380,7 @@ def init_operativo_db(db):
             motivo TEXT DEFAULT '',
             diagnostico TEXT DEFAULT '',
             responsable TEXT DEFAULT '',
-            estado TEXT NOT NULL DEFAULT 'pendiente',
+            estado TEXT NOT NULL DEFAULT 'ingreso',
             fecha_recepcion TEXT,
             fecha_cierre TEXT,
             usuario TEXT DEFAULT '',
@@ -427,6 +434,23 @@ def init_operativo_db(db):
         CREATE INDEX IF NOT EXISTS idx_garantia_items_garantia_id ON garantia_items (garantia_id);
         """
     )
+    db.commit()
+
+    # El proceso de garantías se amplió de 4 a 8 pasos (ver ESTADOS_GARANTIA
+    # más arriba). Las garantías que ya existían con los nombres de estado
+    # viejos se traducen una sola vez a los nuevos, para que no queden
+    # "huérfanas" con un estado que ya no aparece en ningún filtro ni select.
+    # Es seguro correr esto en cada arranque: una vez migradas, no queda
+    # ninguna fila con los valores viejos y las consultas no hacen nada.
+    MAPEO_ESTADOS_GARANTIA_LEGADO = {
+        "pendiente": "ingreso",
+        "en_reparacion": "reparacion",
+        "resuelta": "entregado",
+    }
+    for estado_viejo, estado_nuevo in MAPEO_ESTADOS_GARANTIA_LEGADO.items():
+        db.execute(
+            "UPDATE garantias SET estado = ? WHERE estado = ?", (estado_nuevo, estado_viejo)
+        )
     db.commit()
 
     # Pagos de una orden: un abono a la vez (efectivo, tarjeta, etc.), para
@@ -1735,9 +1759,9 @@ def actualizar_qc(orden_id):
 # Fase 3.5.7 (rediseñada) — Garantías como entidad propia
 #
 # Una garantía ya NO es un sub-registro de una orden: se crea "a partir de
-# los datos del auto" (cliente + equipo), con su propio proceso, más simple
-# que el de una OT normal (pendiente -> en_reparacion -> resuelta/rechazada),
-# y puede opcionalmente referenciar la OT original solo para trazabilidad.
+# los datos del auto" (cliente + equipo), con su propio proceso (ver
+# ESTADOS_GARANTIA arriba), y puede opcionalmente referenciar la OT
+# original solo para trazabilidad.
 # Vive en su propia vista dentro del módulo, separada del tablero de OTs.
 # ---------------------------------------------------------------------------
 
@@ -1801,7 +1825,7 @@ def crear_garantia():
         INSERT INTO garantias (
             cliente_id, equipo_id, orden_origen_id, motivo, diagnostico, responsable,
             estado, fecha_recepcion, usuario, creado_en, actualizado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, 'ingreso', ?, ?, ?, ?)
         """,
         (
             cliente_id, equipo_id, orden_origen_id, motivo,

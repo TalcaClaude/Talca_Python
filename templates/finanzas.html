@@ -298,7 +298,7 @@
       <h2>Generar rendición</h2>
       <button class="modal-close" data-close="modal-caja-rendicion">&times;</button>
     </div>
-    <p class="ayuda-inline">Marca los gastos que estás presentando para que te repongan la plata. Al generar la rendición, el sistema registra automáticamente un aporte por el mismo total.</p>
+    <p class="ayuda-inline">Marca los gastos que estás presentando para cerrarlos como rendidos.</p>
     <div id="cr-lista-pendientes" class="tabla-wrap">
       <p class="vacio">Cargando…</p>
     </div>
@@ -306,6 +306,11 @@
       <label>Nota (opcional)</label>
       <input type="text" id="cr-nota" placeholder="Ej: Rendición semana del 1 al 5 de julio">
     </div>
+    <label class="toggle-critico">
+      <input type="checkbox" id="cr-reponer-saldo" checked>
+      Reponer el saldo automáticamente (crea un aporte por el mismo total)
+    </label>
+    <p class="ayuda-inline">Destildar esto si estos gastos ya se cubrieron antes con un aporte manual — así rendir solo los cierra, sin agregar plata de más.</p>
     <div class="modal-actions modal-actions--split">
       <span class="ayuda-inline">Total seleccionado: <strong id="cr-total-seleccionado" class="mono">$0</strong></span>
       <div>
@@ -330,12 +335,13 @@
             <th>Fecha</th>
             <th>N° de gastos</th>
             <th class="num">Total</th>
+            <th>Repuesto</th>
             <th>Nota</th>
             <th>Responsable</th>
           </tr>
         </thead>
         <tbody id="tbody-caja-rendiciones">
-          <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+          <tr><td colspan="6" class="vacio">Cargando…</td></tr>
         </tbody>
       </table>
     </div>

@@ -417,6 +417,12 @@ def caja_crear_rendicion():
     data = request.get_json(force=True, silent=True) or {}
     gasto_ids = data.get("gasto_ids") or []
     nota = (data.get("nota") or "").strip().upper()
+    # Por defecto True para no cambiar el comportamiento de siempre. Se pasa
+    # False cuando los gastos que se están rindiendo ya se cubrieron antes
+    # con un aporte manual — si igual repusiéramos acá, el aporte manual +
+    # la reposición automática sumarían el doble de plata de la que
+    # realmente entró a la caja.
+    reponer_saldo = data.get("reponer_saldo", True)
 
     if not gasto_ids:
         return jsonify({"error": "Selecciona al menos un gasto para rendir"}), 400
@@ -444,22 +450,39 @@ def caja_crear_rendicion():
         [rendicion_id] + gasto_ids,
     )
 
-    # Reposición automática: el saldo vuelve a subir de inmediato por el
-    # total rendido (a pedido del taller — se asume que la plata vuelve
-    # junto con la rendición). Queda marcada con rendicion_origen_id para
-    # que no se pueda borrar suelta y dejar el saldo descuadrado respecto a
-    # los gastos que ya quedaron marcados como rendidos.
-    db.execute(
-        """
-        INSERT INTO caja_movimientos (tipo, fecha, monto, descripcion, usuario, rendicion_origen_id, creado_en)
-        VALUES ('aporte', ?, ?, ?, ?, ?, ?)
-        """,
-        (ts, total, f"REPOSICIÓN AUTOMÁTICA - RENDICIÓN #{rendicion_id}", usuario_actual(), rendicion_id, ts),
-    )
+    # Reposición automática (opcional, tildada por defecto): el saldo vuelve
+    # a subir de inmediato por el total rendido, asumiendo que la plata
+    # vuelve junto con la rendición. Se puede desactivar desde el checkbox
+    # "Reponer el saldo automáticamente" del modal, para el caso en que esos
+    # gastos ya se cubrieron con un aporte manual hecho antes — ahí rendir
+    # solo cierra/reporta los gastos, sin agregar plata de más. Cuando sí se
+    # crea, queda marcada con rendicion_origen_id para que no se pueda
+    # borrar suelta y dejar el saldo descuadrado respecto a los gastos que
+    # ya quedaron marcados como rendidos.
+    if reponer_saldo:
+        db.execute(
+            """
+            INSERT INTO caja_movimientos (tipo, fecha, monto, descripcion, usuario, rendicion_origen_id, creado_en)
+            VALUES ('aporte', ?, ?, ?, ?, ?, ?)
+            """,
+            (ts, total, f"REPOSICIÓN AUTOMÁTICA - RENDICIÓN #{rendicion_id}", usuario_actual(), rendicion_id, ts),
+        )
 
     db.commit()
     nueva = db.execute("SELECT * FROM caja_rendiciones WHERE id = ?", (rendicion_id,)).fetchone()
-    return jsonify(dict(nueva)), 201
+    d = dict(nueva)
+    d["reposicion_automatica"] = bool(reponer_saldo)
+    return jsonify(d), 201
+
+
+def _rendicion_tuvo_reposicion(db, rendicion_id):
+    """La reposición automática (si se generó) queda como un caja_movimientos
+    con rendicion_origen_id = esta rendición — no hace falta una columna
+    aparte, alcanza con mirar si existe ese movimiento."""
+    fila = db.execute(
+        "SELECT 1 FROM caja_movimientos WHERE rendicion_origen_id = ? LIMIT 1", (rendicion_id,)
+    ).fetchone()
+    return fila is not None
 
 
 @bp.route("/api/caja/rendiciones", methods=["GET"])
@@ -472,6 +495,7 @@ def caja_listar_rendiciones():
         d["n_gastos"] = db.execute(
             "SELECT COUNT(*) FROM caja_movimientos WHERE rendicion_id = ?", (r["id"],)
         ).fetchone()[0]
+        d["reposicion_automatica"] = _rendicion_tuvo_reposicion(db, r["id"])
         rendiciones.append(d)
     return jsonify({"rendiciones": rendiciones})
 
@@ -487,6 +511,7 @@ def caja_detalle_rendicion(rendicion_id):
     ).fetchall()
     d = dict(rendicion)
     d["gastos"] = [_caja_movimiento_dict(g) for g in gastos]
+    d["reposicion_automatica"] = _rendicion_tuvo_reposicion(db, rendicion_id)
     return jsonify(d)
 
 def _gastos_caja_para_reporte(desde, hasta):

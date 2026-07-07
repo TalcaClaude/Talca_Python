@@ -458,6 +458,7 @@ function actualizarTotalSeleccionadoRendicion() {
 document.getElementById("btn-generar-rendicion").addEventListener("click", async () => {
   state.cajaPendientesSeleccionados = new Set();
   document.getElementById("cr-nota").value = "";
+  document.getElementById("cr-reponer-saldo").checked = true;
   const cont = document.getElementById("cr-lista-pendientes");
   cont.innerHTML = `<p class="vacio">Cargando…</p>`;
   abrirModal("modal-caja-rendicion");
@@ -505,12 +506,17 @@ document.getElementById("btn-confirmar-rendicion").addEventListener("click", asy
     toast("Selecciona al menos un gasto", true);
     return;
   }
+  const reponerSaldo = document.getElementById("cr-reponer-saldo").checked;
   try {
     await api("/api/caja/rendicion", {
       method: "POST",
-      body: JSON.stringify({ gasto_ids: gastoIds, nota: document.getElementById("cr-nota").value }),
+      body: JSON.stringify({
+        gasto_ids: gastoIds,
+        nota: document.getElementById("cr-nota").value,
+        reponer_saldo: reponerSaldo,
+      }),
     });
-    toast("Rendición generada — el saldo ya se repuso");
+    toast(reponerSaldo ? "Rendición generada — el saldo ya se repuso" : "Rendición generada — no se agregó ningún aporte nuevo");
     cerrarModal("modal-caja-rendicion");
     await cargarCaja();
   } catch (e) {
@@ -522,12 +528,12 @@ document.getElementById("btn-confirmar-rendicion").addEventListener("click", asy
 
 document.getElementById("btn-ver-rendiciones").addEventListener("click", async () => {
   const tbody = document.getElementById("tbody-caja-rendiciones");
-  tbody.innerHTML = `<tr><td colspan="5" class="vacio">Cargando…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="6" class="vacio">Cargando…</td></tr>`;
   abrirModal("modal-caja-rendiciones-historial");
   try {
     const data = await api("/api/caja/rendiciones");
     if (data.rendiciones.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="5" class="vacio">Todavía no se ha generado ninguna rendición.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6" class="vacio">Todavía no se ha generado ninguna rendición.</td></tr>`;
       return;
     }
     tbody.innerHTML = data.rendiciones.map(r => `
@@ -535,6 +541,7 @@ document.getElementById("btn-ver-rendiciones").addEventListener("click", async (
         <td class="mono">${fmtFecha(r.fecha)}</td>
         <td class="num mono">${r.n_gastos}</td>
         <td class="num mono">${fmtMoney(r.total)}</td>
+        <td>${r.reposicion_automatica ? "Sí" : "No"}</td>
         <td>${escapeHtml(r.nota) || "—"}</td>
         <td>${escapeHtml(r.usuario) || "—"}</td>
       </tr>
@@ -543,7 +550,7 @@ document.getElementById("btn-ver-rendiciones").addEventListener("click", async (
       tr.addEventListener("click", () => verDetalleRendicion(parseInt(tr.dataset.id, 10)));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
   }
 });
 
@@ -558,8 +565,9 @@ async function verDetalleRendicion(id) {
     const r = await api(`/api/caja/rendicion/${id}`);
     ficha.innerHTML = `
       <dt>Fecha</dt><dd>${fmtFecha(r.fecha)}</dd>
-      <dt>Total repuesto</dt><dd class="mono">${fmtMoney(r.total)}</dd>
+      <dt>Total</dt><dd class="mono">${fmtMoney(r.total)}</dd>
       <dt>N° de gastos</dt><dd class="mono">${r.gastos.length}</dd>
+      <dt>¿Repuso el saldo?</dt><dd>${r.reposicion_automatica ? "Sí — se creó un aporte automático por el mismo total" : "No — estos gastos ya estaban cubiertos"}</dd>
       <dt>Nota</dt><dd>${escapeHtml(r.nota) || "—"}</dd>
       <dt>Responsable</dt><dd>${escapeHtml(r.usuario) || "—"}</dd>
     `;

@@ -134,6 +134,19 @@
   <section class="vista" id="vista-reportes" style="display:none">
 
     <div class="dash-panel">
+      <h3 class="dash-titulo">Resumen Financiero</h3>
+      <p class="bodega-intro">Ingresos cobrados a clientes, gastos de Caja Chica, resultado y saldo, con el detalle línea por línea de cada pago y cada gasto — filtrable por rango de fechas. Sin fechas, muestra el mes actual.</p>
+      <div class="reportes-rango">
+        <label>Desde <input type="date" id="reportes-finanzas-desde"></label>
+        <label>Hasta <input type="date" id="reportes-finanzas-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-reporte-finanzas">Descargar Excel</button>
+        <button class="btn btn-secundario" id="btn-reporte-finanzas-pdf">Descargar PDF</button>
+      </div>
+    </div>
+
+    <div class="dash-panel">
       <h3 class="dash-titulo">Gastos de Caja Chica</h3>
       <p class="bodega-intro">Todos los gastos registrados, con su categoría y estado de rendición — filtrable por rango de fechas.</p>
       <div class="reportes-rango">

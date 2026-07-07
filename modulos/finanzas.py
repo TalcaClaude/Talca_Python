@@ -130,44 +130,11 @@ def caja_resumen():
 
 @bp.route("/api/finanzas/resumen", methods=["GET"])
 def finanzas_resumen():
-    db = get_db()
     desde, hasta = _rango_fechas()
     if not desde and not hasta:
         desde = datetime.now().strftime("%Y-%m") + "-01"
-
-    def _suma_en_rango(sql_base, params_base):
-        sql = sql_base
-        params = list(params_base)
-        if desde:
-            sql += " AND fecha >= ?"
-            params.append(desde)
-        if hasta:
-            sql += " AND fecha <= ?"
-            params.append(hasta + "T23:59:59")
-        return db.execute(sql, params).fetchone()[0]
-
-    ingresos = _suma_en_rango(
-        "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE 1 = 1", []
-    )
-    gastos = _suma_en_rango(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto'", []
-    )
-
-    total_aportado = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'aporte'"
-    ).fetchone()[0]
-    total_gastado = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto'"
-    ).fetchone()[0]
-
-    return jsonify({
-        "desde": desde,
-        "hasta": hasta,
-        "ingresos": round(ingresos, 2),
-        "gastos": round(gastos, 2),
-        "resultado": round(ingresos - gastos, 2),
-        "saldo_caja_chica": round(total_aportado - total_gastado, 2),
-    })
+    resumen = _resumen_financiero(desde, hasta)
+    return jsonify({"desde": desde, "hasta": hasta, **resumen})
 
 
 @bp.route("/api/caja/movimientos", methods=["GET"])
@@ -589,4 +556,154 @@ def reporte_caja_gastos_pdf():
 
     sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
     nombre = f"gastos_caja_chica{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    return _pdf_response(buffer, doc, elementos, nombre)
+
+
+# ---------------------------------------------------------------------------
+# Reporte "Resumen financiero" — la versión exportable de la pestaña
+# Resumen: mismo criterio de ingresos/gastos que /api/finanzas/resumen (ver
+# comentario ahí), más el detalle línea por línea de cada pago cobrado y
+# cada gasto de caja chica del período, para poder revisar o entregarle el
+# número a alguien más sin tener que abrir el sistema.
+# ---------------------------------------------------------------------------
+
+def _ingresos_para_reporte(desde, hasta):
+    db = get_db()
+    sql = """
+        SELECT p.*, o.id AS orden_numero, c.nombre AS cliente_nombre
+        FROM pagos_orden p
+        JOIN ordenes_trabajo o ON o.id = p.orden_id
+        JOIN clientes c ON c.id = o.cliente_id
+        WHERE 1 = 1
+    """
+    params = []
+    if desde:
+        sql += " AND p.fecha >= ?"
+        params.append(desde)
+    if hasta:
+        sql += " AND p.fecha <= ?"
+        params.append(hasta + "T23:59:59")
+    sql += " ORDER BY p.fecha DESC, p.id DESC"
+    return [dict(r) for r in db.execute(sql, params).fetchall()]
+
+
+def _resumen_financiero(desde, hasta):
+    """Mismo cálculo que finanzas_resumen(), separado en una función aparte
+    para que tanto el endpoint JSON como los reportes Excel/PDF usen
+    exactamente la misma lógica y nunca puedan mostrar números distintos."""
+    db = get_db()
+
+    def _suma_en_rango(sql_base):
+        sql = sql_base
+        params = []
+        if desde:
+            sql += " AND fecha >= ?"
+            params.append(desde)
+        if hasta:
+            sql += " AND fecha <= ?"
+            params.append(hasta + "T23:59:59")
+        return db.execute(sql, params).fetchone()[0]
+
+    ingresos = _suma_en_rango("SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE 1 = 1")
+    gastos = _suma_en_rango("SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto'")
+    total_aportado = db.execute("SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'aporte'").fetchone()[0]
+    total_gastado = db.execute("SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto'").fetchone()[0]
+
+    return {
+        "ingresos": round(ingresos, 2),
+        "gastos": round(gastos, 2),
+        "resultado": round(ingresos - gastos, 2),
+        "saldo_caja_chica": round(total_aportado - total_gastado, 2),
+    }
+
+
+@bp.route("/api/reportes/finanzas-resumen", methods=["GET"])
+def reporte_finanzas_resumen():
+    desde, hasta = _rango_fechas()
+    if not desde and not hasta:
+        desde = datetime.now().strftime("%Y-%m") + "-01"
+    resumen = _resumen_financiero(desde, hasta)
+    ingresos = _ingresos_para_reporte(desde, hasta)
+    gastos = _gastos_caja_para_reporte(desde, hasta)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Resumen"
+    ws.append(["Período", f"{desde or '(desde el inicio)'} a {hasta or '(hoy)'}"])
+    ws.append(["Ingresos cobrados a clientes", round(resumen["ingresos"], 2)])
+    ws.append(["Gastos de Caja Chica", round(resumen["gastos"], 2)])
+    ws.append(["Resultado del período", round(resumen["resultado"], 2)])
+    ws.append(["Saldo actual de Caja Chica", round(resumen["saldo_caja_chica"], 2)])
+    _autoancho(ws)
+
+    ws2 = wb.create_sheet("Ingresos (pagos)")
+    ws2.append(["Fecha", "OT", "Cliente", "Método de pago", "Monto"])
+    for p in ingresos:
+        ws2.append([p["fecha"], f"#{p['orden_numero']}", p["cliente_nombre"], p["metodo_pago"], round(p["monto"], 2)])
+    ws2.append([])
+    ws2.append(["", "", "", "Total", round(sum(p["monto"] for p in ingresos), 2)])
+    _estilo_encabezado(ws2)
+    _autoancho(ws2)
+
+    ws3 = wb.create_sheet("Gastos (Caja Chica)")
+    ws3.append(["Fecha", "Categoría", "Descripción", "Proveedor", "Monto", "Estado", "Responsable"])
+    for g in gastos:
+        ws3.append([
+            g["fecha"], g["categoria"] or "", g["descripcion"] or "", g["proveedor"] or "",
+            round(g["monto"], 2), "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "",
+        ])
+    ws3.append([])
+    ws3.append(["", "", "", "Total", round(sum(g["monto"] for g in gastos), 2), "", ""])
+    _estilo_encabezado(ws3)
+    _autoancho(ws3)
+
+    sufijo = f"_{desde or 'inicio'}_a_{hasta or 'hoy'}"
+    nombre = f"resumen_financiero{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return _excel_response(wb, nombre)
+
+
+@bp.route("/api/reportes/finanzas-resumen/pdf", methods=["GET"])
+def reporte_finanzas_resumen_pdf():
+    desde, hasta = _rango_fechas()
+    if not desde and not hasta:
+        desde = datetime.now().strftime("%Y-%m") + "-01"
+    resumen = _resumen_financiero(desde, hasta)
+    ingresos = _ingresos_para_reporte(desde, hasta)
+    gastos = _gastos_caja_para_reporte(desde, hasta)
+
+    rango_txt = f" ({desde or '…'} a {hasta or '…'})"
+    buffer, doc, elementos, estilos = _pdf_documento(f"Resumen Financiero{rango_txt}")
+
+    _pdf_tabla(
+        elementos, estilos, "Resumen",
+        ["Ingresos cobrados", "Gastos de Caja Chica", "Resultado del período", "Saldo actual de Caja Chica"],
+        [[
+            fmt_money_pdf(resumen["ingresos"]), fmt_money_pdf(resumen["gastos"]),
+            fmt_money_pdf(resumen["resultado"]), fmt_money_pdf(resumen["saldo_caja_chica"]),
+        ]],
+    )
+
+    filas_ingresos = [
+        [p["fecha"][:10], f"#{p['orden_numero']}", p["cliente_nombre"], p["metodo_pago"], fmt_money_pdf(p["monto"])]
+        for p in ingresos
+    ]
+    _pdf_tabla(
+        elementos, estilos, f"Ingresos cobrados a clientes — {fmt_money_pdf(sum(p['monto'] for p in ingresos))}",
+        ["Fecha", "OT", "Cliente", "Método de pago", "Monto"],
+        filas_ingresos,
+    )
+
+    filas_gastos = [
+        [g["fecha"][:10], g["categoria"] or "—", g["descripcion"] or "—", fmt_money_pdf(g["monto"]),
+         "Rendido" if g["rendido"] else "Pendiente"]
+        for g in gastos
+    ]
+    _pdf_tabla(
+        elementos, estilos, f"Gastos de Caja Chica — {fmt_money_pdf(sum(g['monto'] for g in gastos))}",
+        ["Fecha", "Categoría", "Descripción", "Monto", "Estado"],
+        filas_gastos,
+    )
+
+    sufijo = f"_{desde or 'inicio'}_a_{hasta or 'hoy'}"
+    nombre = f"resumen_financiero{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     return _pdf_response(buffer, doc, elementos, nombre)

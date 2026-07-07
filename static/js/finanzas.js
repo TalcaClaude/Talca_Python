@@ -588,6 +588,13 @@ async function verDetalleRendicion(id) {
 // Reportes
 // ---------------------------------------------------------------------------
 
+document.getElementById("btn-reporte-finanzas").addEventListener("click", () => {
+  window.location.href = `/api/reportes/finanzas-resumen?${rangoFechasParams("reportes-finanzas-desde", "reportes-finanzas-hasta")}`;
+});
+document.getElementById("btn-reporte-finanzas-pdf").addEventListener("click", () => {
+  window.location.href = `/api/reportes/finanzas-resumen/pdf?${rangoFechasParams("reportes-finanzas-desde", "reportes-finanzas-hasta")}`;
+});
+
 document.getElementById("btn-reporte-caja").addEventListener("click", () => {
   window.location.href = `/api/reportes/caja-gastos?${rangoFechasParams("reportes-caja-desde", "reportes-caja-hasta")}`;
 });

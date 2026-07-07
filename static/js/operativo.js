@@ -284,39 +284,34 @@ async function cargarCatalogoVehiculos() {
   }
 }
 
-// Lista base de trabajos comunes de un taller mecánico general — se ofrece
-// siempre como punto de partida (igual que el catálogo de marcas), para que
-// el campo "Trabajo a Realizar" no dependa únicamente de que ya existan
-// órdenes anteriores con ese mismo texto (un taller recién empezado a usar
-// el sistema, sin historial todavía, no tenía ninguna opción para elegir).
+// Lista base de trabajos propios del taller (especializado en cajas de
+// cambio automáticas) — se ofrece siempre como punto de partida (igual que
+// el catálogo de marcas), para que el campo "Trabajo a Realizar" no dependa
+// únicamente de que ya existan órdenes anteriores con ese mismo texto (un
+// taller recién empezado a usar el sistema, sin historial todavía, no tenía
+// ninguna opción para elegir). Lista provista por el taller.
 const TRABAJOS_COMUNES_BASE = [
-  "MANTENCIÓN PREVENTIVA", "CAMBIO DE ACEITE Y FILTRO", "CAMBIO DE FILTRO DE AIRE",
-  "REVISIÓN Y CAMBIO DE PASTILLAS DE FRENO", "REVISIÓN Y CAMBIO DE DISCOS DE FRENO",
-  "ALINEACIÓN Y BALANCEO", "CAMBIO DE NEUMÁTICOS", "DIAGNÓSTICO GENERAL",
-  "DIAGNÓSTICO ELÉCTRICO", "CAMBIO DE BATERÍA", "CAMBIO DE CORREA DE DISTRIBUCIÓN",
-  "REVISIÓN Y REPARACIÓN DE SUSPENSIÓN", "REVISIÓN Y REPARACIÓN DE MOTOR",
-  "REPARACIÓN DE CAJA DE CAMBIOS", "CAMBIO DE EMBRAGUE",
-  "REVISIÓN Y RECARGA DE AIRE ACONDICIONADO", "REVISIÓN DE SISTEMA DE ESCAPE",
-  "CAMBIO DE AMORTIGUADORES", "REVISIÓN PARA REVISIÓN TÉCNICA",
+  "OVERHAUL COMPLETO", "MANTENCIÓN TRANSMISIÓN", "OTROS TRABAJOS",
+  "OVERHAUL CUERPO VALVULAS", "PÉRDIDA DE ACEITE", "CAMBIO DE ACEITE",
+  "CAMBIO EMBRAGUE", "CAMBIO MECATRÓNICA", "CAMBIO CAJA TRANSFERENCIA",
+  "REPARACIÓN CAJA MECANICA", "CAMPAÑA REVISIÓN", "DIAGNOSTICO Y PRESUPUESTO",
+  "REPARACION CONVERTIDOR DE TORQUE", "CAMBIO DE TCM Y PROGRAMACION",
+  "PROGRAMACION Y ADAPTACION", "NO APRUEBA PRESUPUESTO",
 ];
 
 // Datalists de "select con texto libre" para Color/Modelo de
-// Transmisión/Referencia/Trabajo a Realizar (Marca/Modelo dejaron de ser
-// datalist de texto libre — ver poblarSelectMarca/poblarSelectModelo más
-// arriba, ahora son <select> de verdad). Trabajo a Realizar arranca con la
-// lista base de trabajos comunes de arriba, más lo que ya se haya escrito
-// antes en órdenes anteriores (así crece solo con el uso real del taller).
+// Transmisión/Referencia (Marca/Modelo dejaron de ser datalist de texto
+// libre — ver poblarSelectMarca/poblarSelectModelo más arriba, ahora son
+// <select> de verdad).
 function poblarDatalistsOperativo() {
   const colores = new Set();
   const transmisiones = new Set(), referencias = new Set();
-  const trabajos = new Set(TRABAJOS_COMUNES_BASE);
   state.opOrdenes.forEach(o => {
     if (o.equipo) {
       if (o.equipo.color) colores.add(o.equipo.color);
       if (o.equipo.modelo_transmision) transmisiones.add(o.equipo.modelo_transmision);
     }
     if (o.referencia) referencias.add(o.referencia);
-    if (o.trabajo_a_realizar) trabajos.add(o.trabajo_a_realizar);
   });
   const llenar = (id, valores) => {
     document.getElementById(id).innerHTML = [...valores].sort((a, b) => a.localeCompare(b, "es")).map(v => `<option value="${escapeHtml(v)}">`).join("");
@@ -324,7 +319,18 @@ function poblarDatalistsOperativo() {
   llenar("dl-op-colores", colores);
   llenar("dl-op-transmisiones", transmisiones);
   llenar("dl-op-referencias", referencias);
-  llenar("dl-op-trabajos", trabajos);
+}
+
+// "Trabajo a Realizar" es un <select> bloqueado: solo se puede elegir un
+// valor de la lista fija del taller (pedido explícito — no debe permitir
+// escribir texto libre). "Otros Trabajos" ya está en la lista como opción
+// para los casos que no encajan en ninguna categoría puntual.
+function poblarSelectTrabajo(valorActual) {
+  const select = document.getElementById("opon-trabajo");
+  const opciones = [...TRABAJOS_COMUNES_BASE].sort((a, b) => a.localeCompare(b, "es"));
+  select.innerHTML = '<option value="">Selecciona un trabajo…</option>' +
+    opciones.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+  select.value = valorActual && opciones.includes(valorActual) ? valorActual : "";
 }
 
 // ---------------------------------------------------------------------------
@@ -960,6 +966,7 @@ document.getElementById("btn-op-nueva-orden").addEventListener("click", async ()
     state.opOrdenes = dataOrdenes.ordenes;
   }
   poblarDatalistsOperativo();
+  poblarSelectTrabajo("");
   renderEquipamientoChecklist("op-equipamiento-grid-nueva", null, { lectura: false });
   abrirModal("modal-op-orden-nueva");
 });

@@ -476,7 +476,7 @@ function renderTableroOperativo() {
   const busqueda = document.getElementById("op-buscar").value.trim().toLowerCase();
 
   document.getElementById("op-columna-cancelado").style.display = filtroEstado === "cancelado" ? "flex" : "none";
-  document.querySelectorAll(".op-columna").forEach(col => {
+  document.querySelectorAll("#op-kanban .op-columna").forEach(col => {
     const est = col.dataset.estado;
     if (filtroEstado) {
       col.style.display = est === filtroEstado ? "flex" : "none";
@@ -521,7 +521,7 @@ function renderTableroOperativo() {
     `).join("");
   });
 
-  document.querySelectorAll(".op-card").forEach(card => {
+  document.querySelectorAll("#op-kanban .op-card").forEach(card => {
     card.addEventListener("click", () => abrirDetalleOrden(parseInt(card.dataset.id, 10)));
     card.addEventListener("dragstart", (e) => {
       e.dataTransfer.effectAllowed = "move";
@@ -538,7 +538,7 @@ function renderTableroOperativo() {
 // estado. Los drop-zones son las columnas mismas (elementos fijos del HTML),
 // así que los listeners se conectan una sola vez al cargar la página — solo
 // el contenido interno de tarjetas se vuelve a pintar en cada render.
-document.querySelectorAll(".op-columna").forEach(columna => {
+document.querySelectorAll("#op-kanban .op-columna").forEach(columna => {
   columna.addEventListener("dragover", (e) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
@@ -1891,36 +1891,107 @@ const GAR_ESTADO_LABEL = {
   entregado: "Entregado", rechazada: "Rechazada",
 };
 
+const GAR_ESTADOS_TABLERO = [
+  "ingreso", "diagnostico", "reparacion", "prueba", "revision", "listo",
+  "entregado", "rechazada",
+];
+
+// Tablero kanban de garantías — mismo patrón visual y de arrastrar-y-soltar
+// que el tablero de Órdenes de Trabajo (ver renderTableroOperativo), pero
+// con su propio proceso y su propio contenedor (#gar-kanban), para que no
+// se mezclen entre sí los selectores ".op-columna"/".op-card" que usan la
+// misma clase CSS en los dos tableros.
 async function cargarGarantiasTab() {
   try {
-    const estado = document.getElementById("gar-filtro-estado").value;
-    const data = await api(`/api/operativo/garantias${estado ? "?estado=" + encodeURIComponent(estado) : ""}`);
+    const data = await api("/api/operativo/garantias");
     state.opGarantias = data.garantias;
-    const tbody = document.getElementById("tbody-garantias");
-    if (data.garantias.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" class="vacio">Sin garantías registradas todavía.</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = data.garantias.map(g => `
-      <tr data-ver-garantia="${g.id}">
-        <td>${fmtFechaSolo((g.fecha_recepcion || "").slice(0, 10))}</td>
-        <td>${escapeHtml(g.cliente ? g.cliente.nombre : "—")}</td>
-        <td>${escapeHtml(g.equipo ? [g.equipo.marca, g.equipo.modelo, g.equipo.identificador].filter(Boolean).join(" · ") : "—")}</td>
-        <td>${escapeHtml(g.motivo)}</td>
-        <td>${escapeHtml(GAR_ESTADO_LABEL[g.estado] || g.estado)}</td>
-        <td>${escapeHtml(g.responsable || "—")}</td>
-        <td class="num">${fmtMoney(g.total)}</td>
-      </tr>
-    `).join("");
-    tbody.querySelectorAll("[data-ver-garantia]").forEach(tr => {
-      tr.addEventListener("click", () => abrirDetalleGarantia(parseInt(tr.dataset.verGarantia, 10)));
-    });
+    renderTableroGarantias();
   } catch (e) {
     toast(e.message, true);
   }
 }
 
-document.getElementById("gar-filtro-estado").addEventListener("change", cargarGarantiasTab);
+function renderTableroGarantias() {
+  const filtroEstado = document.getElementById("gar-filtro-estado").value;
+
+  document.getElementById("gar-columna-rechazada").style.display = filtroEstado === "rechazada" ? "flex" : "none";
+  document.querySelectorAll("#gar-kanban .op-columna").forEach(col => {
+    const est = col.dataset.estado;
+    if (filtroEstado) {
+      col.style.display = est === filtroEstado ? "flex" : "none";
+    } else {
+      col.style.display = est === "rechazada" ? "none" : "flex";
+    }
+  });
+
+  GAR_ESTADOS_TABLERO.forEach(estado => {
+    const cont = document.getElementById(`gar-cards-${estado}`);
+    const contador = document.getElementById(`gar-count-${estado}`);
+    const garantias = (state.opGarantias || []).filter(g => g.estado === estado);
+    contador.textContent = garantias.length;
+    if (garantias.length === 0) {
+      cont.innerHTML = `<p class="vacio-inline">Sin garantías.</p>`;
+      return;
+    }
+    cont.innerHTML = garantias.map(g => `
+      <div class="op-card" data-id="${g.id}" draggable="true">
+        <div class="op-card-top">
+          <span class="op-card-ot">Garantía #${g.id}</span>
+        </div>
+        <div class="op-card-cliente">${escapeHtml(g.cliente ? g.cliente.nombre : "Sin cliente")}</div>
+        ${g.equipo ? `<div class="op-card-equipo">${escapeHtml([g.equipo.marca, g.equipo.modelo].filter(Boolean).join(" · ") || g.equipo.identificador || "")}</div>` : ""}
+        <div class="op-card-descripcion">${escapeHtml(g.motivo)}</div>
+        <div class="op-card-meta">
+          <span>Ingreso: ${fmtFechaSolo((g.fecha_recepcion || "").slice(0, 10))}</span>
+          ${g.responsable ? `<span>${escapeHtml(g.responsable)}</span>` : ""}
+        </div>
+      </div>
+    `).join("");
+  });
+
+  document.querySelectorAll("#gar-kanban .op-card").forEach(card => {
+    card.addEventListener("click", () => abrirDetalleGarantia(parseInt(card.dataset.id, 10)));
+    card.addEventListener("dragstart", (e) => {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", card.dataset.id);
+      card.classList.add("dragging");
+    });
+    card.addEventListener("dragend", () => {
+      card.classList.remove("dragging");
+    });
+  });
+}
+
+// Igual que en el tablero de OT: los drop-zones son las columnas fijas del
+// HTML, así que los listeners se conectan una sola vez.
+document.querySelectorAll("#gar-kanban .op-columna").forEach(columna => {
+  columna.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    columna.classList.add("drag-over");
+  });
+  columna.addEventListener("dragleave", () => {
+    columna.classList.remove("drag-over");
+  });
+  columna.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    columna.classList.remove("drag-over");
+    const garantiaId = parseInt(e.dataTransfer.getData("text/plain"), 10);
+    const nuevoEstado = columna.dataset.estado;
+    if (!garantiaId || !nuevoEstado) return;
+    const garantia = (state.opGarantias || []).find(g => g.id === garantiaId);
+    if (garantia && garantia.estado === nuevoEstado) return; // soltada en su propia columna
+    try {
+      await api(`/api/operativo/garantias/${garantiaId}`, { method: "PUT", body: JSON.stringify({ estado: nuevoEstado }) });
+      toast(`Garantía #${garantiaId} movida a "${GAR_ESTADO_LABEL[nuevoEstado] || nuevoEstado}".`);
+      await cargarGarantiasTab();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+});
+
+document.getElementById("gar-filtro-estado").addEventListener("change", renderTableroGarantias);
 
 // ---- Nueva garantía ----
 

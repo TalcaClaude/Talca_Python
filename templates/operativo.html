@@ -30,8 +30,8 @@
   <nav class="tabs">
     <button class="tab activo" data-vista="dashboard">Dashboard</button>
     <button class="tab" data-vista="ordenes">Órdenes de Trabajo</button>
-    <button class="tab" data-vista="clientes">Clientes</button>
     <button class="tab" data-vista="garantias">Garantías</button>
+    <button class="tab" data-vista="clientes">Clientes</button>
     <button class="tab" data-vista="reportes">Reportes</button>
   </nav>
 
@@ -189,7 +189,7 @@
 
   <section class="toolbar">
     <select id="gar-filtro-estado">
-      <option value="">Todos los estados</option>
+      <option value="">Todos los estados (excepto rechazada)</option>
       <option value="ingreso">Ingreso</option>
       <option value="diagnostico">Diagnóstico</option>
       <option value="reparacion">Reparación</option>
@@ -203,23 +203,39 @@
     <button type="button" class="btn btn-primary" id="btn-gar-nueva">+ Nueva garantía</button>
   </section>
 
-  <section class="tabla-wrap">
-    <table class="tabla">
-      <thead>
-        <tr>
-          <th>Fecha</th>
-          <th>Cliente</th>
-          <th>Vehículo</th>
-          <th>Motivo</th>
-          <th>Estado</th>
-          <th>Responsable</th>
-          <th class="num">Costo</th>
-        </tr>
-      </thead>
-      <tbody id="tbody-garantias">
-        <tr><td colspan="7" class="vacio">Cargando…</td></tr>
-      </tbody>
-    </table>
+  <section class="op-kanban" id="gar-kanban">
+    <div class="op-columna" data-estado="ingreso">
+      <h3>Ingreso <span class="op-columna-count" id="gar-count-ingreso">0</span></h3>
+      <div class="op-columna-cards" id="gar-cards-ingreso"></div>
+    </div>
+    <div class="op-columna" data-estado="diagnostico">
+      <h3>Diagnóstico <span class="op-columna-count" id="gar-count-diagnostico">0</span></h3>
+      <div class="op-columna-cards" id="gar-cards-diagnostico"></div>
+    </div>
+    <div class="op-columna" data-estado="reparacion">
+      <h3>Reparación <span class="op-columna-count" id="gar-count-reparacion">0</span></h3>
+      <div class="op-columna-cards" id="gar-cards-reparacion"></div>
+    </div>
+    <div class="op-columna" data-estado="prueba">
+      <h3>Prueba <span class="op-columna-count" id="gar-count-prueba">0</span></h3>
+      <div class="op-columna-cards" id="gar-cards-prueba"></div>
+    </div>
+    <div class="op-columna" data-estado="revision">
+      <h3>Revisión <span class="op-columna-count" id="gar-count-revision">0</span></h3>
+      <div class="op-columna-cards" id="gar-cards-revision"></div>
+    </div>
+    <div class="op-columna" data-estado="listo">
+      <h3>Listo <span class="op-columna-count" id="gar-count-listo">0</span></h3>
+      <div class="op-columna-cards" id="gar-cards-listo"></div>
+    </div>
+    <div class="op-columna" data-estado="entregado">
+      <h3>Entregado <span class="op-columna-count" id="gar-count-entregado">0</span></h3>
+      <div class="op-columna-cards" id="gar-cards-entregado"></div>
+    </div>
+    <div class="op-columna" data-estado="rechazada" id="gar-columna-rechazada" style="display:none">
+      <h3>Rechazada <span class="op-columna-count" id="gar-count-rechazada">0</span></h3>
+      <div class="op-columna-cards" id="gar-cards-rechazada"></div>
+    </div>
   </section>
 
   </section>

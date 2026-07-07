@@ -1,6 +1,6 @@
 """
 Módulo Operativo — órdenes de trabajo. Segundo módulo del ERP, construido
-sobre el mismo patrón que Caja Chica (ver modulos/caja_chica.py y
+sobre el mismo patrón que Finanzas/Caja Chica (ver modulos/finanzas.py y
 core.py): un Flask Blueprint que solo importa piezas compartidas desde
 core.py, nunca desde app.py, para no repetir el import circular que se
 encontró al separar Caja Chica por primera vez.

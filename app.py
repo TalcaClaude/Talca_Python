@@ -853,6 +853,11 @@ def vista_operativo():
     return render_template("operativo.html")
 
 
+@app.route("/finanzas")
+def vista_finanzas():
+    return render_template("finanzas.html")
+
+
 @app.route("/api/sesion", methods=["GET"])
 def sesion_actual():
     return jsonify({"username": session.get("username"), "nombre": session.get("nombre")})
@@ -4056,14 +4061,14 @@ def reporte_compras_pdf():
 
 # ---------------------------------------------------------------------------
 # Módulos separados (ver modulos/) — primer paso hacia la arquitectura de
-# ERP: Caja Chica ya vive en su propio archivo como Blueprint de Flask, en
-# vez de estar mezclado acá. Se importa recién al final del archivo, después
-# de que todas las funciones que ese módulo necesita (get_db,
-# _aplicar_entrada_stock, los helpers de reportes, etc.) ya están definidas
-# arriba — así se evita un import circular.
+# ERP: Finanzas (que incluye Caja Chica) ya vive en su propio archivo como
+# Blueprint de Flask, en vez de estar mezclado acá. Se importa recién al
+# final del archivo, después de que todas las funciones que ese módulo
+# necesita (get_db, _aplicar_entrada_stock, los helpers de reportes, etc.)
+# ya están definidas arriba — así se evita un import circular.
 # ---------------------------------------------------------------------------
-from modulos.caja_chica import bp as bp_caja_chica  # noqa: E402
-app.register_blueprint(bp_caja_chica)
+from modulos.finanzas import bp as bp_finanzas  # noqa: E402
+app.register_blueprint(bp_finanzas)
 
 from modulos.operativo import bp as bp_operativo, init_operativo_db  # noqa: E402
 app.register_blueprint(bp_operativo)

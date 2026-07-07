@@ -22,7 +22,10 @@ import base64
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
-import requests
+try:
+    import requests
+except ImportError:  # pragma: no cover - solo pasa si el hosting no instaló la dependencia
+    requests = None
 from flask import Flask, g, jsonify, request, render_template, send_file, session, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -190,7 +193,7 @@ def _correo_transporte_configurado():
     """True si hay algún método de envío de correo configurado (Resend o
     SMTP). No verifica el destinatario — eso lo revisa cada función que
     llama a esta."""
-    return bool(RESEND_API_KEY) or bool(SMTP_USER and SMTP_PASSWORD)
+    return bool(RESEND_API_KEY and requests is not None) or bool(SMTP_USER and SMTP_PASSWORD)
 
 # ---------------------------------------------------------------------------
 # Cálculo automático del stock mínimo (punto de reorden)
@@ -2526,6 +2529,12 @@ def _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes=None
     No usa el protocolo SMTP, así que no lo afectan los bloqueos de puerto
     SMTP que aplican varios hostings (incluido Railway en sus planes
     gratis/Trial/Hobby). Devuelve (exito: bool, detalle: str)."""
+    if requests is None:
+        return False, (
+            "No se pudo enviar por Resend: falta instalar la librería 'requests' en el "
+            "servidor (revisa que requirements.txt la incluya y que el último deploy se haya "
+            "construido de nuevo, no solo reiniciado)."
+        )
     try:
         payload = {
             "from": RESEND_FROM,
@@ -2586,10 +2595,15 @@ def _enviar_correo(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjun
     RESEND_API_KEY configurada (se prueba primero — funciona incluso si el
     hosting bloquea SMTP), si no, SMTP tradicional. Devuelve
     (exito: bool, detalle: str)."""
-    if RESEND_API_KEY:
+    if RESEND_API_KEY and requests is not None:
         return _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes, adjunto_nombre)
     if SMTP_USER and SMTP_PASSWORD:
         return _enviar_correo_smtp(destinatario, asunto, cuerpo_texto, adjunto_bytes, adjunto_nombre)
+    if RESEND_API_KEY and requests is None:
+        return False, (
+            "Hay RESEND_API_KEY configurada pero falta instalar la librería 'requests' en el "
+            "servidor — revisa requirements.txt y fuerza un redeploy completo en Railway."
+        )
     return False, "No hay ningún método de envío de correo configurado (falta RESEND_API_KEY, o SMTP_USER / SMTP_PASSWORD)."
 
 

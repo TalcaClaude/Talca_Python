@@ -104,6 +104,93 @@ CAMPOS_SIMPLES_ORDEN = [
 ]
 
 
+def _reconstruir_tabla_legada_si_hace_falta(db, tabla, sql_create_nueva, columnas_objetivo, mapeos_legado=None):
+    """
+    Sanea una tabla que puede venir de una versión mucho más vieja del
+    proyecto, con columnas legadas que ya no usamos (a veces con NOT NULL
+    y sin default, lo que hace fallar cualquier INSERT que no las llene).
+
+    Ya nos pasó dos veces con 'garantias': primero le faltaba
+    'cliente_id', después apareció una columna 'orden_id' NOT NULL de una
+    versión anterior a que existiera 'orden_origen_id'. En vez de seguir
+    agregando parches columna por columna cada vez que aparece una
+    diferencia nueva, esta función reconstruye la tabla completa con el
+    esquema actual, preservando todos los datos existentes:
+
+      1. Si la tabla no existe todavía, no hace nada (el CREATE TABLE
+         IF NOT EXISTS normal se encarga de crearla limpia).
+      2. Si ya existe y coincide con el esquema objetivo (no le falta
+         ninguna columna nuestra ni tiene columnas NOT NULL sin default
+         que no conocemos), tampoco hace nada — evita reconstruir en
+         cada arranque sin necesidad.
+      3. Si detecta un desajuste, renombra la tabla vieja a
+         '<tabla>_legado' (nunca se borra, por si hay que revisar o
+         recuperar algo a mano), crea la tabla nueva con el esquema
+         correcto, y copia los datos existentes columna por columna
+         -usando 'mapeos_legado' para traducir nombres viejos a los
+         actuales (ej. {"orden_id": "orden_origen_id"})-, incluyendo el
+         'id' para no romper referencias de otras tablas.
+    """
+    info = db.execute(f"PRAGMA table_info({tabla})").fetchall()
+    if not info:
+        return False  # todavía no existe; la crea el CREATE TABLE normal
+
+    nombres_actuales = {c[1] for c in info}
+    columnas_problema = [
+        c[1] for c in info
+        if c[3] == 1 and c[4] is None and c[1] not in columnas_objetivo
+    ]
+    faltan_columnas = [c for c in columnas_objetivo if c not in nombres_actuales]
+    if not columnas_problema and not faltan_columnas:
+        return False
+
+    mapeos_legado = mapeos_legado or {}
+    tabla_legado = f"{tabla}_legado"
+    if db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (tabla_legado,)
+    ).fetchone():
+        tabla_legado = f"{tabla}_legado_{int(datetime.now().timestamp())}"
+
+    # Datos históricos pueden tener referencias que ya no apuntan a nada
+    # (ej. un cliente/OT muy viejo que se insertó antes de que existiera
+    # esta restricción, o de una época donde la app no aplicaba
+    # "PRAGMA foreign_keys"). No queremos que el arranque de la app se
+    # caiga -ni perder esas filas- solo porque una fila vieja no cumple
+    # con una integridad referencial que nunca se le exigió al crearla.
+    # Se desactiva la validación de llaves foráneas únicamente durante
+    # esta copia puntual (hay que hacerlo fuera de una transacción activa,
+    # por eso el commit() antes y después).
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+
+    db.execute(f"ALTER TABLE {tabla} RENAME TO {tabla_legado}")
+    db.executescript(sql_create_nueva)
+
+    insert_cols, select_cols = [], []
+    for col in columnas_objetivo:
+        origen = None
+        if col in nombres_actuales:
+            origen = col
+        else:
+            for legado, destino in mapeos_legado.items():
+                if destino == col and legado in nombres_actuales:
+                    origen = legado
+                    break
+        if origen is not None:
+            insert_cols.append(col)
+            select_cols.append(origen)
+
+    if insert_cols:
+        db.execute(
+            f"INSERT INTO {tabla} ({', '.join(insert_cols)}) "
+            f"SELECT {', '.join(select_cols)} FROM {tabla_legado}"
+        )
+    db.commit()
+    db.execute("PRAGMA foreign_keys = ON")
+    db.commit()
+    return True
+
+
 def init_operativo_db(db):
     db.executescript(
         """
@@ -260,25 +347,24 @@ def init_operativo_db(db):
     # simple que el de una OT normal, y puede opcionalmente referenciar la
     # OT original que tuvo el problema (solo para trazabilidad).
     #
-    # OJO: antes esto estaba condicionado a "if not columnas_garantia" (solo
-    # se creaba si la tabla 'garantias' no existía todavía) — eso hacía que
-    # 'garantia_items' NUNCA se creara en una base de datos donde 'garantias'
-    # ya existía de una versión anterior, causando
-    # "no such table: garantia_items" en producción.
-    #
-    # OJO 2: al sacar ese gate, esto pasó a ejecutar siempre
-    # "CREATE INDEX ... ON garantias (cliente_id)" sin condición — y en la
-    # base de datos real de producción la tabla 'garantias' venía de una
-    # versión TODAVÍA más vieja que ni siquiera tenía la columna
-    # 'cliente_id'. CREATE TABLE IF NOT EXISTS no toca una tabla que ya
-    # existe, así que esa columna nunca se agregaba, y el CREATE INDEX
-    # fallaba con "no such column: cliente_id" — como esto corre al
-    # importar el módulo, tumbaba toda la app (Railway: "Application failed
-    # to respond"). Por eso ahora se verifica columna por columna con
-    # PRAGMA table_info y se agregan las que falten con ALTER TABLE ADD
-    # COLUMN ANTES de crear cualquier índice sobre ellas.
-    db.executescript(
-        """
+    # Esta tabla viene teniendo un historial de incidentes en producción
+    # porque arrastra un esquema mucho más viejo que el actual:
+    #   1) Primero: 'garantia_items' nunca se creaba porque el CREATE TABLE
+    #      estaba condicionado a que 'garantias' no existiera todavía.
+    #   2) Después: al sacar esa condición, un CREATE INDEX sobre
+    #      'cliente_id' fallaba porque la tabla real de producción no
+    #      tenía esa columna (venía de antes de que existiera).
+    #   3) Después: aun agregando 'cliente_id', apareció OTRA columna
+    #      legada — 'orden_id' NOT NULL (de una versión anterior a que
+    #      existiera 'orden_origen_id') — que hacía fallar cualquier
+    #      INSERT nuevo.
+    # En vez de seguir agregando parches cada vez que aparece una
+    # diferencia nueva, ahora se usa _reconstruir_tabla_legada_si_hace_falta
+    # (ver definición arriba de esta función): reconstruye la tabla
+    # completa con el esquema actual si detecta cualquier desajuste,
+    # preservando todos los datos existentes y sin necesidad de conocer de
+    # antemano cada columna legada que pueda faltar o sobrar.
+    sql_garantias_actual = """
         CREATE TABLE IF NOT EXISTS garantias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             cliente_id INTEGER REFERENCES clientes(id),
@@ -294,7 +380,12 @@ def init_operativo_db(db):
             creado_en TEXT,
             actualizado_en TEXT
         );
-
+    """
+    # Crea 'garantias' y 'garantia_items' limpias si no existían todavía
+    # (CREATE TABLE IF NOT EXISTS no toca una tabla que ya existe).
+    db.executescript(sql_garantias_actual)
+    db.executescript(
+        """
         CREATE TABLE IF NOT EXISTS garantia_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             garantia_id INTEGER NOT NULL REFERENCES garantias(id) ON DELETE CASCADE,
@@ -311,37 +402,23 @@ def init_operativo_db(db):
     )
     db.commit()
 
-    # Columnas que 'garantias' debe tener sí o sí. Si la tabla viene de una
-    # versión anterior del proyecto puede que falten una o más (por ejemplo
-    # 'cliente_id', que es justo la que causó el incidente en producción).
-    # Se agregan de forma incremental — nunca se recrea la tabla ni se
-    # tocan columnas ya existentes.
-    columnas_garantias_actuales = {
-        c[1] for c in db.execute("PRAGMA table_info(garantias)").fetchall()
-    }
-    columnas_garantias_requeridas = {
-        "cliente_id": "INTEGER REFERENCES clientes(id)",
-        "equipo_id": "INTEGER REFERENCES equipos(id)",
-        "orden_origen_id": "INTEGER REFERENCES ordenes_trabajo(id)",
-        "motivo": "TEXT DEFAULT ''",
-        "diagnostico": "TEXT DEFAULT ''",
-        "responsable": "TEXT DEFAULT ''",
-        "estado": "TEXT NOT NULL DEFAULT 'pendiente'",
-        "fecha_recepcion": "TEXT",
-        "fecha_cierre": "TEXT",
-        "usuario": "TEXT DEFAULT ''",
-        "creado_en": "TEXT",
-        "actualizado_en": "TEXT",
-    }
-    for columna, definicion in columnas_garantias_requeridas.items():
-        if columna not in columnas_garantias_actuales:
-            db.execute(f"ALTER TABLE garantias ADD COLUMN {columna} {definicion}")
-    db.commit()
+    # Si la tabla ya existía de antes con un esquema legado (le falta
+    # alguna columna nuestra, o tiene columnas NOT NULL sin default que ya
+    # no usamos), se reconstruye preservando los datos.
+    _reconstruir_tabla_legada_si_hace_falta(
+        db,
+        "garantias",
+        sql_garantias_actual,
+        [
+            "id", "cliente_id", "equipo_id", "orden_origen_id", "motivo",
+            "diagnostico", "responsable", "estado", "fecha_recepcion",
+            "fecha_cierre", "usuario", "creado_en", "actualizado_en",
+        ],
+        mapeos_legado={"orden_id": "orden_origen_id"},
+    )
 
     # Recién ahora es seguro crear los índices: todas las columnas que
-    # referencian ya están garantizadas presentes (por el CREATE TABLE si
-    # es una base nueva, o por los ALTER TABLE de arriba si es una base
-    # vieja).
+    # referencian ya están garantizadas presentes.
     db.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_garantias_cliente_id ON garantias (cliente_id);

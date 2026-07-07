@@ -41,7 +41,7 @@ function fmtFechaSolo(isoFecha) {
 // son datos que se guarden con este criterio.
 const CAMPOS_SIN_MAYUSCULAS = new Set([
   "op-buscar", "cli-buscar", "opc-telefono", "opc-rut", "opon-rut-cliente",
-  "opon-encargado", "opon-precio", "opod-valor", "oppi-precio", "opoi-costo",
+  "opon-encargado", "opod-valor", "oppi-precio", "opoi-costo",
   "opag-monto", "gari-costo",
 ]);
 
@@ -284,58 +284,178 @@ async function cargarCatalogoVehiculos() {
   }
 }
 
-// Datalists de "select con texto libre" para Marca/Modelo/Color/Modelo de
-// Transmisión/Referencia/Trabajo a Realizar. Marca se arma con el catálogo de
-// referencia (más completo y confiable) más lo visto en el historial de OTs
-// (por si hay marcas ingresadas que no están en el catálogo). Modelo arranca
-// con todo el historial y se acota a la marca escrita vía
-// actualizarModelosSegunMarca().
+// Lista base de trabajos comunes de un taller mecánico general — se ofrece
+// siempre como punto de partida (igual que el catálogo de marcas), para que
+// el campo "Trabajo a Realizar" no dependa únicamente de que ya existan
+// órdenes anteriores con ese mismo texto (un taller recién empezado a usar
+// el sistema, sin historial todavía, no tenía ninguna opción para elegir).
+const TRABAJOS_COMUNES_BASE = [
+  "MANTENCIÓN PREVENTIVA", "CAMBIO DE ACEITE Y FILTRO", "CAMBIO DE FILTRO DE AIRE",
+  "REVISIÓN Y CAMBIO DE PASTILLAS DE FRENO", "REVISIÓN Y CAMBIO DE DISCOS DE FRENO",
+  "ALINEACIÓN Y BALANCEO", "CAMBIO DE NEUMÁTICOS", "DIAGNÓSTICO GENERAL",
+  "DIAGNÓSTICO ELÉCTRICO", "CAMBIO DE BATERÍA", "CAMBIO DE CORREA DE DISTRIBUCIÓN",
+  "REVISIÓN Y REPARACIÓN DE SUSPENSIÓN", "REVISIÓN Y REPARACIÓN DE MOTOR",
+  "REPARACIÓN DE CAJA DE CAMBIOS", "CAMBIO DE EMBRAGUE",
+  "REVISIÓN Y RECARGA DE AIRE ACONDICIONADO", "REVISIÓN DE SISTEMA DE ESCAPE",
+  "CAMBIO DE AMORTIGUADORES", "REVISIÓN PARA REVISIÓN TÉCNICA",
+];
+
+// Datalists de "select con texto libre" para Color/Modelo de
+// Transmisión/Referencia/Trabajo a Realizar (Marca/Modelo dejaron de ser
+// datalist de texto libre — ver poblarSelectMarca/poblarSelectModelo más
+// arriba, ahora son <select> de verdad). Trabajo a Realizar arranca con la
+// lista base de trabajos comunes de arriba, más lo que ya se haya escrito
+// antes en órdenes anteriores (así crece solo con el uso real del taller).
 function poblarDatalistsOperativo() {
-  const marcas = new Set(), modelos = new Set(), colores = new Set();
-  const transmisiones = new Set(), referencias = new Set(), trabajos = new Set();
+  const colores = new Set();
+  const transmisiones = new Set(), referencias = new Set();
+  const trabajos = new Set(TRABAJOS_COMUNES_BASE);
   state.opOrdenes.forEach(o => {
     if (o.equipo) {
-      if (o.equipo.marca) marcas.add(o.equipo.marca);
-      if (o.equipo.modelo) modelos.add(o.equipo.modelo);
       if (o.equipo.color) colores.add(o.equipo.color);
       if (o.equipo.modelo_transmision) transmisiones.add(o.equipo.modelo_transmision);
     }
     if (o.referencia) referencias.add(o.referencia);
     if (o.trabajo_a_realizar) trabajos.add(o.trabajo_a_realizar);
   });
-  if (state.catalogoVehiculos) {
-    state.catalogoVehiculos.marcas.forEach(m => marcas.add(m));
-  }
   const llenar = (id, valores) => {
     document.getElementById(id).innerHTML = [...valores].sort((a, b) => a.localeCompare(b, "es")).map(v => `<option value="${escapeHtml(v)}">`).join("");
   };
-  llenar("dl-op-marcas", marcas);
-  llenar("dl-op-modelos", modelos);
   llenar("dl-op-colores", colores);
   llenar("dl-op-transmisiones", transmisiones);
   llenar("dl-op-referencias", referencias);
   llenar("dl-op-trabajos", trabajos);
 }
 
-// Acota el datalist de modelos a los del catálogo para la marca escrita (si
-// esa marca existe en el catálogo); si no hay coincidencia exacta, deja el
-// datalist tal como estaba (historial completo) para no bloquear la carga
-// de marcas que el catálogo no cubra.
-function actualizarModelosSegunMarca(marcaTexto) {
-  if (!state.catalogoVehiculos) return;
-  const marca = (marcaTexto || "").trim();
-  if (!marca) return;
-  const marcaCanonica = state.catalogoVehiculos.marcas.find(
-    m => m.toLowerCase() === marca.toLowerCase()
-  );
-  if (!marcaCanonica) return;
-  const modelos = state.catalogoVehiculos.modelos[marcaCanonica] || [];
-  document.getElementById("dl-op-modelos").innerHTML =
-    modelos.map(v => `<option value="${escapeHtml(v)}">`).join("");
+// ---------------------------------------------------------------------------
+// Marca / Modelo: selects en cascada, no campos de texto libre. El pedido
+// fue explícito: deben ser seleccionables, sin espacio para tipear
+// cualquier cosa. La única excepción es una opción "otra marca / otro
+// modelo" al final de cada lista, para no dejar bloqueado un vehículo cuya
+// marca no esté en el catálogo (121 marcas, no cubre todo lo que puede
+// entrar a un taller) — es el mismo patrón de "+Nuevo" que ya se usa en
+// otras partes de este módulo, no algo nuevo para el usuario.
+// ---------------------------------------------------------------------------
+const VALOR_OTRA_MARCA = "__otra_marca__";
+const VALOR_OTRO_MODELO = "__otro_modelo__";
+
+function _marcasConocidas() {
+  const marcas = new Set();
+  if (state.catalogoVehiculos) state.catalogoVehiculos.marcas.forEach(m => marcas.add(m));
+  state.opOrdenes.forEach(o => { if (o.equipo && o.equipo.marca) marcas.add(o.equipo.marca); });
+  return [...marcas].sort((a, b) => a.localeCompare(b, "es"));
 }
 
-document.getElementById("ope-marca").addEventListener("input", (e) => actualizarModelosSegunMarca(e.target.value));
-document.getElementById("opon-marca").addEventListener("input", (e) => actualizarModelosSegunMarca(e.target.value));
+function _modelosConocidos(marca) {
+  const modelos = new Set();
+  const marcaLimpia = (marca || "").trim();
+  if (!marcaLimpia) return [];
+  if (state.catalogoVehiculos) {
+    const marcaCanonica = state.catalogoVehiculos.marcas.find(m => m.toLowerCase() === marcaLimpia.toLowerCase());
+    if (marcaCanonica) (state.catalogoVehiculos.modelos[marcaCanonica] || []).forEach(m => modelos.add(m));
+  }
+  state.opOrdenes.forEach(o => {
+    if (o.equipo && o.equipo.marca && o.equipo.marca.toLowerCase() === marcaLimpia.toLowerCase() && o.equipo.modelo) {
+      modelos.add(o.equipo.modelo);
+    }
+  });
+  return [...modelos].sort((a, b) => a.localeCompare(b, "es"));
+}
+
+// Llena el <select> de marca con el catálogo + historial, seleccionando
+// 'valorActual' si calza con alguna opción (sin distinguir mayúsculas), o
+// activando la opción "otra marca" con el texto libre precargado si no
+// calza con ninguna (para no esconder ni perder un dato ya guardado).
+function poblarSelectMarca(selectId, otraInputId, valorActual) {
+  const select = document.getElementById(selectId);
+  const otraInput = document.getElementById(otraInputId);
+  const opciones = _marcasConocidas();
+  const valor = (valorActual || "").trim();
+  const coincide = opciones.find(m => m.toLowerCase() === valor.toLowerCase());
+
+  select.innerHTML = '<option value="">Selecciona una marca…</option>' +
+    opciones.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("") +
+    `<option value="${VALOR_OTRA_MARCA}">Otra marca (no está en la lista)…</option>`;
+
+  if (coincide) {
+    select.value = coincide;
+    otraInput.style.display = "none";
+    otraInput.value = "";
+  } else if (valor) {
+    select.value = VALOR_OTRA_MARCA;
+    otraInput.style.display = "";
+    otraInput.value = valor;
+  } else {
+    select.value = "";
+    otraInput.style.display = "none";
+    otraInput.value = "";
+  }
+}
+
+// Llena el <select> de modelo según la marca ya elegida (vacío si todavía
+// no hay marca, o si la marca elegida fue "otra" — no hay catálogo de
+// modelos posible para una marca que no conocemos).
+function poblarSelectModelo(selectId, otroInputId, marca, valorActual) {
+  const select = document.getElementById(selectId);
+  const otroInput = document.getElementById(otroInputId);
+  const marcaLimpia = (marca || "").trim();
+  if (!marcaLimpia) {
+    select.innerHTML = '<option value="">Selecciona una marca primero…</option>';
+    otroInput.style.display = "none";
+    otroInput.value = "";
+    return;
+  }
+
+  const opciones = _modelosConocidos(marcaLimpia);
+  const valor = (valorActual || "").trim();
+  const coincide = opciones.find(m => m.toLowerCase() === valor.toLowerCase());
+
+  select.innerHTML = '<option value="">Selecciona un modelo…</option>' +
+    opciones.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("") +
+    `<option value="${VALOR_OTRO_MODELO}">Otro modelo (no está en la lista)…</option>`;
+
+  if (coincide) {
+    select.value = coincide;
+    otroInput.style.display = "none";
+    otroInput.value = "";
+  } else if (valor) {
+    select.value = VALOR_OTRO_MODELO;
+    otroInput.style.display = "";
+    otroInput.value = valor;
+  } else {
+    select.value = "";
+    otroInput.style.display = "none";
+    otroInput.value = "";
+  }
+}
+
+// Valor final a guardar: si el select quedó en la opción "otra/otro", se usa
+// lo escrito en el campo de texto libre de al lado; si no, el valor del select.
+function valorSeleccionUOtro(selectId, otroInputId, valorOtro) {
+  const select = document.getElementById(selectId);
+  if (select.value === valorOtro) return document.getElementById(otroInputId).value.trim();
+  return select.value;
+}
+
+// Conecta un par marca/modelo: al cambiar la marca, se repuebla el select
+// de modelo (vacío, salvo que la marca sea "otra", en cuyo caso se fuerza
+// directo el campo de texto libre del modelo, porque no hay catálogo
+// posible para una marca desconocida).
+function conectarMarcaModelo(marcaSelectId, marcaOtraId, modeloSelectId, modeloOtroId) {
+  document.getElementById(marcaSelectId).addEventListener("change", (e) => {
+    const esOtra = e.target.value === VALOR_OTRA_MARCA;
+    document.getElementById(marcaOtraId).style.display = esOtra ? "" : "none";
+    if (!esOtra) document.getElementById(marcaOtraId).value = "";
+    poblarSelectModelo(modeloSelectId, modeloOtroId, esOtra ? "" : e.target.value, "");
+    if (esOtra) {
+      const modeloSelect = document.getElementById(modeloSelectId);
+      modeloSelect.innerHTML = `<option value="${VALOR_OTRO_MODELO}" selected>Escribe el modelo →</option>`;
+      document.getElementById(modeloOtroId).style.display = "";
+    }
+  });
+}
+conectarMarcaModelo("ope-marca", "ope-marca-otra", "ope-modelo", "ope-modelo-otro");
+conectarMarcaModelo("opon-marca", "opon-marca-otra", "opon-modelo", "opon-modelo-otro");
 
 function renderTableroOperativo() {
   const filtroEstado = document.getElementById("op-filtro-estado").value;
@@ -590,9 +710,8 @@ document.getElementById("opon-cliente-id").addEventListener("change", (e) => {
 // — si el vehículo ya existía, aquí se ven los datos que ya tenía.
 function poblarCamposVehiculoNuevaOrden(equipoId) {
   const eq = state.opEquiposClienteActual.find(x => x.id === parseInt(equipoId, 10));
-  document.getElementById("opon-marca").value = eq ? (eq.marca || "") : "";
-  document.getElementById("opon-modelo").value = eq ? (eq.modelo || "") : "";
-  actualizarModelosSegunMarca(eq ? eq.marca : "");
+  poblarSelectMarca("opon-marca", "opon-marca-otra", eq ? eq.marca : "");
+  poblarSelectModelo("opon-modelo", "opon-modelo-otro", eq ? eq.marca : "", eq ? eq.modelo : "");
   document.getElementById("opon-vin").value = eq ? (eq.vin || "") : "";
   document.getElementById("opon-color").value = eq ? (eq.color || "") : "";
   document.getElementById("opon-anio").value = eq && eq.anio != null ? eq.anio : "";
@@ -629,6 +748,8 @@ document.getElementById("opon-nuevo-equipo").addEventListener("click", () => {
   document.getElementById("form-op-equipo").reset();
   document.getElementById("ope-patente-encontrada").style.display = "none";
   document.getElementById("ope-id").value = "";
+  poblarSelectMarca("ope-marca", "ope-marca-otra", "");
+  poblarSelectModelo("ope-modelo", "ope-modelo-otro", "", "");
   renderSelectClienteEquipoModal(clienteId);
   document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
   opEquipoCallback = async (nuevo, payload) => {
@@ -661,11 +782,11 @@ document.getElementById("ope-identificador").addEventListener("blur", async (e) 
       return;
     }
     const encontrado = data.equipos[0];
-    const marcaEl = document.getElementById("ope-marca");
-    const modeloEl = document.getElementById("ope-modelo");
-    if (!marcaEl.value.trim()) marcaEl.value = encontrado.marca || "";
-    if (!modeloEl.value.trim()) modeloEl.value = encontrado.modelo || "";
-    actualizarModelosSegunMarca(marcaEl.value);
+    const marcaActual = valorSeleccionUOtro("ope-marca", "ope-marca-otra", VALOR_OTRA_MARCA);
+    if (!marcaActual) {
+      poblarSelectMarca("ope-marca", "ope-marca-otra", encontrado.marca || "");
+      poblarSelectModelo("ope-modelo", "ope-modelo-otro", encontrado.marca || "", encontrado.modelo || "");
+    }
     aviso.textContent = `Esta patente ya está registrada (${[encontrado.marca, encontrado.modelo].filter(Boolean).join(" ") || "sin marca/modelo"}) — se completaron marca y modelo.`;
     aviso.style.display = "";
   } catch (e2) {
@@ -684,8 +805,8 @@ document.getElementById("form-op-equipo").addEventListener("submit", async (e) =
   const payload = {
     cliente_id: clienteId,
     identificador: document.getElementById("ope-identificador").value.trim(),
-    marca: document.getElementById("ope-marca").value.trim(),
-    modelo: document.getElementById("ope-modelo").value.trim(),
+    marca: valorSeleccionUOtro("ope-marca", "ope-marca-otra", VALOR_OTRA_MARCA),
+    modelo: valorSeleccionUOtro("ope-modelo", "ope-modelo-otro", VALOR_OTRO_MODELO),
     notas: document.getElementById("ope-notas").value.trim(),
   };
   try {
@@ -768,8 +889,8 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     await api(`/api/operativo/equipos/${equipoId}`, {
       method: "PUT",
       body: JSON.stringify({
-        marca: document.getElementById("opon-marca").value.trim(),
-        modelo: document.getElementById("opon-modelo").value.trim(),
+        marca: valorSeleccionUOtro("opon-marca", "opon-marca-otra", VALOR_OTRA_MARCA),
+        modelo: valorSeleccionUOtro("opon-modelo", "opon-modelo-otro", VALOR_OTRO_MODELO),
         vin: document.getElementById("opon-vin").value.trim(),
         color: document.getElementById("opon-color").value.trim(),
         anio: document.getElementById("opon-anio").value || null,
@@ -794,7 +915,9 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
         estanque_nivel: document.getElementById("opon-estanque").value,
         referencia: document.getElementById("opon-referencia").value.trim(),
         trabajo_a_realizar: document.getElementById("opon-trabajo").value.trim(),
-        precio_referencial: limpiarMonto(document.getElementById("opon-precio").value) || null,
+        // El precio ya no se pide al crear la orden — se define después,
+        // desde la pestaña de la OT (campo "Valor"), cuando ya se sabe
+        // cuánto se le va a cobrar al cliente.
         equipamiento,
       }),
     });
@@ -844,18 +967,52 @@ function renderResumenClienteAuto(orden) {
   btnSeguimiento.dataset.patente = patente || "";
 }
 
-document.getElementById("btn-opod-copiar-seguimiento").addEventListener("click", async (e) => {
-  const patente = e.target.dataset.patente;
+// El botón "Copiar link de seguimiento" antes dependía por completo de
+// navigator.clipboard.writeText(): si el navegador no daba permiso (algo
+// bastante común fuera de un contexto de prueba — móviles, políticas de
+// privacidad, sitios sin el permiso "clipboard-write" otorgado), el único
+// respaldo era mostrar el link en un toast que desaparece solo a los 3
+// segundos, sin forma real de seleccionarlo ni copiarlo a tiempo — para el
+// usuario, el botón simplemente "no servía". Ahora se abre un modal que
+// se queda abierto con el link en un campo de texto seleccionable, y de
+// paso se intenta copiar solo al portapapeles (si el navegador lo permite,
+// mejor: ya queda copiado al abrir el modal).
+async function mostrarLinkSeguimiento(patente) {
+  const link = `${window.location.origin}/seguimiento?patente=${encodeURIComponent(patente)}`;
+  const input = document.getElementById("op-link-seguimiento-valor");
+  const estado = document.getElementById("op-link-seguimiento-estado");
+  input.value = link;
+  estado.textContent = "";
+  abrirModal("modal-op-link-seguimiento");
+  input.focus();
+  input.select();
+  try {
+    await navigator.clipboard.writeText(link);
+    estado.textContent = "Ya se copió automáticamente al portapapeles.";
+  } catch (err) {
+    estado.textContent = "Selecciona el link de arriba y cópialo con Ctrl+C (o mantén presionado y elige \"Copiar\" en el celular).";
+  }
+}
+
+document.getElementById("btn-opod-copiar-seguimiento").addEventListener("click", (e) => {
+  const patente = e.currentTarget.dataset.patente;
   if (!patente) {
     toast("Esta orden no tiene una patente asociada.", true);
     return;
   }
-  const link = `${window.location.origin}/seguimiento?patente=${encodeURIComponent(patente)}`;
+  mostrarLinkSeguimiento(patente);
+});
+
+document.getElementById("btn-op-link-seguimiento-copiar").addEventListener("click", async () => {
+  const input = document.getElementById("op-link-seguimiento-valor");
+  const estado = document.getElementById("op-link-seguimiento-estado");
+  input.focus();
+  input.select();
   try {
-    await navigator.clipboard.writeText(link);
-    toast("Link de seguimiento copiado — puedes enviárselo al cliente por WhatsApp o email.");
+    await navigator.clipboard.writeText(input.value);
+    estado.textContent = "Copiado al portapapeles.";
   } catch (err) {
-    toast(link); // si el navegador bloquea el clipboard, al menos se muestra el link en el toast
+    estado.textContent = "No se pudo copiar automáticamente — el texto ya está seleccionado, usa Ctrl+C.";
   }
 });
 
@@ -1730,6 +1887,8 @@ document.getElementById("garn-nuevo-equipo").addEventListener("click", () => {
   document.getElementById("form-op-equipo").reset();
   document.getElementById("ope-patente-encontrada").style.display = "none";
   document.getElementById("ope-id").value = "";
+  poblarSelectMarca("ope-marca", "ope-marca-otra", "");
+  poblarSelectModelo("ope-modelo", "ope-modelo-otro", "", "");
   renderSelectClienteEquipoModal(clienteId);
   document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
   opEquipoCallback = async (nuevo, payload) => {

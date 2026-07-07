@@ -313,12 +313,14 @@
         </div>
         <div class="campo">
           <label>Marca</label>
-          <input type="text" id="ope-marca" list="dl-op-marcas">
+          <select id="ope-marca"><option value="">Selecciona una marca…</option></select>
+          <input type="text" id="ope-marca-otra" placeholder="Escribe la marca" style="display:none; margin-top:6px">
         </div>
       </div>
       <div class="campo">
         <label>Modelo</label>
-        <input type="text" id="ope-modelo" list="dl-op-modelos">
+        <select id="ope-modelo"><option value="">Selecciona una marca primero…</option></select>
+        <input type="text" id="ope-modelo-otro" placeholder="Escribe el modelo" style="display:none; margin-top:6px">
       </div>
       <p class="ayuda-inline" id="ope-patente-encontrada" style="display:none"></p>
       <div class="campo">
@@ -373,11 +375,13 @@
       <div class="grid-2">
         <div class="campo">
           <label>Marca</label>
-          <input type="text" id="opon-marca" list="dl-op-marcas">
+          <select id="opon-marca"><option value="">Selecciona una marca…</option></select>
+          <input type="text" id="opon-marca-otra" placeholder="Escribe la marca" style="display:none; margin-top:6px">
         </div>
         <div class="campo">
           <label>Modelo</label>
-          <input type="text" id="opon-modelo" list="dl-op-modelos">
+          <select id="opon-modelo"><option value="">Selecciona una marca primero…</option></select>
+          <input type="text" id="opon-modelo-otro" placeholder="Escribe el modelo" style="display:none; margin-top:6px">
         </div>
       </div>
       <div class="grid-3">
@@ -434,20 +438,15 @@
         <label>Estanque <span class="mono" id="opon-estanque-valor">0 / 8</span></label>
         <input type="range" id="opon-estanque" min="0" max="8" step="1" value="0">
       </div>
-      <div class="grid-2">
-        <div class="campo">
-          <label>Referencia</label>
-          <input type="text" id="opon-referencia" list="dl-op-referencias">
-        </div>
-        <div class="campo">
-          <label>Precio ($)</label>
-          <input type="text" inputmode="numeric" id="opon-precio" class="input-monto">
-        </div>
+      <div class="campo">
+        <label>Referencia</label>
+        <input type="text" id="opon-referencia" list="dl-op-referencias">
       </div>
       <div class="campo">
         <label>Trabajo a Realizar</label>
         <input type="text" id="opon-trabajo" list="dl-op-trabajos">
       </div>
+      <p class="ayuda-inline">El precio se define más adelante desde la pestaña de la orden (campo "Valor"), una vez que se sepa cuánto cobrar.</p>
       <div class="campo">
         <label>Comentarios / descripción del problema</label>
         <textarea id="opon-descripcion" rows="2" placeholder="Ej: Caja automática patina en 2da marcha"></textarea>
@@ -464,12 +463,32 @@
   </div>
 </div>
 
-<datalist id="dl-op-marcas"></datalist>
-<datalist id="dl-op-modelos"></datalist>
 <datalist id="dl-op-colores"></datalist>
 <datalist id="dl-op-transmisiones"></datalist>
 <datalist id="dl-op-referencias"></datalist>
 <datalist id="dl-op-trabajos"></datalist>
+
+<!-- Módulo Operativo: link de seguimiento del cliente (queda abierto, no como un toast que
+     desaparece solo — así el link siempre queda visible y seleccionable para copiarlo a mano,
+     sin depender de que el navegador permita escribir directo al portapapeles). -->
+<div class="modal-overlay" id="modal-op-link-seguimiento">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Link de seguimiento para el cliente</h2>
+      <button class="modal-close" data-close="modal-op-link-seguimiento">&times;</button>
+    </div>
+    <p class="ayuda-inline">Copia este link y envíaselo al cliente por WhatsApp, email o SMS — ahí puede ver el estado de su vehículo sin necesidad de iniciar sesión.</p>
+    <div class="campo">
+      <label>Link</label>
+      <input type="text" id="op-link-seguimiento-valor" readonly>
+    </div>
+    <p class="ayuda-inline" id="op-link-seguimiento-estado"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-op-link-seguimiento">Cerrar</button>
+      <button type="button" class="btn btn-primary" id="btn-op-link-seguimiento-copiar">Copiar</button>
+    </div>
+  </div>
+</div>
 
 <!-- Módulo Operativo: equipos de un cliente (historial de vehículo) -->
 <div class="modal-overlay" id="modal-op-cliente-equipos">

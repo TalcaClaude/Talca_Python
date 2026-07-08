@@ -33,9 +33,11 @@ from core import (
     _crear_libro_excel,
     _estilo_encabezado,
     _excel_response,
+    _excel_resumen,
     _iniciar_transaccion_stock,
     _pdf_documento,
     _pdf_response,
+    _pdf_resumen,
     _pdf_tabla,
     _rango_fechas,
     fmt_money_pdf,
@@ -1068,7 +1070,9 @@ def crear_orden():
             return jsonify({
                 "error": f"Este vehículo ya tiene una OT abierta (OT #{ot_abierta['id']}, estado: "
                          f"{ESTADOS_LABEL.get(ot_abierta['estado'], ot_abierta['estado'])}). "
-                         f"Solo se puede crear una OT nueva para el mismo auto una vez que la anterior se entregue o se cancele."
+                         f"Solo se puede crear una OT nueva para el mismo auto una vez que la anterior se entregue o se cancele.",
+                "bloqueo_id": ot_abierta["id"],
+                "bloqueo_tipo": "orden",
             }), 400
 
     prioridad = (data.get("prioridad") or "media").strip().lower()
@@ -1447,6 +1451,46 @@ def historial_equipo(equipo_id):
         "cliente": dict(cliente) if cliente else None,
         "ordenes": [_orden_dict(db, r) for r in ordenes],
         "garantias": [_garantia_dict(db, g) for g in garantias],
+    })
+
+
+@bp.route("/api/operativo/equipos/<int:equipo_id>/bloqueo", methods=["GET"])
+def bloqueo_equipo(equipo_id):
+    """Chequeo rápido para avisar ANTES de intentar crear una OT o una
+    garantía si el vehículo ya tiene una abierta — se llama apenas se
+    selecciona el vehículo en el formulario, para que el error aparezca de
+    inmediato en vez de recién al enviar. Devuelve la misma información
+    (id + estado) que usan crear_orden()/crear_garantia() para bloquear."""
+    db = get_db()
+    equipo = db.execute("SELECT id FROM equipos WHERE id = ?", (equipo_id,)).fetchone()
+    if equipo is None:
+        return jsonify({"error": "Equipo no encontrado"}), 404
+
+    placeholders_ot = ", ".join("?" for _ in ESTADOS_CERRADOS)
+    ot_abierta = db.execute(
+        f"SELECT id, estado FROM ordenes_trabajo WHERE equipo_id = ? AND estado NOT IN ({placeholders_ot}) "
+        "ORDER BY fecha_recepcion DESC LIMIT 1",
+        (equipo_id, *ESTADOS_CERRADOS),
+    ).fetchone()
+
+    placeholders_gar = ", ".join("?" for _ in ESTADOS_GARANTIA_CERRADOS)
+    garantia_abierta = db.execute(
+        f"SELECT id, estado FROM garantias WHERE equipo_id = ? AND estado NOT IN ({placeholders_gar}) "
+        "ORDER BY fecha_recepcion DESC LIMIT 1",
+        (equipo_id, *ESTADOS_GARANTIA_CERRADOS),
+    ).fetchone()
+
+    return jsonify({
+        "ot_abierta": {
+            "id": ot_abierta["id"],
+            "estado": ot_abierta["estado"],
+            "estado_label": ESTADOS_LABEL.get(ot_abierta["estado"], ot_abierta["estado"]),
+        } if ot_abierta else None,
+        "garantia_abierta": {
+            "id": garantia_abierta["id"],
+            "estado": garantia_abierta["estado"],
+            "estado_label": ESTADOS_GARANTIA_LABEL.get(garantia_abierta["estado"], garantia_abierta["estado"]),
+        } if garantia_abierta else None,
     })
 
 
@@ -1843,7 +1887,9 @@ def crear_garantia():
             return jsonify({
                 "error": f"Este vehículo ya tiene una garantía abierta (Garantía #{garantia_abierta['id']}, estado: "
                          f"{ESTADOS_GARANTIA_LABEL.get(garantia_abierta['estado'], garantia_abierta['estado'])}). "
-                         f"Solo se puede abrir una garantía nueva para el mismo auto una vez que la anterior se entregue o se rechace."
+                         f"Solo se puede abrir una garantía nueva para el mismo auto una vez que la anterior se entregue o se rechace.",
+                "bloqueo_id": garantia_abierta["id"],
+                "bloqueo_tipo": "garantia",
             }), 400
 
     orden_origen_id = None
@@ -2116,6 +2162,14 @@ def reporte_ordenes():
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Órdenes de trabajo"
+    total_previo = sum(o["total"] for o in ordenes)
+    rango_txt = f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"
+    _excel_resumen(ws, "Órdenes de trabajo", [
+        ("Rango", rango_txt),
+        ("Órdenes", len(ordenes)),
+        ("Total facturado", f"${total_previo:,.0f}".replace(",", ".")),
+    ])
+    fila_encabezado = ws.max_row + 1
     ws.append(["Fecha recepción", "Cliente", "Equipo", "Estado", "Mecánico", "Entrega estimada", "Entrega real", "Total"])
     total_general = 0
     for o in ordenes:
@@ -2135,7 +2189,7 @@ def reporte_ordenes():
         ])
     ws.append([])
     ws.append(["", "", "", "", "", "", "TOTAL", round(total_general, 2)])
-    _estilo_encabezado(ws)
+    _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
@@ -2152,6 +2206,10 @@ def reporte_ordenes_pdf():
     buffer, doc, elementos, estilos = _pdf_documento(f"Órdenes de trabajo{rango_txt}")
 
     total_general = sum(o["total"] for o in ordenes)
+    _pdf_resumen(elementos, estilos, [
+        ("Órdenes", len(ordenes)),
+        ("Total facturado", fmt_money_pdf(total_general)),
+    ])
     filas = []
     for o in ordenes:
         equipo_txt = ""
@@ -2220,12 +2278,19 @@ def reporte_garantias():
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Garantías"
+    rango_txt = f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"
+    _excel_resumen(ws, "Garantías", [
+        ("Rango", rango_txt),
+        ("Garantías", len(detalle)),
+        ("Costo total", f"${costo_total_general:,.0f}".replace(",", ".")),
+    ])
+    fila_encabezado = ws.max_row + 1
     ws.append(["Fecha", "Cliente", "Equipo", "Responsable", "Motivo", "Estado", "Costo (repuestos/mano de obra)"])
     for fila in detalle:
         ws.append(fila)
     ws.append([])
     ws.append(["", "", "", "", "", "TOTAL", round(costo_total_general, 2)])
-    _estilo_encabezado(ws)
+    _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     ws2 = wb.create_sheet("Resumen por responsable")
@@ -2245,3 +2310,31 @@ def reporte_garantias():
     sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
     nombre = f"garantias{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
     return _excel_response(wb, nombre)
+
+
+@bp.route("/api/operativo/reportes/resumen", methods=["GET"])
+def reportes_operativo_resumen():
+    """Contadores rápidos de órdenes y garantías, para mostrarlos en la
+    pestaña Reportes del módulo Operativo ANTES de descargar el archivo."""
+    db = get_db()
+
+    ordenes_desde = (request.args.get("ordenes_desde") or "").strip()
+    ordenes_hasta = (request.args.get("ordenes_hasta") or "").strip()
+    ordenes = _ordenes_para_reporte(ordenes_desde, ordenes_hasta)
+
+    garantias_desde = (request.args.get("garantias_desde") or "").strip()
+    garantias_hasta = (request.args.get("garantias_hasta") or "").strip()
+    sql = "SELECT COUNT(*) FROM garantias WHERE 1=1"
+    params = []
+    if garantias_desde:
+        sql += " AND substr(creado_en, 1, 10) >= ?"
+        params.append(garantias_desde)
+    if garantias_hasta:
+        sql += " AND substr(creado_en, 1, 10) <= ?"
+        params.append(garantias_hasta)
+    total_garantias = db.execute(sql, params).fetchone()[0]
+
+    return jsonify({
+        "ordenes": {"total": len(ordenes), "total_facturado": round(sum(o["total"] for o in ordenes), 2)},
+        "garantias": {"total": total_garantias},
+    })

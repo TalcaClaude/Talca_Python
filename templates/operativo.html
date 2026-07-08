@@ -251,6 +251,7 @@
         <label>Desde <input type="date" id="rep-ordenes-desde"></label>
         <label>Hasta <input type="date" id="rep-ordenes-hasta"></label>
       </div>
+      <p class="reportes-contador" id="rep-contador-ordenes">Cargando…</p>
       <div class="reportes-botones">
         <button class="btn btn-secundario" id="btn-rep-ordenes-excel">Descargar Excel</button>
         <button class="btn btn-secundario" id="btn-rep-ordenes-pdf">Descargar PDF</button>
@@ -264,6 +265,7 @@
         <label>Desde <input type="date" id="rep-garantias-desde"></label>
         <label>Hasta <input type="date" id="rep-garantias-hasta"></label>
       </div>
+      <p class="reportes-contador" id="rep-contador-garantias">Cargando…</p>
       <div class="reportes-botones">
         <button class="btn btn-secundario" id="btn-rep-garantias-excel">Descargar Excel</button>
       </div>
@@ -380,6 +382,7 @@
             <button type="button" class="btn-link" id="opon-nuevo-equipo">+ Nuevo</button>
             <button type="button" class="btn-link" id="opon-ver-historial" style="display:none">Ver historial</button>
           </div>
+          <div class="ayuda-inline ayuda-inline--bloqueado" id="opon-equipo-bloqueo" style="display:none"></div>
         </div>
       </div>
       <div class="campo">
@@ -1013,7 +1016,9 @@
           <div class="campo-select-mas">
             <select id="garn-equipo-id" required><option value="">Selecciona un vehículo…</option></select>
             <button type="button" class="btn-link" id="garn-nuevo-equipo">+ Nuevo</button>
+            <button type="button" class="btn-link" id="garn-ver-historial" style="display:none">Ver historial</button>
           </div>
+          <div class="ayuda-inline ayuda-inline--bloqueado" id="garn-equipo-bloqueo" style="display:none"></div>
         </div>
       </div>
       <div class="campo">

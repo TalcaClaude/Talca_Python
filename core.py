@@ -416,6 +416,30 @@ def _excel_response(wb, nombre_archivo):
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
+def _excel_resumen(ws, titulo, lineas):
+    """Escribe un resumen corto (2-5 datos clave) arriba de la hoja, antes de
+    la tabla de detalle — para que al abrir el archivo se entienda de
+    inmediato qué trae, sin tener que contar filas a mano. Devuelve la fila
+    en la que debería empezar el encabezado de la tabla de datos."""
+    from openpyxl.styles import Font
+    ws.append([titulo])
+    ws.cell(row=ws.max_row, column=1).font = Font(bold=True, size=13)
+    for label, valor in lineas:
+        ws.append([f"{label}: {valor}"])
+    ws.append([])  # fila en blanco antes de la tabla
+    return ws.max_row + 1
+
+
+def _pdf_resumen(elementos, estilos, lineas):
+    """Agrega un resumen corto (2-5 datos clave) justo debajo del título del
+    PDF, antes de las tablas de detalle."""
+    from reportlab.platypus import Paragraph, Spacer
+    from reportlab.lib.units import cm
+    texto = "&nbsp;&nbsp;·&nbsp;&nbsp;".join(f"<b>{label}:</b> {valor}" for label, valor in lineas)
+    elementos.append(Paragraph(texto, estilos["Normal"]))
+    elementos.append(Spacer(1, 0.4 * cm))
+
+
 def _pdf_documento(titulo):
     """Arma un documento PDF apaisado (más ancho que alto, para que quepan
     tablas con varias columnas) con un título arriba y devuelve

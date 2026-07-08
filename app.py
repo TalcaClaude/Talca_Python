@@ -71,8 +71,10 @@ from core import (  # noqa: E402
     _estilo_encabezado,
     _autoancho,
     _excel_response,
+    _excel_resumen,
     _pdf_documento,
     _pdf_tabla,
+    _pdf_resumen,
     _pdf_response,
     _rango_fechas,
 )
@@ -989,11 +991,11 @@ def listar_productos():
 
     if q:
         sql += """ AND (
-            p.codigo_interno LIKE ? OR p.nombre LIKE ?
+            p.codigo_interno LIKE ? OR p.nombre LIKE ? OR p.descripcion LIKE ?
             OR p.modelo LIKE ? OR p.ubicacion LIKE ? OR u.codigo LIKE ? OR CAST(p.id AS TEXT) LIKE ?
         )"""
         like = f"%{q}%"
-        params += [like, like, like, like, like, like]
+        params += [like, like, like, like, like, like, like]
 
     if categoria:
         sql += " AND p.categoria = ?"
@@ -1005,6 +1007,16 @@ def listar_productos():
     if ubicacion_id:
         sql += " AND p.ubicacion_id = ?"
         params.append(ubicacion_id)
+
+    if request.args.get("sin_ubicacion") == "1":
+        sql += " AND p.ubicacion_id IS NULL"
+
+    # Cuántos productos NO tienen ubicación asignada en total (no depende de
+    # los filtros de arriba) — se muestra siempre como contador junto al
+    # filtro, para que se note el problema aunque no se esté usando el filtro.
+    total_sin_ubicacion = db.execute(
+        "SELECT COUNT(*) FROM productos WHERE ubicacion_id IS NULL"
+    ).fetchone()[0]
 
     # La paginación es opcional (solo se activa si viene "pagina" o
     # "por_pagina" en la URL) porque este mismo endpoint lo usan varias
@@ -1026,6 +1038,7 @@ def listar_productos():
             "productos": productos,
             "categorias": categorias,
             "total": len(productos),
+            "total_sin_ubicacion": total_sin_ubicacion,
         })
 
     total = db.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
@@ -1055,6 +1068,7 @@ def listar_productos():
         "pagina": pagina,
         "por_pagina": por_pagina,
         "total_paginas": total_paginas,
+        "total_sin_ubicacion": total_sin_ubicacion,
     })
 
 
@@ -1150,7 +1164,11 @@ def crear_producto():
         """,
         (
             codigo_interno,
-            (data.get("descripcion") or "").strip().upper(),
+            # A diferencia de código/categoría/modelo (que son casi como
+            # "etiquetas" cortas y se ven mejor en mayúscula), la descripción
+            # es texto libre más largo — forzarla a mayúscula sostenida la
+            # hacía más difícil de leer, así que solo se recorta espacios.
+            (data.get("descripcion") or "").strip(),
             categoria,
             modelo,
             ubicacion_id,
@@ -1215,10 +1233,16 @@ def editar_producto(producto_id):
     # movimiento de stock (ver _recalcular_stock_minimo). Cualquier valor
     # que llegue en el body para este campo se ignora a propósito.
     stock_minimo = row["stock_minimo"]
-    try:
-        costo_compra = float(data.get("costo_compra", row["costo_compra"]))
-    except (TypeError, ValueError):
-        return jsonify({"error": "El costo debe ser un número"}), 400
+    # El costo promedio TAMPOCO se edita a mano desde aquí: se recalcula
+    # solo como promedio ponderado con cada entrada de stock (igual criterio
+    # que el stock, para no perder trazabilidad — antes se podía sobreescribir
+    # libremente el costo desde "Editar datos" sin dejar ningún movimiento
+    # registrado, lo que podía descuadrar el valor de inventario en
+    # silencio). Cualquier valor que llegue en el body para este campo
+    # también se ignora a propósito; el único costo que se acepta por acá es
+    # el "costo inicial" al CREAR el producto (ver crear_producto), nunca al
+    # editarlo.
+    costo_compra = row["costo_compra"]
 
     if "ubicacion_id" in data:
         ubicacion_id = data.get("ubicacion_id") or None
@@ -1262,7 +1286,7 @@ def editar_producto(producto_id):
         (
             codigo_interno,
             nombre,
-            (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip().upper(),
+            (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip(),
             categoria,
             modelo,
             ubicacion_id,
@@ -1593,6 +1617,103 @@ def crear_ubicacion():
     return jsonify(dict(nueva)), 201
 
 
+@app.route("/api/ubicaciones/rango", methods=["POST"])
+def crear_ubicaciones_rango():
+    """Crea de una sola vez todas las ubicaciones de un rango (ej. pasillo
+    1 a 3, estantería 1 a 10, nivel 1 a 5 = hasta 150 ubicaciones), en vez
+    de tener que crear una por una a mano. Las combinaciones que ya
+    existieran se dejan tal cual (no se duplican ni se consideran error) —
+    así el mismo rango se puede volver a enviar más adelante para "rellenar"
+    ubicaciones nuevas sin tener que acordarse cuáles faltan."""
+    data = request.get_json(force=True, silent=True) or {}
+
+    try:
+        pasillo_desde = int(data.get("pasillo_desde"))
+        pasillo_hasta = int(data.get("pasillo_hasta"))
+        estanteria_desde = int(data.get("estanteria_desde"))
+        estanteria_hasta = int(data.get("estanteria_hasta"))
+        nivel_desde = int(data.get("nivel_desde"))
+        nivel_hasta = int(data.get("nivel_hasta"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Los seis valores del rango deben ser números enteros"}), 400
+
+    if min(pasillo_desde, estanteria_desde, nivel_desde) <= 0:
+        return jsonify({"error": "Los valores 'desde' deben ser mayores a 0"}), 400
+    if pasillo_hasta < pasillo_desde or estanteria_hasta < estanteria_desde or nivel_hasta < nivel_desde:
+        return jsonify({"error": "El valor 'hasta' de cada rango debe ser mayor o igual al 'desde'"}), 400
+
+    total_solicitado = (
+        (pasillo_hasta - pasillo_desde + 1)
+        * (estanteria_hasta - estanteria_desde + 1)
+        * (nivel_hasta - nivel_desde + 1)
+    )
+    LIMITE_LOTE = 500
+    if total_solicitado > LIMITE_LOTE:
+        return jsonify({
+            "error": f"Ese rango generaría {total_solicitado} ubicaciones de una sola vez; el máximo por lote es "
+                     f"{LIMITE_LOTE}. Achica el rango o créalas en varias tandas."
+        }), 400
+
+    db = get_db()
+    existentes = {
+        (r["pasillo"], r["estanteria"], r["nivel"])
+        for r in db.execute("SELECT pasillo, estanteria, nivel FROM ubicaciones").fetchall()
+    }
+
+    ts = now_iso()
+    creadas = 0
+    for p in range(pasillo_desde, pasillo_hasta + 1):
+        for e in range(estanteria_desde, estanteria_hasta + 1):
+            for n in range(nivel_desde, nivel_hasta + 1):
+                if (p, e, n) in existentes:
+                    continue
+                codigo = codigo_ubicacion(p, e, n)
+                db.execute(
+                    "INSERT INTO ubicaciones (pasillo, estanteria, nivel, codigo, creado_en) VALUES (?, ?, ?, ?, ?)",
+                    (p, e, n, codigo, ts),
+                )
+                creadas += 1
+    db.commit()
+
+    return jsonify({
+        "creadas": creadas,
+        "omitidas": total_solicitado - creadas,
+        "total_solicitado": total_solicitado,
+    }), 201
+
+
+@app.route("/api/ubicaciones/<int:ubicacion_id>/reasignar", methods=["PUT"])
+def reasignar_ubicacion(ubicacion_id):
+    """Mueve de una sola vez TODOS los productos que hay en `ubicacion_id`
+    hacia otra ubicación — para reorganizar la bodega sin editar producto
+    por producto (ej. vaciar un pasillo completo hacia otro)."""
+    db = get_db()
+    origen = db.execute("SELECT id, codigo FROM ubicaciones WHERE id = ?", (ubicacion_id,)).fetchone()
+    if origen is None:
+        return jsonify({"error": "Ubicación de origen no encontrada"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        destino_id = int(data.get("destino_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Selecciona una ubicación de destino válida"}), 400
+
+    if destino_id == ubicacion_id:
+        return jsonify({"error": "La ubicación de destino debe ser distinta de la de origen"}), 400
+
+    destino = db.execute("SELECT id FROM ubicaciones WHERE id = ?", (destino_id,)).fetchone()
+    if destino is None:
+        return jsonify({"error": "Ubicación de destino no encontrada"}), 400
+
+    ts = now_iso()
+    cur = db.execute(
+        "UPDATE productos SET ubicacion_id = ?, actualizado_en = ? WHERE ubicacion_id = ?",
+        (destino_id, ts, ubicacion_id),
+    )
+    db.commit()
+    return jsonify({"movidos": cur.rowcount})
+
+
 @app.route("/api/ubicaciones/<int:ubicacion_id>", methods=["DELETE"])
 def eliminar_ubicacion(ubicacion_id):
     db = get_db()
@@ -1794,7 +1915,7 @@ def listar_proveedores():
     db = get_db()
     rows = db.execute(
         """
-        SELECT pr.*, COUNT(f.id) AS cantidad_facturas
+        SELECT pr.*, COUNT(f.id) AS cantidad_facturas, MAX(f.fecha) AS ultima_compra
         FROM proveedores pr
         LEFT JOIN facturas f ON f.proveedor_id = pr.id
         GROUP BY pr.id
@@ -2036,8 +2157,34 @@ def _factura_detalle(db, factura_row):
 @app.route("/api/facturas", methods=["GET"])
 def listar_facturas():
     db = get_db()
-    rows = db.execute(FACTURA_SELECT + " ORDER BY f.creado_en DESC, f.id DESC").fetchall()
-    return jsonify({"facturas": [_factura_resumen(db, r) for r in rows]})
+    proveedor_id = request.args.get("proveedor_id", "").strip()
+    estado = request.args.get("estado", "").strip()  # "pendiente" | "parcial" | "completa"
+
+    sql = FACTURA_SELECT
+    params = []
+    if proveedor_id:
+        try:
+            sql += " WHERE f.proveedor_id = ?"
+            params.append(int(proveedor_id))
+        except ValueError:
+            return jsonify({"error": "Proveedor inválido"}), 400
+    sql += " ORDER BY f.creado_en DESC, f.id DESC"
+
+    rows = db.execute(sql, params).fetchall()
+    facturas = [_factura_resumen(db, r) for r in rows]
+
+    if estado in ("pendiente", "parcial", "completa"):
+        def _estado_factura(f):
+            if f["total_lineas"] == 0:
+                return "pendiente"
+            if f["lineas_aplicadas"] == 0:
+                return "pendiente"
+            if f["lineas_aplicadas"] == f["total_lineas"]:
+                return "completa"
+            return "parcial"
+        facturas = [f for f in facturas if _estado_factura(f) == estado]
+
+    return jsonify({"facturas": facturas})
 
 
 @app.route("/api/facturas/<int:factura_id>", methods=["GET"])
@@ -2157,6 +2304,78 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
     return factura_id
 
 
+def _aplicar_lineas_pendientes_factura(db, factura_id, usuario):
+    """Ingresa a stock todas las líneas pendientes (no aplicadas) de UNA
+    factura. Reutiliza la misma lógica de _registrar_factura, pero operando
+    sobre líneas ya existentes en vez de crearlas. Devuelve cuántas líneas
+    se aplicaron."""
+    factura = db.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
+    if factura is None:
+        raise ValueError("Factura no encontrada")
+
+    factura_row = {"id": factura["id"], "numero": factura["numero"]}
+    lineas_pendientes = db.execute(
+        "SELECT * FROM factura_lineas WHERE factura_id = ? AND aplicada = 0",
+        (factura_id,),
+    ).fetchall()
+
+    aplicadas = 0
+    for linea in lineas_pendientes:
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
+        if producto is None:
+            continue  # producto borrado entretanto: se deja pendiente, no se puede ingresar
+        _aplicar_entrada_stock(
+            db, producto, linea["cantidad"], linea["precio_unitario"],
+            f"Ingreso manual (aplicado en lote) de la factura '{factura['numero']}'",
+            usuario, factura_row,
+        )
+        db.execute(
+            "UPDATE factura_lineas SET aplicada = 1, aplicada_en = ? WHERE id = ?",
+            (now_iso(), linea["id"]),
+        )
+        aplicadas += 1
+
+    return aplicadas
+
+
+@app.route("/api/facturas/aplicar-masivo", methods=["POST"])
+def aplicar_facturas_masivo():
+    """Ingresa a stock, en un solo paso, todas las líneas pendientes de
+    varias facturas seleccionadas (checkboxes en la tabla de Facturas)."""
+    data = request.get_json(force=True, silent=True) or {}
+    factura_ids = data.get("factura_ids") or []
+    if not isinstance(factura_ids, list) or not factura_ids:
+        return jsonify({"error": "Selecciona al menos una factura para aplicar"}), 400
+
+    usuario = usuario_actual()
+    db = get_db()
+    _iniciar_transaccion_stock(db)
+
+    facturas_procesadas = 0
+    lineas_aplicadas_total = 0
+    errores = []
+    for fid in factura_ids:
+        try:
+            fid = int(fid)
+        except (TypeError, ValueError):
+            errores.append({"factura_id": fid, "error": "id inválido"})
+            continue
+        try:
+            n = _aplicar_lineas_pendientes_factura(db, fid, usuario)
+            lineas_aplicadas_total += n
+            if n > 0:
+                facturas_procesadas += 1
+        except ValueError as e:
+            errores.append({"factura_id": fid, "error": str(e)})
+
+    db.commit()
+    return jsonify({
+        "facturas_procesadas": facturas_procesadas,
+        "lineas_aplicadas": lineas_aplicadas_total,
+        "errores": errores,
+    })
+
+
 @app.route("/api/facturas/<int:factura_id>", methods=["DELETE"])
 def eliminar_factura(factura_id):
     db = get_db()
@@ -2173,10 +2392,24 @@ def eliminar_factura(factura_id):
     ).fetchall()
 
     if lineas_aplicadas and not forzar:
+        # Detalle producto por producto de lo que se va a revertir, para que
+        # la interfaz pueda mostrarlo ANTES de que la persona confirme (en
+        # vez de solo avisar "se va a revertir stock" sin decir de qué ni
+        # cuánto).
+        detalle_reversion = []
+        for linea in lineas_aplicadas:
+            producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
+            detalle_reversion.append({
+                "producto_id": linea["producto_id"],
+                "producto_nombre": producto["nombre"] if producto else "(producto eliminado)",
+                "codigo_interno": producto["codigo_interno"] if producto else "",
+                "cantidad": linea["cantidad"],
+            })
         return jsonify({
             "error": f"{len(lineas_aplicadas)} producto(s) de esta factura ya fueron ingresados a stock. "
                      f"Si la eliminas de todas formas, se intentará revertir automáticamente ese stock.",
             "requiere_forzar": True,
+            "lineas_a_revertir": detalle_reversion,
         }), 409
 
     if forzar and lineas_aplicadas:
@@ -2502,11 +2735,117 @@ def carga_masiva_previsualizar():
     return jsonify({
         "token": token,
         "facturas": facturas_preview,
-        "resumen": {
-            "total_facturas": len(facturas_preview),
-            "validas": sum(1 for g in facturas_preview if g["valida"]),
-            "con_errores": sum(1 for g in facturas_preview if not g["valida"]),
-        },
+        "resumen": _carga_masiva_resumen(facturas_preview),
+    })
+
+
+def _carga_masiva_resumen(facturas_preview):
+    return {
+        "total_facturas": len(facturas_preview),
+        "validas": sum(1 for g in facturas_preview if g["valida"]),
+        "con_errores": sum(1 for g in facturas_preview if not g["valida"]),
+    }
+
+
+def _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes):
+    """Recalcula errores/valida de UN grupo (factura) de la previsualización,
+    después de que el usuario corrigió algo a mano (producto/cantidad/precio
+    de una línea). No vuelve a leer el Excel: solo re-chequea con los valores
+    que hay ahora mismo en el grupo cacheado."""
+    errores = []
+
+    if grupo["numero"] in numeros_existentes:
+        errores.append(f"Ya existe una factura registrada con el número '{grupo['numero']}'")
+
+    conteo_productos = {}
+    for linea in grupo["lineas"]:
+        errores_linea = []
+
+        if linea["producto_id"] is None:
+            errores_linea.append(f"Fila {linea['fila']}: falta identificar el producto")
+        else:
+            producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
+            if not producto:
+                errores_linea.append(f"Fila {linea['fila']}: no existe ningún producto con ID {linea['producto_id']}")
+                linea["producto_nombre"] = None
+            else:
+                linea["producto_nombre"] = row_to_dict(producto)["nombre"]
+                conteo_productos[linea["producto_id"]] = conteo_productos.get(linea["producto_id"], 0) + 1
+
+        if linea["cantidad"] is None:
+            errores_linea.append(f"Fila {linea['fila']}: falta la cantidad")
+        elif linea["cantidad"] <= 0:
+            errores_linea.append(f"Fila {linea['fila']}: la cantidad debe ser mayor a 0")
+
+        if linea["precio_unitario"] is None:
+            errores_linea.append(f"Fila {linea['fila']}: falta el precio unitario")
+        elif linea["precio_unitario"] < 0:
+            errores_linea.append(f"Fila {linea['fila']}: el precio no puede ser negativo")
+
+        linea["errores"] = errores_linea
+        errores.extend(errores_linea)
+
+    for producto_id, veces in conteo_productos.items():
+        if veces > 1:
+            nombre = next(l["producto_nombre"] for l in grupo["lineas"] if l["producto_id"] == producto_id)
+            errores.append(f"El producto '{nombre}' aparece más de una vez en la factura '{grupo['numero']}'")
+
+    grupo["errores"] = errores
+    grupo["valida"] = len(errores) == 0
+    return grupo
+
+
+@app.route("/api/facturas/carga-masiva/corregir-linea", methods=["POST"])
+def carga_masiva_corregir_linea():
+    """Aplica una corrección manual (producto/cantidad/precio) a UNA línea de
+    la previsualización de carga masiva, sin tener que volver a subir el
+    Excel completo — para errores puntuales (un producto que no calzó, una
+    cantidad mal tipeada) no vale la pena rehacer todo el archivo."""
+    _carga_masiva_limpiar_cache()
+    data = request.get_json(force=True, silent=True) or {}
+    token = data.get("token")
+    numero_factura = (data.get("numero_factura") or "").strip().upper()
+    fila = data.get("fila")
+
+    entrada = CARGA_MASIVA_CACHE.get(token)
+    if not entrada:
+        return jsonify({"error": "La previsualización expiró o no es válida. Vuelve a subir el archivo."}), 400
+
+    grupo = next((g for g in entrada["facturas"] if g["numero"] == numero_factura), None)
+    if grupo is None:
+        return jsonify({"error": "No se encontró esa factura en la previsualización"}), 404
+
+    linea = next((l for l in grupo["lineas"] if l["fila"] == fila), None)
+    if linea is None:
+        return jsonify({"error": "No se encontró esa línea en la previsualización"}), 404
+
+    db = get_db()
+
+    if "producto_id" in data:
+        producto_id = data.get("producto_id")
+        try:
+            linea["producto_id"] = int(producto_id) if producto_id not in (None, "") else None
+        except (TypeError, ValueError):
+            return jsonify({"error": "Producto inválido"}), 400
+    if "cantidad" in data:
+        cantidad = data.get("cantidad")
+        try:
+            linea["cantidad"] = int(cantidad) if cantidad not in (None, "") else None
+        except (TypeError, ValueError):
+            return jsonify({"error": "Cantidad inválida"}), 400
+    if "precio_unitario" in data:
+        precio = data.get("precio_unitario")
+        try:
+            linea["precio_unitario"] = float(precio) if precio not in (None, "") else None
+        except (TypeError, ValueError):
+            return jsonify({"error": "Precio inválido"}), 400
+
+    numeros_existentes = {r["numero"] for r in db.execute("SELECT numero FROM facturas").fetchall()}
+    _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes)
+
+    return jsonify({
+        "factura": grupo,
+        "resumen": _carga_masiva_resumen(entrada["facturas"]),
     })
 
 
@@ -3085,9 +3424,16 @@ def listar_movimientos():
         like = f"%{q}%"
         params += [like, like, like, like]
 
-    sql += " ORDER BY m.fecha DESC, m.id DESC LIMIT 500"
+    # Cuántos movimientos calzan con el filtro EN TOTAL, antes del LIMIT — se
+    # necesita para avisar si se está mostrando solo una parte (el límite
+    # existe para no traer, por ejemplo, 40.000 filas de una sola vez).
+    LIMITE_FILAS = 500
+    total_sin_limite = db.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
 
-    rows = db.execute(sql, params).fetchall()
+    sql += " ORDER BY m.fecha DESC, m.id DESC LIMIT ?"
+    params_con_limite = params + [LIMITE_FILAS]
+
+    rows = db.execute(sql, params_con_limite).fetchall()
     movimientos = []
     for r in rows:
         d = dict(r)
@@ -3098,6 +3444,9 @@ def listar_movimientos():
     return jsonify({
         "movimientos": movimientos,
         "total": len(movimientos),
+        "total_sin_limite": total_sin_limite,
+        "limite_filas": LIMITE_FILAS,
+        "truncado": total_sin_limite > LIMITE_FILAS,
         "categorias": sorted(set(CATEGORIAS_MOVIMIENTO) | {"Merma o pérdida"}),
         # Mismo criterio que usa el formulario de "Registrar movimiento": una
         # entrada no puede tener una categoría que es solo de salida (y
@@ -3808,11 +4157,18 @@ def reporte_inventario():
     ws = wb.active
     ws.title = "Inventario valorizado"
 
+    valor_general_previo = sum(p["stock_total"] * p["costo_compra"] for p in productos)
+    _excel_resumen(ws, "Inventario completo y valorizado", [
+        ("Productos", len(productos)),
+        ("Valor total del inventario", f"${valor_general_previo:,.0f}".replace(",", ".")),
+    ])
+
     encabezados = [
         "N° sistema", "Código interno", "Categoría", "Modelo", "Ubicación",
         "Stock disponible", "Stock reservado", "Stock en merma", "Stock total",
         "Stock mínimo", "Costo promedio", "Valor total",
     ]
+    fila_encabezado = ws.max_row + 1
     ws.append(encabezados)
 
     valor_general = 0
@@ -3828,7 +4184,7 @@ def reporte_inventario():
 
     ws.append([])
     ws.append(["", "", "", "", "", "", "", "", "", "", "TOTAL", round(valor_general, 2)])
-    _estilo_encabezado(ws)
+    _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     # Segunda hoja: valorizado agrupado por categoría, para ver dónde está
@@ -3870,13 +4226,18 @@ def reporte_stock():
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Stock crítico"
+    _excel_resumen(ws, "Stock crítico y sin movimiento", [
+        ("Productos con stock crítico", len(criticos)),
+        ("Productos sin ningún movimiento", len(sin_movimiento)),
+    ])
+    fila_encabezado = ws.max_row + 1
     ws.append(["N° sistema", "Producto", "Categoría", "Stock disponible", "Stock mínimo", "Diferencia", "Ubicación"])
     for p in criticos:
         ws.append([
             p["id_sistema"], p["nombre"], p["categoria"], p["stock_disponible"],
             p["stock_minimo"], p["stock_disponible"] - p["stock_minimo"], p["ubicacion_codigo"] or "",
         ])
-    _estilo_encabezado(ws)
+    _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     ws2 = wb.create_sheet("Sin movimiento")
@@ -3906,10 +4267,16 @@ def reporte_rotacion():
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Más utilizados"
+    _excel_resumen(ws, f"Rotación y consumo — últimos {dias} días", [
+        ("Más utilizados", len(datos["mas_utilizados"])),
+        ("Baja rotación", len(datos["baja_rotacion"])),
+        ("Inmovilizados", len(datos["inmovilizados"])),
+    ])
+    fila_encabezado = ws.max_row + 1
     ws.append(["N° sistema", "Producto", "Categoría", "Salidas en el período", "N° movimientos", "Tendencia"])
     for p in datos["mas_utilizados"]:
         ws.append([p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"], p["n_movimientos"], p["tendencia"]])
-    _estilo_encabezado(ws)
+    _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     ws2 = wb.create_sheet("Baja rotación")
@@ -3957,6 +4324,10 @@ def reporte_inventario_pdf():
     buffer, doc, elementos, estilos = _pdf_documento("Inventario completo y valorizado")
 
     valor_general = sum(p["stock_total"] * p["costo_compra"] for p in productos)
+    _pdf_resumen(elementos, estilos, [
+        ("Productos", len(productos)),
+        ("Valor total del inventario", fmt_money_pdf(valor_general)),
+    ])
     filas = [
         [p["id_sistema"], p["codigo_interno"], p["categoria"], p["modelo"],
          p["ubicacion_codigo"] or "—", p["stock_disponible"], p["stock_reservado"],
@@ -4000,6 +4371,10 @@ def reporte_stock_pdf():
     ).fetchall()]
 
     buffer, doc, elementos, estilos = _pdf_documento("Stock crítico y productos sin movimiento")
+    _pdf_resumen(elementos, estilos, [
+        ("Productos con stock crítico", len(criticos)),
+        ("Productos sin ningún movimiento", len(sin_movimiento)),
+    ])
 
     filas_criticos = [
         [p["id_sistema"], p["nombre"], p["categoria"], p["stock_disponible"], p["stock_minimo"],
@@ -4036,6 +4411,11 @@ def reporte_rotacion_pdf():
     datos = _calcular_rotacion(dias)
 
     buffer, doc, elementos, estilos = _pdf_documento(f"Rotación y consumo — últimos {dias} días")
+    _pdf_resumen(elementos, estilos, [
+        ("Más utilizados", len(datos["mas_utilizados"])),
+        ("Baja rotación", len(datos["baja_rotacion"])),
+        ("Inmovilizados", len(datos["inmovilizados"])),
+    ])
 
     _pdf_tabla(
         elementos, estilos, "Más utilizados",
@@ -4094,6 +4474,12 @@ def reporte_movimientos():
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Movimientos"
+    rango_txt = f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"
+    _excel_resumen(ws, "Movimientos de inventario", [
+        ("Rango", rango_txt),
+        ("Total de movimientos", len(filas_db)),
+    ])
+    fila_encabezado = ws.max_row + 1
     ws.append(["Fecha", "Tipo", "Categoría", "Producto", "Cantidad", "Costo unit.", "Motivo", "Usuario", "Factura", "Stock resultante"])
     for m in filas_db:
         ws.append([
@@ -4101,7 +4487,7 @@ def reporte_movimientos():
             m["cantidad"], m["costo_unitario"], m["motivo"] or "", m["usuario"] or "",
             m["factura_numero"] or "", m["stock_resultante"],
         ])
-    _estilo_encabezado(ws)
+    _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
@@ -4116,6 +4502,7 @@ def reporte_movimientos_pdf():
 
     rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
     buffer, doc, elementos, estilos = _pdf_documento(f"Movimientos de inventario{rango_txt}")
+    _pdf_resumen(elementos, estilos, [("Total de movimientos", len(filas_db))])
 
     filas = [
         [m["fecha"][:16].replace("T", " "), m["tipo"], m["categoria"] or "—",
@@ -4165,6 +4552,14 @@ def reporte_compras():
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Compras"
+    monto_previo = sum(f["total"] for f in facturas)
+    rango_txt = f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"
+    _excel_resumen(ws, "Compras realizadas", [
+        ("Rango", rango_txt),
+        ("Facturas", len(facturas)),
+        ("Monto total", f"${monto_previo:,.0f}".replace(",", ".")),
+    ])
+    fila_encabezado = ws.max_row + 1
     ws.append(["Fecha", "N° factura", "Proveedor", "N° líneas", "Líneas aplicadas", "Total"])
     total_general = 0
     for f in facturas:
@@ -4172,7 +4567,7 @@ def reporte_compras():
         ws.append([f["fecha"], f["numero"], f["proveedor_display"], f["total_lineas"], f["lineas_aplicadas"], round(f["total"], 2)])
     ws.append([])
     ws.append(["", "", "", "", "TOTAL", round(total_general, 2)])
-    _estilo_encabezado(ws)
+    _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
@@ -4189,6 +4584,10 @@ def reporte_compras_pdf():
     buffer, doc, elementos, estilos = _pdf_documento(f"Compras realizadas{rango_txt}")
 
     total_general = sum(f["total"] for f in facturas)
+    _pdf_resumen(elementos, estilos, [
+        ("Facturas", len(facturas)),
+        ("Monto total", fmt_money_pdf(total_general)),
+    ])
     filas = [
         [f["fecha"], f["numero"], f["proveedor_display"] or "—", f["total_lineas"], fmt_money_pdf(f["total"])]
         for f in facturas
@@ -4202,6 +4601,52 @@ def reporte_compras_pdf():
     sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
     nombre = f"compras{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     return _pdf_response(buffer, doc, elementos, nombre)
+
+
+@app.route("/api/reportes/resumen", methods=["GET"])
+def reportes_resumen():
+    """Contadores rápidos de qué trae cada reporte (Módulo 11), para
+    mostrarlos en la pestaña Reportes ANTES de descargar el archivo — así se
+    sabe de antemano si va a traer 3 filas o 3.000, sin tener que abrirlo."""
+    db = get_db()
+
+    total_productos = db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+    valor_inventario = db.execute(
+        "SELECT COALESCE(SUM((stock_disponible + stock_reservado) * costo_compra), 0) FROM productos"
+    ).fetchone()[0]
+
+    criticos = db.execute("SELECT COUNT(*) FROM productos WHERE stock_disponible <= stock_minimo").fetchone()[0]
+    sin_movimiento = db.execute(
+        "SELECT COUNT(*) FROM productos WHERE id NOT IN (SELECT DISTINCT producto_id FROM movimientos)"
+    ).fetchone()[0]
+
+    try:
+        dias = int(request.args.get("dias", 90))
+    except (TypeError, ValueError):
+        dias = 90
+    dias = max(7, min(dias, 730))
+    datos_rotacion = _calcular_rotacion(dias)
+
+    mov_desde = (request.args.get("mov_desde") or "").strip()
+    mov_hasta = (request.args.get("mov_hasta") or "").strip()
+    total_movimientos = len(_movimientos_para_reporte(mov_desde, mov_hasta))
+
+    compras_desde = (request.args.get("compras_desde") or "").strip()
+    compras_hasta = (request.args.get("compras_hasta") or "").strip()
+    facturas = _facturas_para_reporte(compras_desde, compras_hasta)
+
+    return jsonify({
+        "inventario": {"productos": total_productos, "valor_total": round(valor_inventario, 2)},
+        "stock": {"criticos": criticos, "sin_movimiento": sin_movimiento},
+        "rotacion": {
+            "dias": dias,
+            "mas_utilizados": len(datos_rotacion["mas_utilizados"]),
+            "baja_rotacion": len(datos_rotacion["baja_rotacion"]),
+            "inmovilizados": len(datos_rotacion["inmovilizados"]),
+        },
+        "movimientos": {"total": total_movimientos},
+        "compras": {"facturas": len(facturas), "monto_total": round(sum(f["total"] for f in facturas), 2)},
+    })
 
 
 # ---------------------------------------------------------------------------

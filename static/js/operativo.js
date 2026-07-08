@@ -202,6 +202,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "ordenes") cargarOperativo();
     if (vista === "clientes") cargarClientesTab();
     if (vista === "garantias") cargarGarantiasTab();
+    if (vista === "reportes") cargarResumenReportesOperativo();
   });
 });
 
@@ -789,11 +790,60 @@ document.getElementById("form-op-cliente").addEventListener("submit", async (e) 
 
 // ---- Equipos ----
 
+// Chequeo temprano de bloqueo por vehículo duplicado: se llama apenas se
+// selecciona un vehículo (no hay que esperar a enviar el formulario) para
+// avisar de inmediato si ya tiene una OT o una garantía abierta, con un
+// link para saltar directo a esa OT/garantía. `tipo` es "orden" o
+// "garantia" y determina cuál de los dos posibles bloqueos se muestra
+// (el mismo criterio que usa el backend para bloquear la creación).
+async function chequearBloqueoEquipo(equipoId, tipo, contenedorId) {
+  const cont = document.getElementById(contenedorId);
+  if (!equipoId) {
+    cont.style.display = "none";
+    cont.innerHTML = "";
+    return;
+  }
+  let data;
+  try {
+    data = await api(`/api/operativo/equipos/${equipoId}/bloqueo`);
+  } catch (e) {
+    // Si falla el chequeo (ej. problema de red) no bloqueamos la UI: el
+    // backend igual valida al enviar el formulario.
+    cont.style.display = "none";
+    cont.innerHTML = "";
+    return;
+  }
+  const bloqueo = tipo === "orden" ? data.ot_abierta : data.garantia_abierta;
+  if (!bloqueo) {
+    cont.style.display = "none";
+    cont.innerHTML = "";
+    return;
+  }
+  const etiqueta = tipo === "orden" ? "OT" : "Garantía";
+  const sujeto = tipo === "orden" ? "una OT abierta" : "una garantía abierta";
+  const cierre = tipo === "orden" ? "se entregue o se cancele" : "se entregue o se rechace";
+  cont.innerHTML =
+    `⚠️ Este vehículo ya tiene ${sujeto} (${etiqueta} #${bloqueo.id}, estado: ${escapeHtml(bloqueo.estado_label)}). ` +
+    `No se puede crear otra hasta que ${cierre}. ` +
+    `<button type="button" class="btn-link" id="${contenedorId}-btn">Ver ${etiqueta} #${bloqueo.id} →</button>`;
+  cont.style.display = "";
+  document.getElementById(`${contenedorId}-btn`).addEventListener("click", () => {
+    if (tipo === "orden") {
+      cerrarModal("modal-op-orden-nueva");
+      abrirDetalleOrden(bloqueo.id);
+    } else {
+      cerrarModal("modal-op-garantia-nueva");
+      abrirDetalleGarantia(bloqueo.id);
+    }
+  });
+}
+
 async function renderSelectEquiposOperativo(clienteId, valorActual) {
   const select = document.getElementById("opon-equipo-id");
   if (!clienteId) {
     select.innerHTML = '<option value="">Selecciona un vehículo…</option>';
     document.getElementById("opon-ver-historial").style.display = "none";
+    chequearBloqueoEquipo(null, "orden", "opon-equipo-bloqueo");
     return;
   }
   const data = await api(`/api/operativo/equipos?cliente_id=${clienteId}`);
@@ -801,9 +851,11 @@ async function renderSelectEquiposOperativo(clienteId, valorActual) {
   select.innerHTML = '<option value="">Selecciona un vehículo…</option>' +
     data.equipos.map(eq => `<option value="${eq.id}">${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</option>`).join("");
   select.value = valorActual || "";
-  // select.value = ... no dispara "change", así que el link de historial se
-  // actualiza acá también (cubre el caso de equipo recién creado inline).
+  // select.value = ... no dispara "change", así que el link de historial y el
+  // aviso de bloqueo se actualizan acá también (cubre el caso de equipo
+  // recién creado inline).
   document.getElementById("opon-ver-historial").style.display = valorActual ? "" : "none";
+  chequearBloqueoEquipo(valorActual || null, "orden", "opon-equipo-bloqueo");
 }
 
 document.getElementById("opon-cliente-id").addEventListener("change", (e) => {
@@ -830,6 +882,7 @@ function poblarCamposVehiculoNuevaOrden(equipoId) {
 document.getElementById("opon-equipo-id").addEventListener("change", (e) => {
   document.getElementById("opon-ver-historial").style.display = e.target.value ? "" : "none";
   poblarCamposVehiculoNuevaOrden(e.target.value);
+  chequearBloqueoEquipo(e.target.value || null, "orden", "opon-equipo-bloqueo");
 });
 
 document.getElementById("opon-ver-historial").addEventListener("click", () => {
@@ -947,6 +1000,37 @@ document.getElementById("btn-rep-ordenes-pdf").addEventListener("click", () => {
   window.location.href = `/api/operativo/reportes/ordenes/pdf?${rangoFechasParamsOperativo()}`;
 });
 
+// Preview con contadores: se muestra cuántas órdenes/garantías trae cada
+// reporte ANTES de descargarlo, igual que en Logística — se recalcula al
+// entrar a la pestaña y cada vez que cambia un rango de fecha.
+async function cargarResumenReportesOperativo() {
+  const params = new URLSearchParams();
+  const ordenesDesde = document.getElementById("rep-ordenes-desde").value;
+  const ordenesHasta = document.getElementById("rep-ordenes-hasta").value;
+  if (ordenesDesde) params.set("ordenes_desde", ordenesDesde);
+  if (ordenesHasta) params.set("ordenes_hasta", ordenesHasta);
+  const garantiasDesde = document.getElementById("rep-garantias-desde").value;
+  const garantiasHasta = document.getElementById("rep-garantias-hasta").value;
+  if (garantiasDesde) params.set("garantias_desde", garantiasDesde);
+  if (garantiasHasta) params.set("garantias_hasta", garantiasHasta);
+
+  try {
+    const r = await api(`/api/operativo/reportes/resumen?${params.toString()}`);
+    document.getElementById("rep-contador-ordenes").textContent =
+      `${r.ordenes.total} orden(es) · total facturado ${fmtMoney(r.ordenes.total_facturado)}`;
+    document.getElementById("rep-contador-garantias").textContent =
+      `${r.garantias.total} garantía(s) en el rango seleccionado`;
+  } catch (e) {
+    document.getElementById("rep-contador-ordenes").textContent = "No se pudo calcular el resumen.";
+    document.getElementById("rep-contador-garantias").textContent = "No se pudo calcular el resumen.";
+  }
+}
+
+document.getElementById("rep-ordenes-desde").addEventListener("change", cargarResumenReportesOperativo);
+document.getElementById("rep-ordenes-hasta").addEventListener("change", cargarResumenReportesOperativo);
+document.getElementById("rep-garantias-desde").addEventListener("change", cargarResumenReportesOperativo);
+document.getElementById("rep-garantias-hasta").addEventListener("change", cargarResumenReportesOperativo);
+
 // ---- Nueva orden — el ingreso completo del auto (recepción + checklist de
 // equipamiento) se hace acá, al momento de crear la orden, tal como se hace
 // una sola vez cuando el vehículo entra al taller. ----
@@ -1035,6 +1119,11 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     abrirDetalleOrden(nueva.id);
   } catch (e2) {
     toast(e2.message, true);
+    // Puede pasar que el bloqueo haya aparecido justo entre que se
+    // seleccionó el vehículo y se envió el formulario (ej. otra persona
+    // creó una OT para el mismo auto en ese momento) — se refresca el
+    // aviso para que quede visible con su link, no solo el toast.
+    chequearBloqueoEquipo(equipoId, "orden", "opon-equipo-bloqueo");
   }
 });
 
@@ -2027,6 +2116,10 @@ function renderSelectEquiposGarantia(equipos, valorActual) {
   select.innerHTML = '<option value="">Selecciona un vehículo…</option>' +
     equipos.map(eq => `<option value="${eq.id}">${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</option>`).join("");
   select.value = valorActual || "";
+  // select.value = ... no dispara "change", así que el link de historial y el
+  // aviso de bloqueo se actualizan acá también (cubre equipo recién creado).
+  document.getElementById("garn-ver-historial").style.display = valorActual ? "" : "none";
+  chequearBloqueoEquipo(valorActual || null, "garantia", "garn-equipo-bloqueo");
 }
 
 function renderSelectOrdenesGarantia(ordenes, valorActual) {
@@ -2082,7 +2175,14 @@ document.getElementById("garn-cliente-id").addEventListener("change", async (e) 
 });
 
 document.getElementById("garn-equipo-id").addEventListener("change", (e) => {
+  document.getElementById("garn-ver-historial").style.display = e.target.value ? "" : "none";
+  chequearBloqueoEquipo(e.target.value || null, "garantia", "garn-equipo-bloqueo");
   cargarOrdenesGarantiaParaEquipo(e.target.value || null, "");
+});
+
+document.getElementById("garn-ver-historial").addEventListener("click", () => {
+  const equipoId = document.getElementById("garn-equipo-id").value;
+  if (equipoId) abrirHistorialEquipo(parseInt(equipoId, 10));
 });
 
 document.getElementById("garn-nuevo-cliente").addEventListener("click", () => {
@@ -2144,6 +2244,9 @@ document.getElementById("form-op-garantia-nueva").addEventListener("submit", asy
     cargarDashboardOperativo();
   } catch (e2) {
     toast(e2.message, true);
+    // Igual que en "Nueva orden": si el bloqueo apareció justo entre la
+    // selección del vehículo y el envío, se refresca el aviso con su link.
+    chequearBloqueoEquipo(payload.equipo_id, "garantia", "garn-equipo-bloqueo");
   }
 });
 

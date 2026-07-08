@@ -127,6 +127,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "mermas") cargarMermas();
     if (vista === "rotacion") cargarRotacion();
     if (vista === "planificacion") cargarPlanificacion();
+    if (vista === "reportes") cargarResumenReportes();
     if (vista === "usuarios") cargarUsuarios();
   });
 });
@@ -140,6 +141,7 @@ async function api(path, options = {}) {
   if (!res.ok) {
     const err = new Error(data.error || "Error inesperado");
     err.requiereForzar = !!data.requiere_forzar;
+    err.data = data;
     throw err;
   }
   return data;
@@ -219,7 +221,10 @@ function renderTablaUbicaciones() {
       <td class="mono">${u.nivel}</td>
       <td><span class="estado-pill estado-pill--${u.ocupada ? "ocupada" : "libre"}">${u.ocupada ? `${u.productos.length} producto(s)` : "Libre"}</span></td>
       <td>${productosTexto}</td>
-      <td><button class="btn-link" data-borrar-ubicacion="${u.id}">Eliminar</button></td>
+      <td>
+        ${u.ocupada ? `<button class="btn-link" data-reasignar-ubicacion="${u.id}">Reasignar</button> ` : ""}
+        <button class="btn-link" data-borrar-ubicacion="${u.id}">Eliminar</button>
+      </td>
     </tr>
   `;
   }).join("");
@@ -240,7 +245,51 @@ function renderTablaUbicaciones() {
       }
     });
   });
+
+  tbody.querySelectorAll("[data-reasignar-ubicacion]").forEach(btn => {
+    btn.addEventListener("click", () => abrirReasignarUbicacion(parseInt(btn.dataset.reasignarUbicacion, 10)));
+  });
 }
+
+// Mueve de una sola vez TODOS los productos que hay en una ubicación hacia
+// otra — para reorganizar la bodega sin tener que editar producto por
+// producto (ej. "voy a dejar libre el pasillo 3 completo, todo lo que
+// tenga se va al pasillo 8").
+function abrirReasignarUbicacion(origenId) {
+  const origen = state.ubicaciones.find(u => u.id === origenId);
+  if (!origen || origen.productos.length === 0) return;
+  document.getElementById("reasig-origen-id").value = origenId;
+  document.getElementById("reasig-origen-info").textContent =
+    `Se moverán los ${origen.productos.length} producto(s) que hay en ${origen.codigo} a la ubicación que elijas. ${origen.codigo} quedará libre.`;
+  const select = document.getElementById("reasig-destino-id");
+  const otras = state.ubicaciones.filter(u => u.id !== origenId);
+  select.innerHTML = otras.length
+    ? otras.map(u => `<option value="${u.id}">${escapeHtml(u.codigo)}${u.ocupada ? ` (ya tiene ${u.productos.length} producto/s)` : ""}</option>`).join("")
+    : '<option value="">No hay otra ubicación disponible — crea una primero</option>';
+  abrirModal("modal-reasignar-ubicacion");
+}
+
+document.getElementById("form-reasignar-ubicacion").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const origenId = document.getElementById("reasig-origen-id").value;
+  const destinoId = document.getElementById("reasig-destino-id").value;
+  if (!destinoId) {
+    toast("Selecciona la ubicación de destino", true);
+    return;
+  }
+  try {
+    const resultado = await api(`/api/ubicaciones/${origenId}/reasignar`, {
+      method: "PUT",
+      body: JSON.stringify({ destino_id: destinoId }),
+    });
+    toast(`${resultado.movidos} producto(s) reasignado(s)`);
+    cerrarModal("modal-reasignar-ubicacion");
+    await cargarUbicaciones();
+    if (state.productos.length) await cargarProductos();
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
 
 function renderSelectUbicaciones(seleccionActualId) {
   const select = document.getElementById("f-ubicacion-id");
@@ -249,37 +298,112 @@ function renderSelectUbicaciones(seleccionActualId) {
   select.value = seleccionActualId || "";
 }
 
+function resetearModalUbicacion() {
+  document.getElementById("form-ubicacion").reset();
+  document.getElementById("u-modo-rango").checked = false;
+  document.getElementById("u-campos-simple").style.display = "grid";
+  document.getElementById("u-campos-rango").style.display = "none";
+  document.getElementById("u-preview").textContent = "Código resultante: —";
+  document.getElementById("modal-ubicacion-titulo").textContent = "Nueva ubicación";
+  document.getElementById("u-btn-crear").textContent = "Crear ubicación";
+}
+
 document.getElementById("btn-nueva-ubicacion").addEventListener("click", () => {
   state.origenModalUbicacion = "bodega";
-  document.getElementById("form-ubicacion").reset();
-  document.getElementById("u-preview").textContent = "Código resultante: —";
+  resetearModalUbicacion();
+  // El modo rango (crear varias ubicaciones de una sola vez) solo tiene
+  // sentido viniendo de la pestaña Bodega — desde el formulario de
+  // producto se necesita UNA ubicación concreta para asignarla ahí mismo.
+  document.getElementById("u-toggle-rango-wrap").style.display = "flex";
   abrirModal("modal-ubicacion");
 });
 
 document.getElementById("btn-crear-ubicacion-inline").addEventListener("click", () => {
   state.origenModalUbicacion = "producto";
-  document.getElementById("form-ubicacion").reset();
-  document.getElementById("u-preview").textContent = "Código resultante: —";
+  resetearModalUbicacion();
+  document.getElementById("u-toggle-rango-wrap").style.display = "none";
   abrirModal("modal-ubicacion");
 });
 
+function actualizarPreviewUbicacionSimple() {
+  const p = document.getElementById("u-pasillo").value;
+  const e = document.getElementById("u-estanteria").value;
+  const n = document.getElementById("u-nivel").value;
+  document.getElementById("u-preview").textContent =
+    (p && e && n) ? `Código resultante: P${p}-E${e}-N${n}` : "Código resultante: —";
+}
+
+function actualizarPreviewUbicacionRango() {
+  const pD = parseInt(document.getElementById("u-pasillo-desde").value, 10);
+  const pH = parseInt(document.getElementById("u-pasillo-hasta").value, 10);
+  const eD = parseInt(document.getElementById("u-estanteria-desde").value, 10);
+  const eH = parseInt(document.getElementById("u-estanteria-hasta").value, 10);
+  const nD = parseInt(document.getElementById("u-nivel-desde").value, 10);
+  const nH = parseInt(document.getElementById("u-nivel-hasta").value, 10);
+  const preview = document.getElementById("u-preview");
+  if (![pD, pH, eD, eH, nD, nH].every(v => Number.isInteger(v) && v > 0)) {
+    preview.textContent = "Código resultante: —";
+    return;
+  }
+  if (pH < pD || eH < eD || nH < nD) {
+    preview.textContent = "El valor \"hasta\" de cada rango debe ser mayor o igual al \"desde\".";
+    return;
+  }
+  const total = (pH - pD + 1) * (eH - eD + 1) * (nH - nD + 1);
+  preview.textContent = `Se crearán hasta ${total} ubicaciones, de P${pD}-E${eD}-N${nD} a P${pH}-E${eH}-N${nH} (las que ya existan se dejan tal cual, sin duplicar).`;
+}
+
 ["u-pasillo", "u-estanteria", "u-nivel"].forEach(id => {
-  document.getElementById(id).addEventListener("input", () => {
-    const p = document.getElementById("u-pasillo").value;
-    const e = document.getElementById("u-estanteria").value;
-    const n = document.getElementById("u-nivel").value;
-    document.getElementById("u-preview").textContent =
-      (p && e && n) ? `Código resultante: P${p}-E${e}-N${n}` : "Código resultante: —";
-  });
+  document.getElementById(id).addEventListener("input", actualizarPreviewUbicacionSimple);
+});
+["u-pasillo-desde", "u-pasillo-hasta", "u-estanteria-desde", "u-estanteria-hasta", "u-nivel-desde", "u-nivel-hasta"].forEach(id => {
+  document.getElementById(id).addEventListener("input", actualizarPreviewUbicacionRango);
+});
+
+document.getElementById("u-modo-rango").addEventListener("change", (e) => {
+  const esRango = e.target.checked;
+  document.getElementById("u-campos-simple").style.display = esRango ? "none" : "grid";
+  document.getElementById("u-campos-rango").style.display = esRango ? "grid" : "none";
+  document.getElementById("u-btn-crear").textContent = esRango ? "Crear ubicaciones" : "Crear ubicación";
+  document.getElementById("u-preview").textContent = "Código resultante: —";
 });
 
 document.getElementById("form-ubicacion").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const payload = {
-    pasillo: document.getElementById("u-pasillo").value,
-    estanteria: document.getElementById("u-estanteria").value,
-    nivel: document.getElementById("u-nivel").value,
-  };
+  const esRango = document.getElementById("u-modo-rango").checked;
+
+  if (esRango) {
+    const payload = {
+      pasillo_desde: document.getElementById("u-pasillo-desde").value,
+      pasillo_hasta: document.getElementById("u-pasillo-hasta").value,
+      estanteria_desde: document.getElementById("u-estanteria-desde").value,
+      estanteria_hasta: document.getElementById("u-estanteria-hasta").value,
+      nivel_desde: document.getElementById("u-nivel-desde").value,
+      nivel_hasta: document.getElementById("u-nivel-hasta").value,
+    };
+    try {
+      const resultado = await api("/api/ubicaciones/rango", { method: "POST", body: JSON.stringify(payload) });
+      if (resultado.creadas > 0) {
+        toast(`${resultado.creadas} ubicación(es) creada(s)` + (resultado.omitidas > 0 ? ` (${resultado.omitidas} ya existían y se dejaron igual)` : ""));
+      } else {
+        toast("Todas las ubicaciones de ese rango ya existían — no se creó ninguna nueva.", true);
+      }
+      cerrarModal("modal-ubicacion");
+      await cargarUbicaciones();
+    } catch (e2) {
+      toast(e2.message, true);
+    }
+    return;
+  }
+
+  const p = document.getElementById("u-pasillo").value;
+  const est = document.getElementById("u-estanteria").value;
+  const n = document.getElementById("u-nivel").value;
+  if (!p || !est || !n) {
+    toast("Completa pasillo, estantería y nivel", true);
+    return;
+  }
+  const payload = { pasillo: p, estanteria: est, nivel: n };
   try {
     const nueva = await api("/api/ubicaciones", { method: "POST", body: JSON.stringify(payload) });
     toast("Ubicación creada: " + nueva.codigo);
@@ -289,8 +413,8 @@ document.getElementById("form-ubicacion").addEventListener("submit", async (e) =
       renderSelectUbicaciones(nueva.id);
       document.getElementById("f-ubicacion-id").value = nueva.id;
     }
-  } catch (e) {
-    toast(e.message, true);
+  } catch (e2) {
+    toast(e2.message, true);
   }
 });
 
@@ -341,20 +465,53 @@ const ETIQUETAS_ALTA_RAPIDA = {
   modelo: { texto: "modelo", render: renderSelectModelo },
 };
 
+// Alta rápida de categoría/modelo: antes usaba prompt(), que no deja ver el
+// resto del formulario ni valida nada en vivo. Se reemplaza por un modal
+// chico y reutilizable (un solo campo de texto), siguiendo el mismo patrón
+// de callback que ya se usa para mermas y "nuevo proveedor" desde factura.
+let altaRapidaCallback = null;
+
+function abrirModalAltaRapida({ titulo, label, callback }) {
+  document.getElementById("ar-titulo").textContent = titulo;
+  document.getElementById("ar-label").textContent = label;
+  const input = document.getElementById("ar-nombre");
+  input.value = "";
+  altaRapidaCallback = callback;
+  abrirModal("modal-alta-rapida");
+  setTimeout(() => input.focus(), 50);
+}
+
+document.getElementById("form-alta-rapida").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const nombre = document.getElementById("ar-nombre").value.trim();
+  if (!nombre) {
+    toast("Ingresa un nombre", true);
+    return;
+  }
+  if (altaRapidaCallback) {
+    await altaRapidaCallback(nombre);
+  }
+});
+
 document.querySelectorAll("[data-nuevo]").forEach(btn => {
-  btn.addEventListener("click", async () => {
+  btn.addEventListener("click", () => {
     const tipo = btn.dataset.nuevo; // "categoria" | "modelo"
     const info = ETIQUETAS_ALTA_RAPIDA[tipo];
-    const nombre = prompt(`Nombre de la nueva ${info.texto}:`);
-    if (!nombre || !nombre.trim()) return;
-    try {
-      await api(`/api/${tipo}s`, { method: "POST", body: JSON.stringify({ nombre: nombre.trim() }) });
-      await cargarCategoriasYMarcas();
-      info.render(nombre.trim());
-      toast(`${info.texto[0].toUpperCase() + info.texto.slice(1)} agregada`);
-    } catch (e) {
-      toast(e.message, true);
-    }
+    abrirModalAltaRapida({
+      titulo: `Nueva ${info.texto}`,
+      label: `Nombre de la ${info.texto}`,
+      callback: async (nombre) => {
+        try {
+          await api(`/api/${tipo}s`, { method: "POST", body: JSON.stringify({ nombre }) });
+          await cargarCategoriasYMarcas();
+          info.render(nombre);
+          toast(`${info.texto[0].toUpperCase() + info.texto.slice(1)} agregada`);
+          cerrarModal("modal-alta-rapida");
+        } catch (e) {
+          toast(e.message, true);
+        }
+      },
+    });
   });
 });
 
@@ -516,11 +673,13 @@ async function cargarProductos(resetearPagina) {
   const q = document.getElementById("buscar").value.trim();
   const categoria = document.getElementById("filtro-categoria").value;
   const criticos = document.getElementById("filtro-criticos").checked;
+  const sinUbicacion = document.getElementById("filtro-sin-ubicacion").checked;
 
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (categoria) params.set("categoria", categoria);
   if (criticos) params.set("criticos", "1");
+  if (sinUbicacion) params.set("sin_ubicacion", "1");
   params.set("pagina", state.paginaProductos);
   params.set("por_pagina", state.porPaginaProductos);
 
@@ -535,6 +694,13 @@ async function cargarProductos(resetearPagina) {
     renderCategorias();
     renderTabla();
     renderPaginacionProductos();
+    const badge = document.getElementById("contador-sin-ubicacion");
+    if (data.total_sin_ubicacion > 0) {
+      badge.textContent = data.total_sin_ubicacion;
+      badge.style.display = "inline-block";
+    } else {
+      badge.style.display = "none";
+    }
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="10" class="vacio">Error al cargar productos: ${e.message}</td></tr>`;
   }
@@ -624,13 +790,22 @@ function renderTabla() {
         <td class="num mono">${p.stock_reservado}</td>
         <td class="num mono">${p.stock_total}</td>
         <td class="num mono">${fmtMoney(p.costo_compra)}</td>
-        <td></td>
+        <td><button type="button" class="btn-link" data-mov-rapido="${p.id}" title="Registrar un movimiento de stock para este producto">+ Movimiento</button></td>
       </tr>
     `;
   }).join("");
 
   tbody.querySelectorAll("tr[data-id]").forEach(tr => {
     tr.addEventListener("click", () => abrirDetalle(parseInt(tr.dataset.id, 10)));
+  });
+
+  tbody.querySelectorAll("[data-mov-rapido]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      // stopPropagation: si no, el click también le llega a la fila (que
+      // abre el mismo detalle, pero sin el enfoque automático al formulario).
+      e.stopPropagation();
+      abrirDetalle(parseInt(btn.dataset.movRapido, 10), true);
+    });
   });
 }
 
@@ -654,6 +829,7 @@ document.getElementById("buscar").addEventListener("input", () => {
 });
 document.getElementById("filtro-categoria").addEventListener("change", () => cargarProductos(true));
 document.getElementById("filtro-criticos").addEventListener("change", () => cargarProductos(true));
+document.getElementById("filtro-sin-ubicacion").addEventListener("change", () => cargarProductos(true));
 
 // ---------------------------------------------------------------------------
 // Modal: crear / editar producto
@@ -669,6 +845,7 @@ document.getElementById("btn-nuevo").addEventListener("click", async () => {
   document.getElementById("grid-stock-inicial").style.display = "grid";
   document.getElementById("ayuda-stock").style.display = "block";
   document.getElementById("f-costo-label").textContent = "Costo promedio inicial ($ CLP)";
+  document.getElementById("f-costo").readOnly = false;
   document.getElementById("f-stock-disponible").closest(".campo").style.display = "flex";
   document.getElementById("f-ubicacion-legacy").style.display = "none";
   await Promise.all([cargarUbicaciones(), cargarCategoriasYMarcas()]);
@@ -684,8 +861,13 @@ async function abrirEdicion(p) {
   document.getElementById("f-id-sistema-tag").style.display = "block";
   document.getElementById("f-codigo").value = p.codigo_interno || "";
   document.getElementById("f-descripcion").value = p.descripcion || "";
+  // El costo promedio ya no se puede editar a mano acá — se recalcula solo
+  // como promedio ponderado con cada entrada de stock (misma lógica que ya
+  // se aplicaba al stock). Se deja solo como dato informativo, de solo
+  // lectura, para no perder la trazabilidad de cómo se llegó a ese número.
   document.getElementById("f-costo").value = p.costo_compra;
-  document.getElementById("f-costo-label").textContent = "Costo promedio actual ($ CLP)";
+  document.getElementById("f-costo").readOnly = true;
+  document.getElementById("f-costo-label").textContent = "Costo promedio actual ($ CLP) — solo lectura";
 
   await Promise.all([cargarUbicaciones(), cargarCategoriasYMarcas()]);
   renderSelectUbicaciones(p.ubicacion_id);
@@ -718,11 +900,15 @@ formProducto.addEventListener("submit", async (e) => {
     categoria: document.getElementById("f-categoria").value,
     modelo: document.getElementById("f-modelo").value,
     ubicacion_id: document.getElementById("f-ubicacion-id").value,
-    costo_compra: document.getElementById("f-costo").value,
   };
 
   if (!id) {
+    // El costo (inicial) y el stock inicial solo se piden al CREAR el
+    // producto. Al editar, el costo promedio ya no viaja en el payload —
+    // se sigue calculando solo con cada entrada de stock real, nunca a
+    // mano desde este formulario (el backend además lo ignora si llegara).
     payload.stock_disponible = document.getElementById("f-stock-disponible").value;
+    payload.costo_compra = document.getElementById("f-costo").value;
   }
 
   try {
@@ -745,7 +931,7 @@ formProducto.addEventListener("submit", async (e) => {
 // Modal: detalle + movimientos
 // ---------------------------------------------------------------------------
 
-async function abrirDetalle(id) {
+async function abrirDetalle(id, enfocarMovimiento) {
   try {
     const p = await api(`/api/productos/${id}`);
     state.productoActivo = p;
@@ -759,6 +945,16 @@ async function abrirDetalle(id) {
     document.getElementById("m-proveedor-merma-wrap").style.display = "none";
     poblarSelectCategoriaMovimiento(CATEGORIAS_ENTRADA, "Compra");
     abrirModal("modal-detalle");
+    if (enfocarMovimiento) {
+      // Botón "+ Movimiento" de la fila: se salta directo al formulario de
+      // movimiento (que ya vive dentro de este mismo modal) en vez de
+      // dejar que la persona tenga que ubicarlo scrolleando entre toda la
+      // demás info del producto.
+      setTimeout(() => {
+        document.getElementById("form-movimiento").scrollIntoView({ behavior: "smooth", block: "center" });
+        document.getElementById("m-cantidad").focus();
+      }, 80);
+    }
   } catch (e) {
     toast(e.message, true);
   }
@@ -822,11 +1018,46 @@ function renderDetalle(p) {
   }
 }
 
+// Un archivo .heic/.heif se sube y se guarda sin problema, pero casi
+// ningún navegador de escritorio sabe MOSTRAR ese formato en una <img> —
+// es el formato en que el iPhone guarda fotos por defecto, así que es el
+// caso más común. En vez de dejar que la foto "desaparezca" (ícono roto,
+// sin explicación), se avisa apenas se elige el archivo y se deja un
+// mensaje + link de descarga en la previsualización si el navegador no
+// pudo renderizarla.
+const EXTENSIONES_FOTO_SIN_PREVIEW = [".heic", ".heif"];
+
+function esFotoSinPreview(nombreArchivo) {
+  const n = (nombreArchivo || "").toLowerCase();
+  return EXTENSIONES_FOTO_SIN_PREVIEW.some(ext => n.endsWith(ext));
+}
+
 function renderFotoProducto(p) {
   const preview = document.getElementById("detalle-foto-preview");
   const btnQuitar = document.getElementById("btn-quitar-foto");
   if (p.tiene_foto && p.foto_archivo) {
-    preview.innerHTML = `<img src="/api/productos/foto/${encodeURIComponent(p.foto_archivo)}" alt="Foto de ${escapeHtml(p.nombre)}">`;
+    const url = `/api/productos/foto/${encodeURIComponent(p.foto_archivo)}`;
+    if (esFotoSinPreview(p.foto_archivo)) {
+      // Se sabe de antemano que este formato no se puede previsualizar —
+      // ni se intenta poner el <img> (evita el ícono roto).
+      preview.innerHTML = `
+        <span class="vacio-inline">
+          Hay una foto guardada, pero en formato HEIC — el navegador no puede mostrarla acá.
+          <a href="${url}" download>Descargar para verla</a>
+        </span>`;
+    } else {
+      preview.innerHTML = `<img src="${url}" alt="Foto de ${escapeHtml(p.nombre)}">`;
+      // Aunque la extensión no sea heic/heif, por si acaso el navegador
+      // igual no logra decodificarla (foto corrupta, formato raro, etc.)
+      // se deja el mismo mensaje de respaldo en vez de un ícono roto.
+      preview.querySelector("img").addEventListener("error", () => {
+        preview.innerHTML = `
+          <span class="vacio-inline">
+            Hay una foto guardada, pero el navegador no pudo mostrarla acá.
+            <a href="${url}" download>Descargar para verla</a>
+          </span>`;
+      }, { once: true });
+    }
     btnQuitar.style.display = "inline-block";
   } else {
     preview.innerHTML = `<span class="vacio-inline">Sin foto</span>`;
@@ -841,13 +1072,21 @@ document.getElementById("btn-subir-foto").addEventListener("click", () => {
 document.getElementById("detalle-foto-archivo").addEventListener("change", async (e) => {
   const archivo = e.target.files[0];
   if (!archivo || !state.productoActivo) return;
+  const esHeic = esFotoSinPreview(archivo.name);
   const formData = new FormData();
   formData.append("foto", archivo);
   try {
     const res = await fetch(`/api/productos/${state.productoActivo.id}/foto`, { method: "POST", body: formData });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "No se pudo subir la foto");
-    toast("Foto guardada");
+    // Si es HEIC, este aviso reemplaza al "Foto guardada" normal (un solo
+    // toast a la vez) — ya deja claro que sí se guardó, además de advertir
+    // sobre el formato, en vez de mostrar dos mensajes que se pisan entre sí.
+    if (esHeic) {
+      toast("Foto guardada, pero en formato HEIC no se va a poder ver dentro del sistema (la mayoría de los navegadores no la muestra). Si puedes, conviértela a JPG — en iPhone: Ajustes > Cámara > Formatos > \"Más compatible\".", true);
+    } else {
+      toast("Foto guardada");
+    }
     const actualizado = await api(`/api/productos/${state.productoActivo.id}`);
     state.productoActivo = actualizado;
     renderFotoProducto(actualizado);
@@ -896,7 +1135,11 @@ async function buscarFacturaParaMovimiento() {
   }
 
   try {
-    const factura = await api(`/api/facturas/numero/${encodeURIComponent(numero)}`);
+    // El número se guarda siempre en mayúsculas (crear_factura lo normaliza
+    // con .strip().upper()), así que si se busca en minúscula o mixto la
+    // comparación exacta en SQL no encontraba nada aunque la factura sí
+    // existiera. Se normaliza acá también antes de buscar.
+    const factura = await api(`/api/facturas/numero/${encodeURIComponent(numero.toUpperCase())}`);
     const linea = factura.lineas.find(l => l.producto_id === state.productoActivo.id);
 
     if (!linea) {
@@ -1043,25 +1286,62 @@ document.getElementById("btn-eliminar-producto").addEventListener("click", async
 // Facturas (primera pieza del Módulo 4 - Ingreso de Compras)
 // ---------------------------------------------------------------------------
 
+async function poblarFiltroProveedorFacturas() {
+  const select = document.getElementById("fac-filtro-proveedor");
+  const actual = select.value;
+  try {
+    if (!state.proveedores || state.proveedores.length === 0) {
+      const data = await api("/api/proveedores");
+      state.proveedores = data.proveedores;
+    }
+    select.innerHTML = '<option value="">Todos los proveedores</option>' +
+      state.proveedores.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join("");
+    select.value = actual || "";
+  } catch (e) {
+    // Si falla, se deja el filtro con solo "Todos los proveedores" — no es crítico.
+  }
+}
+
 async function cargarFacturas() {
   const tbody = document.getElementById("tbody-facturas");
+  await poblarFiltroProveedorFacturas();
+  const proveedorId = document.getElementById("fac-filtro-proveedor").value;
+  const estado = document.getElementById("fac-filtro-estado").value;
+  const params = new URLSearchParams();
+  if (proveedorId) params.set("proveedor_id", proveedorId);
+  if (estado) params.set("estado", estado);
   try {
-    const data = await api("/api/facturas");
+    const data = await api(`/api/facturas${params.toString() ? "?" + params.toString() : ""}`);
     state.facturas = data.facturas;
     renderTablaFacturas();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar facturas: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar facturas: ${e.message}</td></tr>`;
   }
+}
+
+document.getElementById("fac-filtro-proveedor").addEventListener("change", () => cargarFacturas());
+document.getElementById("fac-filtro-estado").addEventListener("change", () => cargarFacturas());
+
+function actualizarBotonAplicarSeleccionadas() {
+  const marcadas = document.querySelectorAll("#tbody-facturas .fac-check:checked");
+  const boton = document.getElementById("btn-fac-aplicar-seleccionadas");
+  boton.disabled = marcadas.length === 0;
+  boton.textContent = marcadas.length > 0
+    ? `Aplicar seleccionadas a stock (${marcadas.length})`
+    : "Aplicar seleccionadas a stock";
 }
 
 function renderTablaFacturas() {
   const tbody = document.getElementById("tbody-facturas");
+  document.getElementById("fac-check-todas").checked = false;
   if (state.facturas.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Aún no hay facturas registradas. Usa "+ Nueva factura" para empezar.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">No hay facturas que calcen con el filtro actual.</td></tr>`;
+    actualizarBotonAplicarSeleccionadas();
     return;
   }
   tbody.innerHTML = state.facturas.map(f => {
     const completa = f.total_lineas > 0 && f.lineas_aplicadas === f.total_lineas;
+    const tienePendientes = f.total_lineas > 0 && f.lineas_aplicadas < f.total_lineas;
     const estado = completa
       ? '<span class="estado-pill estado-pill--ocupada">Todo ingresado</span>'
       : (f.lineas_aplicadas > 0
@@ -1069,6 +1349,7 @@ function renderTablaFacturas() {
         : '<span class="estado-pill estado-pill--pendiente">Pendiente</span>');
     return `
       <tr data-id="${f.id}">
+        <td><input type="checkbox" class="fac-check" data-id="${f.id}" ${tienePendientes ? "" : "disabled"} onclick="event.stopPropagation()"></td>
         <td class="mono">${escapeHtml(f.numero)}</td>
         <td>${escapeHtml(f.proveedor_display) || "—"}</td>
         <td class="mono">${escapeHtml(f.fecha) || "—"}</td>
@@ -1082,6 +1363,72 @@ function renderTablaFacturas() {
   tbody.querySelectorAll("tr[data-id]").forEach(tr => {
     tr.addEventListener("click", () => abrirFacturaDetalle(parseInt(tr.dataset.id, 10)));
   });
+  tbody.querySelectorAll(".fac-check").forEach(chk => {
+    chk.addEventListener("change", actualizarBotonAplicarSeleccionadas);
+  });
+  actualizarBotonAplicarSeleccionadas();
+}
+
+document.getElementById("fac-check-todas").addEventListener("change", (e) => {
+  document.querySelectorAll("#tbody-facturas .fac-check:not(:disabled)").forEach(chk => {
+    chk.checked = e.target.checked;
+  });
+  actualizarBotonAplicarSeleccionadas();
+});
+
+document.getElementById("btn-fac-aplicar-seleccionadas").addEventListener("click", async () => {
+  const ids = Array.from(document.querySelectorAll("#tbody-facturas .fac-check:checked"))
+    .map(chk => parseInt(chk.dataset.id, 10));
+  if (ids.length === 0) return;
+  const ok = confirm(`¿Ingresar a stock las líneas pendientes de ${ids.length} factura(s) seleccionada(s)?`);
+  if (!ok) return;
+  try {
+    const resultado = await api("/api/facturas/aplicar-masivo", {
+      method: "POST",
+      body: JSON.stringify({ factura_ids: ids }),
+    });
+    toast(`Stock ingresado: ${resultado.lineas_aplicadas} línea(s) de ${resultado.facturas_procesadas} factura(s).`);
+    if (resultado.errores && resultado.errores.length > 0) {
+      toast(`${resultado.errores.length} factura(s) no se pudieron procesar.`, true);
+    }
+    await Promise.all([cargarFacturas(), cargarProductos(), cargarResumen()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// Etiqueta que se muestra tanto en el campo de búsqueda como en los
+// resultados del autocompletar de productos de una línea de factura.
+function etiquetaProductoFactura(p) {
+  return `#${p.id_sistema} — ${p.nombre}${p.codigo_interno ? " (" + p.codigo_interno + ")" : ""}`;
+}
+
+// Recalcula y muestra el subtotal de UNA línea (cantidad × precio) apenas
+// cambia algo en ella.
+function actualizarSubtotalLineaFactura(div) {
+  const cantidad = parseFloat(div.querySelector(".fac-linea-cantidad").value) || 0;
+  const precio = parseFloat(div.querySelector(".fac-linea-precio").value) || 0;
+  const p = div.querySelector(".fac-linea-subtotal");
+  if (!cantidad && !precio) {
+    p.style.display = "none";
+    return;
+  }
+  p.textContent = `Subtotal: ${fmtMoney(cantidad * precio)}`;
+  p.style.display = "block";
+}
+
+// Recalcula el total de TODA la factura sumando cada línea — se llama cada
+// vez que se agrega/quita una línea o cambia cantidad/precio/producto, para
+// que el usuario vea siempre cuánto va a quedar la factura antes de guardar.
+function actualizarTotalFactura() {
+  const filas = Array.from(document.querySelectorAll("#fac-lineas .fac-linea-row"));
+  const total = filas.reduce((acc, fila) => {
+    const cantidad = parseFloat(fila.querySelector(".fac-linea-cantidad").value) || 0;
+    const precio = parseFloat(fila.querySelector(".fac-linea-precio").value) || 0;
+    return acc + cantidad * precio;
+  }, 0);
+  const el = document.getElementById("fac-total-vivo");
+  if (el) el.textContent = fmtMoney(total);
 }
 
 function filaLineaFactura(idx) {
@@ -1089,12 +1436,11 @@ function filaLineaFactura(idx) {
   div.className = "fac-linea-row";
   div.dataset.idx = idx;
   div.innerHTML = `
-    <div class="campo">
+    <div class="campo campo-autocomplete">
       <label>Producto</label>
-      <select class="fac-linea-producto">
-        <option value="">Selecciona un producto…</option>
-        ${state.productosParaFactura.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}${p.codigo_interno ? " (" + escapeHtml(p.codigo_interno) + ")" : ""}</option>`).join("")}
-      </select>
+      <input type="text" class="fac-linea-producto-buscar" placeholder="Busca por nombre, código o N°…" autocomplete="off">
+      <input type="hidden" class="fac-linea-producto-id">
+      <div class="autocomplete-resultados" style="display:none"></div>
     </div>
     <div class="campo">
       <label>Cantidad</label>
@@ -1105,8 +1451,89 @@ function filaLineaFactura(idx) {
       <input type="number" class="fac-linea-precio" min="0" step="1" value="0">
     </div>
     <button type="button" class="fac-linea-quitar">Quitar</button>
+    <p class="fac-linea-subtotal" style="display:none"></p>
   `;
-  div.querySelector(".fac-linea-quitar").addEventListener("click", () => div.remove());
+  div.querySelector(".fac-linea-quitar").addEventListener("click", () => {
+    div.remove();
+    actualizarTotalFactura();
+  });
+
+  const inputBuscar = div.querySelector(".fac-linea-producto-buscar");
+  const inputId = div.querySelector(".fac-linea-producto-id");
+  const resultados = div.querySelector(".autocomplete-resultados");
+
+  function seleccionarProductoLinea(p) {
+    inputId.value = p.id;
+    inputBuscar.value = etiquetaProductoFactura(p);
+    resultados.style.display = "none";
+    actualizarSubtotalLineaFactura(div);
+    actualizarTotalFactura();
+  }
+
+  function renderResultadosLinea(texto) {
+    const q = texto.trim().toLowerCase();
+    if (!q) {
+      resultados.style.display = "none";
+      return;
+    }
+    const coincidencias = state.productosParaFactura.filter(p => {
+      return (p.nombre || "").toLowerCase().includes(q) ||
+        (p.descripcion || "").toLowerCase().includes(q) ||
+        (p.codigo_interno || "").toLowerCase().includes(q) ||
+        String(p.id_sistema || "").toLowerCase().includes(q);
+    }).slice(0, 8);
+    if (coincidencias.length === 0) {
+      resultados.innerHTML = '<div class="autocomplete-sin-resultados">Sin productos que coincidan</div>';
+      resultados.style.display = "block";
+      return;
+    }
+    resultados.innerHTML = coincidencias.map(p => `
+      <div class="autocomplete-item" data-id="${p.id}">
+        ${escapeHtml(etiquetaProductoFactura(p))}
+        <span class="autocomplete-item-meta">Stock actual: ${p.stock_disponible}</span>
+      </div>
+    `).join("");
+    resultados.style.display = "block";
+    resultados.querySelectorAll(".autocomplete-item").forEach(item => {
+      // mousedown (no click) para que se dispare ANTES del blur del input de
+      // búsqueda — si fuera click, el blur cerraría la lista primero y el
+      // click nunca llegaría a alcanzar el ítem.
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const p = state.productosParaFactura.find(x => x.id === parseInt(item.dataset.id, 10));
+        if (p) seleccionarProductoLinea(p);
+      });
+    });
+  }
+
+  inputBuscar.addEventListener("input", () => {
+    inputId.value = "";
+    actualizarSubtotalLineaFactura(div);
+    actualizarTotalFactura();
+    renderResultadosLinea(inputBuscar.value);
+  });
+  inputBuscar.addEventListener("focus", () => {
+    if (inputBuscar.value.trim() && !inputId.value) renderResultadosLinea(inputBuscar.value);
+  });
+  inputBuscar.addEventListener("blur", () => {
+    setTimeout(() => {
+      resultados.style.display = "none";
+      // Si al salir del campo el texto no quedó ligado a un producto real
+      // (el usuario escribió algo y no lo seleccionó de la lista), se limpia
+      // para no dar a entender que ese producto quedó cargado en la línea.
+      if (!inputId.value) inputBuscar.value = "";
+    }, 150);
+  });
+
+  div.querySelector(".fac-linea-cantidad").addEventListener("input", () => {
+    actualizarSubtotalLineaFactura(div);
+    actualizarTotalFactura();
+  });
+  div.querySelector(".fac-linea-precio").addEventListener("input", () => {
+    actualizarSubtotalLineaFactura(div);
+    actualizarTotalFactura();
+  });
+
   return div;
 }
 
@@ -1118,6 +1545,7 @@ document.getElementById("fac-agregar-linea").addEventListener("click", () => {
 document.getElementById("btn-nueva-factura").addEventListener("click", async () => {
   document.getElementById("form-factura").reset();
   document.getElementById("fac-lineas").innerHTML = "";
+  document.getElementById("fac-numero-existe").style.display = "none";
   try {
     const [dataProductos, dataProveedores] = await Promise.all([
       api("/api/productos"),
@@ -1131,6 +1559,7 @@ document.getElementById("btn-nueva-factura").addEventListener("click", async () 
   }
   renderSelectProveedorFactura("");
   document.getElementById("fac-lineas").appendChild(filaLineaFactura(0));
+  actualizarTotalFactura();
   abrirModal("modal-factura");
 });
 
@@ -1142,31 +1571,61 @@ function renderSelectProveedorFactura(seleccionActual) {
   select.value = actual || "";
 }
 
-document.getElementById("fac-nuevo-proveedor").addEventListener("click", async () => {
-  const nombre = prompt("Nombre del nuevo proveedor:");
-  if (!nombre || !nombre.trim()) return;
-  try {
-    const nuevo = await api("/api/proveedores", { method: "POST", body: JSON.stringify({ nombre: nombre.trim() }) });
+// El botón "+ Nuevo" de proveedor, desde la factura, reutiliza el modal
+// completo de proveedor (con RUT/teléfono/email) en vez de un prompt() que
+// solo pedía el nombre y perdía esos datos — se completan después si se
+// quiere, pero al menos queda la posibilidad ahí mismo. `facturaProveedorCallback`
+// es cómo el submit de ese modal avisa de vuelta a la factura qué proveedor
+// quedó creado, para dejarlo seleccionado.
+let facturaProveedorCallback = null;
+
+document.getElementById("fac-nuevo-proveedor").addEventListener("click", () => {
+  document.getElementById("form-proveedor").reset();
+  document.getElementById("pv-id").value = "";
+  document.getElementById("modal-proveedor-titulo").textContent = "Nuevo proveedor";
+  document.getElementById("pv-acciones-editar").style.display = "none";
+  facturaProveedorCallback = async (nuevo) => {
     const dataProveedores = await api("/api/proveedores");
     state.proveedores = dataProveedores.proveedores;
     renderSelectProveedorFactura(nuevo.id);
-    toast("Proveedor agregado. Puedes completar RUT/teléfono/email después, en la pestaña Proveedores.");
-  } catch (e) {
-    toast(e.message, true);
+  };
+  abrirModal("modal-proveedor");
+});
+
+// Chequeo en vivo de N° de factura duplicado: se avisa apenas se escribe,
+// no recién al intentar guardar (mismo criterio que el bloqueo de vehículo
+// en Operativo — mientras antes se vea el error, mejor).
+let facTimeoutNumero = null;
+document.getElementById("fac-numero").addEventListener("input", (e) => {
+  const aviso = document.getElementById("fac-numero-existe");
+  const numero = e.target.value.trim();
+  clearTimeout(facTimeoutNumero);
+  if (!numero) {
+    aviso.style.display = "none";
+    return;
   }
+  facTimeoutNumero = setTimeout(async () => {
+    try {
+      await api(`/api/facturas/numero/${encodeURIComponent(numero.toUpperCase())}`);
+      // Si no lanzó error es porque SÍ existe una factura con ese número.
+      aviso.style.display = "block";
+    } catch (e2) {
+      aviso.style.display = "none";
+    }
+  }, 400);
 });
 
 document.getElementById("form-factura").addEventListener("submit", async (e) => {
   e.preventDefault();
   const filas = Array.from(document.querySelectorAll("#fac-lineas .fac-linea-row"));
   const lineas = filas.map(fila => ({
-    producto_id: fila.querySelector(".fac-linea-producto").value,
+    producto_id: fila.querySelector(".fac-linea-producto-id").value,
     cantidad: fila.querySelector(".fac-linea-cantidad").value,
     precio_unitario: fila.querySelector(".fac-linea-precio").value,
   }));
 
   if (lineas.some(l => !l.producto_id)) {
-    toast("Selecciona un producto en cada línea", true);
+    toast("Selecciona un producto (de la lista) en cada línea", true);
     return;
   }
 
@@ -1221,25 +1680,49 @@ async function abrirFacturaDetalle(id) {
   }
 }
 
+// Al eliminar una factura que YA ingresó stock, en vez de un confirm()
+// genérico que solo dice "N productos van a revertirse" (sin decir cuáles
+// ni cuánto), se muestra el detalle línea por línea antes de que la
+// persona confirme — para que sepa exactamente qué le va a bajar el stock
+// a cada producto antes de hacerlo.
+function abrirConfirmarEliminarFactura(facturaId, lineas) {
+  document.getElementById("ef-resumen").textContent =
+    `Esta factura ya tiene ${lineas.length} producto(s) ingresados a stock. Si la eliminas, se va a revertir esto:`;
+  document.getElementById("ef-tbody").innerHTML = lineas.map(l => `
+    <tr>
+      <td>${escapeHtml(l.producto_nombre)}${l.codigo_interno ? ` <span class="subtexto">(${escapeHtml(l.codigo_interno)})</span>` : ""}</td>
+      <td class="num mono">-${l.cantidad}</td>
+    </tr>
+  `).join("");
+  document.getElementById("ef-btn-confirmar").onclick = async () => {
+    try {
+      await api(`/api/facturas/${facturaId}?forzar=1`, { method: "DELETE" });
+      toast("Factura eliminada. El stock que había ingresado fue revertido (revisa el costo promedio si corresponde).");
+      cerrarModal("modal-eliminar-factura");
+      cerrarModal("modal-factura-detalle");
+      await cargarFacturas();
+    } catch (e2) {
+      toast(e2.message, true);
+    }
+  };
+  abrirModal("modal-eliminar-factura");
+}
+
 document.getElementById("btn-eliminar-factura").addEventListener("click", async () => {
   const id = state.facturaActivaId;
   if (!id) return;
+  if (!confirm("¿Eliminar esta factura? Esta acción no se puede deshacer.")) return;
   try {
-    const resultado = await eliminarConReintento(
-      `/api/facturas/${id}`,
-      "¿Eliminar esta factura? Esta acción no se puede deshacer.",
-      { usuario: "Sistema" }
-    );
-    if (!resultado) return;
-    if (resultado.revertido) {
-      toast("Factura eliminada. El stock que había ingresado fue revertido (revisa el costo promedio si corresponde).");
-    } else {
-      toast("Factura eliminada");
-    }
+    await api(`/api/facturas/${id}`, { method: "DELETE" });
+    toast("Factura eliminada");
     cerrarModal("modal-factura-detalle");
     await cargarFacturas();
   } catch (e) {
-    toast(e.message, true);
+    if (e.requiereForzar && e.data && e.data.lineas_a_revertir) {
+      abrirConfirmarEliminarFactura(id, e.data.lineas_a_revertir);
+    } else {
+      toast(e.message, true);
+    }
   }
 });
 
@@ -1254,23 +1737,36 @@ async function cargarProveedores() {
     state.proveedores = data.proveedores;
     renderTablaProveedores();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar proveedores: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar proveedores: ${e.message}</td></tr>`;
   }
 }
 
 function renderTablaProveedores() {
   const tbody = document.getElementById("tbody-proveedores");
   if (state.proveedores.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Aún no hay proveedores registrados. Usa "+ Nuevo proveedor" para empezar.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Aún no hay proveedores registrados. Usa "+ Nuevo proveedor" para empezar.</td></tr>`;
     return;
   }
-  tbody.innerHTML = state.proveedores.map(p => `
+
+  const termino = document.getElementById("buscar-proveedores").value.trim().toLowerCase();
+  const filtrados = !termino ? state.proveedores : state.proveedores.filter(p => {
+    const campos = [p.nombre, p.rut, p.telefono, p.email];
+    return campos.some(c => c && String(c).toLowerCase().includes(termino));
+  });
+
+  if (filtrados.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Ningún proveedor coincide con "${escapeHtml(document.getElementById("buscar-proveedores").value.trim())}".</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtrados.map(p => `
     <tr data-id="${p.id}">
       <td>${escapeHtml(p.nombre)}</td>
       <td class="mono">${escapeHtml(p.rut) || "—"}</td>
       <td>${escapeHtml(p.telefono) || "—"}</td>
       <td>${escapeHtml(p.email) || "—"}</td>
       <td class="num mono">${p.cantidad_facturas}</td>
+      <td class="mono">${fmtFechaSolo(p.ultima_compra)}</td>
       <td></td>
     </tr>
   `).join("");
@@ -1280,11 +1776,14 @@ function renderTablaProveedores() {
   });
 }
 
+document.getElementById("buscar-proveedores").addEventListener("input", () => renderTablaProveedores());
+
 // ---------------------------------------------------------------------------
 // Carga masiva de facturas vía Excel
 // ---------------------------------------------------------------------------
 
 state.cargaMasivaToken = null;
+state.cargaMasivaFacturas = [];
 
 function cmMostrarPaso(paso) {
   document.getElementById("cm-paso-subir").style.display = paso === "subir" ? "block" : "none";
@@ -1294,6 +1793,7 @@ function cmMostrarPaso(paso) {
 document.getElementById("btn-carga-masiva-facturas").addEventListener("click", () => {
   document.getElementById("cm-archivo").value = "";
   state.cargaMasivaToken = null;
+  state.cargaMasivaFacturas = [];
   cmMostrarPaso("subir");
   abrirModal("modal-carga-masiva");
 });
@@ -1301,6 +1801,7 @@ document.getElementById("btn-carga-masiva-facturas").addEventListener("click", (
 document.getElementById("btn-cm-volver").addEventListener("click", () => {
   document.getElementById("cm-archivo").value = "";
   state.cargaMasivaToken = null;
+  state.cargaMasivaFacturas = [];
   cmMostrarPaso("subir");
 });
 
@@ -1317,31 +1818,67 @@ document.getElementById("btn-cm-previsualizar").addEventListener("click", async 
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "No se pudo leer el archivo");
     state.cargaMasivaToken = data.token;
-    renderPreviewCargaMasiva(data);
+    state.cargaMasivaFacturas = data.facturas;
+    // Se necesita la lista de productos para el autocompletar de corrección
+    // inline (si un producto no calzó, se busca y elige de esta misma lista).
+    if (!state.productosParaFactura || state.productosParaFactura.length === 0) {
+      try {
+        const dataProductos = await api("/api/productos");
+        state.productosParaFactura = dataProductos.productos;
+      } catch (e) {
+        // Si falla, igual se puede ver la previsualización; solo no se podrá
+        // corregir el producto inline (quedaría el mensaje de error nomás).
+      }
+    }
+    renderPreviewCargaMasiva(data.resumen);
     cmMostrarPaso("preview");
   } catch (e) {
     toast(e.message, true);
   }
 });
 
-function renderPreviewCargaMasiva(data) {
-  const r = data.resumen;
+// Corregir errores inline en la previsualización: antes, si el Excel traía
+// un producto mal identificado o una cantidad/precio inválidos, la única
+// forma de arreglarlo era corregir el archivo y volver a subirlo entero.
+// Ahora las líneas con error se muestran editables (producto con
+// autocompletar, cantidad y precio) y se pueden corregir una por una sin
+// perder el resto de la carga ya revisada.
+function renderPreviewCargaMasiva(resumen) {
   document.getElementById("cm-resumen").textContent =
-    `${r.total_facturas} factura(s) detectada(s): ${r.validas} lista(s) para cargar, ${r.con_errores} con errores (no se van a importar).`;
+    `${resumen.total_facturas} factura(s) detectada(s): ${resumen.validas} lista(s) para cargar, ${resumen.con_errores} con errores.`;
 
-  document.getElementById("cm-lista-facturas").innerHTML = data.facturas.map(f => {
+  document.getElementById("cm-lista-facturas").innerHTML = state.cargaMasivaFacturas.map(f => {
     const claseEstado = f.valida ? "badge-urgencia badge-urgencia--proximo" : "badge-urgencia badge-urgencia--critico";
     const textoEstado = f.valida ? "Lista para cargar" : "Con errores — se omitirá";
     const proveedorTxt = f.proveedor_nombre
       ? `${escapeHtml(f.proveedor_nombre)}${f.proveedor_nuevo ? " (se creará)" : ""}`
       : "Sin proveedor";
-    const lineasHtml = f.lineas.map(l => `
-      <tr class="${l.errores.length ? "fila-con-error" : ""}">
-        <td>${l.producto_nombre ? escapeHtml(l.producto_nombre) : `<span class="vacio-inline">Producto no identificado (fila ${l.fila})</span>`}</td>
-        <td class="num">${l.cantidad ?? "—"}</td>
-        <td class="num">${l.precio_unitario != null ? fmtMoney(l.precio_unitario) : "—"}</td>
-        <td>${l.errores.length ? l.errores.map(escapeHtml).join("<br>") : ""}</td>
-      </tr>`).join("");
+    const lineasHtml = f.lineas.map(l => {
+      if (!l.errores.length) {
+        return `
+        <tr>
+          <td>${escapeHtml(l.producto_nombre)}</td>
+          <td class="num">${l.cantidad}</td>
+          <td class="num">${fmtMoney(l.precio_unitario)}</td>
+          <td></td>
+        </tr>`;
+      }
+      return `
+      <tr class="fila-con-error" data-cm-linea="${escapeHtml(f.numero)}|${l.fila}">
+        <td class="campo-autocomplete">
+          <input type="text" class="cm-linea-producto-buscar" placeholder="Busca por nombre, código o N°…" autocomplete="off"
+                 value="${l.producto_nombre ? escapeHtml(l.producto_nombre) : ""}">
+          <input type="hidden" class="cm-linea-producto-id" value="${l.producto_id ?? ""}">
+          <div class="autocomplete-resultados" style="display:none"></div>
+        </td>
+        <td class="num"><input type="number" class="cm-linea-cantidad" min="1" value="${l.cantidad ?? ""}" style="width:70px"></td>
+        <td class="num"><input type="number" class="cm-linea-precio" min="0" step="1" value="${l.precio_unitario ?? ""}" style="width:90px"></td>
+        <td>
+          <p class="ayuda-inline ayuda-inline--bloqueado" style="margin:0 0 6px">${l.errores.map(escapeHtml).join("<br>")}</p>
+          <button type="button" class="btn btn-secundario btn-chico cm-linea-guardar">Guardar corrección</button>
+        </td>
+      </tr>`;
+    }).join("");
     return `
       <div class="dash-panel" style="margin-bottom:14px">
         <h3 class="dash-titulo">${escapeHtml(f.numero)} <span class="${claseEstado}">${textoEstado}</span></h3>
@@ -1353,6 +1890,85 @@ function renderPreviewCargaMasiva(data) {
         </table>
       </div>`;
   }).join("");
+
+  activarAutocompletesCargaMasiva();
+  document.querySelectorAll("#cm-lista-facturas .cm-linea-guardar").forEach(btn => {
+    btn.addEventListener("click", () => guardarCorreccionLineaCargaMasiva(btn.closest("tr")));
+  });
+}
+
+function activarAutocompletesCargaMasiva() {
+  document.querySelectorAll("#cm-lista-facturas tr[data-cm-linea]").forEach(tr => {
+    const inputBuscar = tr.querySelector(".cm-linea-producto-buscar");
+    const inputId = tr.querySelector(".cm-linea-producto-id");
+    const resultados = tr.querySelector(".autocomplete-resultados");
+    if (!inputBuscar) return;
+
+    function renderResultados(texto) {
+      const q = texto.trim().toLowerCase();
+      if (!q) {
+        resultados.style.display = "none";
+        return;
+      }
+      const candidatos = (state.productosParaFactura || [])
+        .filter(p => etiquetaProductoFactura(p).toLowerCase().includes(q))
+        .slice(0, 20);
+      if (candidatos.length === 0) {
+        resultados.innerHTML = `<div class="autocomplete-sin-resultados">Sin resultados</div>`;
+        resultados.style.display = "block";
+        return;
+      }
+      resultados.innerHTML = candidatos.map(p =>
+        `<div class="autocomplete-item" data-id="${p.id}">${escapeHtml(etiquetaProductoFactura(p))}</div>`
+      ).join("");
+      resultados.style.display = "block";
+      resultados.querySelectorAll(".autocomplete-item").forEach(item => {
+        item.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          const p = state.productosParaFactura.find(x => x.id === parseInt(item.dataset.id, 10));
+          if (!p) return;
+          inputId.value = p.id;
+          inputBuscar.value = etiquetaProductoFactura(p);
+          resultados.style.display = "none";
+        });
+      });
+    }
+
+    inputBuscar.addEventListener("input", () => {
+      inputId.value = "";
+      renderResultados(inputBuscar.value);
+    });
+    inputBuscar.addEventListener("focus", () => renderResultados(inputBuscar.value));
+    inputBuscar.addEventListener("blur", () => setTimeout(() => { resultados.style.display = "none"; }, 150));
+  });
+}
+
+async function guardarCorreccionLineaCargaMasiva(tr) {
+  const [numeroFactura, filaStr] = tr.dataset.cmLinea.split("|");
+  const fila = parseInt(filaStr, 10);
+  const productoId = tr.querySelector(".cm-linea-producto-id").value;
+  const cantidad = tr.querySelector(".cm-linea-cantidad").value;
+  const precio = tr.querySelector(".cm-linea-precio").value;
+
+  try {
+    const data = await api("/api/facturas/carga-masiva/corregir-linea", {
+      method: "POST",
+      body: JSON.stringify({
+        token: state.cargaMasivaToken,
+        numero_factura: numeroFactura,
+        fila,
+        producto_id: productoId || null,
+        cantidad: cantidad || null,
+        precio_unitario: precio || null,
+      }),
+    });
+    const idx = state.cargaMasivaFacturas.findIndex(f => f.numero === data.factura.numero);
+    if (idx !== -1) state.cargaMasivaFacturas[idx] = data.factura;
+    renderPreviewCargaMasiva(data.resumen);
+    toast(data.factura.valida ? "Corregido — esta factura ya está lista para cargar" : "Corrección guardada");
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 document.getElementById("btn-cm-confirmar").addEventListener("click", async () => {
@@ -1368,6 +1984,7 @@ document.getElementById("btn-cm-confirmar").addEventListener("click", async () =
     toast(`${data.total_creadas} factura(s) cargada(s)${detalle}`);
     cerrarModal("modal-carga-masiva");
     state.cargaMasivaToken = null;
+    state.cargaMasivaFacturas = [];
     await Promise.all([cargarFacturas(), cargarProductos()]);
   } catch (e) {
     toast(e.message, true);
@@ -1400,12 +2017,14 @@ document.getElementById("btn-nuevo-proveedor").addEventListener("click", () => {
   document.getElementById("pv-id").value = "";
   document.getElementById("modal-proveedor-titulo").textContent = "Nuevo proveedor";
   document.getElementById("pv-acciones-editar").style.display = "none";
+  facturaProveedorCallback = null; // abierto desde la pestaña Proveedores, no desde una factura
   abrirModal("modal-proveedor");
 });
 
 function abrirEdicionProveedor(id) {
   const p = state.proveedores.find(x => x.id === id);
   if (!p) return;
+  facturaProveedorCallback = null;
   document.getElementById("pv-id").value = p.id;
   document.getElementById("pv-nombre").value = p.nombre;
   document.getElementById("pv-rut").value = p.rut || "";
@@ -1450,12 +2069,22 @@ document.getElementById("form-proveedor").addEventListener("submit", async (e) =
     if (id) {
       await api(`/api/proveedores/${id}`, { method: "PUT", body: JSON.stringify(payload) });
       toast("Proveedor actualizado");
+      cerrarModal("modal-proveedor");
+      await cargarProveedores();
     } else {
-      await api("/api/proveedores", { method: "POST", body: JSON.stringify(payload) });
+      const nuevo = await api("/api/proveedores", { method: "POST", body: JSON.stringify(payload) });
       toast("Proveedor creado");
+      cerrarModal("modal-proveedor");
+      if (facturaProveedorCallback) {
+        // Se creó desde el botón "+ Nuevo" de la factura: se deja
+        // seleccionado ahí en vez de refrescar la pestaña Proveedores
+        // (que puede ni siquiera estar cargada todavía).
+        await facturaProveedorCallback(nuevo);
+        facturaProveedorCallback = null;
+      } else {
+        await cargarProveedores();
+      }
     }
-    cerrarModal("modal-proveedor");
-    await cargarProveedores();
   } catch (e) {
     toast(e.message, true);
   }
@@ -2065,6 +2694,40 @@ function fmtMes(clave) {
   return `${MESES_ES[mes - 1]} ${anio}`;
 }
 
+// Modal genérico de "cuántas unidades" para Descartar/Revertir una merma —
+// reemplaza el prompt() nativo que se usaba antes (no daba contexto, y
+// cualquier click accidental fuera de él perdía lo escrito).
+let mermaCantidadCallback = null;
+
+function abrirModalMermaCantidad({ titulo, info, max, accionTexto, callback }) {
+  document.getElementById("mm-titulo").textContent = titulo;
+  document.getElementById("mm-info").textContent = info;
+  const input = document.getElementById("mm-cantidad");
+  input.max = max;
+  input.value = max;
+  document.getElementById("mm-btn-confirmar").textContent = accionTexto;
+  mermaCantidadCallback = callback;
+  abrirModal("modal-merma-cantidad");
+}
+
+document.getElementById("form-merma-cantidad").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = document.getElementById("mm-cantidad");
+  const cantidad = parseInt(input.value, 10);
+  const max = parseInt(input.max, 10);
+  if (!cantidad || cantidad <= 0) {
+    toast("Ingresa una cantidad válida", true);
+    return;
+  }
+  if (max && cantidad > max) {
+    toast(`No puede ser más de ${max}`, true);
+    return;
+  }
+  if (mermaCantidadCallback) {
+    await mermaCantidadCallback(cantidad);
+  }
+});
+
 async function cargarMermas() {
   const tbody = document.getElementById("tbody-mermas");
   const mes = document.getElementById("mermas-filtro-mes").value;
@@ -2127,38 +2790,52 @@ async function cargarMermas() {
     }).join("");
 
     tbody.querySelectorAll("[data-descartar]").forEach(btn => {
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", () => {
         const max = btn.dataset.max;
-        const cantidad = prompt(`¿Cuántas unidades quieres descartar definitivamente? (máximo ${max})`, max);
-        if (!cantidad) return;
-        try {
-          await api(`/api/productos/${btn.dataset.descartar}/merma/descartar`, {
-            method: "POST",
-            body: JSON.stringify({ cantidad, proveedor_id: btn.dataset.proveedor || null }),
-          });
-          toast("Descartado de la cuenta de merma");
-          await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
-        } catch (e) {
-          toast(e.message, true);
-        }
+        abrirModalMermaCantidad({
+          titulo: "Descartar de la merma",
+          info: `¿Cuántas unidades quieres descartar definitivamente? (máximo ${max})`,
+          max,
+          accionTexto: "Descartar",
+          callback: async (cantidad) => {
+            try {
+              await api(`/api/productos/${btn.dataset.descartar}/merma/descartar`, {
+                method: "POST",
+                body: JSON.stringify({ cantidad, proveedor_id: btn.dataset.proveedor || null }),
+              });
+              toast("Descartado de la cuenta de merma");
+              cerrarModal("modal-merma-cantidad");
+              await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
+            } catch (e) {
+              toast(e.message, true);
+            }
+          },
+        });
       });
     });
 
     tbody.querySelectorAll("[data-revertir]").forEach(btn => {
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", () => {
         const max = btn.dataset.max;
-        const cantidad = prompt(`¿Cuántas unidades quieres devolver a stock disponible? (máximo ${max})`, max);
-        if (!cantidad) return;
-        try {
-          await api(`/api/productos/${btn.dataset.revertir}/merma/revertir`, {
-            method: "POST",
-            body: JSON.stringify({ cantidad, proveedor_id: btn.dataset.proveedor || null }),
-          });
-          toast("Merma revertida: stock devuelto a disponible");
-          await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
-        } catch (e) {
-          toast(e.message, true);
-        }
+        abrirModalMermaCantidad({
+          titulo: "Revertir merma",
+          info: `¿Cuántas unidades quieres devolver a stock disponible? (máximo ${max})`,
+          max,
+          accionTexto: "Revertir",
+          callback: async (cantidad) => {
+            try {
+              await api(`/api/productos/${btn.dataset.revertir}/merma/revertir`, {
+                method: "POST",
+                body: JSON.stringify({ cantidad, proveedor_id: btn.dataset.proveedor || null }),
+              });
+              toast("Merma revertida: stock devuelto a disponible");
+              cerrarModal("modal-merma-cantidad");
+              await Promise.all([cargarMermas(), cargarProductos(), cargarResumen()]);
+            } catch (e) {
+              toast(e.message, true);
+            }
+          },
+        });
       });
     });
 
@@ -2222,7 +2899,7 @@ function actualizarOpcionesCategoriaMov() {
     : Object.values(state.categoriasPorTipoMov).flat();
   const opcionesUnicas = [...new Set(opciones)].sort((a, b) => a.localeCompare(b, "es"));
 
-  select.innerHTML = '<option value="">Todas las categorías</option>' +
+  select.innerHTML = '<option value="">Todos los motivos</option>' +
     opcionesUnicas.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
 
   // Si la categoría que tenías elegida ya no tiene sentido para el tipo
@@ -2253,6 +2930,16 @@ async function cargarMovimientos() {
       categoriasMovFiltroCargadas = true;
     }
 
+    const avisoLimite = document.getElementById("mov-aviso-limite");
+    if (data.truncado) {
+      avisoLimite.textContent =
+        `Se están mostrando los ${data.limite_filas} movimientos más recientes que calzan con el filtro, de ${data.total_sin_limite} en total. ` +
+        `Para ver el resto, achica el rango con los filtros de fecha, producto o tipo.`;
+      avisoLimite.style.display = "block";
+    } else {
+      avisoLimite.style.display = "none";
+    }
+
     if (data.movimientos.length === 0) {
       tbody.innerHTML = `<tr><td colspan="9" class="vacio">No se encontraron movimientos con esos filtros.</td></tr>`;
       return;
@@ -2273,6 +2960,7 @@ async function cargarMovimientos() {
     `).join("");
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar movimientos: ${e.message}</td></tr>`;
+    document.getElementById("mov-aviso-limite").style.display = "none";
   }
 }
 
@@ -2352,6 +3040,48 @@ document.getElementById("btn-reporte-compras").addEventListener("click", () => {
 document.getElementById("btn-reporte-compras-pdf").addEventListener("click", () => {
   window.location.href = `/api/reportes/compras/pdf?${rangoFechasParams("reportes-compras-desde", "reportes-compras-hasta")}`;
 });
+
+// Preview con contadores: antes de descargar cualquier reporte, se muestra
+// cuántas filas y qué monto trae — así no hay que abrir el archivo a ciegas
+// para saber si va a traer 3 filas o 3.000. Se recalcula al entrar a la
+// pestaña y cada vez que cambia algún filtro (período de rotación, rangos
+// de fecha de movimientos/compras).
+async function cargarResumenReportes() {
+  const dias = document.getElementById("reportes-rotacion-periodo").value;
+  const params = new URLSearchParams();
+  params.set("dias", dias);
+  const movDesde = document.getElementById("reportes-mov-desde").value;
+  const movHasta = document.getElementById("reportes-mov-hasta").value;
+  if (movDesde) params.set("mov_desde", movDesde);
+  if (movHasta) params.set("mov_hasta", movHasta);
+  const comprasDesde = document.getElementById("reportes-compras-desde").value;
+  const comprasHasta = document.getElementById("reportes-compras-hasta").value;
+  if (comprasDesde) params.set("compras_desde", comprasDesde);
+  if (comprasHasta) params.set("compras_hasta", comprasHasta);
+
+  try {
+    const r = await api(`/api/reportes/resumen?${params.toString()}`);
+    document.getElementById("rep-contador-inventario").textContent =
+      `${r.inventario.productos} producto(s) · valor total ${fmtMoney(r.inventario.valor_total)}`;
+    document.getElementById("rep-contador-stock").textContent =
+      `${r.stock.criticos} con stock crítico · ${r.stock.sin_movimiento} sin movimiento`;
+    document.getElementById("rep-contador-rotacion").textContent =
+      `${r.rotacion.mas_utilizados} más utilizados · ${r.rotacion.baja_rotacion} de baja rotación · ${r.rotacion.inmovilizados} inmovilizados`;
+    document.getElementById("rep-contador-movimientos").textContent =
+      `${r.movimientos.total} movimiento(s) en el rango seleccionado`;
+    document.getElementById("rep-contador-compras").textContent =
+      `${r.compras.facturas} factura(s) · monto total ${fmtMoney(r.compras.monto_total)}`;
+  } catch (e) {
+    ["rep-contador-inventario", "rep-contador-stock", "rep-contador-rotacion", "rep-contador-movimientos", "rep-contador-compras"]
+      .forEach(id => { document.getElementById(id).textContent = "No se pudo calcular el resumen."; });
+  }
+}
+
+document.getElementById("reportes-rotacion-periodo").addEventListener("change", cargarResumenReportes);
+document.getElementById("reportes-mov-desde").addEventListener("change", cargarResumenReportes);
+document.getElementById("reportes-mov-hasta").addEventListener("change", cargarResumenReportes);
+document.getElementById("reportes-compras-desde").addEventListener("change", cargarResumenReportes);
+document.getElementById("reportes-compras-hasta").addEventListener("change", cargarResumenReportes);
 
 // ---------------------------------------------------------------------------
 // Init

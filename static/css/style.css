@@ -213,6 +213,15 @@ body::before { content: none; }
   white-space: nowrap;
 }
 
+.contador-badge {
+  background: var(--danger-soft);
+  color: var(--danger);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
 /* ---------- Operativo: tablero por estado ---------- */
 
 /* El tablero se "escapa" del ancho centrado de .app (max-width: 1180px)
@@ -836,6 +845,20 @@ body::before { content: none; }
 
 .campo textarea { resize: vertical; }
 
+.campo input[readonly] {
+  color: var(--text-muted);
+  background: var(--panel);
+  cursor: not-allowed;
+}
+
+.campo-rango {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.campo-rango input { width: 0; flex: 1; }
+.campo-rango span { color: var(--text-muted); }
+
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-width: 0; }
 .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; min-width: 0; }
 .grid-2 > *, .grid-3 > * { min-width: 0; }
@@ -887,6 +910,17 @@ body::before { content: none; }
   grid-template-columns: 1fr 1fr;
   gap: 24px;
 }
+
+/* El formulario para registrar un movimiento va debajo de las dos columnas
+   (info + historial), a todo el ancho del modal, en vez de apilado dentro
+   de la columna izquierda — así el modal queda bastante más bajo y hay
+   menos que scrollear para llegar al botón de guardar. */
+.detalle-form-movimiento {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 4px;
+}
+.detalle-form-movimiento .subtitulo { margin-top: 14px; }
 
 .subtitulo {
   font-family: var(--font-display);
@@ -1077,6 +1111,12 @@ body::before { content: none; }
   font-size: 12.5px;
 }
 
+.ayuda-inline--bloqueado .btn-link {
+  color: var(--danger);
+  text-decoration: underline;
+  margin-left: 4px;
+}
+
 .estado-pill {
   font-size: 11px;
   font-weight: 700;
@@ -1111,6 +1151,59 @@ body::before { content: none; }
   height: fit-content;
 }
 .fac-linea-quitar:hover { background: var(--danger-soft); }
+
+.fac-linea-subtotal {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: -4px 0 4px;
+}
+
+.fac-total-linea {
+  text-align: right;
+  font-size: 15px;
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.fac-total-linea strong { color: var(--accent-2); font-size: 17px; }
+
+.campo-autocomplete { position: relative; }
+
+.autocomplete-resultados {
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: 4px;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.45);
+}
+.autocomplete-item {
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+}
+.autocomplete-item:last-child { border-bottom: none; }
+.autocomplete-item:hover, .autocomplete-item.autocomplete-activo { background: var(--accent-soft); }
+.autocomplete-item .autocomplete-item-meta {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.autocomplete-sin-resultados {
+  padding: 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  text-align: center;
+}
 
 .topbar-acciones {
   display: flex;
@@ -1336,6 +1429,13 @@ body::before { content: none; }
   color: var(--text-muted);
 }
 .reportes-rango input { margin-left: 6px; }
+
+.reportes-contador {
+  font-size: 12.5px;
+  color: var(--accent);
+  font-weight: 600;
+  margin: 2px 0 10px;
+}
 
 /* ---------- Responsive ---------- */
 

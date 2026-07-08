@@ -107,13 +107,17 @@
   <section class="vista" id="vista-productos" style="display:none">
 
   <section class="toolbar">
-    <input type="text" id="buscar" placeholder="Buscar por código, nombre, modelo o ubicación…">
+    <input type="text" id="buscar" placeholder="Buscar por código, nombre, descripción, modelo o ubicación…">
     <select id="filtro-categoria">
       <option value="">Todas las categorías</option>
     </select>
     <label class="toggle-critico">
       <input type="checkbox" id="filtro-criticos">
       Solo stock crítico
+    </label>
+    <label class="toggle-critico" title="Productos que todavía no tienen una ubicación de bodega asignada">
+      <input type="checkbox" id="filtro-sin-ubicacion">
+      Sin ubicación <span class="contador-badge" id="contador-sin-ubicacion" style="display:none"></span>
     </label>
     <button type="button" class="btn btn-secundario" id="btn-gestion-categorias">Gestionar categorías/modelos</button>
   </section>
@@ -146,7 +150,7 @@
 
   <section class="vista" id="vista-bodega" style="display:none">
 
-  <p class="bodega-intro" style="margin: 0 0 14px;">Bodega única, organizada en <strong>pasillos</strong> → <strong>estanterías</strong> → <strong>niveles</strong>. Cada ubicación guarda como máximo un producto.</p>
+  <p class="bodega-intro" style="margin: 0 0 14px;">Bodega única, organizada en <strong>pasillos</strong> → <strong>estanterías</strong> → <strong>niveles</strong>. Lo ideal es un producto por ubicación para encontrarlo rápido, pero el sistema no lo impide: si hace falta, una misma ubicación puede guardar más de un producto.</p>
 
   <section class="toolbar">
     <input type="text" id="buscar-bodega" placeholder="Buscar por código de ubicación, pasillo/estante/nivel, producto, categoría o modelo…">
@@ -182,10 +186,22 @@
     <button class="btn btn-primary" id="btn-nueva-factura">+ Nueva factura</button>
   </section>
 
+  <section class="toolbar">
+    <select id="fac-filtro-proveedor"><option value="">Todos los proveedores</option></select>
+    <select id="fac-filtro-estado">
+      <option value="">Todos los estados</option>
+      <option value="pendiente">Pendiente</option>
+      <option value="parcial">Parcial</option>
+      <option value="completa">Todo ingresado</option>
+    </select>
+    <button type="button" class="btn btn-secundario" id="btn-fac-aplicar-seleccionadas" disabled>Aplicar seleccionadas a stock</button>
+  </section>
+
   <section class="tabla-wrap">
     <table class="tabla">
       <thead>
         <tr>
+          <th><input type="checkbox" id="fac-check-todas" title="Seleccionar todas"></th>
           <th>N° Factura</th>
           <th>Proveedor</th>
           <th>Fecha</th>
@@ -195,7 +211,7 @@
         </tr>
       </thead>
       <tbody id="tbody-facturas">
-        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="7" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -205,7 +221,7 @@
   <section class="vista" id="vista-proveedores" style="display:none">
 
   <section class="toolbar">
-    <p class="bodega-intro">Proveedores registrados, para usar al crear una factura.</p>
+    <input type="text" id="buscar-proveedores" placeholder="Buscar por nombre, RUT, teléfono o email…">
     <button class="btn btn-primary" id="btn-nuevo-proveedor">+ Nuevo proveedor</button>
   </section>
 
@@ -218,11 +234,12 @@
           <th>Teléfono</th>
           <th>Email</th>
           <th class="num">Facturas</th>
+          <th>Última compra</th>
           <th></th>
         </tr>
       </thead>
       <tbody id="tbody-proveedores">
-        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="7" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -257,7 +274,7 @@
   <section class="vista" id="vista-movimientos" style="display:none">
 
   <section class="toolbar">
-    <input type="text" id="mov-buscar" placeholder="Buscar por motivo, producto, factura o responsable…">
+    <input type="text" id="mov-buscar" placeholder="Buscar por detalle, producto, factura o responsable…">
     <select id="mov-filtro-tipo">
       <option value="">Todos los tipos</option>
       <option value="entrada">Entrada</option>
@@ -265,7 +282,7 @@
       <option value="perdida">Pérdida</option>
     </select>
     <select id="mov-filtro-categoria">
-      <option value="">Todas las categorías</option>
+      <option value="">Todos los motivos</option>
     </select>
   </section>
   <section class="toolbar">
@@ -274,6 +291,8 @@
     <button class="btn btn-secundario" id="mov-limpiar-filtros">Limpiar filtros</button>
   </section>
 
+  <p class="ayuda-inline ayuda-inline--bloqueado" id="mov-aviso-limite" style="display:none"></p>
+
   <section class="tabla-wrap">
     <table class="tabla">
       <thead>
@@ -281,12 +300,12 @@
           <th>Fecha</th>
           <th>Producto</th>
           <th>Tipo</th>
-          <th>Categoría</th>
+          <th>Motivo</th>
           <th class="num">Cantidad</th>
           <th class="num">Stock resultante</th>
           <th>Factura</th>
           <th>Responsable</th>
-          <th>Motivo</th>
+          <th>Detalle</th>
         </tr>
       </thead>
       <tbody id="tbody-movimientos">
@@ -451,6 +470,7 @@
     <div class="dash-panel">
       <h3 class="dash-titulo">Inventario completo y valorizado</h3>
       <p class="bodega-intro">Todos los productos con su stock, costo promedio y valor total — más una hoja aparte con el valor agrupado por categoría.</p>
+      <p class="reportes-contador" id="rep-contador-inventario">Cargando…</p>
       <div class="reportes-botones">
         <a class="btn btn-secundario" href="/api/reportes/inventario">Descargar Excel</a>
         <a class="btn btn-secundario" href="/api/reportes/inventario/pdf">Descargar PDF</a>
@@ -460,6 +480,7 @@
     <div class="dash-panel">
       <h3 class="dash-titulo">Stock crítico y sin movimiento</h3>
       <p class="bodega-intro">Los productos que hay que reponer pronto, y los que llevan tiempo sin tener ninguna salida — en dos hojas separadas.</p>
+      <p class="reportes-contador" id="rep-contador-stock">Cargando…</p>
       <div class="reportes-botones">
         <a class="btn btn-secundario" href="/api/reportes/stock">Descargar Excel</a>
         <a class="btn btn-secundario" href="/api/reportes/stock/pdf">Descargar PDF</a>
@@ -475,6 +496,7 @@
         <option value="180">Últimos 180 días</option>
         <option value="365">Último año</option>
       </select>
+      <p class="reportes-contador" id="rep-contador-rotacion">Cargando…</p>
       <div class="reportes-botones">
         <button class="btn btn-secundario" id="btn-reporte-rotacion">Descargar Excel</button>
         <button class="btn btn-secundario" id="btn-reporte-rotacion-pdf">Descargar PDF</button>
@@ -488,6 +510,7 @@
         <label>Desde <input type="date" id="reportes-mov-desde"></label>
         <label>Hasta <input type="date" id="reportes-mov-hasta"></label>
       </div>
+      <p class="reportes-contador" id="rep-contador-movimientos">Cargando…</p>
       <div class="reportes-botones">
         <button class="btn btn-secundario" id="btn-reporte-movimientos">Descargar Excel</button>
         <button class="btn btn-secundario" id="btn-reporte-movimientos-pdf">Descargar PDF</button>
@@ -501,6 +524,7 @@
         <label>Desde <input type="date" id="reportes-compras-desde"></label>
         <label>Hasta <input type="date" id="reportes-compras-hasta"></label>
       </div>
+      <p class="reportes-contador" id="rep-contador-compras">Cargando…</p>
       <div class="reportes-botones">
         <button class="btn btn-secundario" id="btn-reporte-compras">Descargar Excel</button>
         <button class="btn btn-secundario" id="btn-reporte-compras-pdf">Descargar PDF</button>
@@ -601,61 +625,6 @@
 
         <dl id="detalle-ficha"></dl>
         <p class="ayuda-inline" id="detalle-stock-minimo-calculo"></p>
-
-        <h3 class="subtitulo">Registrar movimiento</h3>
-        <form id="form-movimiento">
-          <input type="hidden" id="m-producto-id">
-          <div class="grid-2">
-            <div class="campo">
-              <label>Tipo</label>
-              <select id="m-tipo">
-                <option value="entrada">Entrada (ingreso de stock)</option>
-                <option value="salida">Salida (consumo / venta / reserva / uso)</option>
-                <option value="perdida">Pérdida (merma)</option>
-              </select>
-            </div>
-            <div class="campo" id="m-categoria-wrap">
-              <label>Categoría</label>
-              <select id="m-categoria"></select>
-            </div>
-          </div>
-          <div class="grid-2">
-            <div class="campo" id="m-factura-wrap">
-              <label>N° de factura (opcional)</label>
-              <input type="text" id="m-factura" placeholder="Ej: F-1023">
-              <p class="ayuda-inline" id="m-factura-preview" style="display:none"></p>
-            </div>
-            <div class="campo">
-              <label id="m-cantidad-label">Cantidad</label>
-              <input type="number" id="m-cantidad" min="0" required>
-            </div>
-          </div>
-          <div class="campo" id="m-proveedor-merma-wrap" style="display:none">
-            <label>Proveedor de este producto *</label>
-            <select id="m-proveedor-merma">
-              <option value="">Cargando…</option>
-            </select>
-            <p class="ayuda-inline">Un mismo producto puede haberse comprado a varios proveedores: elige de cuál viene la unidad que se está perdiendo, para no mezclar el registro de merma.</p>
-          </div>
-          <div class="grid-2">
-            <div class="campo" id="m-costo-wrap">
-              <label>Costo unitario de esta compra ($ CLP, opcional)</label>
-              <input type="number" id="m-costo" min="0" step="1" placeholder="Déjalo vacío si no cambió">
-            </div>
-            <div class="campo">
-              <label>Motivo</label>
-              <input type="text" id="m-motivo" placeholder="Ej: Compra a proveedor, orden de trabajo #123…">
-            </div>
-          </div>
-          <div class="campo">
-            <label>Responsable</label>
-            <input type="text" id="m-usuario" readonly disabled>
-            <p class="ayuda-inline">Siempre queda registrado con el usuario de la sesión actual — no se puede cambiar.</p>
-          </div>
-          <div class="modal-actions modal-actions--start">
-            <button type="submit" class="btn btn-primary">Registrar movimiento</button>
-          </div>
-        </form>
       </div>
 
       <div class="detalle-historial">
@@ -664,6 +633,63 @@
           <p class="vacio">Sin movimientos aún.</p>
         </div>
       </div>
+    </div>
+
+    <div class="detalle-form-movimiento">
+      <h3 class="subtitulo">Registrar movimiento</h3>
+      <form id="form-movimiento">
+        <input type="hidden" id="m-producto-id">
+        <div class="grid-2">
+          <div class="campo">
+            <label>Tipo</label>
+            <select id="m-tipo">
+              <option value="entrada">Entrada (ingreso de stock)</option>
+              <option value="salida">Salida (consumo / venta / reserva / uso)</option>
+              <option value="perdida">Pérdida (merma)</option>
+            </select>
+          </div>
+          <div class="campo" id="m-categoria-wrap">
+            <label>Motivo del movimiento</label>
+            <select id="m-categoria"></select>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="campo" id="m-factura-wrap">
+            <label>N° de factura (opcional)</label>
+            <input type="text" id="m-factura" placeholder="Ej: F-1023">
+            <p class="ayuda-inline" id="m-factura-preview" style="display:none"></p>
+          </div>
+          <div class="campo">
+            <label id="m-cantidad-label">Cantidad</label>
+            <input type="number" id="m-cantidad" min="0" required>
+          </div>
+        </div>
+        <div class="campo" id="m-proveedor-merma-wrap" style="display:none">
+          <label>Proveedor de este producto *</label>
+          <select id="m-proveedor-merma">
+            <option value="">Cargando…</option>
+          </select>
+          <p class="ayuda-inline">Un mismo producto puede haberse comprado a varios proveedores: elige de cuál viene la unidad que se está perdiendo, para no mezclar el registro de merma.</p>
+        </div>
+        <div class="grid-2">
+          <div class="campo" id="m-costo-wrap">
+            <label>Costo unitario de esta compra ($ CLP, opcional)</label>
+            <input type="number" id="m-costo" min="0" step="1" placeholder="Déjalo vacío si no cambió">
+          </div>
+          <div class="campo">
+            <label>Detalle / referencia (opcional)</label>
+            <input type="text" id="m-motivo" placeholder="Ej: Compra a proveedor, orden de trabajo #123…">
+          </div>
+        </div>
+        <div class="campo">
+          <label>Responsable</label>
+          <input type="text" id="m-usuario" readonly disabled>
+          <p class="ayuda-inline">Siempre queda registrado con el usuario de la sesión actual — no se puede cambiar.</p>
+        </div>
+        <div class="modal-actions modal-actions--start">
+          <button type="submit" class="btn btn-primary">Registrar movimiento</button>
+        </div>
+      </form>
     </div>
 
     <div class="modal-actions modal-actions--split">
@@ -677,30 +703,152 @@
 <div class="modal-overlay" id="modal-ubicacion">
   <div class="modal">
     <div class="modal-head">
-      <h2>Nueva ubicación</h2>
+      <h2 id="modal-ubicacion-titulo">Nueva ubicación</h2>
       <button class="modal-close" data-close="modal-ubicacion">&times;</button>
     </div>
     <form id="form-ubicacion">
-      <div class="grid-3">
+      <label class="toggle-critico" id="u-toggle-rango-wrap" style="margin-bottom:14px">
+        <input type="checkbox" id="u-modo-rango">
+        Crear varias de una vez (rango)
+      </label>
+
+      <div class="grid-3" id="u-campos-simple">
         <div class="campo">
           <label>Pasillo</label>
-          <input type="number" id="u-pasillo" min="1" required>
+          <input type="number" id="u-pasillo" min="1">
         </div>
         <div class="campo">
           <label>Estantería</label>
-          <input type="number" id="u-estanteria" min="1" required>
+          <input type="number" id="u-estanteria" min="1">
         </div>
         <div class="campo">
           <label>Nivel</label>
-          <input type="number" id="u-nivel" min="1" required>
+          <input type="number" id="u-nivel" min="1">
         </div>
       </div>
+
+      <div class="grid-3" id="u-campos-rango" style="display:none">
+        <div class="campo">
+          <label>Pasillo (desde – hasta)</label>
+          <div class="campo-rango">
+            <input type="number" id="u-pasillo-desde" min="1">
+            <span>–</span>
+            <input type="number" id="u-pasillo-hasta" min="1">
+          </div>
+        </div>
+        <div class="campo">
+          <label>Estantería (desde – hasta)</label>
+          <div class="campo-rango">
+            <input type="number" id="u-estanteria-desde" min="1">
+            <span>–</span>
+            <input type="number" id="u-estanteria-hasta" min="1">
+          </div>
+        </div>
+        <div class="campo">
+          <label>Nivel (desde – hasta)</label>
+          <div class="campo-rango">
+            <input type="number" id="u-nivel-desde" min="1">
+            <span>–</span>
+            <input type="number" id="u-nivel-hasta" min="1">
+          </div>
+        </div>
+      </div>
+
       <p class="ayuda" id="u-preview">Código resultante: —</p>
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-ubicacion">Cancelar</button>
-        <button type="submit" class="btn btn-primary">Crear ubicación</button>
+        <button type="submit" class="btn btn-primary" id="u-btn-crear">Crear ubicación</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Modal: Reasignar todos los productos de una ubicación a otra -->
+<div class="modal-overlay" id="modal-reasignar-ubicacion">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Reasignar productos de ubicación</h2>
+      <button class="modal-close" data-close="modal-reasignar-ubicacion">&times;</button>
+    </div>
+    <form id="form-reasignar-ubicacion">
+      <input type="hidden" id="reasig-origen-id">
+      <p class="ayuda" id="reasig-origen-info"></p>
+      <div class="campo">
+        <label>Mover todos esos productos a</label>
+        <select id="reasig-destino-id" required></select>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-reasignar-ubicacion">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Reasignar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Cantidad para Descartar/Revertir una merma (reemplaza el prompt() que se usaba antes) -->
+<div class="modal-overlay" id="modal-merma-cantidad">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="mm-titulo">Cantidad</h2>
+      <button class="modal-close" data-close="modal-merma-cantidad">&times;</button>
+    </div>
+    <form id="form-merma-cantidad">
+      <p class="ayuda" id="mm-info"></p>
+      <div class="campo">
+        <label id="mm-cantidad-label">Cantidad</label>
+        <input type="number" id="mm-cantidad" min="1" required>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-merma-cantidad">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="mm-btn-confirmar">Confirmar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Alta rápida de categoría/modelo (reemplaza el prompt() que se usaba antes) -->
+<div class="modal-overlay" id="modal-alta-rapida">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="ar-titulo">Nuevo</h2>
+      <button class="modal-close" data-close="modal-alta-rapida">&times;</button>
+    </div>
+    <form id="form-alta-rapida">
+      <div class="campo">
+        <label id="ar-label">Nombre</label>
+        <input type="text" id="ar-nombre" required autocomplete="off">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-alta-rapida">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="ar-btn-confirmar">Agregar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Confirmar eliminación de factura con stock ya ingresado -->
+<div class="modal-overlay" id="modal-eliminar-factura">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Eliminar factura</h2>
+      <button class="modal-close" data-close="modal-eliminar-factura">&times;</button>
+    </div>
+    <p class="ayuda-inline ayuda-inline--bloqueado" id="ef-resumen"></p>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Producto</th>
+            <th class="num">Se revertirá del stock</th>
+          </tr>
+        </thead>
+        <tbody id="ef-tbody"></tbody>
+      </table>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-eliminar-factura">Cancelar</button>
+      <button type="button" class="btn btn-danger" id="ef-btn-confirmar">Sí, eliminar y revertir stock</button>
+    </div>
   </div>
 </div>
 
@@ -716,6 +864,7 @@
         <div class="campo">
           <label>N° de factura *</label>
           <input type="text" id="fac-numero" required placeholder="Ej: F-1023">
+          <p class="ayuda-inline ayuda-inline--bloqueado" id="fac-numero-existe" style="display:none">Ya existe una factura con este número.</p>
         </div>
         <div class="campo">
           <label>Proveedor</label>
@@ -733,6 +882,7 @@
       <h3 class="subtitulo">Productos de la factura</h3>
       <div id="fac-lineas"></div>
       <button type="button" class="btn-link" id="fac-agregar-linea">+ Agregar producto</button>
+      <p class="fac-total-linea">Total factura: <strong id="fac-total-vivo">$0</strong></p>
 
       <label class="toggle-critico" style="margin-top:16px">
         <input type="checkbox" id="fac-aplicar-stock" checked>

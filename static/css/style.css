@@ -897,25 +897,13 @@ body::before { content: none; }
   margin: 18px 0 10px;
 }
 
-/* La foto y la ficha de datos van lado a lado (en vez de la foto arriba y
-   la ficha abajo) para no alargar el modal hacia abajo — sobre todo ahora
-   que hay más productos y la ficha se abre más seguido. En pantallas
-   angostas vuelven a apilarse (ver "Responsive" más abajo). */
-.detalle-foto-y-ficha {
-  display: grid;
-  grid-template-columns: 168px 1fr;
-  gap: 18px;
-  align-items: start;
-  margin-bottom: 18px;
-}
-
 .detalle-foto {
-  margin-bottom: 0;
+  margin-bottom: 16px;
 }
 .detalle-foto-preview {
   width: 100%;
-  max-width: none;
-  height: 126px;
+  max-width: 260px;
+  height: 160px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel-2);
@@ -932,13 +920,9 @@ body::before { content: none; }
 }
 .detalle-foto-acciones {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
 }
-.detalle-foto-acciones .btn { width: 100%; }
-
-.detalle-ficha-col { min-width: 0; }
 
 #detalle-ficha {
   margin: 0;
@@ -1359,10 +1343,6 @@ body::before { content: none; }
   .summary { grid-template-columns: 1fr 1fr; }
   .grid-2, .grid-3 { grid-template-columns: 1fr; }
   .detalle-grid { grid-template-columns: 1fr; }
-  .detalle-foto-y-ficha { grid-template-columns: 1fr; }
-  .detalle-foto-preview { max-width: 260px; }
-  .detalle-foto-acciones { flex-direction: row; }
-  .detalle-foto-acciones .btn { width: auto; }
   .tabla-wrap { overflow-x: auto; }
   .tabla { min-width: 720px; }
   .fac-linea-row { grid-template-columns: 1fr; }

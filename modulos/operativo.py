@@ -98,6 +98,11 @@ ESTADOS_GARANTIA = [
     "entregado", "rechazada",
 ]
 ESTADOS_GARANTIA_CERRADOS = {"entregado", "rechazada"}
+ESTADOS_GARANTIA_LABEL = {
+    "ingreso": "Ingreso", "diagnostico": "Diagnóstico", "reparacion": "Reparación",
+    "prueba": "Prueba", "revision": "Revisión", "listo": "Listo",
+    "entregado": "Entregado", "rechazada": "Rechazada",
+}
 
 # Campos "simples" (sin efectos secundarios) que se pueden actualizar desde
 # el PUT general de la orden — diagnóstico. Los que sí disparan una
@@ -1048,6 +1053,24 @@ def crear_orden():
         if equipo is None:
             return jsonify({"error": "Ese equipo no existe o no pertenece a este cliente"}), 400
 
+        # Un mismo vehículo no puede tener dos OT abiertas al mismo tiempo
+        # (físicamente no puede estar recibiéndose dos veces a la vez). Solo
+        # se puede crear una OT nueva para este equipo una vez que la
+        # anterior ya se entregó o se canceló — ahí se entiende que el auto
+        # volvió a salir del taller.
+        placeholders = ", ".join("?" for _ in ESTADOS_CERRADOS)
+        ot_abierta = db.execute(
+            f"SELECT id, estado FROM ordenes_trabajo WHERE equipo_id = ? AND estado NOT IN ({placeholders}) "
+            "ORDER BY fecha_recepcion DESC LIMIT 1",
+            (equipo_id, *ESTADOS_CERRADOS),
+        ).fetchone()
+        if ot_abierta is not None:
+            return jsonify({
+                "error": f"Este vehículo ya tiene una OT abierta (OT #{ot_abierta['id']}, estado: "
+                         f"{ESTADOS_LABEL.get(ot_abierta['estado'], ot_abierta['estado'])}). "
+                         f"Solo se puede crear una OT nueva para el mismo auto una vez que la anterior se entregue o se cancele."
+            }), 400
+
     prioridad = (data.get("prioridad") or "media").strip().lower()
     if prioridad not in PRIORIDADES_ORDEN:
         return jsonify({"error": f"Prioridad inválida. Usa una de: {', '.join(PRIORIDADES_ORDEN)}"}), 400
@@ -1805,6 +1828,23 @@ def crear_garantia():
         equipo = db.execute("SELECT id FROM equipos WHERE id = ? AND cliente_id = ?", (equipo_id, cliente_id)).fetchone()
         if equipo is None:
             return jsonify({"error": "Ese equipo no existe o no pertenece a este cliente"}), 400
+
+        # Mismo criterio que en las OT normales: un vehículo no puede tener
+        # dos garantías abiertas al mismo tiempo. Recién se puede abrir una
+        # garantía nueva para el mismo auto cuando la anterior ya quedó
+        # entregada o rechazada (el auto ya salió del taller).
+        placeholders = ", ".join("?" for _ in ESTADOS_GARANTIA_CERRADOS)
+        garantia_abierta = db.execute(
+            f"SELECT id, estado FROM garantias WHERE equipo_id = ? AND estado NOT IN ({placeholders}) "
+            "ORDER BY fecha_recepcion DESC LIMIT 1",
+            (equipo_id, *ESTADOS_GARANTIA_CERRADOS),
+        ).fetchone()
+        if garantia_abierta is not None:
+            return jsonify({
+                "error": f"Este vehículo ya tiene una garantía abierta (Garantía #{garantia_abierta['id']}, estado: "
+                         f"{ESTADOS_GARANTIA_LABEL.get(garantia_abierta['estado'], garantia_abierta['estado'])}). "
+                         f"Solo se puede abrir una garantía nueva para el mismo auto una vez que la anterior se entregue o se rechace."
+            }), 400
 
     orden_origen_id = None
     if data.get("orden_origen_id") not in (None, ""):

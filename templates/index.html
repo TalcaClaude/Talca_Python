@@ -588,43 +588,47 @@
     <div class="detalle-grid">
       <div class="detalle-info">
 
-        <div class="detalle-foto-y-ficha">
-          <div class="detalle-foto">
-            <div class="detalle-foto-preview" id="detalle-foto-preview">
-              <span class="vacio-inline">Sin foto</span>
-            </div>
-            <div class="detalle-foto-acciones">
-              <input type="file" id="detalle-foto-archivo" accept=".jpg,.jpeg,.png,.webp,.heic" style="display:none">
-              <button type="button" class="btn btn-secundario" id="btn-subir-foto">Subir foto</button>
-              <button type="button" class="btn btn-link btn-link--peligro" id="btn-quitar-foto" style="display:none">Quitar foto</button>
-            </div>
+        <div class="detalle-foto">
+          <div class="detalle-foto-preview" id="detalle-foto-preview">
+            <span class="vacio-inline">Sin foto</span>
           </div>
-
-          <div class="detalle-ficha-col">
-            <dl id="detalle-ficha"></dl>
-            <p class="ayuda-inline" id="detalle-stock-minimo-calculo"></p>
+          <div class="detalle-foto-acciones">
+            <input type="file" id="detalle-foto-archivo" accept=".jpg,.jpeg,.png,.webp,.heic" style="display:none">
+            <button type="button" class="btn btn-secundario" id="btn-subir-foto">Subir foto</button>
+            <button type="button" class="btn btn-link btn-link--peligro" id="btn-quitar-foto" style="display:none">Quitar foto</button>
           </div>
         </div>
+
+        <dl id="detalle-ficha"></dl>
+        <p class="ayuda-inline" id="detalle-stock-minimo-calculo"></p>
 
         <h3 class="subtitulo">Registrar movimiento</h3>
         <form id="form-movimiento">
           <input type="hidden" id="m-producto-id">
-          <div class="campo">
-            <label>Tipo</label>
-            <select id="m-tipo">
-              <option value="entrada">Entrada (ingreso de stock)</option>
-              <option value="salida">Salida (consumo / venta / reserva / uso)</option>
-              <option value="perdida">Pérdida (merma)</option>
-            </select>
+          <div class="grid-2">
+            <div class="campo">
+              <label>Tipo</label>
+              <select id="m-tipo">
+                <option value="entrada">Entrada (ingreso de stock)</option>
+                <option value="salida">Salida (consumo / venta / reserva / uso)</option>
+                <option value="perdida">Pérdida (merma)</option>
+              </select>
+            </div>
+            <div class="campo" id="m-categoria-wrap">
+              <label>Categoría</label>
+              <select id="m-categoria"></select>
+            </div>
           </div>
-          <div class="campo" id="m-categoria-wrap">
-            <label>Categoría</label>
-            <select id="m-categoria"></select>
-          </div>
-          <div class="campo" id="m-factura-wrap">
-            <label>N° de factura (opcional)</label>
-            <input type="text" id="m-factura" placeholder="Ej: F-1023">
-            <p class="ayuda-inline" id="m-factura-preview" style="display:none"></p>
+          <div class="grid-2">
+            <div class="campo" id="m-factura-wrap">
+              <label>N° de factura (opcional)</label>
+              <input type="text" id="m-factura" placeholder="Ej: F-1023">
+              <p class="ayuda-inline" id="m-factura-preview" style="display:none"></p>
+            </div>
+            <div class="campo">
+              <label id="m-cantidad-label">Cantidad</label>
+              <input type="number" id="m-cantidad" min="0" required>
+            </div>
           </div>
           <div class="campo" id="m-proveedor-merma-wrap" style="display:none">
             <label>Proveedor de este producto *</label>
@@ -633,17 +637,15 @@
             </select>
             <p class="ayuda-inline">Un mismo producto puede haberse comprado a varios proveedores: elige de cuál viene la unidad que se está perdiendo, para no mezclar el registro de merma.</p>
           </div>
-          <div class="campo">
-            <label id="m-cantidad-label">Cantidad</label>
-            <input type="number" id="m-cantidad" min="0" required>
-          </div>
-          <div class="campo" id="m-costo-wrap">
-            <label>Costo unitario de esta compra ($ CLP, opcional)</label>
-            <input type="number" id="m-costo" min="0" step="1" placeholder="Déjalo vacío si no cambió">
-          </div>
-          <div class="campo">
-            <label>Motivo</label>
-            <input type="text" id="m-motivo" placeholder="Ej: Compra a proveedor, orden de trabajo #123…">
+          <div class="grid-2">
+            <div class="campo" id="m-costo-wrap">
+              <label>Costo unitario de esta compra ($ CLP, opcional)</label>
+              <input type="number" id="m-costo" min="0" step="1" placeholder="Déjalo vacío si no cambió">
+            </div>
+            <div class="campo">
+              <label>Motivo</label>
+              <input type="text" id="m-motivo" placeholder="Ej: Compra a proveedor, orden de trabajo #123…">
+            </div>
           </div>
           <div class="campo">
             <label>Responsable</label>

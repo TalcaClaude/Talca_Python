@@ -653,6 +653,30 @@ class TestOperativoFase35(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 409)
 
+    def test_no_se_puede_crear_2_garantias_abiertas_para_el_mismo_equipo(self):
+        # Mismo criterio que con las OT: el auto no puede tener dos
+        # garantías abiertas al mismo tiempo — recién se puede abrir una
+        # nueva cuando la anterior se entrega o se rechaza.
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"])
+        garantia_1 = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente["id"], "equipo_id": equipo["id"], "motivo": "Falla A"},
+        ).get_json()
+
+        rechazada = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente["id"], "equipo_id": equipo["id"], "motivo": "Falla B"},
+        )
+        self.assertEqual(rechazada.status_code, 400)
+
+        self.client.put(f"/api/operativo/garantias/{garantia_1['id']}", json={"estado": "entregado"})
+        permitida = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente["id"], "equipo_id": equipo["id"], "motivo": "Falla B"},
+        )
+        self.assertEqual(permitida.status_code, 201, permitida.get_data(as_text=True))
+
     # ---- Dashboard: KPI nuevo de garantías abiertas ----
 
     def test_dashboard_incluye_garantias_abiertas(self):
@@ -674,6 +698,11 @@ class TestOperativoFase35(unittest.TestCase):
         equipo_a = self._crear_equipo(cliente["id"], identificador="AAA111")
         equipo_b = self._crear_equipo(cliente["id"], identificador="BBB222")
         orden_1 = self._crear_orden(cliente["id"], equipo_id=equipo_a["id"])
+        # No se puede crear una segunda OT abierta para el mismo equipo (ver
+        # test_no_se_puede_crear_2_ot_abiertas_para_el_mismo_equipo) — para
+        # que el equipo tenga dos OT en su historial, la primera se entrega
+        # antes de abrir la segunda, como pasaría en la vida real.
+        self.client.put(f"/api/operativo/ordenes/{orden_1['id']}", json={"estado": "entregado"})
         orden_2 = self._crear_orden(cliente["id"], equipo_id=equipo_a["id"])
         self._crear_orden(cliente["id"], equipo_id=equipo_b["id"])  # de otro equipo, no debe aparecer
 
@@ -683,6 +712,25 @@ class TestOperativoFase35(unittest.TestCase):
         ids = {o["id"] for o in data["ordenes"]}
         self.assertEqual(ids, {orden_1["id"], orden_2["id"]})
         self.assertEqual(data["cliente"]["id"], cliente["id"])
+
+    def test_no_se_puede_crear_2_ot_abiertas_para_el_mismo_equipo(self):
+        # Un mismo auto no puede estar "recibiéndose" dos veces a la vez —
+        # solo se puede abrir una OT nueva una vez que la anterior ya se
+        # entregó (o se canceló).
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"])
+        orden_1 = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+
+        rechazada = self.client.post(
+            "/api/operativo/ordenes", json={"cliente_id": cliente["id"], "equipo_id": equipo["id"]}
+        )
+        self.assertEqual(rechazada.status_code, 400)
+
+        self.client.put(f"/api/operativo/ordenes/{orden_1['id']}", json={"estado": "entregado"})
+        permitida = self.client.post(
+            "/api/operativo/ordenes", json={"cliente_id": cliente["id"], "equipo_id": equipo["id"]}
+        )
+        self.assertEqual(permitida.status_code, 201, permitida.get_data(as_text=True))
 
     # ---- Recepción ampliada (3.5.2) ----
 

@@ -3,6 +3,10 @@ const state = {
   categorias: [],
   productoActivo: null,
   ubicaciones: [],
+  paginaProductos: 1,
+  porPaginaProductos: 50,
+  totalProductos: 0,
+  totalPaginasProductos: 1,
   origenModalUbicacion: "producto", // "producto" | "bodega"
   categoriasDisponibles: [],
   modelosDisponibles: [],
@@ -171,13 +175,39 @@ async function cargarUbicaciones() {
   }
 }
 
+let buscarBodegaTimeout;
+const inputBuscarBodega = document.getElementById("buscar-bodega");
+if (inputBuscarBodega) {
+  inputBuscarBodega.addEventListener("input", () => {
+    clearTimeout(buscarBodegaTimeout);
+    buscarBodegaTimeout = setTimeout(renderTablaUbicaciones, 200);
+  });
+}
+
 function renderTablaUbicaciones() {
   const tbody = document.getElementById("tbody-ubicaciones");
   if (state.ubicaciones.length === 0) {
     tbody.innerHTML = `<tr><td colspan="7" class="vacio">Aún no hay ubicaciones creadas. Usa "+ Nueva ubicación" para empezar a mapear la bodega.</td></tr>`;
     return;
   }
-  tbody.innerHTML = state.ubicaciones.map(u => {
+
+  const buscarInput = document.getElementById("buscar-bodega");
+  const termino = (buscarInput ? buscarInput.value : "").trim().toLowerCase();
+
+  const ubicacionesFiltradas = !termino ? state.ubicaciones : state.ubicaciones.filter(u => {
+    const campos = [u.codigo, String(u.pasillo), String(u.estanteria), String(u.nivel)];
+    u.productos.forEach(p => {
+      campos.push(p.nombre, p.codigo_interno, p.categoria, p.modelo);
+    });
+    return campos.some(c => c && String(c).toLowerCase().includes(termino));
+  });
+
+  if (ubicacionesFiltradas.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Ninguna ubicación coincide con "${escapeHtml(buscarInput.value.trim())}".</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = ubicacionesFiltradas.map(u => {
     const productosTexto = u.productos.length
       ? u.productos.map(p => `<span class="codigo-pill">${p.codigo_interno ? escapeHtml(p.codigo_interno) : "#" + String(p.id).padStart(4, "0")}</span> ${escapeHtml(p.nombre)}`).join("<br>")
       : "—";
@@ -480,7 +510,9 @@ async function cargarResumen() {
   }
 }
 
-async function cargarProductos() {
+async function cargarProductos(resetearPagina) {
+  if (resetearPagina) state.paginaProductos = 1;
+
   const q = document.getElementById("buscar").value.trim();
   const categoria = document.getElementById("filtro-categoria").value;
   const criticos = document.getElementById("filtro-criticos").checked;
@@ -489,17 +521,62 @@ async function cargarProductos() {
   if (q) params.set("q", q);
   if (categoria) params.set("categoria", categoria);
   if (criticos) params.set("criticos", "1");
+  params.set("pagina", state.paginaProductos);
+  params.set("por_pagina", state.porPaginaProductos);
 
   const tbody = document.getElementById("tbody-productos");
   try {
     const data = await api("/api/productos?" + params.toString());
     state.productos = data.productos;
     state.categorias = data.categorias;
+    state.totalProductos = data.total;
+    state.totalPaginasProductos = data.total_paginas || 1;
+    state.paginaProductos = data.pagina || 1;
     renderCategorias();
     renderTabla();
+    renderPaginacionProductos();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar productos: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="vacio">Error al cargar productos: ${e.message}</td></tr>`;
   }
+}
+
+function renderPaginacionProductos() {
+  const cont = document.getElementById("paginacion-productos");
+  if (!cont) return;
+
+  if (state.totalProductos === 0) {
+    cont.innerHTML = "";
+    return;
+  }
+
+  const desde = (state.paginaProductos - 1) * state.porPaginaProductos + 1;
+  const hasta = Math.min(state.paginaProductos * state.porPaginaProductos, state.totalProductos);
+
+  cont.innerHTML = `
+    <span class="paginacion-info">Mostrando ${desde}–${hasta} de ${state.totalProductos} producto(s)</span>
+    <div class="paginacion-botones">
+      <button type="button" class="btn btn-secundario" id="btn-pagina-anterior" ${state.paginaProductos <= 1 ? "disabled" : ""}>← Anterior</button>
+      <span class="paginacion-actual">Página ${state.paginaProductos} de ${state.totalPaginasProductos}</span>
+      <button type="button" class="btn btn-secundario" id="btn-pagina-siguiente" ${state.paginaProductos >= state.totalPaginasProductos ? "disabled" : ""}>Siguiente →</button>
+    </div>
+  `;
+
+  const btnAnt = document.getElementById("btn-pagina-anterior");
+  const btnSig = document.getElementById("btn-pagina-siguiente");
+  if (btnAnt) btnAnt.addEventListener("click", () => {
+    if (state.paginaProductos > 1) {
+      state.paginaProductos--;
+      cargarProductos();
+      document.querySelector(".tabla-wrap").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  });
+  if (btnSig) btnSig.addEventListener("click", () => {
+    if (state.paginaProductos < state.totalPaginasProductos) {
+      state.paginaProductos++;
+      cargarProductos();
+      document.querySelector(".tabla-wrap").scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  });
 }
 
 function renderCategorias() {
@@ -513,7 +590,7 @@ function renderCategorias() {
 function renderTabla() {
   const tbody = document.getElementById("tbody-productos");
   if (state.productos.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="9" class="vacio">No se encontraron productos.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="vacio">No se encontraron productos.</td></tr>`;
     return;
   }
 
@@ -527,14 +604,21 @@ function renderTabla() {
     } else {
       ubicacionTexto = "—";
     }
+    // El nombre visible se arma como "Categoría - Modelo" (o el código
+    // interno / "Producto #N" si faltan ambos) — con Categoría y Modelo ya
+    // como columnas propias, mostrar aquí la descripción es lo que aporta
+    // información distinta; si no hay descripción cargada, se usa el
+    // nombre como respaldo para no dejar la fila vacía.
+    const principal = p.descripcion || p.nombre;
     return `
       <tr data-id="${p.id}">
         <td><span class="codigo-pill">#${escapeHtml(p.id_sistema)}</span></td>
         <td>
-          <div class="nombre-producto">${escapeHtml(p.nombre)} ${critico ? '<span class="badge-critico">Crítico</span>' : ""}</div>
-          <div class="subtexto">${escapeHtml([p.codigo_interno, p.modelo].filter(Boolean).join(" · ")) || "&nbsp;"}</div>
+          <div class="nombre-producto">${escapeHtml(principal)} ${critico ? '<span class="badge-critico">Crítico</span>' : ""}</div>
+          ${p.codigo_interno ? `<div class="subtexto">${escapeHtml(p.codigo_interno)}</div>` : ""}
         </td>
         <td>${escapeHtml(p.categoria) || "—"}</td>
+        <td>${escapeHtml(p.modelo) || "—"}</td>
         <td>${ubicacionTexto}</td>
         <td class="num mono">${p.stock_disponible}</td>
         <td class="num mono">${p.stock_reservado}</td>
@@ -566,10 +650,10 @@ function escapeHtml(str) {
 let buscarTimeout;
 document.getElementById("buscar").addEventListener("input", () => {
   clearTimeout(buscarTimeout);
-  buscarTimeout = setTimeout(cargarProductos, 250);
+  buscarTimeout = setTimeout(() => cargarProductos(true), 250);
 });
-document.getElementById("filtro-categoria").addEventListener("change", cargarProductos);
-document.getElementById("filtro-criticos").addEventListener("change", cargarProductos);
+document.getElementById("filtro-categoria").addEventListener("change", () => cargarProductos(true));
+document.getElementById("filtro-criticos").addEventListener("change", () => cargarProductos(true));
 
 // ---------------------------------------------------------------------------
 // Modal: crear / editar producto

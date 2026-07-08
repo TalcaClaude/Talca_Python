@@ -990,10 +990,10 @@ def listar_productos():
     if q:
         sql += """ AND (
             p.codigo_interno LIKE ? OR p.nombre LIKE ?
-            OR p.modelo LIKE ? OR u.codigo LIKE ? OR CAST(p.id AS TEXT) LIKE ?
+            OR p.modelo LIKE ? OR p.ubicacion LIKE ? OR u.codigo LIKE ? OR CAST(p.id AS TEXT) LIKE ?
         )"""
         like = f"%{q}%"
-        params += [like, like, like, like, like]
+        params += [like, like, like, like, like, like]
 
     if categoria:
         sql += " AND p.categoria = ?"
@@ -1006,19 +1006,55 @@ def listar_productos():
         sql += " AND p.ubicacion_id = ?"
         params.append(ubicacion_id)
 
-    sql += " ORDER BY p.nombre COLLATE NOCASE ASC"
-
-    rows = db.execute(sql, params).fetchall()
-    productos = [row_to_dict(r) for r in rows]
+    # La paginación es opcional (solo se activa si viene "pagina" o
+    # "por_pagina" en la URL) porque este mismo endpoint lo usan varias
+    # pantallas (Facturas, Operativo, Caja Chica, el selector de
+    # movimientos) para llenar selectores con la lista COMPLETA de
+    # productos — paginar siempre habría cortado esos selectores a la
+    # primera página sin que nadie lo notara.
+    paginar = request.args.get("pagina") is not None or request.args.get("por_pagina") is not None
 
     categorias = [r["categoria"] for r in db.execute(
         "SELECT DISTINCT categoria FROM productos WHERE categoria != '' ORDER BY categoria"
     ).fetchall()]
 
+    if not paginar:
+        sql += " ORDER BY p.nombre COLLATE NOCASE ASC"
+        rows = db.execute(sql, params).fetchall()
+        productos = [row_to_dict(r) for r in rows]
+        return jsonify({
+            "productos": productos,
+            "categorias": categorias,
+            "total": len(productos),
+        })
+
+    total = db.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
+
+    try:
+        pagina = max(1, int(request.args.get("pagina", 1)))
+    except (TypeError, ValueError):
+        pagina = 1
+    try:
+        por_pagina = int(request.args.get("por_pagina", 50))
+    except (TypeError, ValueError):
+        por_pagina = 50
+    por_pagina = min(max(por_pagina, 1), 500)
+    total_paginas = max(1, math.ceil(total / por_pagina))
+    pagina = min(pagina, total_paginas)
+
+    sql += " ORDER BY p.nombre COLLATE NOCASE ASC LIMIT ? OFFSET ?"
+    params = params + [por_pagina, (pagina - 1) * por_pagina]
+
+    rows = db.execute(sql, params).fetchall()
+    productos = [row_to_dict(r) for r in rows]
+
     return jsonify({
         "productos": productos,
         "categorias": categorias,
-        "total": len(productos),
+        "total": total,
+        "pagina": pagina,
+        "por_pagina": por_pagina,
+        "total_paginas": total_paginas,
     })
 
 
@@ -1509,7 +1545,7 @@ def listar_ubicaciones():
     ubicaciones = []
     for u in ubis:
         productos = db.execute(
-            "SELECT id, codigo_interno, nombre FROM productos WHERE ubicacion_id = ? ORDER BY nombre COLLATE NOCASE",
+            "SELECT id, codigo_interno, nombre, categoria, modelo FROM productos WHERE ubicacion_id = ? ORDER BY nombre COLLATE NOCASE",
             (u["id"],),
         ).fetchall()
         ubicaciones.append({

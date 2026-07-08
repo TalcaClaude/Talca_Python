@@ -125,6 +125,7 @@
           <th>N°</th>
           <th>Producto</th>
           <th>Categoría</th>
+          <th>Modelo</th>
           <th>Ubicación</th>
           <th class="num">Disponible</th>
           <th class="num">Reservado</th>
@@ -134,17 +135,21 @@
         </tr>
       </thead>
       <tbody id="tbody-productos">
-        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="10" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
+
+  <section class="paginacion" id="paginacion-productos"></section>
 
   </section>
 
   <section class="vista" id="vista-bodega" style="display:none">
 
+  <p class="bodega-intro" style="margin: 0 0 14px;">Bodega única, organizada en <strong>pasillos</strong> → <strong>estanterías</strong> → <strong>niveles</strong>. Cada ubicación guarda como máximo un producto.</p>
+
   <section class="toolbar">
-    <p class="bodega-intro">Bodega única, organizada en <strong>pasillos</strong> → <strong>estanterías</strong> → <strong>niveles</strong>. Cada ubicación guarda como máximo un producto.</p>
+    <input type="text" id="buscar-bodega" placeholder="Buscar por código de ubicación, pasillo/estante/nivel, producto, categoría o modelo…">
     <button class="btn btn-primary" id="btn-nueva-ubicacion">+ Nueva ubicación</button>
   </section>
 
@@ -583,19 +588,23 @@
     <div class="detalle-grid">
       <div class="detalle-info">
 
-        <div class="detalle-foto">
-          <div class="detalle-foto-preview" id="detalle-foto-preview">
-            <span class="vacio-inline">Sin foto</span>
+        <div class="detalle-foto-y-ficha">
+          <div class="detalle-foto">
+            <div class="detalle-foto-preview" id="detalle-foto-preview">
+              <span class="vacio-inline">Sin foto</span>
+            </div>
+            <div class="detalle-foto-acciones">
+              <input type="file" id="detalle-foto-archivo" accept=".jpg,.jpeg,.png,.webp,.heic" style="display:none">
+              <button type="button" class="btn btn-secundario" id="btn-subir-foto">Subir foto</button>
+              <button type="button" class="btn btn-link btn-link--peligro" id="btn-quitar-foto" style="display:none">Quitar foto</button>
+            </div>
           </div>
-          <div class="detalle-foto-acciones">
-            <input type="file" id="detalle-foto-archivo" accept=".jpg,.jpeg,.png,.webp,.heic" style="display:none">
-            <button type="button" class="btn btn-secundario" id="btn-subir-foto">Subir foto</button>
-            <button type="button" class="btn btn-link btn-link--peligro" id="btn-quitar-foto" style="display:none">Quitar foto</button>
+
+          <div class="detalle-ficha-col">
+            <dl id="detalle-ficha"></dl>
+            <p class="ayuda-inline" id="detalle-stock-minimo-calculo"></p>
           </div>
         </div>
-
-        <dl id="detalle-ficha"></dl>
-        <p class="ayuda-inline" id="detalle-stock-minimo-calculo"></p>
 
         <h3 class="subtitulo">Registrar movimiento</h3>
         <form id="form-movimiento">

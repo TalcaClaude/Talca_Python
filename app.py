@@ -9,6 +9,7 @@ para que sea fácil de instalar y correr en cualquier PC o servidor.
 
 import os
 import re
+import json
 import sqlite3
 import time
 import threading
@@ -640,6 +641,114 @@ def init_db():
         """
     )
     db.commit()
+
+    # ---- Migración 11: importación masiva del inventario físico real
+    # (levantamiento de bodega "BODEGA 1", cierre de junio 2026). Se corre
+    # una sola vez: si ya existe el producto con el primer ID de la carga
+    # (60001), no se vuelve a intentar en el próximo arranque. Los IDs
+    # quedan correlativos a partir de 60001 (no desde 1) porque así lo
+    # pidió el taller, dejando ese rango reservado como "productos
+    # cargados desde el levantamiento inicial" y evitando pisar cualquier
+    # producto que ya se haya cargado a mano con IDs bajos.
+    #
+    # Cada fila del Excel original era una unidad física (sin columna de
+    # cantidad), así que la cantidad de cada producto es el conteo de filas
+    # con el mismo modelo+descripción, y el costo es el promedio de esos
+    # precios (ponderado de forma natural, porque cada fila = 1 unidad).
+    # La ubicación numérica de 3 dígitos del Excel (ej. "232") se decodifica
+    # dígito a dígito en pasillo/estantería/nivel, igual que el resto del
+    # sistema; las ubicaciones en texto libre (ej. "Estante", "Pasillo")
+    # quedan abreviadas en el campo de ubicación antiguo (sin estructurar),
+    # que la interfaz ya muestra como "pendiente de asignar".
+    archivo_importacion_inicial = os.path.join(BASE_DIR, "data", "importacion_inventario_junio2026.json")
+    ya_importado = db.execute("SELECT 1 FROM productos WHERE id = ?", (60001,)).fetchone()
+    if not ya_importado and os.path.exists(archivo_importacion_inicial):
+        with open(archivo_importacion_inicial, "r", encoding="utf-8") as f:
+            datos_importacion = json.load(f)
+
+        ts = now_iso()
+        cache_ubicaciones = {}  # (pasillo, estanteria, nivel) -> ubicacion_id
+
+        # Nombres de categorías/modelos ya existentes, comparados en
+        # mayúsculas desde Python (no con "COLLATE NOCASE" de SQLite, que
+        # solo pliega A-Z y deja intactas las vocales con tilde, así que
+        # "Válvulas" y "VÁLVULAS" le parecerían distintas). Esto evita que
+        # la carga masiva duplique, por ejemplo, "Cuerpo de Válvulas" (una
+        # de las categorías con las que parte el sistema) como una segunda
+        # fila "CUERPO DE VÁLVULAS".
+        categorias_existentes = {
+            (r[0] or "").strip().upper() for r in db.execute("SELECT nombre FROM categorias").fetchall()
+        }
+        modelos_existentes = {
+            (r[0] or "").strip().upper() for r in db.execute("SELECT nombre FROM modelos").fetchall()
+        }
+
+        for item in datos_importacion["productos"]:
+            categoria = (item["categoria"] or "").strip().upper()
+            modelo = (item["modelo"] or "").strip().upper()
+            descripcion = (item["descripcion"] or "").strip().upper()
+            cantidad = int(item["cantidad"])
+            costo = float(item["costo_promedio"])
+            pid = int(item["id"])
+
+            ubicacion_id = None
+            pasillo = item.get("ubicacion_pasillo")
+            estanteria = item.get("ubicacion_estanteria")
+            nivel = item.get("ubicacion_nivel")
+            texto_legacy = item.get("ubicacion_texto_legacy") or ""
+
+            if pasillo is not None and estanteria is not None and nivel is not None:
+                combo = (pasillo, estanteria, nivel)
+                if combo not in cache_ubicaciones:
+                    fila_ubi = db.execute(
+                        "SELECT id FROM ubicaciones WHERE pasillo = ? AND estanteria = ? AND nivel = ?",
+                        combo,
+                    ).fetchone()
+                    if fila_ubi:
+                        cache_ubicaciones[combo] = fila_ubi["id"]
+                    else:
+                        codigo = codigo_ubicacion(pasillo, estanteria, nivel)
+                        cur_u = db.execute(
+                            "INSERT INTO ubicaciones (pasillo, estanteria, nivel, codigo, creado_en) VALUES (?, ?, ?, ?, ?)",
+                            (pasillo, estanteria, nivel, codigo, ts),
+                        )
+                        cache_ubicaciones[combo] = cur_u.lastrowid
+                ubicacion_id = cache_ubicaciones[combo]
+
+            db.execute(
+                """
+                INSERT INTO productos (
+                    id, codigo_interno, nombre, descripcion, categoria, marca, modelo,
+                    ubicacion, ubicacion_id, stock_disponible, stock_reservado, stock_merma,
+                    stock_minimo, costo_compra, creado_en, actualizado_en
+                ) VALUES (?, '', '', ?, ?, '', ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
+                """,
+                (pid, descripcion, categoria, modelo, texto_legacy, ubicacion_id, cantidad, costo, ts, ts),
+            )
+            nombre = nombre_automatico(categoria, modelo, "", pid)
+            db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nombre, pid))
+
+            if cantidad > 0:
+                db.execute(
+                    """
+                    INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, costo_unitario, stock_resultante)
+                    VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, 'Carga inicial de inventario (importación masiva junio 2026)', 'Sistema (importación)', ?, ?)
+                    """,
+                    (pid, ts, cantidad, costo, cantidad),
+                )
+
+            if categoria and categoria not in categorias_existentes:
+                db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (categoria,))
+                categorias_existentes.add(categoria)
+            if modelo and modelo not in modelos_existentes:
+                db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (modelo,))
+                modelos_existentes.add(modelo)
+
+        db.commit()
+
+        for item in datos_importacion["productos"]:
+            _recalcular_stock_minimo(db, int(item["id"]))
+        db.commit()
 
     # ---- Índices de rendimiento: movimientos es la tabla que más va a
     # crecer con los años (cada entrada, salida y pérdida queda ahí para

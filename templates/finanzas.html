@@ -209,6 +209,30 @@
     </table>
   </section>
 
+  <h3 class="subtitulo" style="margin-top:32px">Facturas de compra — condiciones de pago pactadas</h3>
+  <p class="ayuda-inline">Regístralas apenas se pacte la compra con el proveedor (contado, crédito a N días, o mixto). Quedan "pendientes de recepción": no se aplica stock ni se genera la Cuenta por Pagar hasta que alguien contraste esta factura contra lo que llegó físicamente y la apruebe — ver el aviso 📦 que aparece en cualquier pantalla mientras haya facturas por revisar.</p>
+  <section class="toolbar">
+    <span style="flex:1"></span>
+    <button class="btn btn-primary" id="btn-nueva-factura-pendiente">+ Registrar factura de compra</button>
+  </section>
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Factura</th>
+          <th>Proveedor</th>
+          <th>Condición</th>
+          <th class="num">Monto facturado</th>
+          <th>Estado</th>
+          <th>Registrada por</th>
+        </tr>
+      </thead>
+      <tbody id="tbody-facturas-pendientes">
+        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
   </section>
 
   <section class="vista" id="vista-reportes" style="display:none">
@@ -482,8 +506,75 @@
   </div>
 </div>
 
+<!-- Modal: Registrar factura de compra pendiente de recepción -->
+<div class="modal-overlay" id="modal-factura-pendiente">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Registrar factura de compra</h2>
+      <button class="modal-close" data-close="modal-factura-pendiente">&times;</button>
+    </div>
+    <p class="ayuda-inline">Esto NO aplica stock ni genera la Cuenta por Pagar todavía — queda pendiente hasta que se apruebe la recepción contra lo que llegó físicamente.</p>
+    <form id="form-factura-pendiente">
+      <div class="grid-3">
+        <div class="campo">
+          <label>N° de factura *</label>
+          <input type="text" id="pfr-numero" required placeholder="Ej: F-1023">
+        </div>
+        <div class="campo">
+          <label>Proveedor</label>
+          <select id="pfr-proveedor-id"><option value="">Sin proveedor</option></select>
+        </div>
+        <div class="campo">
+          <label>Fecha</label>
+          <input type="date" id="pfr-fecha">
+        </div>
+      </div>
+
+      <h3 class="subtitulo">Productos de la factura</h3>
+      <div id="pfr-lineas"></div>
+      <button type="button" class="btn-link" id="pfr-agregar-linea">+ Agregar producto</button>
+      <p class="fac-total-linea">Total factura: <strong id="pfr-total-vivo">$0</strong></p>
+
+      <h3 class="subtitulo">Condición de pago</h3>
+      <div class="grid-3">
+        <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="contado"> Al contado</label>
+        <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="credito" checked> A crédito</label>
+        <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="mixto"> Mixto</label>
+      </div>
+      <div class="grid-2" id="pfr-campos-mixto" style="display:none">
+        <div class="campo">
+          <label>% al contado</label>
+          <input type="number" id="pfr-porcentaje-contado" min="1" max="99" value="50">
+        </div>
+      </div>
+      <div class="grid-2" id="pfr-campos-credito">
+        <div class="campo">
+          <label>Plazo de crédito (días)</label>
+          <input type="number" id="pfr-plazo-dias" min="1" value="30">
+        </div>
+        <div class="campo">
+          <label>&nbsp;</label>
+          <div class="pfr-plazos-rapidos">
+            <button type="button" class="btn btn-secundario" data-plazo="30">30 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo="60">60 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo="90">90 días</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-factura-pendiente">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Registrar factura</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
+{% include "_alerta_facturas_pendientes.html" %}
+
 <script src="/static/js/finanzas.js?v={{ ASSET_VERSION }}"></script>
+<script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
 </body>
 </html>

@@ -486,6 +486,38 @@ def init_db():
             creado_en TEXT NOT NULL
         );
 
+        -- Facturas de compra que registra Finanzas ANTES de que lleguen
+        -- físicamente al taller (a diferencia de crear_factura(), que asume
+        -- que la mercadería ya está en bodega y aplica el stock al
+        -- instante). Acá se guardan las condiciones de pago pactadas con el
+        -- proveedor (contado / crédito a N días / mixto) y quedan en
+        -- 'pendiente' hasta que alguien contraste lo que dice esta factura
+        -- contra lo que llegó de verdad y la apruebe (puede ajustar
+        -- cantidades por línea si algo no calzó) o la rechace. Solo al
+        -- aprobarla se crea la factura real, se aplica el stock y se
+        -- generan sus Cuentas por Pagar — ver aprobar_factura_pendiente_recepcion.
+        -- Ver también el aviso global de facturas por revisar (alerta_facturas_pendientes.js),
+        -- pensado para que esto no pase piola como antes pasaba con
+        -- "Pendientes de WhatsApp" (que solo se veía si entrabas a Facturas).
+        CREATE TABLE IF NOT EXISTS facturas_finanzas_pendientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero TEXT NOT NULL,
+            proveedor_id INTEGER REFERENCES proveedores(id),
+            fecha TEXT DEFAULT '',
+            lineas_json TEXT NOT NULL,
+            condicion_pago TEXT NOT NULL DEFAULT 'credito',
+            porcentaje_contado REAL NOT NULL DEFAULT 0,
+            plazo_dias_credito INTEGER NOT NULL DEFAULT 30,
+            estado TEXT NOT NULL DEFAULT 'pendiente',
+            factura_id INTEGER REFERENCES facturas(id) ON DELETE SET NULL,
+            lineas_recibidas_json TEXT,
+            creado_por TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            revisado_por TEXT DEFAULT '',
+            revisado_en TEXT DEFAULT '',
+            nota_rechazo TEXT DEFAULT ''
+        );
+
         CREATE TABLE IF NOT EXISTS reservas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             producto_id INTEGER NOT NULL,
@@ -1013,6 +1045,22 @@ def init_db():
     columnas_agente_mensajes = [c[1] for c in db.execute("PRAGMA table_info(agente_mensajes)").fetchall()]
     if "origen" not in columnas_agente_mensajes:
         db.execute("ALTER TABLE agente_mensajes ADD COLUMN origen TEXT NOT NULL DEFAULT 'texto'")
+        db.commit()
+
+    # ---- Migración 13: condiciones de pago pactadas con el proveedor
+    # (contado / crédito a N días / mixto), guardadas en la factura ya
+    # aprobada como dato informativo — ver facturas_finanzas_pendientes
+    # (de donde salen estos valores al aprobar) y _generar_cxp_de_factura
+    # (que las usa para generar la o las Cuentas por Pagar correspondientes).
+    # Las facturas creadas por los caminos antiguos (manual directo, Excel,
+    # WhatsApp) siguen sin pasar por este flujo — quedan con estos campos en
+    # NULL y su CxP se sigue generando 100% a crédito a 30 días, como
+    # siempre (ver valores por defecto de _generar_cxp_de_factura).
+    columnas_facturas = [c[1] for c in db.execute("PRAGMA table_info(facturas)").fetchall()]
+    if "condicion_pago" not in columnas_facturas:
+        db.execute("ALTER TABLE facturas ADD COLUMN condicion_pago TEXT")
+        db.execute("ALTER TABLE facturas ADD COLUMN porcentaje_contado REAL")
+        db.execute("ALTER TABLE facturas ADD COLUMN plazo_dias_credito INTEGER")
         db.commit()
 
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
@@ -2733,41 +2781,90 @@ def crear_factura():
 CXP_DIAS_VENCIMIENTO_DEFECTO = 30
 
 
-def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validadas):
-    """Genera la Cuenta por Pagar de una factura de compra recién
-    registrada — el monto es la suma de cantidad×precio_unitario de todas
-    sus líneas. Se llama SIEMPRE desde _registrar_factura (nunca a mano),
-    así que cualquier factura que entre por cualquiera de sus tres caminos
-    (registro manual, carga masiva por Excel, foto de WhatsApp aprobada)
-    genera su CxP sola, sin que se pueda olvidar. No se genera si el total
-    es $0 (ej. factura de solo devoluciones)."""
+def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validadas,
+                              condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None):
+    """Genera la(s) Cuenta(s) por Pagar de una factura de compra recién
+    registrada — el monto total es la suma de cantidad×precio_unitario de
+    todas sus líneas. Se llama SIEMPRE desde _registrar_factura (nunca a
+    mano), así que cualquier factura que entre por cualquiera de sus
+    caminos (registro manual, carga masiva por Excel, foto de WhatsApp
+    aprobada, o aprobación de recepción desde Finanzas) genera su CxP sola,
+    sin que se pueda olvidar. No se genera nada si el total es $0 (ej.
+    factura de solo devoluciones).
+
+    condicion_pago/porcentaje_contado/plazo_dias_credito solo los manda
+    aprobar_factura_pendiente_recepcion (ver más abajo) — las facturas de
+    los otros tres caminos no pasan por la revisión de condiciones de pago
+    y siguen generando su CxP igual que siempre: 100% a crédito, a
+    CXP_DIAS_VENCIMIENTO_DEFECTO días.
+      - 'contado': se paga íntegro en el momento. Se genera la CxP igual
+        (para no perder el registro de cuánto se le compró a ese
+        proveedor) pero ya con su abono registrado y 'estado' en
+        'pagada' — no queda nada pendiente.
+      - 'credito': se genera pendiente, con vencimiento a plazo_dias_credito.
+      - 'mixto': se genera UNA CxP por el tramo al contado (ya pagada) y
+        OTRA por el tramo a crédito (pendiente, con su propio
+        vencimiento) — ambas apuntando a la misma factura_id."""
     monto_total = round(sum(cantidad * precio_unitario for _p, cantidad, precio_unitario in lineas_validadas), 2)
     if monto_total <= 0:
         return
 
+    if plazo_dias_credito is None:
+        plazo_dias_credito = CXP_DIAS_VENCIMIENTO_DEFECTO
+    porcentaje_contado = max(0.0, min(100.0, porcentaje_contado or 0))
+    if condicion_pago == "contado":
+        porcentaje_contado = 100.0
+    elif condicion_pago == "credito":
+        porcentaje_contado = 0.0
+
+    monto_contado = round(monto_total * porcentaje_contado / 100, 2)
+    monto_credito = round(monto_total - monto_contado, 2)
+
     fecha_emision = fecha or now_iso()
-    fecha_vencimiento = sumar_dias_iso(fecha_emision, CXP_DIAS_VENCIMIENTO_DEFECTO)
     ts = now_iso()
-    db.execute(
-        """
-        INSERT INTO cuentas_por_pagar
-            (proveedor_id, factura_id, concepto, monto_total, fecha_emision, fecha_vencimiento, estado, usuario, creado_en, actualizado_en)
-        VALUES (?, ?, '', ?, ?, ?, 'pendiente', ?, ?, ?)
-        """,
-        (proveedor_id, factura_id, monto_total, fecha_emision, fecha_vencimiento, usuario_actual(), ts, ts),
-    )
+
+    if monto_contado > 0:
+        cur = db.execute(
+            """
+            INSERT INTO cuentas_por_pagar
+                (proveedor_id, factura_id, concepto, monto_total, fecha_emision, fecha_vencimiento, estado, usuario, creado_en, actualizado_en)
+            VALUES (?, ?, 'Tramo al contado', ?, ?, ?, 'pagada', ?, ?, ?)
+            """,
+            (proveedor_id, factura_id, monto_contado, fecha_emision, fecha_emision, usuario_actual(), ts, ts),
+        )
+        db.execute(
+            """
+            INSERT INTO cxp_pagos (cxp_id, monto, fecha, metodo_pago, desde_caja_chica, nota, usuario, creado_en)
+            VALUES (?, ?, ?, 'contado', 0, 'Pago al contado registrado junto con la aprobación de recepción de la factura', ?, ?)
+            """,
+            (cur.lastrowid, monto_contado, fecha_emision, usuario_actual(), ts),
+        )
+
+    if monto_credito > 0:
+        fecha_vencimiento = sumar_dias_iso(fecha_emision, plazo_dias_credito)
+        db.execute(
+            """
+            INSERT INTO cuentas_por_pagar
+                (proveedor_id, factura_id, concepto, monto_total, fecha_emision, fecha_vencimiento, estado, usuario, creado_en, actualizado_en)
+            VALUES (?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?)
+            """,
+            (proveedor_id, factura_id, "Tramo a crédito" if monto_contado > 0 else "",
+             monto_credito, fecha_emision, fecha_vencimiento, usuario_actual(), ts, ts),
+        )
 
 
-def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True):
+def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True,
+                        condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None):
     """Inserta la factura y sus líneas, aplicando el ingreso de stock si
-    corresponde, y generando su Cuenta por Pagar (ver
+    corresponde, y generando su(s) Cuenta(s) por Pagar (ver
     _generar_cxp_de_factura). Separado de crear_factura() para poder
     reutilizarlo también desde la carga masiva vía Excel (Módulo de
-    compras) y desde la aprobación de facturas recibidas por WhatsApp."""
+    compras), desde la aprobación de facturas recibidas por WhatsApp, y
+    desde la aprobación de recepción de facturas registradas por Finanzas."""
     ts = now_iso()
     cur = db.execute(
-        "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en) VALUES (?, ?, ?, ?)",
-        (numero, proveedor_id, fecha, ts),
+        "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en, condicion_pago, porcentaje_contado, plazo_dias_credito) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (numero, proveedor_id, fecha, ts, condicion_pago, porcentaje_contado, plazo_dias_credito),
     )
     factura_id = cur.lastrowid
     factura_row = {"id": factura_id, "numero": numero}
@@ -2793,7 +2890,10 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
                 (now_iso(), cur_linea.lastrowid),
             )
 
-    _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validadas)
+    _generar_cxp_de_factura(
+        db, factura_id, proveedor_id, fecha, lineas_validadas,
+        condicion_pago=condicion_pago, porcentaje_contado=porcentaje_contado, plazo_dias_credito=plazo_dias_credito,
+    )
 
     return factura_id
 
@@ -3978,6 +4078,258 @@ def rechazar_factura_whatsapp_pendiente(pendiente_id):
     db.execute(
         """
         UPDATE facturas_whatsapp_pendientes
+        SET estado = 'rechazada', revisado_por = ?, revisado_en = ?, nota_rechazo = ?
+        WHERE id = ?
+        """,
+        (usuario_actual(), ts, nota, pendiente_id),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Facturas pendientes de recepción — a pedido del taller: hay facturas que
+# se pagan al contado, otras a crédito (30/60/90 días), y otras mixtas
+# (ej. 50% contado / 50% a crédito). Finanzas registra la factura con esas
+# condiciones de pago apenas se pacta con el proveedor, ANTES de que la
+# mercadería llegue físicamente — a diferencia de crear_factura(), acá NO
+# se aplica el stock ni se genera la CxP todavía. Alguien tiene que
+# contrastar esta factura contra lo que llegó de verdad al taller y
+# aprobarla (ajustando cantidades por línea si algo no calzó) o
+# rechazarla; solo al aprobar se crea la factura real (_registrar_factura,
+# con las condiciones de pago ya definidas) y recién ahí se aplica el
+# stock y se generan las Cuentas por Pagar. No hay un rol "Bodega"
+# separado en este sistema — cualquier sesión iniciada puede aprobar o
+# rechazar, igual que ya pasa con las facturas de WhatsApp — pero para que
+# esto no quede escondido como pasaba con "Pendientes de WhatsApp" (solo
+# se veía si entrabas a Facturas), estas quedan avisadas con un aviso
+# global bloqueante en cualquier pantalla (ver alerta_facturas_pendientes.js).
+# ---------------------------------------------------------------------------
+
+CONDICIONES_PAGO_VALIDAS = {"contado", "credito", "mixto"}
+
+
+def _factura_pendiente_recepcion_dict(db, row):
+    d = dict(row)
+    d["lineas"] = json.loads(d.pop("lineas_json") or "[]")
+    recibidas = d.pop("lineas_recibidas_json", None)
+    d["lineas_recibidas"] = json.loads(recibidas) if recibidas else None
+    d["monto_total"] = round(sum(l["cantidad"] * l["precio_unitario"] for l in d["lineas"]), 2)
+    if d["proveedor_id"]:
+        prov = db.execute("SELECT nombre FROM proveedores WHERE id = ?", (d["proveedor_id"],)).fetchone()
+        d["proveedor_nombre"] = prov["nombre"] if prov else ""
+    else:
+        d["proveedor_nombre"] = ""
+    return d
+
+
+@app.route("/api/facturas/pendientes-recepcion", methods=["GET"])
+def listar_facturas_pendientes_recepcion():
+    db = get_db()
+    estado = request.args.get("estado", "").strip()
+    if estado:
+        filas = db.execute(
+            "SELECT * FROM facturas_finanzas_pendientes WHERE estado = ? ORDER BY creado_en DESC", (estado,)
+        ).fetchall()
+    else:
+        filas = db.execute("SELECT * FROM facturas_finanzas_pendientes ORDER BY creado_en DESC").fetchall()
+    return jsonify({"pendientes": [_factura_pendiente_recepcion_dict(db, f) for f in filas]})
+
+
+@app.route("/api/facturas/pendientes-recepcion/contador", methods=["GET"])
+def contador_facturas_pendientes_recepcion():
+    """Endpoint liviano para el aviso global (se consulta seguido, desde
+    cualquier pantalla) — solo el número, no los datos completos."""
+    db = get_db()
+    n = db.execute(
+        "SELECT COUNT(*) FROM facturas_finanzas_pendientes WHERE estado = 'pendiente'"
+    ).fetchone()[0]
+    return jsonify({"pendientes": n})
+
+
+@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>", methods=["GET"])
+def detalle_factura_pendiente_recepcion(pendiente_id):
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    return jsonify(_factura_pendiente_recepcion_dict(db, fila))
+
+
+@app.route("/api/facturas/pendientes-recepcion", methods=["POST"])
+def crear_factura_pendiente_recepcion():
+    data = request.get_json(force=True, silent=True) or {}
+    numero = (data.get("numero") or "").strip().upper()
+    proveedor_id = data.get("proveedor_id") or None
+    fecha = (data.get("fecha") or "").strip()
+    lineas_in = data.get("lineas") or []
+    condicion_pago = (data.get("condicion_pago") or "credito").strip().lower()
+    try:
+        porcentaje_contado = float(data.get("porcentaje_contado") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El porcentaje al contado debe ser un número"}), 400
+    try:
+        plazo_dias_credito = int(data.get("plazo_dias_credito") or CXP_DIAS_VENCIMIENTO_DEFECTO)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El plazo de crédito debe ser un número de días"}), 400
+
+    if not numero:
+        return jsonify({"error": "El número de factura es obligatorio"}), 400
+    if not lineas_in:
+        return jsonify({"error": "Agrega al menos un producto a la factura"}), 400
+    if condicion_pago not in CONDICIONES_PAGO_VALIDAS:
+        return jsonify({"error": f"Condición de pago inválida. Usa una de: {', '.join(CONDICIONES_PAGO_VALIDAS)}"}), 400
+    if condicion_pago == "mixto" and not (0 < porcentaje_contado < 100):
+        return jsonify({"error": "Para una condición mixta, el porcentaje al contado debe estar entre 0 y 100 (sin incluirlos)"}), 400
+    if plazo_dias_credito <= 0 and condicion_pago in ("credito", "mixto"):
+        return jsonify({"error": "El plazo de crédito debe ser mayor a 0 días"}), 400
+
+    db = get_db()
+    existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
+    if existe:
+        return jsonify({"error": f"Ya existe una factura registrada con el número '{numero}'"}), 400
+    ya_pendiente = db.execute(
+        "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente'", (numero,)
+    ).fetchone()
+    if ya_pendiente:
+        return jsonify({"error": f"Ya hay una factura pendiente de recepción con el número '{numero}'"}), 400
+
+    if proveedor_id:
+        try:
+            proveedor_id = int(proveedor_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Proveedor inválido"}), 400
+        if not db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone():
+            return jsonify({"error": "El proveedor seleccionado no existe"}), 400
+
+    lineas_validadas = []
+    productos_vistos = set()
+    for i, linea in enumerate(lineas_in, start=1):
+        try:
+            producto_id = int(linea.get("producto_id"))
+            cantidad = int(linea.get("cantidad"))
+            precio_unitario = float(linea.get("precio_unitario"))
+        except (TypeError, ValueError):
+            return jsonify({"error": f"Línea {i}: producto, cantidad y precio deben ser válidos"}), 400
+        if cantidad <= 0:
+            return jsonify({"error": f"Línea {i}: la cantidad debe ser mayor a 0"}), 400
+        if precio_unitario < 0:
+            return jsonify({"error": f"Línea {i}: el precio no puede ser negativo"}), 400
+        producto = db.execute("SELECT id, nombre FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        if not producto:
+            return jsonify({"error": f"Línea {i}: el producto seleccionado no existe"}), 400
+        if producto_id in productos_vistos:
+            return jsonify({"error": f"Línea {i}: ese producto ya está agregado en otra línea de esta misma factura"}), 400
+        productos_vistos.add(producto_id)
+        lineas_validadas.append({"producto_id": producto_id, "producto_nombre": producto["nombre"],
+                                  "cantidad": cantidad, "precio_unitario": precio_unitario})
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO facturas_finanzas_pendientes
+            (numero, proveedor_id, fecha, lineas_json, condicion_pago, porcentaje_contado,
+             plazo_dias_credito, estado, creado_por, creado_en)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?)
+        """,
+        (numero, proveedor_id, fecha, json.dumps(lineas_validadas), condicion_pago, porcentaje_contado,
+         plazo_dias_credito, usuario_actual(), ts),
+    )
+    db.commit()
+    nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(_factura_pendiente_recepcion_dict(db, nueva)), 201
+
+
+@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/aprobar", methods=["POST"])
+def aprobar_factura_pendiente_recepcion(pendiente_id):
+    """Aprueba la recepción: recibe (opcionalmente) las cantidades
+    efectivamente contadas físicamente por línea — si una línea no viene en
+    'lineas_recibidas', se asume que llegó tal cual estaba facturada. Una
+    línea con cantidad_recibida = 0 simplemente no se carga (ej. no llegó
+    nada de ese producto). El monto de la(s) CxP generada(s) siempre se
+    calcula sobre lo efectivamente recibido, no sobre lo facturado — si
+    llegó menos de lo pactado, se le paga al proveedor solo por lo que
+    llegó."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if fila["estado"] != "pendiente":
+        return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede volver a procesar."}), 400
+
+    ya_existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (fila["numero"],)).fetchone()
+    if ya_existe:
+        return jsonify({"error": f"Ya existe una factura registrada con el número '{fila['numero']}'"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    lineas_recibidas_in = data.get("lineas_recibidas")
+    lineas_facturadas = json.loads(fila["lineas_json"])
+
+    cantidades_por_producto = {}
+    if lineas_recibidas_in is not None:
+        for lr in lineas_recibidas_in:
+            try:
+                pid = int(lr.get("producto_id"))
+                cant = int(lr.get("cantidad_recibida"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Las cantidades recibidas deben ser números válidos"}), 400
+            if cant < 0:
+                return jsonify({"error": "Una cantidad recibida no puede ser negativa"}), 400
+            cantidades_por_producto[pid] = cant
+
+    _iniciar_transaccion_stock(db)
+
+    lineas_validadas = []
+    lineas_recibidas_registro = []
+    for l in lineas_facturadas:
+        cantidad_recibida = cantidades_por_producto.get(l["producto_id"], l["cantidad"]) if lineas_recibidas_in is not None else l["cantidad"]
+        lineas_recibidas_registro.append({"producto_id": l["producto_id"], "cantidad_recibida": cantidad_recibida})
+        if cantidad_recibida <= 0:
+            continue
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (l["producto_id"],)).fetchone()
+        if not producto:
+            return jsonify({"error": f"El producto '{l.get('producto_nombre', l['producto_id'])}' ya no existe en el inventario"}), 400
+        lineas_validadas.append((producto, cantidad_recibida, l["precio_unitario"]))
+
+    if not lineas_validadas:
+        return jsonify({"error": "No se puede aprobar una recepción sin ningún producto recibido — si nada llegó, rechaza la factura."}), 400
+
+    factura_id = _registrar_factura(
+        db, fila["numero"], fila["proveedor_id"], fila["fecha"], lineas_validadas, usuario_actual(),
+        aplicar_stock=True, condicion_pago=fila["condicion_pago"],
+        porcentaje_contado=fila["porcentaje_contado"], plazo_dias_credito=fila["plazo_dias_credito"],
+    )
+
+    ts = now_iso()
+    db.execute(
+        """
+        UPDATE facturas_finanzas_pendientes
+        SET estado = 'aprobada', factura_id = ?, lineas_recibidas_json = ?, revisado_por = ?, revisado_en = ?
+        WHERE id = ?
+        """,
+        (factura_id, json.dumps(lineas_recibidas_registro), usuario_actual(), ts, pendiente_id),
+    )
+    db.commit()
+
+    nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
+    return jsonify(_factura_detalle(db, nueva)), 201
+
+
+@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/rechazar", methods=["POST"])
+def rechazar_factura_pendiente_recepcion(pendiente_id):
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if fila["estado"] != "pendiente":
+        return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede volver a procesar."}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    nota = (data.get("nota") or "").strip()
+    ts = now_iso()
+    db.execute(
+        """
+        UPDATE facturas_finanzas_pendientes
         SET estado = 'rechazada', revisado_por = ?, revisado_en = ?, nota_rechazo = ?
         WHERE id = ?
         """,

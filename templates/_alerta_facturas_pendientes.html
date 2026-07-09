@@ -1,0 +1,62 @@
+<!-- Aviso global: facturas de compra pendientes de recepción (ver
+     static/js/alerta_facturas_pendientes.js). Se incluye en todas las
+     plantillas autenticadas para que esto no quede escondido dentro de un
+     módulo en particular — cualquiera con sesión iniciada, en cualquier
+     pantalla, ve que hay algo por revisar hasta que se resuelva. -->
+
+<div class="afp-flotante" id="afp-flotante" style="display:none">
+  <button type="button" id="afp-btn-flotante">
+    <span class="afp-flotante-icono">📦</span>
+    <span id="afp-flotante-texto">0 facturas por revisar</span>
+  </button>
+</div>
+
+<div class="modal-overlay" id="afp-modal-lista">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Facturas pendientes de recepción</h2>
+      <button class="modal-close" data-close="afp-modal-lista">&times;</button>
+    </div>
+    <p class="ayuda-inline">Finanzas las registra con sus condiciones de pago apenas se pactan con el proveedor. Contrasta cada una contra lo que llegó físicamente antes de aprobarla — recién ahí se aplica el stock y se genera lo que corresponda pagar.</p>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr><th>Factura</th><th>Proveedor</th><th>Condición</th><th class="num">Monto facturado</th><th></th></tr>
+        </thead>
+        <tbody id="afp-tbody-lista">
+          <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="afp-modal-detalle">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="afp-detalle-titulo">Factura</h2>
+      <button class="modal-close" data-close="afp-modal-detalle">&times;</button>
+    </div>
+    <dl id="afp-detalle-ficha"></dl>
+    <h3 class="subtitulo">Líneas — ajusta "Recibido" si algo no calzó con lo físico</h3>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr><th>Producto</th><th class="num">Facturado</th><th class="num">Recibido</th><th class="num">Precio unit.</th></tr>
+        </thead>
+        <tbody id="afp-tbody-lineas"></tbody>
+      </table>
+    </div>
+    <p class="ayuda-inline">Si una línea queda en 0, ese producto simplemente no se carga al inventario. Lo que se le pague al proveedor se calcula sobre lo recibido, no sobre lo facturado.</p>
+    <div class="campo">
+      <label>Nota (obligatoria solo si vas a rechazar)</label>
+      <input type="text" id="afp-nota-rechazo" placeholder="Ej: Llegó incompleta / dañada, se coordina con el proveedor">
+    </div>
+    <div class="modal-actions modal-actions--split">
+      <button type="button" class="btn btn-danger" id="afp-btn-rechazar">Rechazar factura</button>
+      <button type="button" class="btn btn-primary" id="afp-btn-aprobar">Aprobar recepción</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="afp-toast"></div>

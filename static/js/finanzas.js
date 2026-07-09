@@ -123,7 +123,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "resumen") cargarResumenFinanzas();
     if (vista === "caja") cargarCaja();
     if (vista === "cxc") cargarCxc();
-    if (vista === "cxp") cargarCxp();
+    if (vista === "cxp") { cargarCxp(); cargarFacturasPendientesRecepcion(); }
   });
 });
 
@@ -724,6 +724,155 @@ document.getElementById("form-cxp-pago").addEventListener("submit", async (e) =>
     toast("Pago registrado");
     cerrarModal("modal-cxp-pago");
     await cargarCxp();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Facturas de compra pendientes de recepción — Finanzas las registra acá
+// con sus condiciones de pago (contado / crédito / mixto). No aplican
+// stock ni generan CxP hasta que se aprueben (ver aviso global 📦 en
+// alerta_facturas_pendientes.js, que es donde de verdad se revisan y
+// aprueban/rechazan — acá solo se crean y se les hace seguimiento de
+// estado).
+// ---------------------------------------------------------------------------
+
+const ESTADO_PFR_LABEL = { pendiente: "Pendiente de revisión", aprobada: "Aprobada", rechazada: "Rechazada" };
+
+async function cargarFacturasPendientesRecepcion() {
+  const tbody = document.getElementById("tbody-facturas-pendientes");
+  try {
+    const data = await api("/api/facturas/pendientes-recepcion");
+    if (data.pendientes.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" class="vacio">Todavía no se ha registrado ninguna factura por este camino.</td></tr>`;
+      return;
+    }
+    const etiquetaCondicion = { contado: "Contado", credito: "Crédito", mixto: "Mixto" };
+    tbody.innerHTML = data.pendientes.map(p => `
+      <tr>
+        <td>${escapeHtml(p.numero)}</td>
+        <td>${escapeHtml(p.proveedor_nombre) || "—"}</td>
+        <td>${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}${p.condicion_pago === "credito" ? ` (${p.plazo_dias_credito}d)` : ""}${p.condicion_pago === "mixto" ? ` (${p.porcentaje_contado}% contado)` : ""}</td>
+        <td class="num mono">${fmtMoney(p.monto_total)}</td>
+        <td><span class="mov-tipo mov-tipo--${p.estado === "aprobada" ? "entrada" : p.estado === "rechazada" ? "perdida" : "salida"}">${ESTADO_PFR_LABEL[p.estado] || p.estado}</span></td>
+        <td>${escapeHtml(p.creado_por) || "—"}</td>
+      </tr>`).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+  }
+}
+
+function actualizarTotalFacturaPendiente() {
+  const filas = Array.from(document.querySelectorAll("#pfr-lineas .fac-linea-row"));
+  const total = filas.reduce((acc, fila) => {
+    const cantidad = parseFloat(fila.querySelector(".pfr-linea-cantidad").value) || 0;
+    const precio = parseFloat(fila.querySelector(".pfr-linea-precio").value) || 0;
+    return acc + cantidad * precio;
+  }, 0);
+  document.getElementById("pfr-total-vivo").textContent = fmtMoney(total);
+}
+
+function filaLineaFacturaPendiente(productos) {
+  const div = document.createElement("div");
+  div.className = "fac-linea-row";
+  div.innerHTML = `
+    <div class="campo">
+      <label>Producto</label>
+      <select class="pfr-linea-producto-id">
+        <option value="">Selecciona un producto…</option>
+        ${productos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="campo">
+      <label>Cantidad</label>
+      <input type="number" class="pfr-linea-cantidad" min="1" value="1">
+    </div>
+    <div class="campo">
+      <label>Precio unit. ($ CLP)</label>
+      <input type="number" class="pfr-linea-precio" min="0" step="1" value="0">
+    </div>
+    <button type="button" class="fac-linea-quitar">Quitar</button>
+  `;
+  div.querySelector(".fac-linea-quitar").addEventListener("click", () => {
+    div.remove();
+    actualizarTotalFacturaPendiente();
+  });
+  div.querySelector(".pfr-linea-cantidad").addEventListener("input", actualizarTotalFacturaPendiente);
+  div.querySelector(".pfr-linea-precio").addEventListener("input", actualizarTotalFacturaPendiente);
+  return div;
+}
+
+let pfrProductosCache = [];
+
+document.getElementById("btn-nueva-factura-pendiente").addEventListener("click", async () => {
+  document.getElementById("form-factura-pendiente").reset();
+  document.getElementById("pfr-lineas").innerHTML = "";
+  document.getElementById("pfr-campos-mixto").style.display = "none";
+  document.getElementById("pfr-campos-credito").style.display = "block";
+  try {
+    const [dataProductos, dataProveedores] = await Promise.all([api("/api/productos"), api("/api/proveedores")]);
+    pfrProductosCache = dataProductos.productos;
+    const select = document.getElementById("pfr-proveedor-id");
+    select.innerHTML = '<option value="">Sin proveedor</option>' +
+      dataProveedores.proveedores.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join("");
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  document.getElementById("pfr-lineas").appendChild(filaLineaFacturaPendiente(pfrProductosCache));
+  actualizarTotalFacturaPendiente();
+  abrirModal("modal-factura-pendiente");
+});
+
+document.getElementById("pfr-agregar-linea").addEventListener("click", () => {
+  document.getElementById("pfr-lineas").appendChild(filaLineaFacturaPendiente(pfrProductosCache));
+});
+
+document.querySelectorAll('input[name="pfr-condicion"]').forEach(radio => {
+  radio.addEventListener("change", () => {
+    const condicion = document.querySelector('input[name="pfr-condicion"]:checked').value;
+    document.getElementById("pfr-campos-mixto").style.display = condicion === "mixto" ? "grid" : "none";
+    document.getElementById("pfr-campos-credito").style.display = condicion === "contado" ? "none" : "grid";
+  });
+});
+
+document.querySelectorAll(".pfr-plazos-rapidos [data-plazo]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.getElementById("pfr-plazo-dias").value = btn.dataset.plazo;
+  });
+});
+
+document.getElementById("form-factura-pendiente").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const filas = Array.from(document.querySelectorAll("#pfr-lineas .fac-linea-row"));
+  const lineas = filas.map(fila => ({
+    producto_id: fila.querySelector(".pfr-linea-producto-id").value,
+    cantidad: fila.querySelector(".pfr-linea-cantidad").value,
+    precio_unitario: fila.querySelector(".pfr-linea-precio").value,
+  }));
+  if (lineas.some(l => !l.producto_id)) {
+    toast("Selecciona un producto en cada línea (o quítala)", true);
+    return;
+  }
+  const condicion = document.querySelector('input[name="pfr-condicion"]:checked').value;
+
+  try {
+    await api("/api/facturas/pendientes-recepcion", {
+      method: "POST",
+      body: JSON.stringify({
+        numero: document.getElementById("pfr-numero").value,
+        proveedor_id: document.getElementById("pfr-proveedor-id").value || null,
+        fecha: document.getElementById("pfr-fecha").value,
+        lineas,
+        condicion_pago: condicion,
+        porcentaje_contado: condicion === "mixto" ? Number(document.getElementById("pfr-porcentaje-contado").value) : (condicion === "contado" ? 100 : 0),
+        plazo_dias_credito: Number(document.getElementById("pfr-plazo-dias").value || 30),
+      }),
+    });
+    toast("Factura registrada — queda pendiente de aprobar la recepción");
+    cerrarModal("modal-factura-pendiente");
+    await cargarFacturasPendientesRecepcion();
   } catch (e) {
     toast(e.message, true);
   }

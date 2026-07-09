@@ -1497,6 +1497,61 @@ body::before { content: none; }
   margin: 2px 0 10px;
 }
 
+/* ---------- Aviso global: facturas pendientes de recepción ---------- */
+/* Visible en cualquier módulo (ver alerta_facturas_pendientes.js) — a
+   diferencia del badge de "Pendientes de WhatsApp" (que solo se veía
+   dentro de Facturas), este flota sobre toda la app hasta que se resuelvan
+   todas las facturas pendientes. */
+
+.afp-flotante {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 90;
+}
+
+.afp-flotante button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--danger, #d9534f);
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 12px 20px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  animation: afp-pulso 1.8s ease-in-out infinite;
+}
+
+.afp-flotante-icono { font-size: 18px; }
+
+@keyframes afp-pulso {
+  0%, 100% { box-shadow: 0 6px 24px rgba(217, 83, 79, 0.35); }
+  50% { box-shadow: 0 6px 28px rgba(217, 83, 79, 0.75); }
+}
+
+.afp-linea-recibido input {
+  width: 90px;
+}
+
+.afp-linea-diff {
+  color: var(--danger, #d9534f);
+  font-weight: 600;
+}
+
+.pfr-plazos-rapidos {
+  display: flex;
+  gap: 8px;
+}
+.pfr-plazos-rapidos .btn {
+  padding: 8px 12px;
+  font-size: 12.5px;
+}
+
 /* ---------- Responsive ---------- */
 
 @media (max-width: 760px) {

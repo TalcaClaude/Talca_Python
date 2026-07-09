@@ -2707,6 +2707,222 @@ class TestCuentasPorPagar(unittest.TestCase):
         self.assertEqual(fila["estado"], "parcial")
 
 
+class TestFacturasPendientesDeRecepcion(unittest.TestCase):
+    """Una factura que Finanzas registra con condiciones de pago (contado /
+    crédito / mixto) no debe tocar el inventario ni generar Cuentas por
+    Pagar hasta que alguien contraste lo recibido físicamente y la
+    apruebe (o la rechace). Si esto se rompe, se podría inflar el stock o
+    generar una deuda a proveedor por mercadería que en realidad nunca
+    llegó al taller, o que llegó en menor cantidad de la pactada."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_producto_http(self, nombre, stock_disponible=0, costo_compra=1000):
+        resp = self.client.post(
+            "/api/productos",
+            json={"nombre": nombre, "stock_disponible": stock_disponible, "costo_compra": costo_compra},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_pendiente(self, numero, producto_id, cantidad=5, precio_unitario=1000, **extra):
+        body = {
+            "numero": numero,
+            "fecha": datetime.now().strftime("%Y-%m-%d"),
+            "lineas": [{"producto_id": producto_id, "cantidad": cantidad, "precio_unitario": precio_unitario}],
+            "condicion_pago": "credito",
+        }
+        body.update(extra)
+        resp = self.client.post("/api/facturas/pendientes-recepcion", json=body)
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def test_crear_pendiente_no_toca_stock_ni_genera_cxp(self):
+        producto = self._crear_producto_http("Producto - pendiente no toca stock", stock_disponible=0)
+        self._crear_pendiente("FACT-PEND-001", producto["id"], cantidad=10, precio_unitario=1000)
+
+        sin_cambios = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(sin_cambios["stock_disponible"], 0)
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT id FROM facturas WHERE numero = ?", ("FACT-PEND-001",)).fetchone()
+            cxp = db.execute(
+                "SELECT COUNT(*) FROM cuentas_por_pagar cxp JOIN facturas f ON f.id = cxp.factura_id WHERE f.numero = ?",
+                ("FACT-PEND-001",),
+            ).fetchone()[0]
+        self.assertIsNone(factura)
+        self.assertEqual(cxp, 0)
+
+    def test_no_se_puede_crear_dos_pendientes_con_el_mismo_numero(self):
+        producto = self._crear_producto_http("Producto - pendiente numero duplicado", stock_disponible=0)
+        self._crear_pendiente("FACT-PEND-DUP-001", producto["id"])
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-DUP-001",
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_aprobar_tal_cual_facturado_aplica_stock_y_genera_cxp_a_credito(self):
+        producto = self._crear_producto_http("Producto - aprobar credito", stock_disponible=0)
+        pendiente = self._crear_pendiente(
+            "FACT-PEND-CRED-001", producto["id"], cantidad=4, precio_unitario=2500,
+            condicion_pago="credito", plazo_dias_credito=60,
+        )
+        resp = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+        actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(actualizado["stock_disponible"], 4)
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT * FROM facturas WHERE numero = ?", ("FACT-PEND-CRED-001",)).fetchone()
+            self.assertEqual(factura["condicion_pago"], "credito")
+            cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
+            self.assertEqual(cxp["monto_total"], 10000)
+            self.assertEqual(cxp["estado"], "pendiente")
+            dias = (datetime.fromisoformat(cxp["fecha_vencimiento"]) - datetime.fromisoformat(cxp["fecha_emision"])).days
+            self.assertEqual(dias, 60)
+
+        pend_actualizado = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
+        self.assertEqual(pend_actualizado["estado"], "aprobada")
+
+    def test_aprobar_al_contado_genera_cxp_ya_pagada(self):
+        producto = self._crear_producto_http("Producto - aprobar contado", stock_disponible=0)
+        pendiente = self._crear_pendiente(
+            "FACT-PEND-CONT-001", producto["id"], cantidad=2, precio_unitario=5000, condicion_pago="contado",
+        )
+        resp = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT * FROM facturas WHERE numero = ?", ("FACT-PEND-CONT-001",)).fetchone()
+            cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
+            self.assertEqual(cxp["estado"], "pagada")
+            self.assertEqual(cxp["monto_total"], 10000)
+            pago = db.execute("SELECT * FROM cxp_pagos WHERE cxp_id = ?", (cxp["id"],)).fetchone()
+            self.assertEqual(pago["monto"], 10000)
+            self.assertEqual(pago["metodo_pago"], "contado")
+
+    def test_aprobar_mixto_genera_dos_cxp_una_pagada_y_una_pendiente(self):
+        producto = self._crear_producto_http("Producto - aprobar mixto", stock_disponible=0)
+        pendiente = self._crear_pendiente(
+            "FACT-PEND-MIX-001", producto["id"], cantidad=10, precio_unitario=1000,
+            condicion_pago="mixto", porcentaje_contado=50, plazo_dias_credito=30,
+        )
+        resp = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT * FROM facturas WHERE numero = ?", ("FACT-PEND-MIX-001",)).fetchone()
+            cxps = db.execute(
+                "SELECT * FROM cuentas_por_pagar WHERE factura_id = ? ORDER BY id", (factura["id"],)
+            ).fetchall()
+        self.assertEqual(len(cxps), 2)
+        montos_por_estado = {c["estado"]: c["monto_total"] for c in cxps}
+        self.assertEqual(montos_por_estado["pagada"], 5000)
+        self.assertEqual(montos_por_estado["pendiente"], 5000)
+
+    def test_mixto_sin_porcentaje_valido_es_rechazado_al_crear(self):
+        producto = self._crear_producto_http("Producto - mixto invalido", stock_disponible=0)
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-MIX-INVALIDO",
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
+                "condicion_pago": "mixto",
+                "porcentaje_contado": 0,
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_aprobar_con_cantidad_recibida_menor_ajusta_stock_y_monto_de_cxp(self):
+        # Se facturaron 10 unidades pero solo llegaron físicamente 6 — el
+        # stock que se aplica y lo que se le debe al proveedor tienen que
+        # reflejar lo que de verdad llegó, no lo que decía la factura.
+        producto = self._crear_producto_http("Producto - recepcion parcial", stock_disponible=0)
+        pendiente = self._crear_pendiente(
+            "FACT-PEND-PARCIAL-001", producto["id"], cantidad=10, precio_unitario=1000, condicion_pago="credito",
+        )
+        resp = self.client.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar",
+            json={"lineas_recibidas": [{"producto_id": producto["id"], "cantidad_recibida": 6}]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+        actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(actualizado["stock_disponible"], 6)
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT * FROM facturas WHERE numero = ?", ("FACT-PEND-PARCIAL-001",)).fetchone()
+            cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
+        self.assertEqual(cxp["monto_total"], 6000)
+
+    def test_aprobar_con_cantidad_recibida_cero_no_falla_por_falta_de_lineas_validas(self):
+        producto = self._crear_producto_http("Producto - recepcion nada llego", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-CERO-001", producto["id"], cantidad=5, precio_unitario=1000)
+        resp = self.client.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar",
+            json={"lineas_recibidas": [{"producto_id": producto["id"], "cantidad_recibida": 0}]},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rechazar_no_aplica_stock_ni_crea_factura(self):
+        producto = self._crear_producto_http("Producto - pendiente rechazada", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-RECH-001", producto["id"], cantidad=5, precio_unitario=1000)
+
+        resp = self.client.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar",
+            json={"nota": "Llegó dañada, se devolvió completa al proveedor."},
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        sin_cambios = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(sin_cambios["stock_disponible"], 0)
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT id FROM facturas WHERE numero = ?", ("FACT-PEND-RECH-001",)).fetchone()
+        self.assertIsNone(factura)
+
+        pend_actualizado = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
+        self.assertEqual(pend_actualizado["estado"], "rechazada")
+        self.assertEqual(pend_actualizado["nota_rechazo"], "Llegó dañada, se devolvió completa al proveedor.")
+
+    def test_no_se_puede_aprobar_ni_rechazar_dos_veces(self):
+        producto = self._crear_producto_http("Producto - doble procesamiento", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-DOBLE-001", producto["id"])
+        self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+
+        resp_aprobar_de_nuevo = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp_aprobar_de_nuevo.status_code, 400)
+        resp_rechazar_despues = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar", json={})
+        self.assertEqual(resp_rechazar_despues.status_code, 400)
+
+    def test_contador_de_pendientes_refleja_solo_las_en_estado_pendiente(self):
+        producto = self._crear_producto_http("Producto - contador pendientes", stock_disponible=0)
+        antes = self.client.get("/api/facturas/pendientes-recepcion/contador").get_json()["pendientes"]
+
+        p1 = self._crear_pendiente("FACT-PEND-CONTADOR-001", producto["id"])
+        self._crear_pendiente("FACT-PEND-CONTADOR-002", producto["id"])
+        self.client.post(f"/api/facturas/pendientes-recepcion/{p1['id']}/aprobar", json={})
+
+        despues = self.client.get("/api/facturas/pendientes-recepcion/contador").get_json()["pendientes"]
+        # Se crearon 2, se aprobó 1 -> debe quedar 1 más que "antes".
+        self.assertEqual(despues, antes + 1)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

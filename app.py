@@ -61,6 +61,8 @@ from core import (  # noqa: E402
     row_to_dict,
     codigo_ubicacion,
     nombre_automatico,
+    normalizar_busqueda,
+    coincide_busqueda,
     now_iso,
     fmt_money_pdf,
     usuario_actual,
@@ -1098,13 +1100,12 @@ def listar_productos():
     sql = PRODUCTO_SELECT + " WHERE 1=1"
     params = []
 
-    if q:
-        sql += """ AND (
-            p.codigo_interno LIKE ? OR p.nombre LIKE ? OR p.descripcion LIKE ?
-            OR p.modelo LIKE ? OR p.ubicacion LIKE ? OR u.codigo LIKE ? OR CAST(p.id AS TEXT) LIKE ?
-        )"""
-        like = f"%{q}%"
-        params += [like, like, like, like, like, like, like]
+    # 'q' se filtra en Python (ver coincide_busqueda en core.py), no con SQL
+    # LIKE: así la búsqueda ignora tildes/mayúsculas y admite varias palabras
+    # sueltas que pueden calzar en campos distintos (ej. "6f35 bomba"
+    # encuentra un producto cuyo código es "6F35" Y cuya descripción
+    # menciona "bomba"), en vez de tener que acertarle a una frase exacta
+    # dentro de un solo campo.
 
     if categoria:
         sql += " AND p.categoria = ?"
@@ -1139,10 +1140,20 @@ def listar_productos():
         "SELECT DISTINCT categoria FROM productos WHERE categoria != '' ORDER BY categoria"
     ).fetchall()]
 
+    sql += " ORDER BY p.nombre COLLATE NOCASE ASC"
+    rows = db.execute(sql, params).fetchall()
+    productos = [row_to_dict(r) for r in rows]
+
+    if q:
+        productos = [
+            p for p in productos
+            if coincide_busqueda(
+                q, p.get("codigo_interno"), p.get("nombre"), p.get("descripcion"),
+                p.get("modelo"), p.get("ubicacion"), p.get("ubicacion_codigo"), p.get("id"),
+            )
+        ]
+
     if not paginar:
-        sql += " ORDER BY p.nombre COLLATE NOCASE ASC"
-        rows = db.execute(sql, params).fetchall()
-        productos = [row_to_dict(r) for r in rows]
         return jsonify({
             "productos": productos,
             "categorias": categorias,
@@ -1150,7 +1161,7 @@ def listar_productos():
             "total_sin_ubicacion": total_sin_ubicacion,
         })
 
-    total = db.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
+    total = len(productos)
 
     try:
         pagina = max(1, int(request.args.get("pagina", 1)))
@@ -1164,11 +1175,8 @@ def listar_productos():
     total_paginas = max(1, math.ceil(total / por_pagina))
     pagina = min(pagina, total_paginas)
 
-    sql += " ORDER BY p.nombre COLLATE NOCASE ASC LIMIT ? OFFSET ?"
-    params = params + [por_pagina, (pagina - 1) * por_pagina]
-
-    rows = db.execute(sql, params).fetchall()
-    productos = [row_to_dict(r) for r in rows]
+    inicio = (pagina - 1) * por_pagina
+    productos = productos[inicio:inicio + por_pagina]
 
     return jsonify({
         "productos": productos,
@@ -4344,27 +4352,34 @@ def listar_movimientos():
     if hasta:
         sql += " AND m.fecha <= ?"
         params.append(hasta + "T23:59:59")
-    if q:
-        sql += " AND (m.motivo LIKE ? OR m.usuario LIKE ? OR p.nombre LIKE ? OR m.factura_numero LIKE ?)"
-        like = f"%{q}%"
-        params += [like, like, like, like]
 
-    # Cuántos movimientos calzan con el filtro EN TOTAL, antes del LIMIT — se
-    # necesita para avisar si se está mostrando solo una parte (el límite
-    # existe para no traer, por ejemplo, 40.000 filas de una sola vez).
-    LIMITE_FILAS = 500
-    total_sin_limite = db.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
+    # 'q' se filtra en Python con coincide_busqueda (ver core.py), no con SQL
+    # LIKE — así admite varias palabras sueltas sin tildes que pueden calzar
+    # en campos distintos (ej. "factura 1023 juan" encuentra un movimiento
+    # con esa factura Y ese responsable, aunque estén en columnas separadas).
 
-    sql += " ORDER BY m.fecha DESC, m.id DESC LIMIT ?"
-    params_con_limite = params + [LIMITE_FILAS]
-
-    rows = db.execute(sql, params_con_limite).fetchall()
+    sql += " ORDER BY m.fecha DESC, m.id DESC"
+    rows = db.execute(sql, params).fetchall()
     movimientos = []
     for r in rows:
         d = dict(r)
         d["producto_id_sistema"] = f"{r['producto_id']:04d}" if r["producto_id"] is not None else "----"
         d["producto_nombre"] = d["producto_nombre"] or "(producto eliminado)"
         movimientos.append(d)
+
+    if q:
+        movimientos = [
+            m for m in movimientos
+            if coincide_busqueda(q, m.get("motivo"), m.get("usuario"), m.get("producto_nombre"), m.get("factura_numero"))
+        ]
+
+    # Cuántos movimientos calzan con el filtro EN TOTAL, antes del límite de
+    # cuántas filas se muestran — se necesita para avisar si se está
+    # mostrando solo una parte (el límite existe para no mandar, por
+    # ejemplo, 40.000 filas de una sola vez).
+    LIMITE_FILAS = 500
+    total_sin_limite = len(movimientos)
+    movimientos = movimientos[:LIMITE_FILAS]
 
     return jsonify({
         "movimientos": movimientos,

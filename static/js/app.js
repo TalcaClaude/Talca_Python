@@ -28,6 +28,28 @@ function fmtMoney(n) {
   return "$" + Math.round(n).toLocaleString("es-CL");
 }
 
+// ---------------------------------------------------------------------------
+// Búsqueda "de varias palabras, sin tildes" (mismo criterio que
+// coincide_busqueda en core.py, para los buscadores que filtran en el
+// navegador en vez de pedirle al servidor): minúsculas + sin
+// tildes/diacríticos, y cada palabra escrita tiene que aparecer en alguno
+// de los campos (concatenados) — así "6f35 bomba" encuentra algo cuyo
+// código es "6F35" Y cuya descripción menciona "bomba", aunque sean campos
+// distintos, y mientras más palabras se agregan más se acota el resultado.
+// ---------------------------------------------------------------------------
+
+function normalizarBusqueda(texto) {
+  if (texto === null || texto === undefined) return "";
+  return String(texto).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function coincideBusqueda(consulta, ...campos) {
+  const terminos = normalizarBusqueda(consulta).split(/\s+/).filter(Boolean);
+  if (!terminos.length) return true;
+  const texto = normalizarBusqueda(campos.filter(c => c !== null && c !== undefined && c !== "").join(" "));
+  return terminos.every(t => texto.includes(t));
+}
+
 function fmtFecha(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return iso;
@@ -194,14 +216,14 @@ function renderTablaUbicaciones() {
   }
 
   const buscarInput = document.getElementById("buscar-bodega");
-  const termino = (buscarInput ? buscarInput.value : "").trim().toLowerCase();
+  const termino = buscarInput ? buscarInput.value.trim() : "";
 
   const ubicacionesFiltradas = !termino ? state.ubicaciones : state.ubicaciones.filter(u => {
-    const campos = [u.codigo, String(u.pasillo), String(u.estanteria), String(u.nivel)];
+    const campos = [u.codigo, u.pasillo, u.estanteria, u.nivel];
     u.productos.forEach(p => {
       campos.push(p.nombre, p.codigo_interno, p.categoria, p.modelo);
     });
-    return campos.some(c => c && String(c).toLowerCase().includes(termino));
+    return coincideBusqueda(termino, ...campos);
   });
 
   if (ubicacionesFiltradas.length === 0) {
@@ -1462,25 +1484,39 @@ function filaLineaFactura(idx) {
   const inputId = div.querySelector(".fac-linea-producto-id");
   const resultados = div.querySelector(".autocomplete-resultados");
 
+  // Al elegir un resultado: si esta línea todavía está vacía, se completa
+  // esta misma línea (comportamiento de siempre). Si esta línea YA tiene un
+  // producto, en vez de pisarlo se agrega una línea NUEVA con el producto
+  // elegido — y la lista de resultados queda abierta, con el mismo filtro,
+  // para poder seguir clickeando varios productos parecidos seguidos (ej.
+  // filtrar "bomba" y cargar 3 modelos distintos sin volver a escribir la
+  // búsqueda ni apretar "+ Agregar producto" cada vez).
   function seleccionarProductoLinea(p) {
-    inputId.value = p.id;
-    inputBuscar.value = etiquetaProductoFactura(p);
-    resultados.style.display = "none";
-    actualizarSubtotalLineaFactura(div);
+    if (!inputId.value) {
+      inputId.value = p.id;
+      inputBuscar.value = etiquetaProductoFactura(p);
+      actualizarSubtotalLineaFactura(div);
+      actualizarTotalFactura();
+      inputBuscar.focus();
+      return;
+    }
+    const cont = document.getElementById("fac-lineas");
+    const nuevaLinea = filaLineaFactura(cont.children.length);
+    cont.appendChild(nuevaLinea);
+    nuevaLinea.querySelector(".fac-linea-producto-id").value = p.id;
+    nuevaLinea.querySelector(".fac-linea-producto-buscar").value = etiquetaProductoFactura(p);
+    actualizarSubtotalLineaFactura(nuevaLinea);
     actualizarTotalFactura();
   }
 
   function renderResultadosLinea(texto) {
-    const q = texto.trim().toLowerCase();
+    const q = texto.trim();
     if (!q) {
       resultados.style.display = "none";
       return;
     }
     const coincidencias = state.productosParaFactura.filter(p => {
-      return (p.nombre || "").toLowerCase().includes(q) ||
-        (p.descripcion || "").toLowerCase().includes(q) ||
-        (p.codigo_interno || "").toLowerCase().includes(q) ||
-        String(p.id_sistema || "").toLowerCase().includes(q);
+      return coincideBusqueda(q, p.nombre, p.descripcion, p.codigo_interno, p.id_sistema);
     }).slice(0, 8);
     if (coincidencias.length === 0) {
       resultados.innerHTML = '<div class="autocomplete-sin-resultados">Sin productos que coincidan</div>';
@@ -1513,7 +1549,7 @@ function filaLineaFactura(idx) {
     renderResultadosLinea(inputBuscar.value);
   });
   inputBuscar.addEventListener("focus", () => {
-    if (inputBuscar.value.trim() && !inputId.value) renderResultadosLinea(inputBuscar.value);
+    if (inputBuscar.value.trim()) renderResultadosLinea(inputBuscar.value);
   });
   inputBuscar.addEventListener("blur", () => {
     setTimeout(() => {
@@ -1748,10 +1784,9 @@ function renderTablaProveedores() {
     return;
   }
 
-  const termino = document.getElementById("buscar-proveedores").value.trim().toLowerCase();
+  const termino = document.getElementById("buscar-proveedores").value.trim();
   const filtrados = !termino ? state.proveedores : state.proveedores.filter(p => {
-    const campos = [p.nombre, p.rut, p.telefono, p.email];
-    return campos.some(c => c && String(c).toLowerCase().includes(termino));
+    return coincideBusqueda(termino, p.nombre, p.rut, p.telefono, p.email);
   });
 
   if (filtrados.length === 0) {
@@ -1994,13 +2029,13 @@ function activarAutocompletesCargaMasiva() {
     if (!inputBuscar) return;
 
     function renderResultados(texto) {
-      const q = texto.trim().toLowerCase();
+      const q = texto.trim();
       if (!q) {
         resultados.style.display = "none";
         return;
       }
       const candidatos = (state.productosParaFactura || [])
-        .filter(p => etiquetaProductoFactura(p).toLowerCase().includes(q))
+        .filter(p => coincideBusqueda(q, etiquetaProductoFactura(p)))
         .slice(0, 20);
       if (candidatos.length === 0) {
         resultados.innerHTML = `<div class="autocomplete-sin-resultados">Sin resultados</div>`;

@@ -162,6 +162,21 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+// Búsqueda sin tildes y multi-palabra (misma lógica que app.js): cada
+// palabra escrita debe aparecer en alguno de los campos entregados, sin
+// importar mayúsculas/tildes ni en cuál campo específico caiga cada una.
+function normalizarBusqueda(texto) {
+  if (texto === null || texto === undefined) return "";
+  return String(texto).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function coincideBusqueda(consulta, ...campos) {
+  const terminos = normalizarBusqueda(consulta).split(/\s+/).filter(Boolean);
+  if (!terminos.length) return true;
+  const texto = normalizarBusqueda(campos.filter(c => c !== null && c !== undefined && c !== "").join(" "));
+  return terminos.every(t => texto.includes(t));
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -535,15 +550,12 @@ function renderTableroOperativo() {
     }
   });
 
-  const coincide = (orden) => {
-    if (!busqueda) return true;
-    const partes = [
-      orden.cliente ? orden.cliente.nombre : "",
-      orden.equipo ? `${orden.equipo.marca} ${orden.equipo.modelo} ${orden.equipo.identificador}` : "",
-      orden.descripcion_problema || "",
-    ].join(" ").toLowerCase();
-    return partes.includes(busqueda);
-  };
+  const coincide = (orden) => coincideBusqueda(
+    busqueda,
+    orden.cliente ? orden.cliente.nombre : "",
+    orden.equipo ? `${orden.equipo.marca} ${orden.equipo.modelo} ${orden.equipo.identificador}` : "",
+    orden.descripcion_problema || "",
+  );
 
   OP_ESTADOS_TABLERO.forEach(estado => {
     const cont = document.getElementById(`op-cards-${estado}`);
@@ -1322,11 +1334,11 @@ function renderCostosOrden(orden) {
   } else {
     tbody.innerHTML = items.map(it => `
       <tr>
-        <td>${escapeHtml(OPOI_TIPO_LABEL[it.tipo] || it.tipo)}</td>
-        <td>${escapeHtml(it.descripcion)}</td>
+        <td>${escapeHtml(OPOI_TIPO_LABEL[it.tipo] || it.tipo)}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}</td>
         <td class="num">${it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
-        <td class="num">${fmtMoney(it.cantidad * it.costo_unitario)}</td>
+        <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
       </tr>
     `).join("");
   }
@@ -1728,15 +1740,89 @@ async function abrirRepuestosModal() {
     }
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderItemsOrden(orden);
-    const selectProducto = document.getElementById("opoi-producto-id");
-    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
-      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
+    document.getElementById("opoi-producto-buscar").value = "";
+    document.getElementById("opoi-producto-id").value = "";
+    document.getElementById("opoi-producto-resultados").style.display = "none";
     document.getElementById("form-op-item").reset();
     document.getElementById("opoi-tipo").dispatchEvent(new Event("change"));
   } catch (e) {
     toast(e.message, true);
   }
 }
+
+// Búsqueda de producto para "Carga de repuestos": al hacer clic en un
+// resultado se agrega el ítem al tiro (misma cantidad del campo "Cantidad"),
+// SIN cerrar la lista de resultados — así se puede seguir clickeando otros
+// productos que calcen con el mismo filtro sin retipear la búsqueda. El botón
+// "+ Agregar ítem" se mantiene para mano de obra y como respaldo manual.
+function renderResultadosOpoi(texto) {
+  const resultados = document.getElementById("opoi-producto-resultados");
+  const q = texto.trim();
+  if (!q) {
+    resultados.style.display = "none";
+    return;
+  }
+  const coincidencias = state.opProductos.filter(p =>
+    coincideBusqueda(q, p.nombre, p.descripcion, p.codigo_interno, p.id_sistema)
+  ).slice(0, 8);
+  if (coincidencias.length === 0) {
+    resultados.innerHTML = '<div class="autocomplete-sin-resultados">Sin productos que coincidan</div>';
+    resultados.style.display = "block";
+    return;
+  }
+  resultados.innerHTML = coincidencias.map(p => `
+    <div class="autocomplete-item" data-id="${p.id}">
+      #${escapeHtml(p.id_sistema)} — ${escapeHtml(p.nombre)}
+      <span class="autocomplete-item-meta">Stock: ${p.stock_disponible}</span>
+    </div>
+  `).join("");
+  resultados.style.display = "block";
+  resultados.querySelectorAll(".autocomplete-item").forEach(item => {
+    // mousedown (no click) para que se dispare antes del blur del input.
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const p = state.opProductos.find(x => x.id === parseInt(item.dataset.id, 10));
+      if (p) agregarRepuestoDesdeAutocomplete(p);
+    });
+  });
+}
+
+async function agregarRepuestoDesdeAutocomplete(producto) {
+  const ordenId = document.getElementById("opod-id").value;
+  const cantidad = document.getElementById("opoi-cantidad").value || 1;
+  const textoBusqueda = document.getElementById("opoi-producto-buscar").value;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/items`, {
+      method: "POST",
+      body: JSON.stringify({ tipo: "repuesto", producto_id: producto.id, cantidad }),
+    });
+    toast(`Agregado: ${producto.nombre}`);
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderItemsOrden(orden);
+    renderCostosOrden(orden);
+    // Refresca el stock y vuelve a mostrar los resultados con el mismo
+    // filtro, para poder seguir agregando productos parecidos sin cerrar
+    // la lista ni retipear la búsqueda.
+    const dataProductos = await api("/api/productos");
+    state.opProductos = dataProductos.productos;
+    renderResultadosOpoi(textoBusqueda);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("opoi-producto-buscar").addEventListener("input", (e) => {
+  document.getElementById("opoi-producto-id").value = "";
+  renderResultadosOpoi(e.target.value);
+});
+document.getElementById("opoi-producto-buscar").addEventListener("focus", (e) => {
+  if (e.target.value.trim()) renderResultadosOpoi(e.target.value);
+});
+document.getElementById("opoi-producto-buscar").addEventListener("blur", () => {
+  setTimeout(() => {
+    document.getElementById("opoi-producto-resultados").style.display = "none";
+  }, 150);
+});
 
 function renderItemsOrden(orden) {
   const tbody = document.getElementById("tbody-op-items");
@@ -1745,11 +1831,11 @@ function renderItemsOrden(orden) {
   } else {
     tbody.innerHTML = orden.items.map(it => `
       <tr>
-        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}</td>
-        <td>${escapeHtml(it.descripcion)}</td>
+        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}</td>
         <td class="num">${it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
-        <td class="num">${fmtMoney(it.cantidad * it.costo_unitario)}</td>
+        <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
         <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-item="${it.id}">Eliminar</button></td>
       </tr>
     `).join("");
@@ -1765,6 +1851,7 @@ document.getElementById("opoi-tipo").addEventListener("change", (e) => {
   document.getElementById("opoi-campo-producto").style.display = esRepuesto ? "flex" : "none";
   document.getElementById("opoi-campo-descripcion").style.display = esRepuesto ? "none" : "flex";
   document.getElementById("opoi-campo-costo").style.display = esRepuesto ? "none" : "flex";
+  document.getElementById("opoi-fila-mo-extra").style.display = esRepuesto ? "none" : "flex";
 });
 
 document.getElementById("form-op-item").addEventListener("submit", async (e) => {
@@ -1778,12 +1865,14 @@ document.getElementById("form-op-item").addEventListener("submit", async (e) => 
   if (tipo === "repuesto") {
     payload.producto_id = document.getElementById("opoi-producto-id").value;
     if (!payload.producto_id) {
-      toast("Selecciona un producto.", true);
+      toast("Busca el producto y haz clic en él para agregarlo.", true);
       return;
     }
   } else {
     payload.descripcion = document.getElementById("opoi-descripcion").value.trim();
     payload.costo_unitario = limpiarMonto(document.getElementById("opoi-costo").value) || 0;
+    payload.detalle = document.getElementById("opoi-mo-detalle").value.trim();
+    payload.aplica_iva = document.getElementById("opoi-mo-iva").checked;
     if (!payload.descripcion) {
       toast("Describe la mano de obra realizada.", true);
       return;
@@ -1796,15 +1885,12 @@ document.getElementById("form-op-item").addEventListener("submit", async (e) => 
     renderItemsOrden(orden);
     renderCostosOrden(orden);
     document.getElementById("form-op-item").reset();
+    document.getElementById("opoi-producto-buscar").value = "";
+    document.getElementById("opoi-producto-id").value = "";
     document.getElementById("opoi-tipo").dispatchEvent(new Event("change"));
-    // Refresca el stock mostrado en el selector de productos.
+    // Refresca el stock que se muestra en los resultados de búsqueda.
     const dataProductos = await api("/api/productos");
     state.opProductos = dataProductos.productos;
-    const selectProducto = document.getElementById("opoi-producto-id");
-    const valorActual = selectProducto.value;
-    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
-      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
-    selectProducto.value = valorActual;
   } catch (e2) {
     toast(e2.message, true);
   }
@@ -2306,11 +2392,11 @@ function renderItemsGarantia(garantia) {
   } else {
     tbody.innerHTML = garantia.items.map(it => `
       <tr>
-        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}</td>
-        <td>${escapeHtml(it.descripcion)}</td>
+        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}</td>
         <td class="num">${it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
-        <td class="num">${fmtMoney(it.cantidad * it.costo_unitario)}</td>
+        <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
         <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-gar-item="${it.id}">Eliminar</button></td>
       </tr>
     `).join("");
@@ -2339,9 +2425,9 @@ async function abrirDetalleGarantia(id) {
       const dataProductos = await api("/api/productos");
       state.opProductos = dataProductos.productos;
     }
-    const selectProducto = document.getElementById("gari-producto-id");
-    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
-      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
+    document.getElementById("gari-producto-buscar").value = "";
+    document.getElementById("gari-producto-id").value = "";
+    document.getElementById("gari-producto-resultados").style.display = "none";
     document.getElementById("form-gar-item").reset();
     document.getElementById("gari-tipo").dispatchEvent(new Event("change"));
 
@@ -2350,6 +2436,72 @@ async function abrirDetalleGarantia(id) {
     toast(e.message, true);
   }
 }
+
+// Igual patrón que "Carga de repuestos" de la OT: clic en un resultado
+// agrega el ítem al tiro sin cerrar la lista.
+function renderResultadosGari(texto) {
+  const resultados = document.getElementById("gari-producto-resultados");
+  const q = texto.trim();
+  if (!q) {
+    resultados.style.display = "none";
+    return;
+  }
+  const coincidencias = state.opProductos.filter(p =>
+    coincideBusqueda(q, p.nombre, p.descripcion, p.codigo_interno, p.id_sistema)
+  ).slice(0, 8);
+  if (coincidencias.length === 0) {
+    resultados.innerHTML = '<div class="autocomplete-sin-resultados">Sin productos que coincidan</div>';
+    resultados.style.display = "block";
+    return;
+  }
+  resultados.innerHTML = coincidencias.map(p => `
+    <div class="autocomplete-item" data-id="${p.id}">
+      #${escapeHtml(p.id_sistema)} — ${escapeHtml(p.nombre)}
+      <span class="autocomplete-item-meta">Stock: ${p.stock_disponible}</span>
+    </div>
+  `).join("");
+  resultados.style.display = "block";
+  resultados.querySelectorAll(".autocomplete-item").forEach(item => {
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const p = state.opProductos.find(x => x.id === parseInt(item.dataset.id, 10));
+      if (p) agregarRepuestoGarantiaDesdeAutocomplete(p);
+    });
+  });
+}
+
+async function agregarRepuestoGarantiaDesdeAutocomplete(producto) {
+  const garantiaId = document.getElementById("gard-id").value;
+  const cantidad = document.getElementById("gari-cantidad").value || 1;
+  const textoBusqueda = document.getElementById("gari-producto-buscar").value;
+  try {
+    await api(`/api/operativo/garantias/${garantiaId}/items`, {
+      method: "POST",
+      body: JSON.stringify({ tipo: "repuesto", producto_id: producto.id, cantidad }),
+    });
+    toast(`Agregado: ${producto.nombre}`);
+    const garantia = await api(`/api/operativo/garantias/${garantiaId}`);
+    renderItemsGarantia(garantia);
+    const dataProductos = await api("/api/productos");
+    state.opProductos = dataProductos.productos;
+    renderResultadosGari(textoBusqueda);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("gari-producto-buscar").addEventListener("input", (e) => {
+  document.getElementById("gari-producto-id").value = "";
+  renderResultadosGari(e.target.value);
+});
+document.getElementById("gari-producto-buscar").addEventListener("focus", (e) => {
+  if (e.target.value.trim()) renderResultadosGari(e.target.value);
+});
+document.getElementById("gari-producto-buscar").addEventListener("blur", () => {
+  setTimeout(() => {
+    document.getElementById("gari-producto-resultados").style.display = "none";
+  }, 150);
+});
 
 // Elimina la garantía completa (no solo un ítem suelto) — igual que
 // "Eliminar orden" en las OT. El backend devuelve al inventario el stock
@@ -2391,6 +2543,7 @@ document.getElementById("gari-tipo").addEventListener("change", (e) => {
   document.getElementById("gari-campo-producto").style.display = esRepuesto ? "flex" : "none";
   document.getElementById("gari-campo-descripcion").style.display = esRepuesto ? "none" : "flex";
   document.getElementById("gari-campo-costo").style.display = esRepuesto ? "none" : "flex";
+  document.getElementById("gari-fila-mo-extra").style.display = esRepuesto ? "none" : "flex";
 });
 
 document.getElementById("form-gar-item").addEventListener("submit", async (e) => {
@@ -2404,12 +2557,14 @@ document.getElementById("form-gar-item").addEventListener("submit", async (e) =>
   if (tipo === "repuesto") {
     payload.producto_id = document.getElementById("gari-producto-id").value;
     if (!payload.producto_id) {
-      toast("Selecciona un producto.", true);
+      toast("Busca el producto y haz clic en él para agregarlo.", true);
       return;
     }
   } else {
     payload.descripcion = document.getElementById("gari-descripcion").value.trim();
     payload.costo_unitario = limpiarMonto(document.getElementById("gari-costo").value) || 0;
+    payload.detalle = document.getElementById("gari-mo-detalle").value.trim();
+    payload.aplica_iva = document.getElementById("gari-mo-iva").checked;
     if (!payload.descripcion) {
       toast("Describe la mano de obra realizada.", true);
       return;
@@ -2421,14 +2576,11 @@ document.getElementById("form-gar-item").addEventListener("submit", async (e) =>
     const garantia = await api(`/api/operativo/garantias/${garantiaId}`);
     renderItemsGarantia(garantia);
     document.getElementById("form-gar-item").reset();
+    document.getElementById("gari-producto-buscar").value = "";
+    document.getElementById("gari-producto-id").value = "";
     document.getElementById("gari-tipo").dispatchEvent(new Event("change"));
     const dataProductos = await api("/api/productos");
     state.opProductos = dataProductos.productos;
-    const selectProducto = document.getElementById("gari-producto-id");
-    const valorActual = selectProducto.value;
-    selectProducto.innerHTML = '<option value="">Selecciona un producto…</option>' +
-      state.opProductos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)} (stock: ${p.stock_disponible})</option>`).join("");
-    selectProducto.value = valorActual;
   } catch (e2) {
     toast(e2.message, true);
   }

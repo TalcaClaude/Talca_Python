@@ -419,6 +419,43 @@ class TestOperativo(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 409)
 
+    def test_mano_de_obra_con_iva_y_detalle_de_trabajo_externo(self):
+        # Trabajo subcontratado (ej. "programación electrónica por Lucas
+        # Medina") que se cobra con IVA: el costo real que sale del taller
+        # es el monto + 19%, y debe quedar reflejado tanto en el ítem como
+        # en el total/mano_obra_cargada de la orden.
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={
+                "tipo": "mano_obra", "descripcion": "Programación electrónica",
+                "detalle": "Trabajo externo — Lucas Medina",
+                "cantidad": 1, "costo_unitario": 50000, "aplica_iva": True,
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        item = resp.get_json()
+        self.assertEqual(item["detalle"], "TRABAJO EXTERNO — LUCAS MEDINA")
+        self.assertEqual(item["aplica_iva"], 1)
+        self.assertAlmostEqual(item["subtotal"], 59500)  # 50.000 + 19%
+
+        detalle = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertAlmostEqual(detalle["total"], 59500)
+        self.assertAlmostEqual(detalle["mano_obra_cargada"], 59500)
+
+    def test_mano_de_obra_sin_iva_no_agrega_recargo(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "mano_obra", "descripcion": "Cambio de sellos", "cantidad": 1, "costo_unitario": 20000},
+        )
+        item = resp.get_json()
+        self.assertEqual(item["aplica_iva"], 0)
+        self.assertEqual(item["detalle"], "")
+        self.assertEqual(item["subtotal"], 20000)
+
 
 class TestOperativoFase35(unittest.TestCase):
     """Sub-flujos ampliados del módulo Operativo (Fase 3.5): presupuesto con
@@ -582,6 +619,10 @@ class TestOperativoFase35(unittest.TestCase):
         cliente = self._crear_cliente()
         equipo = self._crear_equipo(cliente["id"])
         orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+        # La garantía solo se puede abrir una vez que el auto ya salió del
+        # taller (la OT original tiene que estar cerrada) — ver
+        # test_no_se_puede_crear_garantia_de_un_equipo_con_ot_abierta.
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
         resp = self.client.post(
             "/api/operativo/garantias",
             json={
@@ -676,6 +717,33 @@ class TestOperativoFase35(unittest.TestCase):
         permitida = self.client.post(
             "/api/operativo/garantias",
             json={"cliente_id": cliente["id"], "equipo_id": equipo["id"], "motivo": "Falla B"},
+        )
+        self.assertEqual(permitida.status_code, 201, permitida.get_data(as_text=True))
+
+    def test_no_se_puede_crear_garantia_de_un_equipo_con_ot_abierta(self):
+        # Bug reportado por el taller: no tiene lógica dejar abrir una
+        # garantía para un auto que TODAVÍA está en el taller con una OT
+        # abierta (ni siquiera ha salido) — si aparece un problema mientras
+        # la OT sigue abierta, se sigue trabajando ahí mismo, no como
+        # garantía nueva.
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"])
+        orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])  # nace "recibido" (abierta)
+
+        bloqueada = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente["id"], "equipo_id": equipo["id"], "motivo": "Ruido raro"},
+        )
+        self.assertEqual(bloqueada.status_code, 400)
+        self.assertEqual(bloqueada.get_json().get("bloqueo_tipo"), "orden")
+        self.assertEqual(bloqueada.get_json().get("bloqueo_id"), orden["id"])
+
+        # Una vez que la OT se entrega (el auto ya salió del taller), sí se
+        # puede abrir la garantía para ese mismo vehículo.
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        permitida = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente["id"], "equipo_id": equipo["id"], "motivo": "Ruido raro"},
         )
         self.assertEqual(permitida.status_code, 201, permitida.get_data(as_text=True))
 
@@ -820,6 +888,59 @@ class TestOperativoFase35(unittest.TestCase):
         item = resp.get_json()
         self.assertTrue(item["usuario"])
         self.assertIsNotNone(item["creado_en"])
+
+
+class TestBusquedaSinTildesMultipalabra(unittest.TestCase):
+    """coincide_busqueda/normalizar_busqueda (core.py) son la base de TODOS
+    los buscadores del sistema: ignoran tildes/mayúsculas y tratan cada
+    palabra escrita como un filtro AND que puede calzar en cualquier campo
+    — mientras más palabras se agregan, más se acota el resultado. Estos
+    tests fijan ese comportamiento a nivel de función, y el de más abajo
+    (test_buscador_de_productos_combina_dos_campos) lo verifica de punta a
+    punta contra el endpoint /api/productos real."""
+
+    def test_normaliza_tildes_y_mayusculas(self):
+        self.assertEqual(taller_app.normalizar_busqueda("Bómba"), "bomba")
+        self.assertEqual(taller_app.normalizar_busqueda("CAMIÓN"), "camion")
+
+    def test_coincide_con_una_sola_palabra_sin_tilde(self):
+        self.assertTrue(taller_app.coincide_busqueda("bomba", "BÓMBA DE AGUA"))
+        self.assertTrue(taller_app.coincide_busqueda("camion", "Camión 3/4"))
+
+    def test_varias_palabras_deben_calzar_todas_aunque_esten_en_campos_distintos(self):
+        # "6f35 bomba" tiene que encontrar algo cuyo código es "6F35" Y cuya
+        # descripción menciona "bomba" — cada palabra puede calzar en un
+        # campo distinto, pero TODAS tienen que aparecer en algún lado.
+        self.assertTrue(taller_app.coincide_busqueda("6f35 bomba", "6F35", "BOMBA DE AGUA"))
+        self.assertFalse(taller_app.coincide_busqueda("6f35 bomba", "6F35", "FILTRO DE ACEITE"))
+        self.assertFalse(taller_app.coincide_busqueda("6f35 bomba", "6F36", "BOMBA DE AGUA"))
+
+    def test_consulta_vacia_no_filtra_nada(self):
+        self.assertTrue(taller_app.coincide_busqueda("", "cualquier cosa"))
+        self.assertTrue(taller_app.coincide_busqueda("   ", "cualquier cosa"))
+
+    def test_buscador_de_productos_combina_dos_campos(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            _crear_producto(db, "BOMBA DE AGUA TESTBUSQUEDA", stock_disponible=5)
+            db.execute(
+                "UPDATE productos SET codigo_interno = '6F35' WHERE nombre = 'BOMBA DE AGUA TESTBUSQUEDA'"
+            )
+            db.commit()
+            _crear_producto(db, "FILTRO DE ACEITE TESTBUSQUEDA", stock_disponible=5)
+            db.execute(
+                "UPDATE productos SET codigo_interno = '9Z11' WHERE nombre = 'FILTRO DE ACEITE TESTBUSQUEDA'"
+            )
+            db.commit()
+
+        cliente = taller_app.app.test_client()
+        cliente.post("/login", data={"username": "admin", "password": "taller2026"})
+
+        resp = cliente.get("/api/productos?q=6f35+bomba")
+        data = resp.get_json()
+        nombres = [p["nombre"] for p in data["productos"]]
+        self.assertIn("BOMBA DE AGUA TESTBUSQUEDA", nombres)
+        self.assertNotIn("FILTRO DE ACEITE TESTBUSQUEDA", nombres)
 
 
 class TestBuscarProductoPorTexto(unittest.TestCase):

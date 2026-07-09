@@ -880,9 +880,11 @@
               <option value="mano_obra">Mano de obra</option>
             </select>
           </div>
-          <div class="campo" id="opoi-campo-producto">
+          <div class="campo campo-autocomplete" id="opoi-campo-producto">
             <label>Producto</label>
-            <select id="opoi-producto-id"><option value="">Selecciona un producto…</option></select>
+            <input type="text" id="opoi-producto-buscar" placeholder="Busca por nombre, código o N°… (ej: 6f35 bomba)" autocomplete="off">
+            <input type="hidden" id="opoi-producto-id">
+            <div class="autocomplete-resultados" id="opoi-producto-resultados" style="display:none"></div>
           </div>
           <div class="campo" id="opoi-campo-descripcion" style="display:none">
             <label>Descripción</label>
@@ -902,6 +904,19 @@
             <button type="submit" class="btn btn-secundario">+ Agregar ítem</button>
           </div>
         </div>
+        <div class="grid-3" id="opoi-fila-mo-extra" style="display:none">
+          <div class="campo">
+            <label>Detalle / realizado por (opcional)</label>
+            <input type="text" id="opoi-mo-detalle" placeholder='Ej: "Trabajo externo — Lucas Medina"'>
+          </div>
+          <div class="campo">
+            <label>&nbsp;</label>
+            <label style="flex-direction:row; align-items:center; gap:8px; display:flex;">
+              <input type="checkbox" id="opoi-mo-iva" style="width:auto"> Aplicar IVA (19%) a este trabajo
+            </label>
+          </div>
+        </div>
+        <p class="ayuda-inline">Con repuestos: haz clic en un resultado de la búsqueda para agregarlo al tiro — puedes seguir clickeando otros sin que la lista se cierre.</p>
       </form>
     </div>
 
@@ -1111,9 +1126,11 @@
             <option value="mano_obra">Mano de obra</option>
           </select>
         </div>
-        <div class="campo" id="gari-campo-producto">
+        <div class="campo campo-autocomplete" id="gari-campo-producto">
           <label>Producto</label>
-          <select id="gari-producto-id"><option value="">Selecciona un producto…</option></select>
+          <input type="text" id="gari-producto-buscar" placeholder="Busca por nombre, código o N°… (ej: 6f35 bomba)" autocomplete="off">
+          <input type="hidden" id="gari-producto-id">
+          <div class="autocomplete-resultados" id="gari-producto-resultados" style="display:none"></div>
         </div>
         <div class="campo" id="gari-campo-descripcion" style="display:none">
           <label>Descripción</label>
@@ -1133,6 +1150,19 @@
           <button type="submit" class="btn btn-secundario">+ Agregar ítem</button>
         </div>
       </div>
+      <div class="grid-3" id="gari-fila-mo-extra" style="display:none">
+        <div class="campo">
+          <label>Detalle / realizado por (opcional)</label>
+          <input type="text" id="gari-mo-detalle" placeholder='Ej: "Trabajo externo — Lucas Medina"'>
+        </div>
+        <div class="campo">
+          <label>&nbsp;</label>
+          <label style="flex-direction:row; align-items:center; gap:8px; display:flex;">
+            <input type="checkbox" id="gari-mo-iva" style="width:auto"> Aplicar IVA (19%) a este trabajo
+          </label>
+        </div>
+      </div>
+      <p class="ayuda-inline">Con repuestos: haz clic en un resultado de la búsqueda para agregarlo al tiro — puedes seguir clickeando otros sin que la lista se cierre.</p>
     </form>
     <div class="modal-actions">
       <button type="button" class="btn btn-secundario" data-close="modal-op-garantia-detalle">Cerrar</button>

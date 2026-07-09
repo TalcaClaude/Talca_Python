@@ -38,6 +38,7 @@ from core import (
     _pdf_response,
     _pdf_tabla,
     _rango_fechas,
+    coincide_busqueda,
     fmt_money_pdf,
     get_db,
     now_iso,
@@ -162,14 +163,22 @@ def caja_listar_movimientos():
     if hasta:
         sql += " AND fecha <= ?"
         params.append(hasta + "T23:59:59")
-    if q:
-        sql += " AND (categoria LIKE ? OR descripcion LIKE ? OR proveedor LIKE ? OR usuario LIKE ?)"
-        like = f"%{q}%"
-        params += [like, like, like, like]
 
-    sql += " ORDER BY fecha DESC, id DESC LIMIT 500"
+    # 'q' se filtra en Python con coincide_busqueda (ver core.py): admite
+    # varias palabras sueltas, sin tildes, que pueden calzar en columnas
+    # distintas (ej. "ferreteria bomba" encuentra un gasto de ese proveedor
+    # Y esa descripción, aunque sean campos separados).
+    sql += " ORDER BY fecha DESC, id DESC"
     rows = db.execute(sql, params).fetchall()
     movimientos = [_caja_movimiento_dict(r) for r in rows]
+
+    if q:
+        movimientos = [
+            m for m in movimientos
+            if coincide_busqueda(q, m.get("categoria"), m.get("descripcion"), m.get("proveedor"), m.get("usuario"))
+        ]
+
+    movimientos = movimientos[:500]
 
     return jsonify({"movimientos": movimientos, "total": len(movimientos)})
 

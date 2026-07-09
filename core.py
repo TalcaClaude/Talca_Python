@@ -18,6 +18,7 @@ del otro.
 import os
 import re
 import sqlite3
+import unicodedata
 from datetime import datetime, timedelta
 import statistics
 import math
@@ -106,6 +107,40 @@ def row_to_dict(row):
 
 def codigo_ubicacion(pasillo, estanteria, nivel):
     return f"P{pasillo}-E{estanteria}-N{nivel}"
+
+
+# ---------------------------------------------------------------------------
+# Búsqueda "de varias palabras, sin tildes": todos los buscadores del sistema
+# (productos, movimientos, clientes, caja chica, etc.) usan estas dos
+# funciones para que buscar sea más tolerante y más preciso a la vez:
+#   - Sin tildes/mayúsculas: "bomba" encuentra "BOMBA" y "bómba" por igual.
+#   - Varias palabras = AND, no importa en qué campo caiga cada una: buscar
+#     "6f35 bomba" encuentra algo cuyo código es "6F35" Y cuya descripción
+#     menciona "bomba", aunque sean campos distintos — mientras más palabras
+#     se agreguen, más se acota el resultado (en vez de tener que acertarle
+#     a una frase exacta en un solo campo).
+# ---------------------------------------------------------------------------
+
+def normalizar_busqueda(texto):
+    """minúsculas + sin tildes/diacríticos, para comparar sin que la tilde
+    (o su ausencia) cambie el resultado."""
+    if texto is None:
+        return ""
+    texto = unicodedata.normalize("NFD", str(texto))
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+    return texto.lower()
+
+
+def coincide_busqueda(consulta, *campos):
+    """True si CADA palabra de 'consulta' aparece en al menos uno de
+    'campos' (concatenados), sin importar tildes/mayúsculas ni en cuál
+    campo específico caiga cada palabra. Con 'consulta' vacía, siempre
+    coincide (no filtra nada)."""
+    terminos = normalizar_busqueda(consulta).split()
+    if not terminos:
+        return True
+    texto = normalizar_busqueda(" ".join(str(c) for c in campos if c))
+    return all(t in texto for t in terminos)
 
 
 def nombre_automatico(categoria, modelo, codigo_interno, id_num):

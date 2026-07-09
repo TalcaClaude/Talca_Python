@@ -40,6 +40,7 @@ from core import (
     _pdf_resumen,
     _pdf_tabla,
     _rango_fechas,
+    coincide_busqueda,
     fmt_money_pdf,
     formatear_rut,
     get_db,
@@ -75,6 +76,17 @@ ESTADOS_PRESUPUESTO = ["pendiente", "enviado", "aprobado", "rechazado"]
 RESULTADOS_QC_ITEM = ["ok", "falla", "na"]  # resultado de cada punto del checklist
 RESULTADOS_QC = ["pendiente", "aprobado", "rechazado"]  # veredicto general de la orden
 IVA_PORCENTAJE = 0.19
+
+
+def _item_subtotal(item):
+    """cantidad × costo_unitario de un ítem de orden_items/garantia_items,
+    agregando el 19% si el ítem quedó marcado con aplica_iva (pensado para
+    mano de obra subcontratada/externa que se cobra con IVA — ver migración
+    de 'aplica_iva'/'detalle' en init_operativo_db). Repuestos normalmente
+    no usan este flag (su costo ya es el Costo Promedio Ponderado interno),
+    pero la función es genérica por si algún día se necesita ahí también."""
+    multiplicador = (1 + IVA_PORCENTAJE) if item.get("aplica_iva") else 1
+    return round(item["cantidad"] * item["costo_unitario"] * multiplicador, 2)
 
 # Pagos de una OT: métodos aceptados.
 METODOS_PAGO = ["efectivo", "tarjeta", "transferencia", "cheque", "otro"]
@@ -482,6 +494,22 @@ def init_operativo_db(db):
         )
         db.commit()
 
+    # Ítems de mano de obra: se puede dejar un detalle de quién hizo el
+    # trabajo (útil para trabajo externo/subcontratado, ej. "Programación
+    # electrónica por Lucas Medina") y marcar si ese trabajo lleva IVA — la
+    # mano de obra subcontratada normalmente sí, la interna normalmente no.
+    # Cuando aplica_iva está marcado, el costo real de ese ítem (el que se
+    # usa en "Costos"/utilidad) se calcula con el 19% agregado, ver
+    # _item_subtotal más abajo.
+    for tabla in ("orden_items", "garantia_items"):
+        columnas_item = [c[1] for c in db.execute(f"PRAGMA table_info({tabla})").fetchall()]
+        if "detalle" not in columnas_item:
+            db.execute(f"ALTER TABLE {tabla} ADD COLUMN detalle TEXT DEFAULT ''")
+            db.commit()
+        if "aplica_iva" not in columnas_item:
+            db.execute(f"ALTER TABLE {tabla} ADD COLUMN aplica_iva INTEGER NOT NULL DEFAULT 0")
+            db.commit()
+
 
 # ---------------------------------------------------------------------------
 # Clientes
@@ -499,15 +527,18 @@ def _cliente_dict(db, row):
 def listar_clientes():
     db = get_db()
     q = (request.args.get("q") or "").strip()
-    sql = "SELECT * FROM clientes"
-    params = []
+    rows = db.execute("SELECT * FROM clientes ORDER BY nombre COLLATE NOCASE").fetchall()
+    clientes = [_cliente_dict(db, r) for r in rows]
     if q:
-        sql += " WHERE nombre LIKE ? OR rut LIKE ? OR telefono LIKE ?"
-        comodin = f"%{q}%"
-        params = [comodin, comodin, comodin]
-    sql += " ORDER BY nombre COLLATE NOCASE"
-    rows = db.execute(sql, params).fetchall()
-    return jsonify({"clientes": [_cliente_dict(db, r) for r in rows], "total": len(rows)})
+        # Se filtra en Python con coincide_busqueda (ver core.py): admite
+        # varias palabras sueltas, sin tildes, que pueden calzar en campos
+        # distintos (ej. "perez 9912" encuentra por apellido Y por parte
+        # del teléfono a la vez).
+        clientes = [
+            c for c in clientes
+            if coincide_busqueda(q, c.get("nombre"), c.get("rut"), c.get("telefono"))
+        ]
+    return jsonify({"clientes": clientes, "total": len(clientes)})
 
 
 @bp.route("/api/operativo/clientes/<int:cliente_id>", methods=["GET"])
@@ -763,7 +794,9 @@ def _orden_dict(db, row):
     d["equipo"] = dict(equipo) if equipo else None
     items = db.execute("SELECT * FROM orden_items WHERE orden_id = ? ORDER BY creado_en ASC", (d["id"],)).fetchall()
     d["items"] = [dict(i) for i in items]
-    d["total"] = sum(i["cantidad"] * i["costo_unitario"] for i in items)
+    for it in d["items"]:
+        it["subtotal"] = _item_subtotal(it)
+    d["total"] = sum(i["subtotal"] for i in d["items"])
     pagos = db.execute(
         "SELECT * FROM pagos_orden WHERE orden_id = ? ORDER BY fecha ASC, creado_en ASC", (d["id"],)
     ).fetchall()
@@ -787,10 +820,10 @@ def _orden_dict(db, row):
     # "Costos". La mano de obra cargada no tiene un costo registrado en el
     # sistema (no se lleva sueldo por OT), así que no resta de la utilidad.
     costo_repuestos = sum(
-        i["cantidad"] * i["costo_unitario"] for i in items if i["tipo"] == "repuesto"
+        i["subtotal"] for i in d["items"] if i["tipo"] == "repuesto"
     )
     mano_obra_cargada = sum(
-        i["cantidad"] * i["costo_unitario"] for i in items if i["tipo"] == "mano_obra"
+        i["subtotal"] for i in d["items"] if i["tipo"] == "mano_obra"
     )
     d["costo_repuestos"] = round(costo_repuestos, 2)
     d["mano_obra_cargada"] = round(mano_obra_cargada, 2)
@@ -870,12 +903,16 @@ def dashboard_operativo():
     costo_repuestos_cerradas_mes = _suma_costo_repuestos(ids_cerradas_mes)
     utilidad_mes = round(monto_cerradas_mes - costo_repuestos_cerradas_mes, 2)
 
+    # El multiplicador de IVA por ítem (CASE WHEN) refleja aplica_iva de la
+    # misma forma que _item_subtotal en Python — no se puede reusar esa
+    # función acá porque esto es un SUM agregado en SQL, no fila por fila.
+    _iva_case = f"(CASE WHEN aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)"
     costo_garantias = db.execute(
-        "SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM garantia_items"
+        f"SELECT COALESCE(SUM(cantidad * costo_unitario * {_iva_case}), 0) AS total FROM garantia_items"
     ).fetchone()["total"] or 0
 
     costo_garantias_mes = db.execute(
-        "SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM garantia_items "
+        f"SELECT COALESCE(SUM(cantidad * costo_unitario * {_iva_case}), 0) AS total FROM garantia_items "
         "WHERE substr(creado_en, 1, 7) = ?",
         (prefijo_mes,),
     ).fetchone()["total"] or 0
@@ -1411,28 +1448,36 @@ def agregar_item_orden(orden_id):
         ).fetchone()[0]
         if not descripcion:
             descripcion = producto["nombre"]
-    else:  # mano_obra
+    detalle = ""
+    aplica_iva = 0
+    if tipo == "mano_obra":
         if not descripcion:
             return jsonify({"error": "Describe la mano de obra realizada"}), 400
         try:
             costo_unitario = float(data.get("costo_unitario") or 0)
         except (TypeError, ValueError):
             return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+        # Detalle opcional (ej. quién hizo el trabajo si fue subcontratado:
+        # "Programación electrónica por Lucas Medina") y si ese trabajo se
+        # cobra con IVA (típico en mano de obra externa/subcontratada).
+        detalle = (data.get("detalle") or "").strip().upper()
+        aplica_iva = 1 if data.get("aplica_iva") else 0
 
     cur = db.execute(
         """
         INSERT INTO orden_items (
             orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
-            movimiento_id, usuario, creado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            movimiento_id, usuario, creado_en, detalle, aplica_iva
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts),
+        (orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva),
     )
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
     db.commit()
 
-    nuevo_item = db.execute("SELECT * FROM orden_items WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(dict(nuevo_item)), 201
+    nuevo_item = dict(db.execute("SELECT * FROM orden_items WHERE id = ?", (cur.lastrowid,)).fetchone())
+    nuevo_item["subtotal"] = _item_subtotal(nuevo_item)
+    return jsonify(nuevo_item), 201
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/items/<int:item_id>", methods=["DELETE"])
@@ -1879,7 +1924,9 @@ def _garantia_dict(db, row):
         "SELECT * FROM garantia_items WHERE garantia_id = ? ORDER BY creado_en ASC", (d["id"],)
     ).fetchall()
     d["items"] = [dict(i) for i in items]
-    d["total"] = sum(i["cantidad"] * i["costo_unitario"] for i in items)
+    for it in d["items"]:
+        it["subtotal"] = _item_subtotal(it)
+    d["total"] = sum(i["subtotal"] for i in d["items"])
     return d
 
 
@@ -1906,7 +1953,28 @@ def crear_garantia():
         if equipo is None:
             return jsonify({"error": "Ese equipo no existe o no pertenece a este cliente"}), 400
 
-        # Mismo criterio que en las OT normales: un vehículo no puede tener
+        # Una garantía es "el auto ya se entregó y volvió por un problema" —
+        # no tiene sentido abrir una garantía para un vehículo que TODAVÍA
+        # está en el taller con una OT abierta (ni siquiera ha salido). Si
+        # el problema apareció mientras la OT sigue abierta, corresponde
+        # seguir trabajándolo dentro de esa misma OT, no como garantía.
+        placeholders_ot = ", ".join("?" for _ in ESTADOS_CERRADOS)
+        ot_abierta = db.execute(
+            f"SELECT id, estado FROM ordenes_trabajo WHERE equipo_id = ? AND estado NOT IN ({placeholders_ot}) "
+            "ORDER BY fecha_recepcion DESC LIMIT 1",
+            (equipo_id, *ESTADOS_CERRADOS),
+        ).fetchone()
+        if ot_abierta is not None:
+            return jsonify({
+                "error": f"Este vehículo ya tiene una Orden de Trabajo abierta en el taller (OT #{ot_abierta['id']}, "
+                         f"estado: {ESTADOS_LABEL.get(ot_abierta['estado'], ot_abierta['estado'])}). No se puede abrir "
+                         f"una garantía para un vehículo que todavía no ha salido del taller — sigue trabajándolo "
+                         f"dentro de esa misma OT.",
+                "bloqueo_id": ot_abierta["id"],
+                "bloqueo_tipo": "orden",
+            }), 400
+
+        # Mismo criterio, pero entre garantías: un vehículo no puede tener
         # dos garantías abiertas al mismo tiempo. Recién se puede abrir una
         # garantía nueva para el mismo auto cuando la anterior ya quedó
         # entregada o rechazada (el auto ya salió del taller).
@@ -2106,27 +2174,32 @@ def agregar_item_garantia(garantia_id):
         ).fetchone()[0]
         if not descripcion:
             descripcion = producto["nombre"]
-    else:  # mano_obra
+    detalle = ""
+    aplica_iva = 0
+    if tipo == "mano_obra":
         if not descripcion:
             return jsonify({"error": "Describe la mano de obra realizada"}), 400
         try:
             costo_unitario = float(data.get("costo_unitario") or 0)
         except (TypeError, ValueError):
             return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+        detalle = (data.get("detalle") or "").strip().upper()
+        aplica_iva = 1 if data.get("aplica_iva") else 0
 
     cur = db.execute(
         """
         INSERT INTO garantia_items (
             garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
-            movimiento_id, usuario, creado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            movimiento_id, usuario, creado_en, detalle, aplica_iva
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts),
+        (garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva),
     )
     db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (ts, garantia_id))
     db.commit()
-    nuevo_item = db.execute("SELECT * FROM garantia_items WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(dict(nuevo_item)), 201
+    nuevo_item = dict(db.execute("SELECT * FROM garantia_items WHERE id = ?", (cur.lastrowid,)).fetchone())
+    nuevo_item["subtotal"] = _item_subtotal(nuevo_item)
+    return jsonify(nuevo_item), 201
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>/items/<int:item_id>", methods=["DELETE"])

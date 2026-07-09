@@ -677,6 +677,45 @@ class TestOperativoFase35(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 409)
 
+    def test_diagnostico_se_puede_revisar_y_ajustar_desde_el_presupuesto(self):
+        # El mismo campo "diagnostico" (resumen para el cliente) se puede
+        # editar desde la pestaña Presupuesto, para revisarlo/ajustarlo
+        # antes de mandarlo — puede haber llegado por audio de WhatsApp.
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}",
+            json={"diagnostico": "Diagnóstico original, cargado por audio"},
+        )
+
+        resp = self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}/presupuesto",
+            json={"diagnostico": "Diagnóstico revisado antes de enviar", "notas": "Precio válido por 15 días"},
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        actualizada = resp.get_json()
+        self.assertEqual(actualizada["diagnostico"], "DIAGNÓSTICO REVISADO ANTES DE ENVIAR")
+        self.assertEqual(actualizada["presupuesto_notas"], "PRECIO VÁLIDO POR 15 DÍAS")
+        # Quien guardó el ajuste queda como responsable — misma sesión que
+        # el resto de la app (usuario_actual()).
+        self.assertEqual(actualizada["responsable_diagnostico"], "ADMINISTRADOR")
+
+        # El nuevo texto también aparece en el PDF del presupuesto que se
+        # le manda al cliente.
+        from pypdf import PdfReader
+        pdf_resp = self.client.get(f"/api/operativo/ordenes/{orden['id']}/presupuesto/pdf")
+        texto = PdfReader(io.BytesIO(pdf_resp.data)).pages[0].extract_text()
+        self.assertIn("DIAGNÓSTICO REVISADO ANTES DE ENVIAR", texto)
+
+    def test_guardar_presupuesto_sin_tocar_diagnostico_no_lo_modifica(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"diagnostico": "Texto original"})
+
+        resp = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"notas": "Solo notas"})
+        actualizada = resp.get_json()
+        self.assertEqual(actualizada["diagnostico"], "TEXTO ORIGINAL")
+
     # ---- Control de calidad ----
 
     def test_qc_rechazado_devuelve_la_orden_a_reparacion(self):

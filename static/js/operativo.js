@@ -1729,6 +1729,10 @@ function renderPresupuesto(orden) {
   document.getElementById("opp-total").textContent = fmtMoney(orden.presupuesto.total);
   document.getElementById("opp-estado").value = orden.presupuesto_estado || "pendiente";
   document.getElementById("opp-iva-check").checked = !!orden.presupuesto_iva;
+  // Mismo campo "diagnostico" que la pestaña Diagnóstico (y que puede
+  // haber llegado por audio de WhatsApp) — se repite acá para poder
+  // revisarlo/ajustarlo justo antes de mandar el presupuesto.
+  document.getElementById("opp-diagnostico").value = orden.diagnostico || "";
   document.getElementById("opp-notas").value = orden.presupuesto_notas || "";
 
   tbody.querySelectorAll("[data-eliminar-presupuesto-item]").forEach(btn => {
@@ -1779,6 +1783,7 @@ document.getElementById("btn-opp-guardar").addEventListener("click", async () =>
   const payload = {
     estado: document.getElementById("opp-estado").value,
     iva: document.getElementById("opp-iva-check").checked,
+    diagnostico: document.getElementById("opp-diagnostico").value.trim(),
     notas: document.getElementById("opp-notas").value.trim(),
   };
   try {

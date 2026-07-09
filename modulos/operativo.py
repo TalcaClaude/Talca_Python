@@ -1773,9 +1773,10 @@ def eliminar_item_presupuesto(orden_id, item_id):
 @bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto", methods=["PUT"])
 def actualizar_presupuesto(orden_id):
     """Cambia el estado del presupuesto (pendiente/enviado/aprobado/rechazado),
-    el IVA y las notas. Al quedar 'aprobado' la orden pasa sola a
-    'reparacion' — así nadie tiene que acordarse de mover el tablero a mano
-    después de que el cliente dio el visto bueno."""
+    el IVA, el diagnóstico (resumen para el cliente) y las notas. Al quedar
+    'aprobado' la orden pasa sola a 'reparacion' — así nadie tiene que
+    acordarse de mover el tablero a mano después de que el cliente dio el
+    visto bueno."""
     db = get_db()
     row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     if row is None:
@@ -1796,6 +1797,19 @@ def actualizar_presupuesto(orden_id):
 
     notas = (data.get("notas", row["presupuesto_notas"]) or "").strip().upper()
 
+    # El diagnóstico (resumen para el cliente) es EL MISMO campo que se ve
+    # en la pestaña Diagnóstico — se repite acá para poder revisarlo/
+    # ajustarlo justo antes de mandar el presupuesto (a pedido del taller:
+    # puede haber llegado por audio de WhatsApp y conviene revisarlo antes
+    # de que le llegue al cliente). Igual que en editar_orden(), quien
+    # queda como responsable del diagnóstico es quien tiene la sesión
+    # iniciada al guardar — nunca un valor que mande el cliente.
+    diagnostico = row["diagnostico"]
+    responsable_diagnostico = row["responsable_diagnostico"]
+    if "diagnostico" in data:
+        diagnostico = (data.get("diagnostico") or "").strip().upper()
+        responsable_diagnostico = usuario_actual().strip().upper()
+
     nuevo_estado_orden = row["estado"]
     if estado_presupuesto == "aprobado" and row["presupuesto_estado"] != "aprobado":
         nuevo_estado_orden = "reparacion"
@@ -1803,8 +1817,8 @@ def actualizar_presupuesto(orden_id):
     ts = now_iso()
     db.execute(
         "UPDATE ordenes_trabajo SET presupuesto_estado = ?, presupuesto_iva = ?, presupuesto_notas = ?, "
-        "estado = ?, actualizado_en = ? WHERE id = ?",
-        (estado_presupuesto, iva, notas, nuevo_estado_orden, ts, orden_id),
+        "diagnostico = ?, responsable_diagnostico = ?, estado = ?, actualizado_en = ? WHERE id = ?",
+        (estado_presupuesto, iva, notas, diagnostico, responsable_diagnostico, nuevo_estado_orden, ts, orden_id),
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()

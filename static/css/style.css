@@ -344,34 +344,26 @@ body::before { content: none; }
   margin-bottom: 2px;
 }
 
-.op-card-equipo {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+/* Marca/modelo del vehículo: línea propia, sin recortar — se pidió
+   explícito que se lea completo aunque eso implique una tarjeta un poco
+   más alta (se permite envolver a una segunda línea si el nombre es muy
+   largo, en vez de cortarlo con "…"). */
+.op-card-equipo-nombre {
   font-size: 12px;
   color: var(--accent-2);
+  margin-bottom: 2px;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+/* Patente / año / color: línea aparte más abajo, para que se alcancen a
+   leer siempre (antes la patente no se veía y el modelo se cortaba). */
+.op-card-equipo-detalle {
+  font-size: 11.5px;
+  color: var(--text-muted);
   margin-bottom: 6px;
-}
-
-/* Marca/modelo (lo que ya se mostraba) se recorta con "…" cuando no cabe —
-   es un flex ítem que sí puede achicarse. */
-.op-card-equipo-nombre {
-  /* No baja de ~30px aunque la columna sea angosta y el año/color ocupen
-     espacio — así marca/modelo nunca desaparece del todo, solo se recorta. */
-  min-width: 30px;
-  flex: 1 1 auto;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Año/color (lo nuevo que se pidió mostrar) va en un ítem que NO se achica,
-   para que nunca sea lo que se recorta cuando la tarjeta queda angosta —
-   así siempre queda visible sin alargar la tarjeta. */
-.op-card-equipo-extra {
-  flex: 0 0 auto;
-  white-space: nowrap;
-  opacity: 0.85;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 .op-card-valor {
@@ -542,6 +534,20 @@ body::before { content: none; }
 .btn-chico {
   padding: 4px 10px;
   font-size: 12.5px;
+}
+
+/* Acciones secundarias de la OT (ver historial, copiar link, vista
+   imprimible): antes eran links amarillos arriba de todo, lo que parecía
+   una alerta. Ahora van abajo del recuadro de valor/pagos, como botones
+   chicos en fila prolija — mismo estilo que el resto de acciones
+   secundarias de la app, no un aviso. */
+.op-acciones-secundarias {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
 }
 
 .op-equipamiento-grid {

@@ -386,8 +386,8 @@ function poblarDatalistsOperativo() {
 // valor de la lista fija del taller (pedido explícito — no debe permitir
 // escribir texto libre). "Otros Trabajos" ya está en la lista como opción
 // para los casos que no encajan en ninguna categoría puntual.
-function poblarSelectTrabajo(valorActual) {
-  const select = document.getElementById("opon-trabajo");
+function poblarSelectTrabajo(valorActual, selectId = "opon-trabajo") {
+  const select = document.getElementById(selectId);
   const opciones = [...TRABAJOS_COMUNES_BASE].sort((a, b) => a.localeCompare(b, "es"));
   select.innerHTML = '<option value="">Selecciona un trabajo…</option>' +
     opciones.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
@@ -576,18 +576,16 @@ function renderTableroOperativo() {
         </div>
         <div class="op-card-cliente">${escapeHtml(o.cliente ? o.cliente.nombre : "Sin cliente")}</div>
         ${o.equipo ? (() => {
-          const nombre = [o.equipo.marca, o.equipo.modelo].filter(Boolean).join(" ") || o.equipo.identificador || "";
-          const anioColor = [o.equipo.anio, o.equipo.color].filter(Boolean).join(" · ");
-          const tituloCompleto = [nombre, anioColor].filter(Boolean).join(" · ");
-          // Año y color van en un span aparte de ancho fijo (no crece con el
-          // texto) para que SIEMPRE se alcancen a ver, aunque la columna sea
-          // angosta — es justo la info nueva que se pidió agregar, así que
-          // no puede ser lo primero que se recorte. Marca/modelo, que ya se
-          // mostraba antes, es lo que se recorta con "…" si no cabe todo.
-          return `<div class="op-card-equipo" title="${escapeHtml(tituloCompleto)}">
-            <span class="op-card-equipo-nombre">${escapeHtml(nombre)}</span>
-            ${anioColor ? `<span class="op-card-equipo-extra">${escapeHtml(anioColor)}</span>` : ""}
-          </div>`;
+          const nombre = [o.equipo.marca, o.equipo.modelo].filter(Boolean).join(" ");
+          // Patente/año/color van en su PROPIA línea, no recortados — se
+          // pidió explícito que se alcancen a leer completos aunque la
+          // tarjeta quede un poco más alta (nunca mucho: es una sola línea
+          // más, sin envolver texto).
+          const detalle = [o.equipo.identificador, o.equipo.anio, o.equipo.color].filter(Boolean).join(" · ");
+          return `
+            ${nombre ? `<div class="op-card-equipo-nombre">${escapeHtml(nombre)}</div>` : ""}
+            ${detalle ? `<div class="op-card-equipo-detalle">${escapeHtml(detalle)}</div>` : ""}
+          `;
         })() : ""}
         <div class="op-card-valor">${fmtMoney(o.precio_referencial || 0)}</div>
         <div class="op-card-meta">
@@ -1410,6 +1408,7 @@ async function abrirDetalleOrden(id) {
 
     document.getElementById("opod-estado").value = orden.estado;
     document.getElementById("opod-prioridad").value = orden.prioridad || "media";
+    poblarSelectTrabajo(orden.trabajo_a_realizar || "", "opod-trabajo");
     document.getElementById("opod-descripcion").value = orden.descripcion_problema || "";
     renderValorYPagosOrden(orden);
     renderCostosOrden(orden);
@@ -1449,6 +1448,7 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
   const payload = {
     estado: document.getElementById("opod-estado").value,
     prioridad: document.getElementById("opod-prioridad").value,
+    trabajo_a_realizar: document.getElementById("opod-trabajo").value,
     descripcion_problema: document.getElementById("opod-descripcion").value.trim(),
     precio_referencial: limpiarMonto(document.getElementById("opod-valor").value) || 0,
     precio_iva: document.getElementById("opod-iva-check").checked,

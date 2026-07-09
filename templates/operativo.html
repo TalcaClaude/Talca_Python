@@ -677,11 +677,11 @@
 
     <div class="op-tabs">
       <button type="button" class="op-tab activo" data-opod-tab="ot">OT</button>
-      <button type="button" class="op-tab" data-opod-tab="costos">Costos</button>
       <button type="button" class="op-tab" data-opod-tab="recepcion">Recepción</button>
-      <button type="button" class="op-tab" data-opod-tab="diagnostico">Diagnóstico</button>
       <button type="button" class="op-tab" data-opod-tab="presupuesto">Presupuesto</button>
       <button type="button" class="op-tab" data-opod-tab="repuestos">Carga de repuestos</button>
+      <button type="button" class="op-tab" data-opod-tab="diagnostico">Diagnóstico</button>
+      <button type="button" class="op-tab" data-opod-tab="costos">Costos</button>
       <button type="button" class="op-tab" data-opod-tab="qc">Pruebas de ruta</button>
     </div>
 
@@ -689,10 +689,6 @@
       <!-- La info de cliente y vehículo ya no se repite acá: vive completa
            en la pestaña "Recepción" (con botón de editar). Esta pestaña
            empieza directo en "Estado" para dejarla más compacta. -->
-      <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-ver-historial" style="display:none">Ver historial de este vehículo</button></p>
-      <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-copiar-seguimiento">🔗 Copiar link de seguimiento para el cliente</button></p>
-      <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-orden-imprimible">🖨 Vista imprimible de la orden (para entregar al cliente)</button></p>
-
       <div class="grid-2">
         <div class="campo">
           <label>Estado</label>
@@ -718,6 +714,11 @@
             <option value="urgente">Urgente</option>
           </select>
         </div>
+      </div>
+
+      <div class="campo">
+        <label>Trabajo a realizar</label>
+        <select id="opod-trabajo"><option value="">Selecciona un trabajo…</option></select>
       </div>
 
       <h3 class="subtitulo">Valor de la OT</h3>
@@ -761,6 +762,12 @@
             <tr><td colspan="5" class="vacio">Sin pagos registrados.</td></tr>
           </tbody>
         </table>
+      </div>
+
+      <div class="op-acciones-secundarias">
+        <button type="button" class="btn btn-secundario btn-chico" id="btn-opod-ver-historial" style="display:none">Ver historial de este vehículo</button>
+        <button type="button" class="btn btn-secundario btn-chico" id="btn-opod-copiar-seguimiento">🔗 Copiar link de seguimiento</button>
+        <button type="button" class="btn btn-secundario btn-chico" id="btn-opod-orden-imprimible">🖨 Vista imprimible</button>
       </div>
 
     </div>

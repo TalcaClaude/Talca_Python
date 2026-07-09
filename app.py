@@ -100,6 +100,24 @@ os.makedirs(FACTURAS_WHATSAPP_DIR, exist_ok=True)
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "cambia-esta-clave-en-produccion-usando-la-variable-SECRET_KEY")
 
+# "Cache busting" de CSS/JS: el navegador guarda los archivos estáticos en
+# caché por horas (Flask los sirve con Cache-Control de varias horas por
+# defecto), así que después de cada despliegue alguien podía seguir viendo
+# la versión vieja de la página sin darse cuenta (ej. un botón nuevo que
+# "no aparece" aunque el despliegue haya salido bien) hasta que el caché
+# expirara solo. ASSET_VERSION se calcula una vez CUANDO ARRANCA EL
+# PROCESO (o sea, en cada despliegue nuevo cambia solo) y se agrega como
+# "?v=..." a cada <script>/<link> en las plantillas (ver ASSET_VERSION más
+# abajo) — eso hace que la URL del archivo cambie en cada despliegue, así
+# que el navegador SIEMPRE pide la versión nueva en vez de usar la cacheada.
+ASSET_VERSION = str(int(datetime.now().timestamp()))
+
+
+@app.context_processor
+def _inyectar_asset_version():
+    return {"ASSET_VERSION": ASSET_VERSION}
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taller")
 

@@ -1660,10 +1660,10 @@ async function abrirDiagnostico() {
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     document.getElementById("opdi-sintoma").value = orden.sintoma || "";
     document.getElementById("opdi-diagnostico-tecnico").value = orden.diagnostico_tecnico || "";
-    document.getElementById("opdi-falla-detectada").value = orden.falla_detectada || "";
-    document.getElementById("opdi-componentes-danados").value = orden.componentes_danados || "";
-    document.getElementById("opdi-mediciones").value = orden.mediciones || "";
-    document.getElementById("opdi-resultado-pruebas").value = orden.resultado_pruebas || "";
+    // Campo de solo lectura: se rellena para mostrar quién lo guardó la
+    // última vez, pero el servidor jamás toma este valor del cliente (ver
+    // editar_orden() en modulos/operativo.py) — siempre lo pisa con quien
+    // tiene la sesión iniciada al guardar.
     document.getElementById("opdi-responsable-diagnostico").value = orden.responsable_diagnostico || "";
     document.getElementById("opdi-diagnostico").value = orden.diagnostico || "";
   } catch (e) {
@@ -1676,17 +1676,13 @@ document.getElementById("btn-opdi-guardar").addEventListener("click", async () =
   const payload = {
     sintoma: document.getElementById("opdi-sintoma").value.trim(),
     diagnostico_tecnico: document.getElementById("opdi-diagnostico-tecnico").value.trim(),
-    falla_detectada: document.getElementById("opdi-falla-detectada").value.trim(),
-    componentes_danados: document.getElementById("opdi-componentes-danados").value.trim(),
-    mediciones: document.getElementById("opdi-mediciones").value.trim(),
-    resultado_pruebas: document.getElementById("opdi-resultado-pruebas").value.trim(),
-    responsable_diagnostico: document.getElementById("opdi-responsable-diagnostico").value.trim(),
     diagnostico: document.getElementById("opdi-diagnostico").value.trim(),
   };
   try {
     await api(`/api/operativo/ordenes/${ordenId}`, { method: "PUT", body: JSON.stringify(payload) });
     toast("Diagnóstico guardado.");
     await refrescarResumenHub(ordenId);
+    await abrirDiagnostico(); // refresca el responsable (lo acaba de fijar el servidor)
   } catch (e) {
     toast(e.message, true);
   }
@@ -2078,9 +2074,11 @@ async function eliminarItemQc(itemId) {
 
 document.getElementById("btn-opqc-guardar").addEventListener("click", async () => {
   const ordenId = document.getElementById("opod-id").value;
+  // "inspector" no se manda: es de solo lectura, el servidor siempre lo
+  // pisa con quien tiene la sesión iniciada (ver actualizar_qc() en
+  // modulos/operativo.py).
   const payload = {
     resultado: document.getElementById("opqc-veredicto").value,
-    inspector: document.getElementById("opqc-inspector").value.trim(),
     observaciones: document.getElementById("opqc-observaciones-generales").value.trim(),
   };
   try {

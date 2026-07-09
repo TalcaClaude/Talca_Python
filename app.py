@@ -3679,19 +3679,22 @@ def _agente_listar_ordenes_abiertas(db):
 # ejemplo, marcar el control de calidad como "aprobado"/"rechazado", que sí
 # mueve la orden de estado — por eso qc_resultado queda afuera de esta
 # lista y sigue siendo solo manual, ver actualizar_qc en modulos/operativo.py).
+#
+# Deliberadamente reducidos a lo mínimo — lo que un mecánico realmente
+# alcanza a contar en un audio corto — a pedido del taller ("lo fundamental
+# es lo que se dice por audio"). "responsable del diagnóstico" e
+# "inspector" NO están en estas listas a propósito: nunca se completan con
+# lo que interprete la IA del mensaje, siempre quedan igual al mecánico
+# registrado que mandó el mensaje (ver _agente_actualizar_diagnostico_o_
+# prueba_ruta más abajo), para que ese dato no se pueda falsear ni quede
+# vacío por un mensaje ambiguo.
 CAMPOS_DIAGNOSTICO_AGENTE = {
-    "sintoma": "síntoma reportado",
-    "diagnostico_tecnico": "diagnóstico técnico",
-    "falla_detectada": "falla detectada",
-    "componentes_danados": "componentes dañados",
-    "mediciones": "mediciones",
-    "resultado_pruebas": "resultado de pruebas",
-    "responsable_diagnostico": "responsable del diagnóstico",
+    "sintoma": "síntoma reportado por el cliente",
+    "diagnostico_tecnico": "diagnóstico técnico (qué encontró y qué falla)",
     "diagnostico": "diagnóstico (resumen para el cliente)",
 }
 CAMPOS_PRUEBA_RUTA_AGENTE = {
-    "qc_inspector": "inspector",
-    "qc_observaciones": "observaciones generales",
+    "qc_observaciones": "observaciones generales de la prueba de ruta",
 }
 
 
@@ -3802,7 +3805,9 @@ def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
         "el sintoma era ruido en la suspension delantera, se detecto el amortiguador derecho roto, mediciones "
         "ok en el resto\" — esto es 'actualizar_diagnostico'.\n"
         "3. Contar el resultado de una PRUEBA DE RUTA / inspección final de una OT, sin pedir cambiar el "
-        "estado, ej: \"ot 4012 prueba de ruta ok, sin ruidos, la hizo Pedro\" — esto es 'actualizar_prueba_ruta'.\n\n"
+        "estado, ej: \"ot 4012 prueba de ruta ok, frenos y dirección responden bien, sin ruidos\" — esto es "
+        "'actualizar_prueba_ruta'. Quién hizo la prueba NUNCA se le pide a la IA — el sistema ya sabe quién "
+        "es porque es el mismo mecánico que mandó el mensaje.\n\n"
         "Los estados posibles de una OT son (usa EXACTAMENTE estas claves internas en 'estado_destino'):\n"
         f"{estados_descripcion}\n\n"
         "Campos disponibles para 'actualizar_diagnostico' (usa EXACTAMENTE estos nombres de campo):\n"
@@ -3926,9 +3931,17 @@ def _agente_actualizar_diagnostico_o_prueba_ruta(db, mecanico, interpretado, acc
     — nunca qc_resultado, que sí cambia el estado de la OT y por eso se deja
     como acción manual desde el sistema) y aplicarlos directo, sin revisión
     humana, tal como se pidió: son notas de texto sin ningún efecto
-    secundario sobre el resto del sistema."""
+    secundario sobre el resto del sistema.
+
+    El responsable del diagnóstico / inspector de la prueba de ruta NUNCA
+    sale de lo que la IA interpretó del mensaje — siempre es el mecánico
+    que efectivamente mandó el mensaje de WhatsApp (ya autenticado más
+    arriba en _agente_procesar_mensaje por su teléfono registrado), para
+    que ese dato no se pueda falsear ni completar con un nombre
+    equivocado."""
     campos_agente = CAMPOS_DIAGNOSTICO_AGENTE if accion == "actualizar_diagnostico" else CAMPOS_PRUEBA_RUTA_AGENTE
     etiqueta_accion = "diagnóstico" if accion == "actualizar_diagnostico" else "prueba de ruta"
+    campo_responsable = "responsable_diagnostico" if accion == "actualizar_diagnostico" else "qc_inspector"
 
     ot_id = interpretado.get("ot_id")
     if not isinstance(ot_id, int):
@@ -3959,11 +3972,17 @@ def _agente_actualizar_diagnostico_o_prueba_ruta(db, mecanico, interpretado, acc
             f"No encontré ningún dato concreto de {etiqueta_accion} en tu mensaje para la OT #{ot_id}.",
         )
 
+    # Se agrega DESPUÉS de comprobar que hay datos reales que guardar (así
+    # un mensaje sin información de diagnóstico sigue rechazándose), pero
+    # siempre que se aplique algo, el responsable queda registrado — nunca
+    # se guarda un diagnóstico "huérfano" sin saber quién lo hizo.
+    campos[campo_responsable] = mecanico["nombre"]
+
     actualizada, error = _actualizar_campos_orden_por_agente(db, ot_id, campos)
     if error:
         return _registrar(mecanico["nombre"], "error", ot_id, "", "", False, error)
 
-    campos_legibles = ", ".join(campos_agente[c] for c in campos)
+    campos_legibles = ", ".join(campos_agente[c] for c in campos if c in campos_agente)
     accion_registro = "actualizar_diagnostico" if accion == "actualizar_diagnostico" else "actualizar_prueba_ruta"
     respuesta = f"Listo — actualicé el {etiqueta_accion} de la OT #{ot_id} ({campos_legibles}). ✅"
     return _registrar(mecanico["nombre"], accion_registro, ot_id, "", "", True, respuesta)

@@ -1165,6 +1165,71 @@ class TestPresupuestoDescargaEnvioYOrdenImprimible(unittest.TestCase):
         self.assertNotIn("Costo mano de obra", texto)
         self.assertNotIn("Utilidad", texto)
 
+    def test_presupuesto_pdf_incluye_el_diagnostico_junto_al_precio(self):
+        # A pedido del taller: el presupuesto que recibe el cliente debe ir
+        # acompañado del diagnóstico (resumen para el cliente), para que no
+        # llegue un precio "pelado" sin explicación de por qué se cobra.
+        from pypdf import PdfReader
+
+        cliente = self._crear_cliente(nombre="Cliente Con Diagnostico")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}",
+            json={"diagnostico": "Se detectó el amortiguador delantero derecho roto, se recomienda cambiarlo."},
+        )
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/presupuesto/items",
+            json={"tipo": "repuesto", "descripcion": "Amortiguador delantero", "cantidad": 1, "precio_unitario": 45000},
+        )
+
+        resp = self.client.get(f"/api/operativo/ordenes/{orden['id']}/presupuesto/pdf")
+        self.assertEqual(resp.status_code, 200)
+        texto = PdfReader(io.BytesIO(resp.data)).pages[0].extract_text()
+        self.assertIn("Diagnóstico", texto)
+        self.assertIn("AMORTIGUADOR DELANTERO DERECHO ROTO", texto)
+
+    def test_presupuesto_pdf_sin_diagnostico_cargado_no_muestra_la_seccion(self):
+        from pypdf import PdfReader
+
+        cliente = self._crear_cliente(nombre="Cliente Sin Diagnostico")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.get(f"/api/operativo/ordenes/{orden['id']}/presupuesto/pdf")
+        self.assertEqual(resp.status_code, 200)
+        texto = PdfReader(io.BytesIO(resp.data)).pages[0].extract_text()
+        self.assertNotIn("Diagnóstico", texto)
+
+    def test_responsable_del_diagnostico_se_registra_solo_con_la_sesion_activa(self):
+        # El responsable NUNCA se toma de lo que mande el cliente en el PUT
+        # — siempre es quien tiene la sesión iniciada al guardar (mismo
+        # criterio que usuario_actual() en Caja Chica).
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        resp = self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}",
+            json={"sintoma": "No enciende", "responsable_diagnostico": "Alguien Que No Guardó Esto"},
+        )
+        actualizada = resp.get_json()
+        self.assertNotEqual(actualizada["responsable_diagnostico"], "ALGUIEN QUE NO GUARDÓ ESTO")
+        self.assertEqual(actualizada["responsable_diagnostico"], "ADMINISTRADOR")
+
+        # Si el PUT no toca ningún campo de diagnóstico (ej. guarda otra
+        # pestaña), el responsable no se pisa.
+        resp2 = self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"trabajo_a_realizar": "CAMBIO DE ACEITE"})
+        self.assertEqual(resp2.get_json()["responsable_diagnostico"], "ADMINISTRADOR")
+
+    def test_inspector_de_prueba_de_ruta_se_registra_solo_con_la_sesion_activa(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "control_calidad"})
+        resp = self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}/qc",
+            json={"observaciones": "Todo OK", "inspector": "Alguien Que No Guardó Esto"},
+        )
+        actualizada = resp.get_json()
+        self.assertNotEqual(actualizada["qc_inspector"], "ALGUIEN QUE NO GUARDÓ ESTO")
+        self.assertEqual(actualizada["qc_inspector"], "ADMINISTRADOR")
+
 
 class TestBusquedaSinTildesMultipalabra(unittest.TestCase):
     """coincide_busqueda/normalizar_busqueda (core.py) son la base de TODOS
@@ -1669,14 +1734,13 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self._forzar_estado(orden["id"], "diagnostico")
         # Deja un valor previo en un campo que el mensaje NO va a mencionar,
         # para comprobar que no se borra.
-        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"mediciones": "COMPRESIÓN OK"})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"diagnostico_tecnico": "REVISIÓN PREVIA OK"})
 
         respuesta_ia = {
             "accion": "actualizar_diagnostico",
             "ot_id": orden["id"],
-            "resumen": "El mecánico reporta la falla encontrada",
-            "sintoma": "El auto no enciende en frío",
-            "falla_detectada": "Batería descargada",
+            "resumen": "El mecánico reporta el síntoma encontrado",
+            "sintoma": "El auto no enciende en frío, batería descargada",
         }
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular(
@@ -1691,12 +1755,38 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertIn(str(orden["id"]), data["respuesta_texto"])
 
         actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
-        self.assertEqual(actual["sintoma"], "EL AUTO NO ENCIENDE EN FRÍO")
-        self.assertEqual(actual["falla_detectada"], "BATERÍA DESCARGADA")
+        self.assertEqual(actual["sintoma"], "EL AUTO NO ENCIENDE EN FRÍO, BATERÍA DESCARGADA")
         # El campo que ya tenía un valor y no fue mencionado sigue intacto.
-        self.assertEqual(actual["mediciones"], "COMPRESIÓN OK")
+        self.assertEqual(actual["diagnostico_tecnico"], "REVISIÓN PREVIA OK")
+        # El responsable NUNCA sale de lo que interpretó la IA — siempre es
+        # el mecánico registrado que mandó el mensaje de WhatsApp.
+        self.assertEqual(actual["responsable_diagnostico"], "DIEGO MECÁNICO")
         # El estado de la orden no cambia por esta acción.
         self.assertEqual(actual["estado"], "diagnostico")
+
+    def test_actualizar_diagnostico_por_agente_ignora_un_responsable_que_mande_la_ia(self):
+        # Defensa en profundidad: aunque la IA (por error o por un prompt
+        # manipulado) mandara un "responsable_diagnostico" en la
+        # interpretación, la función ni siquiera lo mira — construye el
+        # valor final ella misma a partir del mecánico autenticado.
+        self._registrar_mecanico("Diego Mecánico", "+56911122266")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "diagnostico")
+
+        respuesta_ia = {
+            "accion": "actualizar_diagnostico",
+            "ot_id": orden["id"],
+            "resumen": "Intento de suplantar al responsable",
+            "sintoma": "Ruido en el motor",
+            "responsable_diagnostico": "Otro Mecánico Cualquiera",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56911122266", f"ot {orden['id']} ruido en el motor")
+
+        self.assertTrue(resp.get_json()["exito"])
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["responsable_diagnostico"], "DIEGO MECÁNICO")
 
     def test_actualizar_prueba_ruta_por_agente_nunca_toca_qc_resultado_ni_estado(self):
         self._registrar_mecanico("Elena Mecánica", "+56911133344")
@@ -1708,10 +1798,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
             "accion": "actualizar_prueba_ruta",
             "ot_id": orden["id"],
             "resumen": "El mecánico deja observaciones de la prueba de ruta",
-            "qc_inspector": "Elena Mecánica",
             "qc_observaciones": "Frenos y dirección responden bien, sin ruidos extraños",
             # Aunque la IA mandara esto por error, la función solo debe
-            # aplicar qc_inspector/qc_observaciones — nunca qc_resultado.
+            # aplicar qc_observaciones (más el inspector, que ella misma
+            # fija) — nunca qc_resultado.
             "qc_resultado": "aprobado",
         }
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
@@ -1722,6 +1812,8 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(data["accion"], "actualizar_prueba_ruta")
 
         actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        # El inspector NUNCA sale de lo que interpretó la IA — siempre es el
+        # mecánico registrado que mandó el mensaje de WhatsApp.
         self.assertEqual(actual["qc_inspector"], "ELENA MECÁNICA")
         self.assertIn("FRENOS", actual["qc_observaciones"])
         # qc_resultado y el estado de la OT NUNCA se tocan por este medio:

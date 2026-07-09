@@ -812,43 +812,28 @@
     </div>
 
     <div class="op-tab-panel" id="opod-panel-diagnostico" style="display:none">
-      <div class="grid-2">
-        <div class="campo">
-          <label>Síntoma reportado</label>
-          <textarea id="opdi-sintoma" rows="2"></textarea>
-        </div>
-        <div class="campo">
-          <label>Diagnóstico técnico</label>
-          <textarea id="opdi-diagnostico-tecnico" rows="2"></textarea>
-        </div>
+      <!-- Pestaña simplificada a lo estrictamente necesario: lo que un
+           mecánico alcanza a contar en un audio corto. El resto de los
+           datos sueltos que había antes (falla detectada, componentes
+           dañados, mediciones, resultado de pruebas por separado) se
+           fusionaron en "Diagnóstico técnico" como texto libre — se
+           pidió explícito simplificar y dejar solo lo fundamental. -->
+      <div class="campo">
+        <label>Síntoma reportado</label>
+        <textarea id="opdi-sintoma" rows="2" placeholder="Lo que el cliente dice que le pasa al vehículo"></textarea>
       </div>
-      <div class="grid-2">
-        <div class="campo">
-          <label>Falla detectada</label>
-          <input type="text" id="opdi-falla-detectada">
-        </div>
-        <div class="campo">
-          <label>Componentes dañados</label>
-          <input type="text" id="opdi-componentes-danados">
-        </div>
-      </div>
-      <div class="grid-2">
-        <div class="campo">
-          <label>Mediciones</label>
-          <textarea id="opdi-mediciones" rows="2" placeholder="Ej: Presión línea: 45 psi"></textarea>
-        </div>
-        <div class="campo">
-          <label>Resultado de pruebas</label>
-          <textarea id="opdi-resultado-pruebas" rows="2"></textarea>
-        </div>
+      <div class="campo">
+        <label>Diagnóstico técnico</label>
+        <textarea id="opdi-diagnostico-tecnico" rows="3" placeholder="Qué encontró el mecánico: falla, componentes dañados, mediciones, resultado de pruebas, etc."></textarea>
       </div>
       <div class="campo">
         <label>Responsable del diagnóstico</label>
-        <input type="text" id="opdi-responsable-diagnostico">
+        <input type="text" id="opdi-responsable-diagnostico" readonly>
+        <p class="ayuda-inline">Se registra solo — siempre queda quien guardó el diagnóstico (o el mecánico que mandó el audio de WhatsApp), nunca se escribe a mano.</p>
       </div>
       <div class="campo">
         <label>Diagnóstico (resumen para el cliente)</label>
-        <textarea id="opdi-diagnostico" rows="2"></textarea>
+        <textarea id="opdi-diagnostico" rows="2" placeholder="Resumen simple, en lenguaje de cliente — este texto va junto al presupuesto que se le envía"></textarea>
       </div>
       <div class="modal-actions modal-actions--start">
         <button type="button" class="btn btn-primary" id="btn-opdi-guardar">Guardar diagnóstico</button>
@@ -1043,13 +1028,14 @@
         </div>
         <div class="campo">
           <label>Inspector</label>
-          <input type="text" id="opqc-inspector">
+          <input type="text" id="opqc-inspector" readonly>
         </div>
       </div>
       <div class="campo">
         <label>Observaciones generales</label>
-        <textarea id="opqc-observaciones-generales" rows="2"></textarea>
+        <textarea id="opqc-observaciones-generales" rows="2" placeholder="Lo fundamental de la prueba de ruta — frenos, dirección, ruidos, etc."></textarea>
       </div>
+      <p class="ayuda-inline">El inspector se registra solo — siempre queda quien guardó el control de calidad (o el mecánico que mandó el audio de WhatsApp), nunca se escribe a mano.</p>
       <div class="modal-actions modal-actions--start">
         <button type="button" class="btn btn-primary" id="btn-opqc-guardar">Guardar control de calidad</button>
       </div>

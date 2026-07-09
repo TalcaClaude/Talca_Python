@@ -123,9 +123,15 @@ ESTADOS_GARANTIA_LABEL = {
 # transición automática de estado (presupuesto_estado, qc_resultado) viven
 # en sus propios endpoints más abajo, para que ese efecto secundario quede
 # explícito y sea auditable.
+#
+# "responsable_diagnostico" NO está en esta lista a propósito: no se deja
+# escribir con lo que mande el cliente (igual que qc_inspector, ver
+# actualizar_qc() más abajo) — siempre queda igual a quien tiene la sesión
+# iniciada al guardar el diagnóstico (ver editar_orden(), usuario_actual()),
+# para que no se pueda registrar un diagnóstico a nombre de otra persona.
 CAMPOS_SIMPLES_ORDEN = [
     "sintoma", "diagnostico_tecnico", "falla_detectada", "componentes_danados",
-    "mediciones", "resultado_pruebas", "responsable_diagnostico",
+    "mediciones", "resultado_pruebas",
     "referencia", "trabajo_a_realizar",
 ]
 
@@ -1229,11 +1235,12 @@ def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
 # qc_resultado queda deliberadamente afuera de _CAMPOS_QC porque cambiarlo
 # sí tiene un efecto secundario (mueve el estado de la OT — ver
 # actualizar_qc() más abajo), a diferencia del resto que son solo texto
-# libre sin ningún efecto sobre el resto del sistema.
-_CAMPOS_DIAGNOSTICO_AGENTE = {
-    "sintoma", "diagnostico_tecnico", "falla_detectada", "componentes_danados",
-    "mediciones", "resultado_pruebas", "responsable_diagnostico", "diagnostico",
-}
+# libre sin ningún efecto sobre el resto del sistema. responsable_diagnostico
+# y qc_inspector SÍ están en la lista blanca porque la función igual los
+# escribe (ver _agente_actualizar_diagnostico_o_prueba_ruta en app.py) —
+# pero solo con el nombre del mecánico autenticado que mandó el mensaje,
+# nunca con lo que la IA haya interpretado del texto libre.
+_CAMPOS_DIAGNOSTICO_AGENTE = {"sintoma", "diagnostico_tecnico", "diagnostico", "responsable_diagnostico"}
 _CAMPOS_QC_AGENTE = {"qc_inspector", "qc_observaciones"}
 
 
@@ -1358,6 +1365,19 @@ def editar_orden(orden_id):
         campo: (data.get(campo, row[campo]) or "").strip().upper() for campo in CAMPOS_SIMPLES_ORDEN
     }
 
+    # El responsable del diagnóstico NUNCA se toma de lo que mande el
+    # cliente (a diferencia del resto de los campos de arriba) — siempre es
+    # quien tiene la sesión iniciada al momento de guardar, igual que
+    # usuario_actual() en Caja Chica. Si el guardado no tocó ningún campo
+    # de diagnóstico (ej. viene de otra pestaña) se deja el valor que ya
+    # había, para no "robarle" la autoría a quien lo hizo antes.
+    campos_diagnostico = {"sintoma", "diagnostico_tecnico", "falla_detectada", "componentes_danados",
+                           "mediciones", "resultado_pruebas", "diagnostico"}
+    if campos_diagnostico & data.keys():
+        responsable_diagnostico = usuario_actual().strip().upper()
+    else:
+        responsable_diagnostico = row["responsable_diagnostico"]
+
     db.execute(
         """
         UPDATE ordenes_trabajo SET
@@ -1383,7 +1403,7 @@ def editar_orden(orden_id):
             valores_simples["sintoma"], valores_simples["diagnostico_tecnico"],
             valores_simples["falla_detectada"], valores_simples["componentes_danados"],
             valores_simples["mediciones"], valores_simples["resultado_pruebas"],
-            valores_simples["responsable_diagnostico"],
+            responsable_diagnostico,
             valores_simples["referencia"], valores_simples["trabajo_a_realizar"],
             orden_id,
         ),
@@ -1857,6 +1877,17 @@ def _armar_presupuesto_pdf(db, orden_id):
     elementos.append(tabla_cliente)
     elementos.append(Spacer(1, 14))
 
+    # El diagnóstico (resumen para el cliente, pestaña "Diagnóstico") se
+    # incluye acá para que el presupuesto que recibe el cliente venga
+    # acompañado de POR QUÉ se cobra cada ítem — a pedido del taller, para
+    # que no llegue un presupuesto "pelado" sin explicación. Se omite por
+    # completo si todavía no se ha cargado un diagnóstico (ej. presupuesto
+    # armado antes de terminar de revisar el vehículo).
+    if orden.get("diagnostico"):
+        elementos.append(Paragraph("Diagnóstico", estilos["EtiquetaPresupuesto"]))
+        elementos.append(Paragraph(orden["diagnostico"], estilos["Normal"]))
+        elementos.append(Spacer(1, 10))
+
     encabezados = ["Tipo", "Descripción", "Cantidad", "Precio unit.", "Subtotal"]
     filas = [encabezados]
     for it in presupuesto["items"]:
@@ -2170,7 +2201,15 @@ def actualizar_qc(orden_id):
         resultado = (data.get("resultado") or "").strip().lower()
         if resultado not in RESULTADOS_QC:
             return jsonify({"error": f"Resultado inválido. Usa uno de: {', '.join(RESULTADOS_QC)}"}), 400
-    inspector = (data.get("inspector", row["qc_inspector"]) or "").strip().upper()
+    # El inspector, igual que el responsable del diagnóstico (ver
+    # editar_orden()), NUNCA se toma de lo que mande el cliente — siempre
+    # es quien tiene la sesión iniciada al momento de guardar. Si este PUT
+    # no tocó ni el resultado ni las observaciones, se deja el inspector
+    # que ya había (ej. una llamada que solo actualiza el checklist).
+    if "resultado" in data or "observaciones" in data:
+        inspector = usuario_actual().strip().upper()
+    else:
+        inspector = row["qc_inspector"] or ""
     observaciones = (data.get("observaciones", row["qc_observaciones"]) or "").strip().upper()
 
     nuevo_estado_orden = row["estado"]

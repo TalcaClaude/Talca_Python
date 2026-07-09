@@ -25,6 +25,7 @@
       <a href="/" class="btn btn-secundario">← Módulos</a>
       <button class="btn btn-secundario" id="btn-respaldo">Respaldo</button>
       <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+      <button class="btn btn-secundario" id="btn-importar-excel" style="display:none">Importar Excel</button>
       <button class="btn btn-primary" id="btn-nuevo" style="display:none">+ Nuevo producto</button>
     </div>
   </header>
@@ -541,6 +542,62 @@
 </div>
 
 <!-- Modal: Crear / Editar producto -->
+<div class="modal-overlay" id="modal-importar-excel">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Importar Excel — reemplazar catálogo de productos</h2>
+      <button class="modal-close" data-close="modal-importar-excel">&times;</button>
+    </div>
+    <p class="ayuda-inline ayuda-inline--bloqueado">
+      ⚠ Esto BORRA todos los productos actuales y los reemplaza por el contenido del Excel. No se puede
+      deshacer. El historial de movimientos/facturas/OTs ligado a los productos actuales no se borra, pero
+      queda sin poder mostrar a qué producto pertenecía.
+    </p>
+    <div class="campo">
+      <label>Archivo Excel (.xlsx) *</label>
+      <input type="file" id="imp-excel-archivo" accept=".xlsx">
+    </div>
+    <div class="modal-actions" style="justify-content:flex-start">
+      <button type="button" class="btn btn-secundario" id="btn-imp-excel-previsualizar">Previsualizar</button>
+    </div>
+
+    <div id="imp-excel-resultado" style="display:none; margin-top:14px">
+      <div id="imp-excel-preview-ok" style="display:none">
+        <p class="ayuda-inline">
+          <strong id="imp-excel-total-filas"></strong> productos válidos para importar
+          (<span id="imp-excel-total-advertencias"></span> advertencias).
+          Valor total estimado: <strong id="imp-excel-valor-total"></strong>.
+        </p>
+        <p class="ayuda-inline ayuda-inline--bloqueado">
+          Se van a eliminar <strong id="imp-excel-total-actuales"></strong> producto(s) que existen hoy en el
+          sistema.
+        </p>
+        <div id="imp-excel-muestra-wrap" class="tabla-wrap" style="margin-top:10px">
+          <table class="tabla">
+            <thead><tr><th>Producto (resultante)</th><th>Ubicación</th><th class="num">Cantidad</th><th class="num">Costo</th></tr></thead>
+            <tbody id="imp-excel-muestra"></tbody>
+          </table>
+        </div>
+        <div id="imp-excel-advertencias-wrap" style="margin-top:10px; display:none">
+          <p class="ayuda-inline"><strong>Advertencias (primeras filas):</strong></p>
+          <ul id="imp-excel-advertencias-lista" class="lista-advertencias"></ul>
+        </div>
+
+        <hr style="margin:16px 0; border:none; border-top:1px solid var(--borde, #333)">
+
+        <div class="campo">
+          <label>Escribe REEMPLAZAR para confirmar que quieres borrar el catálogo actual y cargar este Excel</label>
+          <input type="text" id="imp-excel-confirmar-texto" placeholder="REEMPLAZAR" autocomplete="off">
+        </div>
+        <div class="modal-actions" style="justify-content:flex-start">
+          <button type="button" class="btn btn-danger" id="btn-imp-excel-confirmar" disabled>Confirmar y reemplazar catálogo</button>
+        </div>
+      </div>
+      <p id="imp-excel-error" class="ayuda-inline ayuda-inline--bloqueado" style="display:none"></p>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="modal-producto">
   <div class="modal">
     <div class="modal-head">

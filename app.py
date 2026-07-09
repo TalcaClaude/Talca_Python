@@ -1238,6 +1238,215 @@ def listar_productos():
     })
 
 
+def _leer_excel_productos_masivo(archivo):
+    """Lee un Excel de inventario en formato 'ID / MODELO / DESCRIPCION /
+    CANTIDAD / CODIGO DE UBICACIÓN / PRECIO PROMEDIO' (una fila por
+    producto, ver /api/productos/importar-excel/*) y devuelve
+    (filas_validas, errores). 'filas_validas' es una lista de dicts ya
+    listos para insertarse en 'productos'; 'errores' son advertencias en
+    español sobre filas puntuales que no se pudieron leer bien — una fila
+    mala NUNCA hace fallar el archivo completo, solo se excluye (o se
+    corrige con un valor por defecto, dejando la advertencia)."""
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(archivo, data_only=True)
+    except Exception as e:
+        raise RuntimeError(f"No se pudo leer el archivo como Excel (.xlsx): {e}")
+
+    ws = wb.worksheets[0]
+    filas_validas = []
+    errores = []
+    vistos = {}  # (modelo, descripcion) normalizados -> primera fila donde aparecieron, para avisar de duplicados
+
+    for i, fila in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        if fila is None or all(v is None or str(v).strip() == "" for v in fila):
+            continue  # fila completamente vacía, se ignora sin avisar
+
+        valores = (list(fila) + [None] * 6)[:6]
+        _id, modelo, descripcion, cantidad, ubicacion, precio = valores
+
+        modelo = (str(modelo).strip() if modelo is not None else "")
+        descripcion = (str(descripcion).strip() if descripcion is not None else "")
+        if not descripcion:
+            errores.append(f"Fila {i}: no tiene descripción, se omitió.")
+            continue
+
+        # Filas de resumen al final de la planilla (ej. "TOTAL:" con la
+        # suma de cantidades/valores) no son productos — se detectan porque
+        # no traen modelo y la descripción es justo esa palabra, y se
+        # omiten sin avisar (no es un error, es esperable en este formato).
+        if not modelo and descripcion.strip(":").strip().upper() in ("TOTAL", "TOTALES", "SUMA", "SUBTOTAL"):
+            continue
+
+        try:
+            cantidad_num = int(float(cantidad)) if cantidad not in (None, "") else 0
+        except (TypeError, ValueError):
+            errores.append(f"Fila {i} ({descripcion}): la cantidad '{cantidad}' no es un número, se usó 0.")
+            cantidad_num = 0
+
+        try:
+            precio_num = float(precio) if precio not in (None, "") else 0.0
+        except (TypeError, ValueError):
+            errores.append(f"Fila {i} ({descripcion}): el precio '{precio}' no es un número, se usó 0.")
+            precio_num = 0.0
+
+        ubicacion_txt = (str(ubicacion).strip() if ubicacion is not None else "")
+
+        clave = (modelo.upper(), descripcion.upper())
+        if clave in vistos:
+            errores.append(
+                f"Fila {i} ({modelo} - {descripcion}): mismo modelo y descripción que la fila "
+                f"{vistos[clave]} — se importan ambas igual, pero revisa si es un duplicado real."
+            )
+        else:
+            vistos[clave] = i
+
+        filas_validas.append({
+            "categoria": modelo.upper(),        # ver nota en el endpoint: MODELO va en 'categoria'
+            "modelo": descripcion.upper(),       # y DESCRIPCION va en 'modelo', para que el nombre
+            "ubicacion": ubicacion_txt.upper(),  # automático quede "MODELO - DESCRIPCION" como se pidió.
+            "cantidad": max(0, cantidad_num),
+            "costo_compra": max(0.0, precio_num),
+        })
+
+    return filas_validas, errores
+
+
+@app.route("/api/productos/importar-excel/previsualizar", methods=["POST"])
+def productos_importar_excel_previsualizar():
+    """Primer paso de 'Importar Excel' (reemplazo completo del catálogo):
+    lee el archivo y devuelve un resumen (cuántas filas se importarían,
+    cuántas tuvieron algún problema, valor total estimado) SIN TOCAR LA
+    BASE DE DATOS TODAVÍA — el reemplazo real ocurre recién en
+    /confirmar, y solo si el usuario lo confirma explícitamente desde la
+    interfaz (ver 'confirmar_texto')."""
+    archivo = request.files.get("archivo")
+    if not archivo or not archivo.filename:
+        return jsonify({"error": "Debes adjuntar un archivo Excel (.xlsx)"}), 400
+
+    try:
+        filas, errores = _leer_excel_productos_masivo(archivo)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+
+    if not filas:
+        return jsonify({"error": "El archivo no trae ninguna fila con al menos una descripción — no hay nada que importar."}), 400
+
+    db = get_db()
+    total_actuales = db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+    valor_total_estimado = sum(f["cantidad"] * f["costo_compra"] for f in filas)
+
+    return jsonify({
+        "total_filas_validas": len(filas),
+        "total_advertencias": len(errores),
+        "advertencias": errores[:30],
+        "advertencias_recortadas": max(0, len(errores) - 30),
+        "valor_total_estimado": round(valor_total_estimado, 2),
+        "productos_actuales_a_reemplazar": total_actuales,
+        "muestra": [
+            {"nombre_resultante": f"{f['categoria']} - {f['modelo']}".strip(" -"),
+             "ubicacion": f["ubicacion"], "cantidad": f["cantidad"], "costo_compra": f["costo_compra"]}
+            for f in filas[:8]
+        ],
+    })
+
+
+@app.route("/api/productos/importar-excel/confirmar", methods=["POST"])
+def productos_importar_excel_confirmar():
+    """Reemplaza TODO el catálogo de productos por el contenido del Excel
+    — acción destructiva e irreversible (no hay 'deshacer'), por eso exige
+    'confirmar_texto' == 'REEMPLAZAR' además del archivo, para que no se
+    pueda disparar por accidente con un solo clic ni con un doble-submit
+    del formulario.
+
+    Los productos actuales se BORRAN (no se intenta hacer merge/actualizar
+    por nombre — a pedido explícito del taller). Cualquier movimiento,
+    ítem de OT/garantía o línea de factura que apuntara a un producto
+    viejo queda con una referencia que ya no existe ("huérfana"): el
+    historial en sí no se borra, pero deja de poder mostrar el producto
+    asociado. Por eso se desactiva 'PRAGMA foreign_keys' justo durante el
+    reemplazo (igual que en las migraciones de esquema, ver
+    modulos/operativo.py) — si no, SQLite directamente RECHAZARÍA borrar
+    un producto todavía referenciado en vez de dejarlo huérfano.
+
+    La ubicación de bodega del Excel (ej. '334') es un código antiguo del
+    taller que no calza con el formato estructurado de este sistema
+    (pasillo/estantería/nivel, ej. 'P3-E3-N4') — se guarda tal cual en el
+    campo de ubicación libre ('pendiente de asignar' en la interfaz), para
+    no inventar una conversión que podría quedar mal. Se puede asignar la
+    ubicación estructurada real después, producto por producto, desde
+    Productos → editar."""
+    archivo = request.files.get("archivo")
+    confirmar_texto = (request.form.get("confirmar_texto") or "").strip().upper()
+    if confirmar_texto != "REEMPLAZAR":
+        return jsonify({"error": "Falta confirmar la acción: escribe exactamente REEMPLAZAR para continuar."}), 400
+    if not archivo or not archivo.filename:
+        return jsonify({"error": "Debes adjuntar un archivo Excel (.xlsx)"}), 400
+
+    try:
+        filas, errores = _leer_excel_productos_masivo(archivo)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    if not filas:
+        return jsonify({"error": "El archivo no trae ninguna fila con al menos una descripción — no hay nada que importar."}), 400
+
+    db = get_db()
+    ts = now_iso()
+    total_actuales = db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+
+    # Fuera de una transacción activa a propósito (PRAGMA foreign_keys no
+    # se puede cambiar en medio de una transacción) — mismo patrón que
+    # modulos/operativo.py usa para sus migraciones de esquema.
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    try:
+        db.execute("DELETE FROM productos")
+        db.execute("DELETE FROM stock_minimo_calculo")
+        for f in filas:
+            cur = db.execute(
+                """
+                INSERT INTO productos (
+                    codigo_interno, nombre, descripcion, categoria, marca, modelo,
+                    ubicacion, ubicacion_id, stock_disponible, stock_reservado, stock_merma,
+                    stock_minimo, costo_compra, creado_en, actualizado_en
+                ) VALUES ('', '', '', ?, '', ?, ?, NULL, ?, 0, 0, 0, ?, ?, ?)
+                """,
+                (f["categoria"], f["modelo"], f["ubicacion"], f["cantidad"], f["costo_compra"], ts, ts),
+            )
+            nuevo_id = cur.lastrowid
+            nombre = nombre_automatico(f["categoria"], f["modelo"], "", nuevo_id)
+            db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nombre, nuevo_id))
+            if f["cantidad"] > 0:
+                db.execute(
+                    """
+                    INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, costo_unitario, stock_resultante)
+                    VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, 'Carga inicial por importación de Excel', ?, ?, ?)
+                    """,
+                    (nuevo_id, ts, f["cantidad"], usuario_actual(), f["costo_compra"], f["cantidad"]),
+                )
+            _asegurar_categoria(db, f["categoria"])
+            _asegurar_modelo(db, f["modelo"])
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.execute("PRAGMA foreign_keys = ON")
+        db.commit()
+
+    for pid in [r["id"] for r in db.execute("SELECT id FROM productos").fetchall()]:
+        _recalcular_stock_minimo(db, pid)
+    db.commit()
+
+    total_nuevos = db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+    return jsonify({
+        "ok": True,
+        "productos_eliminados": total_actuales,
+        "productos_creados": total_nuevos,
+        "filas_con_advertencia": len(errores),
+    })
+
+
 @app.route("/api/productos/<int:producto_id>", methods=["GET"])
 def obtener_producto(producto_id):
     db = get_db()

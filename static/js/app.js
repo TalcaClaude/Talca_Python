@@ -127,6 +127,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
+    document.getElementById("btn-importar-excel").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
       dashboard: "Dashboard",
       productos: "Administración de Inventario",
@@ -852,6 +853,120 @@ document.getElementById("buscar").addEventListener("input", () => {
 document.getElementById("filtro-categoria").addEventListener("change", () => cargarProductos(true));
 document.getElementById("filtro-criticos").addEventListener("change", () => cargarProductos(true));
 document.getElementById("filtro-sin-ubicacion").addEventListener("change", () => cargarProductos(true));
+
+// ---------------------------------------------------------------------------
+// Importar Excel — reemplaza TODO el catálogo de productos por el
+// contenido de un archivo subido. Dos pasos: previsualizar (solo lee el
+// archivo y muestra un resumen, no toca la base) y confirmar (recién ahí
+// borra los productos actuales e inserta los nuevos) — exige escribir
+// "REEMPLAZAR" a mano antes de habilitar el botón de confirmar, porque es
+// una acción destructiva que no se puede deshacer.
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-importar-excel").addEventListener("click", () => {
+  document.getElementById("imp-excel-archivo").value = "";
+  document.getElementById("imp-excel-resultado").style.display = "none";
+  document.getElementById("imp-excel-preview-ok").style.display = "none";
+  document.getElementById("imp-excel-error").style.display = "none";
+  document.getElementById("imp-excel-confirmar-texto").value = "";
+  document.getElementById("btn-imp-excel-confirmar").disabled = true;
+  abrirModal("modal-importar-excel");
+});
+
+document.getElementById("imp-excel-confirmar-texto").addEventListener("input", (e) => {
+  document.getElementById("btn-imp-excel-confirmar").disabled = e.target.value.trim().toUpperCase() !== "REEMPLAZAR";
+});
+
+document.getElementById("btn-imp-excel-previsualizar").addEventListener("click", async () => {
+  const archivo = document.getElementById("imp-excel-archivo").files[0];
+  const resultadoDiv = document.getElementById("imp-excel-resultado");
+  const errorP = document.getElementById("imp-excel-error");
+  const okDiv = document.getElementById("imp-excel-preview-ok");
+  resultadoDiv.style.display = "block";
+  okDiv.style.display = "none";
+  errorP.style.display = "none";
+  if (!archivo) {
+    errorP.textContent = "Selecciona un archivo Excel (.xlsx) primero.";
+    errorP.style.display = "block";
+    return;
+  }
+  errorP.textContent = "";
+  errorP.style.display = "none";
+  try {
+    const formData = new FormData();
+    formData.append("archivo", archivo);
+    const resp = await fetch("/api/productos/importar-excel/previsualizar", { method: "POST", body: formData });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || "No se pudo leer el archivo.");
+
+    document.getElementById("imp-excel-total-filas").textContent = data.total_filas_validas;
+    document.getElementById("imp-excel-total-advertencias").textContent = data.total_advertencias;
+    document.getElementById("imp-excel-valor-total").textContent = fmtMoney(data.valor_total_estimado);
+    document.getElementById("imp-excel-total-actuales").textContent = data.productos_actuales_a_reemplazar;
+
+    document.getElementById("imp-excel-muestra").innerHTML = data.muestra.map(m => `
+      <tr>
+        <td>${escapeHtml(m.nombre_resultante)}</td>
+        <td>${escapeHtml(m.ubicacion) || "—"}</td>
+        <td class="num">${m.cantidad}</td>
+        <td class="num">${fmtMoney(m.costo_compra)}</td>
+      </tr>
+    `).join("");
+
+    const advWrap = document.getElementById("imp-excel-advertencias-wrap");
+    if (data.advertencias && data.advertencias.length) {
+      advWrap.style.display = "block";
+      let lista = data.advertencias.map(a => `<li>${escapeHtml(a)}</li>`).join("");
+      if (data.advertencias_recortadas > 0) {
+        lista += `<li>… y ${data.advertencias_recortadas} advertencia(s) más.</li>`;
+      }
+      document.getElementById("imp-excel-advertencias-lista").innerHTML = lista;
+    } else {
+      advWrap.style.display = "none";
+    }
+
+    document.getElementById("imp-excel-confirmar-texto").value = "";
+    document.getElementById("btn-imp-excel-confirmar").disabled = true;
+    okDiv.style.display = "block";
+  } catch (e) {
+    errorP.textContent = e.message;
+    errorP.style.display = "block";
+  }
+});
+
+document.getElementById("btn-imp-excel-confirmar").addEventListener("click", async () => {
+  const archivo = document.getElementById("imp-excel-archivo").files[0];
+  const confirmarTexto = document.getElementById("imp-excel-confirmar-texto").value.trim();
+  const errorP = document.getElementById("imp-excel-error");
+  if (!archivo) {
+    errorP.textContent = "Selecciona un archivo Excel (.xlsx) primero.";
+    errorP.style.display = "block";
+    return;
+  }
+  if (!confirm("Esto va a BORRAR todos los productos actuales y reemplazarlos por el contenido del Excel. ¿Continuar?")) {
+    return;
+  }
+  const btn = document.getElementById("btn-imp-excel-confirmar");
+  btn.disabled = true;
+  const textoOriginal = btn.textContent;
+  btn.textContent = "Reemplazando…";
+  try {
+    const formData = new FormData();
+    formData.append("archivo", archivo);
+    formData.append("confirmar_texto", confirmarTexto);
+    const resp = await fetch("/api/productos/importar-excel/confirmar", { method: "POST", body: formData });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || "No se pudo reemplazar el catálogo.");
+    toast(`Catálogo reemplazado: ${data.productos_eliminados} producto(s) eliminado(s), ${data.productos_creados} creado(s).`);
+    cerrarModal("modal-importar-excel");
+    await cargarProductos(true);
+  } catch (e) {
+    errorP.textContent = e.message;
+    errorP.style.display = "block";
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Modal: crear / editar producto

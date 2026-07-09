@@ -1662,6 +1662,146 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertFalse(data["exito"])
         self.assertEqual(data["accion"], "error")
 
+    def test_actualizar_diagnostico_por_agente_solo_toca_los_campos_mencionados(self):
+        self._registrar_mecanico("Diego Mecánico", "+56911122233")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "diagnostico")
+        # Deja un valor previo en un campo que el mensaje NO va a mencionar,
+        # para comprobar que no se borra.
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"mediciones": "COMPRESIÓN OK"})
+
+        respuesta_ia = {
+            "accion": "actualizar_diagnostico",
+            "ot_id": orden["id"],
+            "resumen": "El mecánico reporta la falla encontrada",
+            "sintoma": "El auto no enciende en frío",
+            "falla_detectada": "Batería descargada",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular(
+                "+56911122233", f"ot {orden['id']} revisé el auto, no enciende en frío, la batería está descargada"
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "actualizar_diagnostico")
+        self.assertEqual(data["estado_nuevo"], "")
+        self.assertIn(str(orden["id"]), data["respuesta_texto"])
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["sintoma"], "EL AUTO NO ENCIENDE EN FRÍO")
+        self.assertEqual(actual["falla_detectada"], "BATERÍA DESCARGADA")
+        # El campo que ya tenía un valor y no fue mencionado sigue intacto.
+        self.assertEqual(actual["mediciones"], "COMPRESIÓN OK")
+        # El estado de la orden no cambia por esta acción.
+        self.assertEqual(actual["estado"], "diagnostico")
+
+    def test_actualizar_prueba_ruta_por_agente_nunca_toca_qc_resultado_ni_estado(self):
+        self._registrar_mecanico("Elena Mecánica", "+56911133344")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "control_calidad")
+
+        respuesta_ia = {
+            "accion": "actualizar_prueba_ruta",
+            "ot_id": orden["id"],
+            "resumen": "El mecánico deja observaciones de la prueba de ruta",
+            "qc_inspector": "Elena Mecánica",
+            "qc_observaciones": "Frenos y dirección responden bien, sin ruidos extraños",
+            # Aunque la IA mandara esto por error, la función solo debe
+            # aplicar qc_inspector/qc_observaciones — nunca qc_resultado.
+            "qc_resultado": "aprobado",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56911133344", f"ot {orden['id']} hice la prueba de ruta, todo bien, sin ruidos")
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "actualizar_prueba_ruta")
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["qc_inspector"], "ELENA MECÁNICA")
+        self.assertIn("FRENOS", actual["qc_observaciones"])
+        # qc_resultado y el estado de la OT NUNCA se tocan por este medio:
+        # eso sí mueve la OT de estado y se deja como acción manual.
+        self.assertFalse(actual.get("qc_resultado"))
+        self.assertEqual(actual["estado"], "control_calidad")
+
+    def test_actualizar_diagnostico_sin_datos_concretos_no_rompe_nada(self):
+        self._registrar_mecanico("Fabián Mecánico", "+56911144455")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "diagnostico")
+
+        respuesta_ia = {
+            "accion": "actualizar_diagnostico",
+            "ot_id": orden["id"],
+            "resumen": "El mecánico solo saluda, no da ningún dato de diagnóstico",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56911144455", f"ot {orden['id']} hola, después te cuento")
+
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "error")
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "diagnostico")
+
+    def test_actualizar_diagnostico_de_ot_entregada_es_rechazado(self):
+        self._registrar_mecanico("Gabriela Mecánica", "+56911155566")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "entregado")
+
+        respuesta_ia = {
+            "accion": "actualizar_diagnostico",
+            "ot_id": orden["id"],
+            "resumen": "Manda un dato de diagnóstico tarde, la OT ya está entregada",
+            "sintoma": "Ruido en el motor",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56911155566", f"ot {orden['id']} el síntoma era ruido en el motor")
+
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "error")
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertNotEqual(actual["sintoma"], "RUIDO EN EL MOTOR")
+
+    def test_cambio_de_estado_explicito_tiene_prioridad_sobre_datos_de_diagnostico(self):
+        # Regla 6 del prompt de interpretación: si el mensaje además pide
+        # explícitamente un cambio de estado, esa acción manda — aunque el
+        # mismo mensaje también traiga detalles de diagnóstico. Acá no se
+        # está probando la IA (está mockeada), sino que el backend respeta
+        # cualquiera de las dos acciones que la IA elija sin mezclarlas.
+        self._registrar_mecanico("Hernán Mecánico", "+56911166677")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])  # nace en "recibido"
+
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": orden["id"],
+            "estado_destino": "diagnostico",
+            "resumen": "El mecánico avisa el síntoma y pide pasar la OT a diagnóstico",
+            "sintoma": "No enciende",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56911166677", f"ot {orden['id']} no enciende, la paso a diagnóstico")
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["accion"], "cambio_estado_ot")
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "diagnostico")
+        # El campo sintoma no se tocó por esta vía: cambiar_estado_ot solo
+        # mueve estado/fecha_entrega_real, nunca campos de diagnóstico.
+        self.assertNotEqual(actual["sintoma"], "NO ENCIENDE")
+
     def test_registrar_mecanico_valida_telefono_y_evita_duplicados(self):
         resp_sin_nombre = self.client.post("/api/agente/mecanicos", json={"telefono": "+56977777777"})
         self.assertEqual(resp_sin_nombre.status_code, 400)

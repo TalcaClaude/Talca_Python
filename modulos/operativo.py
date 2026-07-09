@@ -1220,6 +1220,66 @@ def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
     return _orden_dict(db, actualizada), None
 
 
+# Columnas que _actualizar_campos_orden_por_agente() tiene permitido tocar,
+# agrupadas por las dos acciones del agente de WhatsApp que las usan (ver
+# app.py: CAMPOS_DIAGNOSTICO_AGENTE / CAMPOS_PRUEBA_RUTA_AGENTE y
+# _agente_procesar_mensaje). Es una lista blanca fija (no se arma a partir
+# de lo que mande la IA) precisamente para que un mensaje de WhatsApp jamás
+# pueda terminar escribiendo en una columna arbitraria de la tabla:
+# qc_resultado queda deliberadamente afuera de _CAMPOS_QC porque cambiarlo
+# sí tiene un efecto secundario (mueve el estado de la OT — ver
+# actualizar_qc() más abajo), a diferencia del resto que son solo texto
+# libre sin ningún efecto sobre el resto del sistema.
+_CAMPOS_DIAGNOSTICO_AGENTE = {
+    "sintoma", "diagnostico_tecnico", "falla_detectada", "componentes_danados",
+    "mediciones", "resultado_pruebas", "responsable_diagnostico", "diagnostico",
+}
+_CAMPOS_QC_AGENTE = {"qc_inspector", "qc_observaciones"}
+
+
+def _actualizar_campos_orden_por_agente(db, orden_id, campos):
+    """Aplica una actualización parcial de texto libre (diagnóstico o
+    prueba de ruta) a una orden de trabajo — pensado para el agente de
+    WhatsApp (ver app.py: _agente_procesar_mensaje), igual que
+    _actualizar_estado_orden_por_agente() de arriba pero para las dos
+    acciones 'actualizar_diagnostico' / 'actualizar_prueba_ruta'.
+
+    'campos' es un dict {columna: valor} que SOLO puede contener columnas
+    presentes en _CAMPOS_DIAGNOSTICO_AGENTE ∪ _CAMPOS_QC_AGENTE — cualquier
+    otra clave se ignora en vez de aplicarse, como defensa en profundidad
+    por si algún día se agrega una acción nueva y se pasa el dict
+    equivocado. Los valores se normalizan igual que el resto del sistema
+    (.strip().upper()) y solo se escriben los campos que el mensaje
+    realmente mencionó — un campo omitido deja el valor existente intacto,
+    nunca lo vacía.
+
+    Devuelve (orden_dict, None) si funcionó, (None, mensaje_de_error) si
+    no — nunca lanza una excepción, mismo criterio que
+    _actualizar_estado_orden_por_agente()."""
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if row is None:
+        return None, f"No existe ninguna orden de trabajo con el número {orden_id}."
+
+    columnas_permitidas = _CAMPOS_DIAGNOSTICO_AGENTE | _CAMPOS_QC_AGENTE
+    a_aplicar = {
+        columna: (valor or "").strip().upper()
+        for columna, valor in (campos or {}).items()
+        if columna in columnas_permitidas and (valor or "").strip()
+    }
+    if not a_aplicar:
+        return None, "No encontré ningún dato concreto para guardar en ese mensaje."
+
+    set_clause = ", ".join(f"{columna} = ?" for columna in a_aplicar)
+    valores = list(a_aplicar.values()) + [now_iso(), orden_id]
+    db.execute(
+        f"UPDATE ordenes_trabajo SET {set_clause}, actualizado_en = ? WHERE id = ?",
+        valores,
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    return _orden_dict(db, actualizada), None
+
+
 @bp.route("/api/operativo/ordenes/<int:orden_id>", methods=["PUT"])
 def editar_orden(orden_id):
     db = get_db()

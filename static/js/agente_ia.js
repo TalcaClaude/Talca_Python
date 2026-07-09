@@ -147,7 +147,7 @@ function renderSelectMecanicosAgente() {
     .filter(m => m.activo)
     .map(m => `<option value="${escapeHtml(m.telefono)}">${escapeHtml(m.nombre)} (${escapeHtml(m.telefono)})</option>`)
     .join("");
-  ["sim-agente-telefono", "sim-agente-voz-telefono"].forEach(id => {
+  ["sim-agente-telefono", "sim-agente-voz-telefono", "sim-agente-foto-telefono"].forEach(id => {
     const select = document.getElementById(id);
     if (!select) return;
     const valorPrevio = select.value;
@@ -222,7 +222,7 @@ function renderTablaMensajesAgente() {
     <tr>
       <td class="mono">${fmtFecha(m.creado_en)}</td>
       <td>${escapeHtml(m.mecanico_nombre) || "—"}</td>
-      <td>${m.origen === "voz" ? "🎤 Voz" : m.origen === "foto_factura" ? "📄 Foto factura" : "💬 Texto"}</td>
+      <td>${m.origen === "voz" ? "🎤 Voz" : m.origen === "foto_factura" ? "📄 Foto factura" : m.origen === "foto_vehiculo" ? "🚗 Foto vehículo" : "💬 Texto"}</td>
       <td>${escapeHtml(m.mensaje_texto)}</td>
       <td><span class="badge-urgencia ${m.exito ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${escapeHtml(m.respuesta_texto)}</span></td>
     </tr>
@@ -275,6 +275,37 @@ document.getElementById("form-simular-agente-voz").addEventListener("submit", as
       <p class="${clase}">${escapeHtml(data.respuesta_texto)}</p>
     `;
     archivoInput.value = "";
+    await cargarMensajesAgente();
+  } catch (e2) {
+    resultadoDiv.innerHTML = `<p class="ayuda-inline ayuda-inline--bloqueado">${escapeHtml(e2.message)}</p>`;
+  }
+});
+
+document.getElementById("form-simular-agente-foto").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const telefono = document.getElementById("sim-agente-foto-telefono").value;
+  const texto = document.getElementById("sim-agente-foto-texto").value;
+  const archivoInput = document.getElementById("sim-agente-foto-archivo");
+  const archivo = archivoInput.files[0];
+  const resultadoDiv = document.getElementById("sim-agente-foto-resultado");
+  resultadoDiv.style.display = "block";
+  if (!archivo) {
+    resultadoDiv.innerHTML = `<p class="ayuda-inline ayuda-inline--bloqueado">Selecciona una foto.</p>`;
+    return;
+  }
+  resultadoDiv.innerHTML = `<p class="ayuda-inline">Analizando la foto…</p>`;
+  try {
+    const formData = new FormData();
+    formData.append("telefono", telefono);
+    formData.append("foto", archivo);
+    if (texto.trim()) formData.append("texto", texto.trim());
+    const resp = await fetch("/api/agente/simular-mensaje-foto", { method: "POST", body: formData });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || "Error al procesar la foto");
+    const clase = data.exito ? "ayuda-inline" : "ayuda-inline ayuda-inline--bloqueado";
+    resultadoDiv.innerHTML = `<p class="${clase}">${escapeHtml(data.respuesta_texto)}</p>`;
+    archivoInput.value = "";
+    document.getElementById("sim-agente-foto-texto").value = "";
     await cargarMensajesAgente();
   } catch (e2) {
     resultadoDiv.innerHTML = `<p class="ayuda-inline ayuda-inline--bloqueado">${escapeHtml(e2.message)}</p>`;

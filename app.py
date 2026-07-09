@@ -2765,6 +2765,118 @@ def _llamar_claude_vision_factura(imagen_bytes, mime_type):
     raise RuntimeError("La IA no devolvió los datos en el formato esperado. Intenta con una foto más nítida.")
 
 
+# ---------------------------------------------------------------------------
+# Clasificación de fotos que llegan por el agente de WhatsApp: antes de
+# tratar una foto como factura de compra (ver _llamar_claude_vision_factura
+# / _procesar_foto_factura_whatsapp), primero hay que saber DE QUÉ es la
+# foto — un mecánico también puede mandar una foto del vehículo (ej. para
+# avisar "listo para probar" mostrando la patente) en vez de una factura.
+# Se hace en una llamada de IA aparte, más liviana, en vez de meter la
+# clasificación dentro de _llamar_claude_vision_factura, para no tocar esa
+# función (la usa también /api/facturas/escanear-foto, que siempre asume
+# que la foto es una factura porque el usuario la subió desde ahí a
+# propósito).
+# ---------------------------------------------------------------------------
+
+def _llamar_claude_vision_clasificar_foto_whatsapp(imagen_bytes, mime_type):
+    """Le pregunta a Claude (vision) de qué es una foto mandada por
+    WhatsApp: 'factura' (factura de compra), 'vehiculo' (foto de un auto/
+    moto, típicamente para mostrar la patente) u 'otro' (no calza con
+    ninguna de las dos, ej. una foto borrosa o de otra cosa). Si es
+    'vehiculo', también intenta leer la patente. Devuelve un dict
+    {"tipo": ..., "patente": ...} ('patente' vacía si no se detectó tipo
+    'vehiculo' o no se alcanzó a leer con confianza), o lanza RuntimeError
+    con un mensaje explicable si la IA no está disponible/configurada."""
+    if requests is None:
+        raise RuntimeError("Falta instalar la librería 'requests' en el servidor para poder leer fotos.")
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError(
+            "El análisis de fotos por WhatsApp no está configurado todavía: falta la variable de entorno "
+            "ANTHROPIC_API_KEY en el servidor."
+        )
+
+    imagen_b64 = base64.b64encode(imagen_bytes).decode("ascii")
+
+    herramienta = {
+        "name": "clasificar_foto_taller",
+        "description": "Clasifica una foto mandada por WhatsApp a un taller mecánico.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {
+                    "type": "string",
+                    "enum": ["factura", "vehiculo", "otro"],
+                    "description": (
+                        "'factura' si la foto muestra una factura, boleta o guía de despacho de compra de "
+                        "repuestos/insumos. 'vehiculo' si la foto muestra un auto, camioneta o moto (entero o "
+                        "en parte, ej. solo la patente o el motor). 'otro' si no calza con ninguna de las dos "
+                        "(foto borrosa, de otra cosa, o no se entiende qué es)."
+                    ),
+                },
+                "patente": {
+                    "type": "string",
+                    "description": (
+                        "Solo si tipo es 'vehiculo': la patente/placa del vehículo tal como se lee en la foto, "
+                        "sin espacios ni guiones (ej. 'AB1234' o 'ABCD12'). Vacía si no se alcanza a leer con "
+                        "confianza (patente no visible, foto borrosa/cortada, ángulo malo)."
+                    ),
+                },
+            },
+            "required": ["tipo"],
+        },
+    }
+
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 256,
+        "tools": [herramienta],
+        "tool_choice": {"type": "tool", "name": "clasificar_foto_taller"},
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": imagen_b64}},
+                {
+                    "type": "text",
+                    "text": (
+                        "Un mecánico de un taller mandó esta foto por WhatsApp. Clasifícala usando la "
+                        "herramienta clasificar_foto_taller. NO es una factura de compra a menos que se vea "
+                        "claramente un documento con ese formato (encabezado, líneas de detalle, totales)."
+                    ),
+                },
+            ],
+        }],
+    }
+
+    try:
+        resp = requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"No se pudo contactar al servicio de IA: {e}")
+
+    if resp.status_code >= 400:
+        detalle = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
+        raise RuntimeError(f"El servicio de IA respondió con error ({resp.status_code}): {detalle}")
+
+    data = resp.json()
+    for bloque in data.get("content", []):
+        if bloque.get("type") == "tool_use" and bloque.get("name") == "clasificar_foto_taller":
+            resultado = bloque.get("input") or {}
+            return {
+                "tipo": resultado.get("tipo") or "otro",
+                "patente": (resultado.get("patente") or "").strip().upper(),
+            }
+
+    raise RuntimeError("La IA no devolvió una respuesta en el formato esperado. Intenta con una foto más nítida.")
+
+
 def _buscar_producto_por_texto(db, texto):
     """Intenta encontrar, entre los productos existentes, el que mejor
     calza con una descripción de texto libre (típicamente sacada de una
@@ -4118,12 +4230,20 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
     consolida en UN solo registro de auditoría por mensaje, con la
     respuesta de todas juntas.
 
-    'origen' es 'texto', 'voz' o 'foto_factura', solo para dejar registro de
-    cómo llegó el mensaje (si vino de una nota de voz, 'texto_mensaje' ya es
-    la transcripción — el resto de la lógica es idéntica sea cual sea el
-    origen). Si 'imagen_bytes' viene con datos, se interpreta como una foto
-    de factura de compra (ver _procesar_foto_factura_whatsapp) en vez de
-    intentar interpretar 'texto_mensaje' como un cambio de estado de OT."""
+    'origen' es 'texto', 'voz', 'foto_factura' o 'foto_vehiculo', solo para
+    dejar registro de cómo llegó el mensaje (si vino de una nota de voz,
+    'texto_mensaje' ya es la transcripción — el resto de la lógica es
+    idéntica sea cual sea el origen). Si 'imagen_bytes' viene con datos,
+    primero se clasifica la foto (ver
+    _llamar_claude_vision_clasificar_foto_whatsapp): si es una factura, se
+    procesa como tal (ver _procesar_foto_factura_whatsapp) y ahí termina.
+    Si es un vehículo, se lee la patente y se combina con
+    'texto_mensaje' (el pie de foto, ej. "listo para probar") para que siga
+    el mismo camino de interpretación de texto de más abajo — así el
+    mecánico puede identificar la OT por patente en vez de tener que
+    escribir el número, reutilizando la misma lógica de
+    _llamar_claude_interpretar_mensaje_agente que ya sabe matchear por
+    patente (ver 'ordenes_abiertas')."""
     telefono = _normalizar_telefono(telefono_crudo)
     texto_mensaje = (texto_mensaje or "").strip()
     ts = now_iso()
@@ -4164,10 +4284,47 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
 
     if imagen_bytes is not None:
         try:
-            resultado_factura = _procesar_foto_factura_whatsapp(db, telefono, mecanico["nombre"], imagen_bytes, imagen_mime)
+            clasificacion = _llamar_claude_vision_clasificar_foto_whatsapp(imagen_bytes, imagen_mime)
         except RuntimeError as e:
-            return _registrar(mecanico["nombre"], "error", None, "", "", False, f"No pude leer la factura: {e}")
-        return _registrar(mecanico["nombre"], "factura_recibida", None, "", "", True, resultado_factura["mensaje"])
+            return _registrar(mecanico["nombre"], "error", None, "", "", False, f"No pude leer la foto: {e}")
+
+        tipo_foto = clasificacion.get("tipo")
+
+        if tipo_foto == "factura":
+            try:
+                resultado_factura = _procesar_foto_factura_whatsapp(db, telefono, mecanico["nombre"], imagen_bytes, imagen_mime)
+            except RuntimeError as e:
+                return _registrar(mecanico["nombre"], "error", None, "", "", False, f"No pude leer la factura: {e}")
+            return _registrar(mecanico["nombre"], "factura_recibida", None, "", "", True, resultado_factura["mensaje"])
+
+        if tipo_foto == "vehiculo":
+            origen = "foto_vehiculo"
+            patente = clasificacion.get("patente") or ""
+            if not patente:
+                return _registrar(
+                    mecanico["nombre"], "foto_vehiculo_sin_patente", None, "", "", False,
+                    "Recibí la foto del vehículo, pero no logré leer la patente con claridad. Manda una foto "
+                    "donde se vea mejor, o escribe el número de OT junto con el mensaje.",
+                )
+            if not texto_mensaje:
+                return _registrar(
+                    mecanico["nombre"], "foto_vehiculo_sin_accion", None, "", "", False,
+                    f"Recibí la foto del vehículo (patente {patente}), pero el mensaje no traía ninguna "
+                    f"acción. Manda de nuevo la foto junto con un texto que diga qué pasó (ej. \"listo para "
+                    f"probar\").",
+                )
+            # Se combina con el pie de foto para que el mismo intérprete de
+            # texto (_llamar_claude_interpretar_mensaje_agente) pueda
+            # identificar la OT por patente, igual que ya hace con
+            # descripciones de vehículo/cliente — no hace falta resolver la
+            # OT acá, se reutiliza esa lógica ya probada.
+            texto_mensaje = f"{texto_mensaje} (patente detectada en la foto adjunta: {patente})"
+        else:
+            return _registrar(
+                mecanico["nombre"], "foto_no_reconocida", None, "", "", False,
+                "Recibí una foto, pero no la reconocí como una factura de compra ni como la foto de un "
+                "vehículo con patente visible. Mándala de nuevo más nítida, o escribe la acción en texto.",
+            )
 
     if not texto_mensaje:
         return _registrar("", "error", None, "", "", False, "El mensaje llegó vacío.")
@@ -4340,12 +4497,17 @@ def simular_mensaje_voz_agente():
 @app.route("/api/agente/simular-mensaje-foto", methods=["POST"])
 def simular_mensaje_foto_agente():
     """Igual que /api/agente/simular-mensaje, pero para probar el análisis
-    de fotos de facturas sin necesitar una cuenta de WhatsApp real: recibe
-    una imagen (multipart/form-data) y sigue exactamente el mismo camino
-    que una foto real mandada por WhatsApp (queda pendiente de revisión en
-    Facturas → Pendientes de WhatsApp, nunca se sube sola)."""
+    de fotos sin necesitar una cuenta de WhatsApp real: recibe una imagen
+    (multipart/form-data) y sigue exactamente el mismo camino que una foto
+    real mandada por WhatsApp — la IA primero clasifica si es una factura
+    de compra (queda pendiente de revisión en Facturas → "Pendientes de
+    WhatsApp", nunca se sube sola) o la foto de un vehículo (se lee la
+    patente y se usa junto al 'texto' opcional, el pie de foto, para
+    identificar la OT y aplicar la acción — ver
+    _llamar_claude_vision_clasificar_foto_whatsapp)."""
     db = get_db()
     telefono = (request.form.get("telefono") or "").strip()
+    texto = (request.form.get("texto") or "").strip()
     archivo = request.files.get("foto")
     if not telefono or not archivo or not archivo.filename:
         return jsonify({"error": "Faltan el teléfono y/o la foto"}), 400
@@ -4355,7 +4517,7 @@ def simular_mensaje_foto_agente():
     mime_type = mime_por_extension.get(extension) or archivo.mimetype or "image/jpeg"
 
     imagen_bytes = archivo.read()
-    resultado = _agente_procesar_mensaje(db, telefono, "", origen="foto_factura", imagen_bytes=imagen_bytes, imagen_mime=mime_type)
+    resultado = _agente_procesar_mensaje(db, telefono, texto, origen="foto_factura", imagen_bytes=imagen_bytes, imagen_mime=mime_type)
     return jsonify(resultado)
 
 
@@ -4395,11 +4557,14 @@ def webhook_whatsapp():
         db = get_db()
 
         # Adjuntos: Twilio manda NumMedia > 0 + MediaUrl0/MediaContentType0
-        # apuntando al archivo. Se distingue por tipo: una foto se trata
-        # como una factura de compra a analizar (ver
-        # _procesar_foto_factura_whatsapp), un audio se transcribe como si
-        # fuera el texto del mensaje (nota de voz). Solo se mira el primer
-        # adjunto.
+        # apuntando al archivo. Se distingue por tipo: una foto se manda a
+        # clasificar por IA (ver _llamar_claude_vision_clasificar_foto_
+        # whatsapp dentro de _agente_procesar_mensaje) — puede ser una
+        # factura de compra o la foto de un vehículo (en ese caso, el
+        # 'Body' que haya venido junto a la foto se usa como pie de foto
+        # con la acción a realizar, ej. "listo para probar"). Un audio se
+        # transcribe como si fuera el texto del mensaje (nota de voz). Solo
+        # se mira el primer adjunto.
         num_media = int(request.form.get("NumMedia", "0") or "0")
         origen = "texto"
         imagen_bytes = None

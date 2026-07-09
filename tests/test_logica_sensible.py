@@ -2270,11 +2270,12 @@ class TestAgenteWhatsApp(unittest.TestCase):
     # /api/facturas/escanear-foto (ver TestEscanearFotoFactura), mockeada
     # acá también para no depender de ANTHROPIC_API_KEY en los tests. --
 
-    def _subir_foto_por_agente(self, telefono, filename="factura.jpg", contenido=b"contenido-falso-de-una-foto"):
+    def _subir_foto_por_agente(self, telefono, filename="factura.jpg", contenido=b"contenido-falso-de-una-foto", texto=""):
+        data = {"telefono": telefono, "foto": (io.BytesIO(contenido), filename)}
+        if texto:
+            data["texto"] = texto
         return self.client.post(
-            "/api/agente/simular-mensaje-foto",
-            data={"telefono": telefono, "foto": (io.BytesIO(contenido), filename)},
-            content_type="multipart/form-data",
+            "/api/agente/simular-mensaje-foto", data=data, content_type="multipart/form-data",
         )
 
     def _contar_pendientes(self):
@@ -2313,7 +2314,11 @@ class TestAgenteWhatsApp(unittest.TestCase):
             "proveedor_rut": "",
             "lineas": [{"descripcion": nombre_producto, "cantidad": 4, "precio_unitario": 8000}],
         }
-        with patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+        # Toda foto que llega por el agente se clasifica primero (¿factura
+        # o vehículo?) antes de intentar leerla como factura — ver
+        # _llamar_claude_vision_clasificar_foto_whatsapp en app.py.
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp", return_value={"tipo": "factura", "patente": ""}), \
+             patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
             resp = self._subir_foto_por_agente(telefono)
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         data = resp.get_json()
@@ -2323,6 +2328,74 @@ class TestAgenteWhatsApp(unittest.TestCase):
         pendientes = self.client.get("/api/facturas/whatsapp-pendientes?estado=pendiente").get_json()["pendientes"]
         pendiente = next(p for p in pendientes if p["datos"]["numero"] == numero)
         return pendiente["id"], producto_id, numero
+
+    # -- Foto de un vehículo por WhatsApp: en vez de una factura, el
+    # mecánico manda la foto del auto (para mostrar la patente) junto con
+    # un pie de foto que dice qué pasó (ej. "listo para probar"). La IA lee
+    # la patente, la combina con el texto y se apoya en el mismo intérprete
+    # de mensajes que ya sabe matchear una OT por patente (ver
+    # ordenes_abiertas en _llamar_claude_interpretar_mensaje_agente). --
+
+    def test_foto_de_vehiculo_con_patente_y_pie_de_foto_mueve_la_ot(self):
+        self._registrar_mecanico("Mecánico Fotos Auto", "+56900771122")
+        cliente = self._crear_cliente(nombre="Cliente Foto Vehiculo")
+        equipo = self._crear_equipo(cliente["id"], identificador="FTV001", marca="Haval", modelo="H6")
+        orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+        self._forzar_estado(orden["id"], "reparacion")
+
+        clasificacion = {"tipo": "vehiculo", "patente": "FTV001"}
+        respuesta_ia = self._ia({
+            "tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "control_calidad",
+        })
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp", return_value=clasificacion), \
+             patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._subir_foto_por_agente(
+                "+56900771122", filename="auto.jpg", texto="listo para probar",
+            )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["ot_id"], orden["id"])
+        self.assertEqual(data["estado_nuevo"], "control_calidad")
+        self.assertEqual(data["origen"], "foto_vehiculo")
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "control_calidad")
+
+    def test_foto_de_vehiculo_sin_patente_legible_pide_una_foto_mejor(self):
+        self._registrar_mecanico("Mecánico Foto Sin Patente", "+56900771133")
+        with patch.object(
+            taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+            return_value={"tipo": "vehiculo", "patente": ""},
+        ):
+            resp = self._subir_foto_por_agente("+56900771133", filename="auto.jpg", texto="listo para probar")
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "foto_vehiculo_sin_patente")
+        self.assertIn("no logré leer la patente", data["respuesta_texto"])
+
+    def test_foto_de_vehiculo_sin_pie_de_foto_pide_la_accion(self):
+        self._registrar_mecanico("Mecánico Foto Sin Texto", "+56900771144")
+        with patch.object(
+            taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+            return_value={"tipo": "vehiculo", "patente": "SINTX01"},
+        ):
+            resp = self._subir_foto_por_agente("+56900771144", filename="auto.jpg")
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "foto_vehiculo_sin_accion")
+        self.assertIn("SINTX01", data["respuesta_texto"])
+
+    def test_foto_que_no_es_factura_ni_vehiculo_no_se_procesa(self):
+        self._registrar_mecanico("Mecánico Foto Rara", "+56900771155")
+        with patch.object(
+            taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+            return_value={"tipo": "otro", "patente": ""},
+        ):
+            resp = self._subir_foto_por_agente("+56900771155", filename="algo.jpg")
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "foto_no_reconocida")
 
     def test_foto_de_factura_queda_pendiente_de_revision_y_no_toca_el_inventario(self):
         pendiente_id, producto_id, numero = self._preparar_pendiente("100001")

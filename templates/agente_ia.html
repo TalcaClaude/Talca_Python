@@ -103,6 +103,36 @@
       </div>
     </form>
     <div id="sim-agente-voz-resultado" style="display:none; margin-top:10px"></div>
+
+    <hr style="margin:18px 0; border:none; border-top:1px solid var(--borde, #333)">
+
+    <h3 class="dash-titulo" style="font-size:15px">O prueba una foto</h3>
+    <p class="ayuda-inline">
+      Sube una foto y el sistema primero la clasifica: si es una factura de compra, queda pendiente de
+      revisión en Facturas → "Pendientes de WhatsApp"; si es la foto de un vehículo, lee la patente y la
+      combina con el texto de abajo (el "pie de foto") para identificar la OT y aplicar la acción — ej. sube
+      una foto del auto con la patente visible y escribe "listo para probar".
+    </p>
+    <form id="form-simular-agente-foto">
+      <div class="campo">
+        <label>Mecánico (por su teléfono registrado) *</label>
+        <select id="sim-agente-foto-telefono" required>
+          <option value="">Selecciona un mecánico…</option>
+        </select>
+      </div>
+      <div class="campo">
+        <label>Foto *</label>
+        <input type="file" id="sim-agente-foto-archivo" accept="image/*" required>
+      </div>
+      <div class="campo">
+        <label>Pie de foto (opcional — solo aplica si la foto es de un vehículo)</label>
+        <textarea id="sim-agente-foto-texto" rows="2" placeholder='Ej: "listo para probar"'></textarea>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start">
+        <button type="submit" class="btn btn-primary">Enviar foto de prueba</button>
+      </div>
+    </form>
+    <div id="sim-agente-foto-resultado" style="display:none; margin-top:10px"></div>
   </section>
 
   <section class="tabla-wrap" style="margin-top:18px">

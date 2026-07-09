@@ -246,7 +246,12 @@ def _consumo_diario_stats(db, producto_id, dias=STOCK_MINIMO_VENTANA_DIAS):
     """Consumo diario promedio y su desviación estándar dentro de la
     ventana de días indicada, contando los días sin salidas como 0 (para
     que el promedio refleje bien la frecuencia real de uso, no solo los
-    días que sí tuvieron movimiento)."""
+    días que sí tuvieron movimiento).
+
+    Excluye la categoría 'Corrección de inventario' (reversión técnica de un
+    ingreso hecho por error, ej. al eliminar una factura ya aplicada — ver
+    CATEGORIA_CORRECCION_INVENTARIO en app.py): esa salida nunca fue consumo
+    real del taller, y contarla infla el promedio y el stock mínimo sugerido."""
     desde_dt = datetime.now() - timedelta(days=dias)
     desde = desde_dt.isoformat(timespec="seconds")
 
@@ -254,7 +259,7 @@ def _consumo_diario_stats(db, producto_id, dias=STOCK_MINIMO_VENTANA_DIAS):
         """
         SELECT date(fecha) AS dia, SUM(cantidad) AS total
         FROM movimientos
-        WHERE producto_id = ? AND tipo = 'salida' AND fecha >= ?
+        WHERE producto_id = ? AND tipo = 'salida' AND categoria != 'Corrección de inventario' AND fecha >= ?
         GROUP BY dia
         """,
         (producto_id, desde),

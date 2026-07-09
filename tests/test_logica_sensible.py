@@ -61,15 +61,15 @@ def _crear_producto(db, nombre, stock_disponible=0, costo_compra=0.0, stock_mini
     return cur.lastrowid
 
 
-def _insertar_movimiento(db, producto_id, tipo, cantidad, fecha, stock_resultante, costo_unitario=None):
+def _insertar_movimiento(db, producto_id, tipo, cantidad, fecha, stock_resultante, costo_unitario=None, categoria=""):
     db.execute(
         """
         INSERT INTO movimientos (
             producto_id, fecha, tipo, categoria, cantidad, motivo, usuario,
             costo_unitario, stock_resultante
-        ) VALUES (?, ?, ?, '', ?, '', 'test', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, '', 'test', ?, ?)
         """,
-        (producto_id, fecha, tipo, cantidad, costo_unitario, stock_resultante),
+        (producto_id, fecha, tipo, categoria, cantidad, costo_unitario, stock_resultante),
     )
     db.commit()
 
@@ -127,6 +127,118 @@ class TestCostoPromedioPonderado(unittest.TestCase):
         actualizado = self.db.execute("SELECT * FROM productos WHERE id = ?", (pid,)).fetchone()
         self.assertAlmostEqual(actualizado["costo_compra"], 80.0)
         self.assertEqual(actualizado["stock_disponible"], 10)
+
+
+class TestEliminarFacturaRevierteSinContaminarConsumo(unittest.TestCase):
+    """Al eliminar una factura que ya aplicó stock, se revierte ese ingreso
+    con un movimiento de salida. Ese movimiento es una CORRECCIÓN técnica
+    (se está deshaciendo un error), no consumo real del taller — así que no
+    debe contarse en rotación, planificación de compras ni en el cálculo de
+    stock mínimo automático. Si esto se rompe, eliminar una factura mal
+    cargada infla artificialmente esas métricas y puede llevar a comprar de
+    más o a decisiones de reposición equivocadas."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_producto_http(self, nombre, stock_disponible=0, costo_compra=1000):
+        resp = self.client.post(
+            "/api/productos",
+            json={"nombre": nombre, "stock_disponible": stock_disponible, "costo_compra": costo_compra},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_factura_aplicada(self, numero, producto_id, cantidad=5, precio_unitario=1000):
+        resp = self.client.post(
+            "/api/facturas",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto_id, "cantidad": cantidad, "precio_unitario": precio_unitario}],
+                "aplicar_stock": True,
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def test_reversion_por_eliminar_factura_queda_marcada_como_correccion_de_inventario(self):
+        producto = self._crear_producto_http("Producto - reversión marca categoría", stock_disponible=0)
+        factura = self._crear_factura_aplicada("FACT-REV-CAT-001", producto["id"])
+
+        resp = self.client.delete(f"/api/facturas/{factura['id']}?forzar=1")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            mov = db.execute(
+                "SELECT * FROM movimientos WHERE producto_id = ? AND tipo = 'salida' ORDER BY id DESC LIMIT 1",
+                (producto["id"],),
+            ).fetchone()
+        self.assertIsNotNone(mov)
+        self.assertEqual(mov["categoria"], "Corrección de inventario")
+
+    def test_reversion_por_eliminar_factura_no_aparece_en_rotacion(self):
+        producto = self._crear_producto_http("Producto - reversión no cuenta en rotación", stock_disponible=0)
+        factura = self._crear_factura_aplicada("FACT-REV-ROT-001", producto["id"], cantidad=7)
+
+        self.client.delete(f"/api/facturas/{factura['id']}?forzar=1")
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            rotacion = taller_app._calcular_rotacion(dias=365)
+        ids_en_mas_utilizados = {r["id"] for r in rotacion["mas_utilizados"]}
+        self.assertNotIn(producto["id"], ids_en_mas_utilizados)
+
+    def test_reversion_por_eliminar_factura_no_infla_el_consumo_diario_para_stock_minimo(self):
+        producto = self._crear_producto_http("Producto - reversión no infla consumo diario", stock_disponible=0)
+        factura = self._crear_factura_aplicada("FACT-REV-CONSUMO-001", producto["id"], cantidad=9)
+
+        self.client.delete(f"/api/facturas/{factura['id']}?forzar=1")
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            promedio, desviacion = taller_app._consumo_diario_stats(db, producto["id"])
+        self.assertEqual(promedio, 0)
+        self.assertEqual(desviacion, 0)
+
+    def test_eliminar_factura_creada_via_whatsapp_no_falla_por_llave_foranea(self):
+        # Reproduce el bug reportado: una factura que quedó vinculada a una
+        # fila de facturas_whatsapp_pendientes (porque nació de una foto
+        # aprobada desde esa bandeja) no se podía eliminar — SQLite
+        # rechazaba el DELETE con "FOREIGN KEY constraint failed" porque esa
+        # columna no tenía ON DELETE CASCADE/SET NULL.
+        producto = self._crear_producto_http("Producto - factura de whatsapp aprobada", stock_disponible=0)
+        factura = self._crear_factura_aplicada("FACT-REV-WAP-001", producto["id"])
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            ts = taller_app.now_iso()
+            cur = db.execute(
+                """
+                INSERT INTO facturas_whatsapp_pendientes (
+                    telefono, mecanico_nombre, foto_archivo, datos_json, estado,
+                    factura_id, revisado_por, revisado_en, creado_en
+                ) VALUES (?, ?, ?, ?, 'aprobada', ?, ?, ?, ?)
+                """,
+                ("+56911112222", "Mecánico Test", "foto-test.jpg", "{}", factura["id"], "admin", ts, ts),
+            )
+            db.commit()
+            pendiente_id = cur.lastrowid
+
+        resp = self.client.delete(f"/api/facturas/{factura['id']}?forzar=1")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            pendiente = db.execute(
+                "SELECT * FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)
+            ).fetchone()
+        self.assertIsNone(pendiente["factura_id"])
+        self.assertEqual(pendiente["estado"], "aprobada")  # el historial de revisión se conserva
 
 
 class TestPuntoDeReorden(unittest.TestCase):

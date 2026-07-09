@@ -304,8 +304,19 @@ MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
 # "Merma o pérdida" ya no es una categoría a elegir: es su propio tipo de
 # movimiento ("perdida"). "Traslado interno" se quitó por no usarse.
 CATEGORIAS_ENTRADA = ["Compra", "Ajuste de inventario", "Devolución"]
-CATEGORIAS_SALIDA = ["Venta", "Consumo interno", "Reserva", "Ajuste de inventario", "Devolución"]
+CATEGORIAS_SALIDA = ["Venta", "Consumo interno", "Reserva", "Ajuste de inventario", "Devolución", "Corrección de inventario"]
 CATEGORIAS_MOVIMIENTO = sorted(set(CATEGORIAS_ENTRADA) | set(CATEGORIAS_SALIDA))
+
+# "Corrección de inventario": movimientos técnicos que revierten un ingreso
+# que se hizo por error (ej. al eliminar una factura que ya había aplicado
+# stock) — quedan en el historial de Movimientos para no perder trazabilidad,
+# pero NUNCA representaron un uso real del taller, así que toda consulta que
+# mida consumo/rotación (ver _calcular_rotacion, _calcular_planificacion, el
+# "más movidos" del dashboard, y _consumo_diario_stats en core.py) filtra
+# "AND categoria != 'Corrección de inventario'" junto con "tipo = 'salida'",
+# para no ensuciar esos números con algo que en la práctica nunca pasó por
+# bodega.
+CATEGORIA_CORRECCION_INVENTARIO = "Corrección de inventario"
 
 
 # ---------------------------------------------------------------------------
@@ -2584,17 +2595,30 @@ def eliminar_factura(factura_id):
             db.execute(
                 """
                 INSERT INTO movimientos (
-                    producto_id, fecha, tipo, cantidad, motivo, usuario,
+                    producto_id, fecha, tipo, categoria, cantidad, motivo, usuario,
                     costo_unitario, factura_id, factura_numero, stock_resultante
-                ) VALUES (?, ?, 'salida', ?, ?, ?, NULL, NULL, ?, ?)
+                ) VALUES (?, ?, 'salida', ?, ?, ?, ?, NULL, NULL, ?, ?)
                 """,
                 (
-                    producto["id"], ts, linea["cantidad"],
-                    f"Reversión automática por eliminación de la factura '{factura['numero']}' (corrección de error)",
+                    producto["id"], ts, CATEGORIA_CORRECCION_INVENTARIO, linea["cantidad"],
+                    f"Reversión automática por eliminación de la factura '{factura['numero']}' (corrección de error, "
+                    f"no cuenta como consumo real)",
                     usuario, factura["numero"], nuevo_stock,
                 ),
             )
 
+    # Si esta factura fue creada a partir de una foto mandada por WhatsApp
+    # (facturas_whatsapp_pendientes.factura_id apunta a ella una vez
+    # aprobada), hay que soltar esa referencia ANTES de borrar la factura:
+    # esa columna no tiene ON DELETE CASCADE/SET NULL (no queremos borrar el
+    # historial de la revisión solo porque la factura se eliminó después), así
+    # que sin este paso el DELETE de más abajo choca con la restricción de
+    # llave foránea. El registro de la pendiente queda igual (mismo estado
+    # 'aprobada', mismo audit trail), solo se limpia el vínculo roto.
+    db.execute(
+        "UPDATE facturas_whatsapp_pendientes SET factura_id = NULL WHERE factura_id = ?",
+        (factura_id,),
+    )
     db.execute("DELETE FROM facturas WHERE id = ?", (factura_id,))
     db.commit()
     return jsonify({"ok": True, "revertido": bool(lineas_aplicadas)})
@@ -5014,7 +5038,7 @@ def dashboard():
         """
         SELECT m.producto_id, SUM(m.cantidad) AS total_salida
         FROM movimientos m
-        WHERE m.tipo = 'salida'
+        WHERE m.tipo = 'salida' AND m.categoria != 'Corrección de inventario'
         GROUP BY m.producto_id
         ORDER BY total_salida DESC
         LIMIT 5
@@ -5105,7 +5129,7 @@ def _calcular_rotacion(dias):
         """
         SELECT producto_id, SUM(cantidad) AS total_salida_periodo, COUNT(*) AS n_movimientos
         FROM movimientos
-        WHERE tipo = 'salida' AND fecha >= ?
+        WHERE tipo = 'salida' AND categoria != 'Corrección de inventario' AND fecha >= ?
         GROUP BY producto_id
         ORDER BY total_salida_periodo DESC
         LIMIT 15
@@ -5120,7 +5144,7 @@ def _calcular_rotacion(dias):
         """
         SELECT producto_id, SUM(cantidad) AS total_salida_periodo
         FROM movimientos
-        WHERE tipo = 'salida' AND fecha >= ?
+        WHERE tipo = 'salida' AND categoria != 'Corrección de inventario' AND fecha >= ?
         GROUP BY producto_id
         """,
         (desde,),
@@ -5167,7 +5191,7 @@ def _calcular_rotacion(dias):
         {PRODUCTO_SELECT}
         WHERE p.id NOT IN (
             SELECT DISTINCT producto_id FROM movimientos
-            WHERE tipo = 'salida' AND fecha >= ?
+            WHERE tipo = 'salida' AND categoria != 'Corrección de inventario' AND fecha >= ?
         )
         AND (p.stock_disponible + p.stock_reservado) > 0
         ORDER BY p.actualizado_en ASC
@@ -5200,7 +5224,7 @@ def _calcular_rotacion(dias):
         """
         SELECT strftime('%Y-%W', fecha) AS semana, SUM(cantidad) AS total
         FROM movimientos
-        WHERE tipo = 'salida' AND fecha >= ?
+        WHERE tipo = 'salida' AND categoria != 'Corrección de inventario' AND fecha >= ?
         GROUP BY semana
         """,
         (desde,),
@@ -5212,7 +5236,7 @@ def _calcular_rotacion(dias):
             """
             SELECT strftime('%Y-%W', fecha) AS semana, SUM(cantidad) AS total
             FROM movimientos
-            WHERE tipo = 'salida' AND producto_id = ? AND fecha >= ?
+            WHERE tipo = 'salida' AND categoria != 'Corrección de inventario' AND producto_id = ? AND fecha >= ?
             GROUP BY semana
             """,
             (producto_id, desde),
@@ -5315,7 +5339,7 @@ def _calcular_planificacion(dias=60):
         """
         SELECT producto_id, SUM(cantidad) AS total, COUNT(DISTINCT strftime('%Y-%W', fecha)) AS n_semanas
         FROM movimientos
-        WHERE tipo = 'salida' AND fecha >= ?
+        WHERE tipo = 'salida' AND categoria != 'Corrección de inventario' AND fecha >= ?
         GROUP BY producto_id
         """,
         (desde,),

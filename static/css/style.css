@@ -1205,6 +1205,36 @@ body::before { content: none; }
   text-align: center;
 }
 
+/* Facturas pendientes de revisión (WhatsApp): tarjetas de la bandeja y
+   layout foto + datos del detalle. */
+.wap-card {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 10px;
+}
+.wap-card img {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.wap-card-info { flex: 1; min-width: 0; }
+.wap-card-info strong { display: block; }
+.wapd-layout {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+.wapd-foto { flex: 0 0 260px; }
+.wapd-datos { flex: 1; min-width: 320px; }
+
 .topbar-acciones {
   display: flex;
   gap: 10px;

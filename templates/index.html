@@ -185,6 +185,7 @@
     <button class="btn btn-secundario" id="btn-carga-masiva-facturas">Carga masiva (Excel)</button>
     <button class="btn btn-secundario" id="btn-escanear-foto-factura">📷 Escanear foto</button>
     <input type="file" id="input-escanear-foto-factura" accept="image/jpeg,image/png,image/webp,image/gif" capture="environment" style="display:none">
+    <button class="btn btn-secundario" id="btn-whatsapp-pendientes">📥 Pendientes de WhatsApp <span class="badge-urgencia badge-urgencia--critico" id="badge-whatsapp-pendientes" style="display:none">0</span></button>
     <button class="btn btn-primary" id="btn-nueva-factura">+ Nueva factura</button>
   </section>
 
@@ -959,6 +960,65 @@
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- Modal: Facturas pendientes de revisión (llegaron como foto por WhatsApp) -->
+<div class="modal-overlay" id="modal-whatsapp-pendientes">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Facturas pendientes de revisión (WhatsApp)</h2>
+      <button class="modal-close" data-close="modal-whatsapp-pendientes">&times;</button>
+    </div>
+    <p class="bodega-intro">Fotos de facturas que el personal mandó por WhatsApp al agente. La IA ya leyó lo que pudo — revísalas y apruébalas (o recházalas) antes de que se sumen al inventario.</p>
+    <div id="wap-lista"></div>
+  </div>
+</div>
+
+<!-- Modal: Revisar una factura pendiente de WhatsApp en detalle -->
+<div class="modal-overlay" id="modal-whatsapp-pendiente-detalle">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="wapd-titulo">Revisar factura</h2>
+      <button class="modal-close" data-close="modal-whatsapp-pendiente-detalle">&times;</button>
+    </div>
+    <input type="hidden" id="wapd-id">
+    <div class="wapd-layout">
+      <div class="wapd-foto">
+        <img id="wapd-imagen" src="" alt="Foto de la factura" style="max-width:100%; border-radius:8px; border:1px solid var(--borde)">
+        <p class="ayuda-inline" id="wapd-origen"></p>
+      </div>
+      <div class="wapd-datos">
+        <div class="grid-3">
+          <div class="campo">
+            <label>N° Factura</label>
+            <input type="text" id="wapd-numero">
+          </div>
+          <div class="campo">
+            <label>Proveedor</label>
+            <input type="text" id="wapd-proveedor">
+          </div>
+          <div class="campo">
+            <label>Fecha</label>
+            <input type="date" id="wapd-fecha">
+          </div>
+        </div>
+        <p class="ayuda-inline" id="wapd-aviso" style="display:none"></p>
+        <div class="tabla-wrap">
+          <table class="tabla">
+            <thead>
+              <tr><th>Producto</th><th class="num">Cantidad</th><th class="num">Precio unit.</th><th></th></tr>
+            </thead>
+            <tbody id="wapd-lineas"></tbody>
+          </table>
+        </div>
+        <button type="button" class="btn btn-secundario" id="btn-wapd-agregar-linea">+ Agregar línea</button>
+      </div>
+    </div>
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-danger" id="btn-wapd-rechazar">Rechazar</button>
+      <button type="button" class="btn btn-primary" id="btn-wapd-aprobar">Aprobar y cargar al inventario</button>
+    </div>
   </div>
 </div>
 

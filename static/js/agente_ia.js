@@ -222,7 +222,7 @@ function renderTablaMensajesAgente() {
     <tr>
       <td class="mono">${fmtFecha(m.creado_en)}</td>
       <td>${escapeHtml(m.mecanico_nombre) || "—"}</td>
-      <td>${m.origen === "voz" ? "🎤 Voz" : "💬 Texto"}</td>
+      <td>${m.origen === "voz" ? "🎤 Voz" : m.origen === "foto_factura" ? "📄 Foto factura" : "💬 Texto"}</td>
       <td>${escapeHtml(m.mensaje_texto)}</td>
       <td><span class="badge-urgencia ${m.exito ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${escapeHtml(m.respuesta_texto)}</span></td>
     </tr>

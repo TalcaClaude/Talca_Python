@@ -248,6 +248,7 @@ async function cargarDashboardOperativo() {
     document.getElementById("op-s-monto-por-cerrar").textContent = fmtMoney(data.monto_por_cerrar);
     document.getElementById("op-s-utilidad-mes").textContent = fmtMoney(data.utilidad_mes);
     document.getElementById("op-s-costo-ots-cerradas").textContent = fmtMoney(data.costo_ots_cerradas);
+    document.getElementById("op-s-costo-mano-obra-cerradas").textContent = fmtMoney(data.costo_mano_obra_ots_cerradas || 0);
     document.getElementById("op-s-costo-garantias").textContent = fmtMoney(data.costo_garantias);
     document.getElementById("op-s-garantias-abiertas").textContent = data.garantias_abiertas;
     document.getElementById("op-s-ticket-promedio").textContent = fmtMoney(data.ticket_promedio_mes);

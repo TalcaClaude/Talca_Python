@@ -817,8 +817,12 @@ def _orden_dict(db, row):
 
     # Costo real de los repuestos cargados (a costo promedio ponderado, sin
     # margen) — para poder mostrar una utilidad estimada en la pestaña
-    # "Costos". La mano de obra cargada no tiene un costo registrado en el
-    # sistema (no se lleva sueldo por OT), así que no resta de la utilidad.
+    # "Costos". La mano de obra SÍ resta de la utilidad cuando tiene un
+    # costo unitario cargado (ej. trabajo externo/subcontratado que se le
+    # paga a un tercero, con o sin IVA) — es plata real que sale del taller.
+    # La mano de obra interna normalmente se carga con costo $0 (ya está
+    # cubierta por el sueldo fijo del personal), así que no afecta la
+    # utilidad a menos que se le haya puesto un costo.
     costo_repuestos = sum(
         i["subtotal"] for i in d["items"] if i["tipo"] == "repuesto"
     )
@@ -827,7 +831,7 @@ def _orden_dict(db, row):
     )
     d["costo_repuestos"] = round(costo_repuestos, 2)
     d["mano_obra_cargada"] = round(mano_obra_cargada, 2)
-    d["utilidad_estimada"] = round(valor_neto - costo_repuestos, 2)
+    d["utilidad_estimada"] = round(valor_neto - costo_repuestos - mano_obra_cargada, 2)
 
     try:
         d["equipamiento"] = json.loads(d["equipamiento_json"]) if d.get("equipamiento_json") else {}
@@ -844,10 +848,14 @@ def dashboard_operativo():
       - monto_cerradas_mes: valor cobrado (Neto + IVA si aplica) de esas órdenes cerradas este mes.
       - monto_por_cerrar: valor cobrado (Neto + IVA si aplica) de todas las órdenes abiertas.
       - costo_ots_cerradas: costo real de los repuestos usados en TODAS las órdenes entregadas
-        (histórico, no solo el mes) — la mano de obra no se cuenta porque no tiene costo registrado.
+        (histórico, no solo el mes).
+      - costo_mano_obra_ots_cerradas: costo real de la mano de obra CON costo unitario cargado
+        (típicamente trabajo externo/subcontratado) en TODAS las órdenes entregadas (histórico) —
+        la mano de obra interna sin costo cargado no aporta acá.
       - costo_garantias: costo real de los repuestos/mano de obra usados en TODAS las garantías
         (histórico) — es dinero que sale sin que se le cobre al cliente.
-      - utilidad_mes: monto_cerradas_mes menos el costo de repuestos de esas mismas órdenes.
+      - utilidad_mes: monto_cerradas_mes menos el costo de repuestos y de mano de obra (con costo
+        cargado) de esas mismas órdenes.
       - ticket_promedio_mes: monto_cerradas_mes dividido por la cantidad de OTs cerradas este mes.
       - tiempo_promedio_taller_mes: días promedio entre recepción y entrega de las OTs cerradas
         este mes (qué tan rápido se está resolviendo, en promedio).
@@ -886,6 +894,11 @@ def dashboard_operativo():
         iva_monto = round(neto * IVA_PORCENTAJE, 2) if row["precio_iva"] else 0.0
         return round(neto + iva_monto, 2)
 
+    # El multiplicador de IVA por ítem (CASE WHEN) refleja aplica_iva de la
+    # misma forma que _item_subtotal en Python — no se puede reusar esa
+    # función acá porque esto es un SUM agregado en SQL, no fila por fila.
+    _iva_case = f"(CASE WHEN aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)"
+
     def _suma_costo_repuestos(ids):
         if not ids:
             return 0
@@ -897,16 +910,29 @@ def dashboard_operativo():
         ).fetchone()
         return fila["total"] or 0
 
+    # Costo de la mano de obra cargada con costo unitario (típicamente
+    # trabajo externo/subcontratado pagado a un tercero) — plata real que
+    # sale del taller y por lo tanto sí resta de la utilidad. La mano de
+    # obra interna se suele cargar con costo $0, así que no aporta acá.
+    def _suma_costo_mano_obra(ids):
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        fila = db.execute(
+            f"SELECT COALESCE(SUM(cantidad * costo_unitario * {_iva_case}), 0) AS total FROM orden_items "
+            f"WHERE tipo = 'mano_obra' AND orden_id IN ({placeholders})",
+            ids,
+        ).fetchone()
+        return fila["total"] or 0
+
     monto_cerradas_mes = round(sum(_valor_total_orden(r) for r in cerradas_mes), 2)
     monto_por_cerrar = round(sum(_valor_total_orden(r) for r in abiertas), 2)
     costo_ots_cerradas = round(_suma_costo_repuestos(ids_cerradas_todas), 2)
+    costo_mano_obra_ots_cerradas = round(_suma_costo_mano_obra(ids_cerradas_todas), 2)
     costo_repuestos_cerradas_mes = _suma_costo_repuestos(ids_cerradas_mes)
-    utilidad_mes = round(monto_cerradas_mes - costo_repuestos_cerradas_mes, 2)
+    costo_mano_obra_cerradas_mes = _suma_costo_mano_obra(ids_cerradas_mes)
+    utilidad_mes = round(monto_cerradas_mes - costo_repuestos_cerradas_mes - costo_mano_obra_cerradas_mes, 2)
 
-    # El multiplicador de IVA por ítem (CASE WHEN) refleja aplica_iva de la
-    # misma forma que _item_subtotal en Python — no se puede reusar esa
-    # función acá porque esto es un SUM agregado en SQL, no fila por fila.
-    _iva_case = f"(CASE WHEN aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)"
     costo_garantias = db.execute(
         f"SELECT COALESCE(SUM(cantidad * costo_unitario * {_iva_case}), 0) AS total FROM garantia_items"
     ).fetchone()["total"] or 0
@@ -960,6 +986,7 @@ def dashboard_operativo():
         "monto_por_cerrar": monto_por_cerrar,
         "garantias_abiertas": garantias_abiertas,
         "costo_ots_cerradas": costo_ots_cerradas,
+        "costo_mano_obra_ots_cerradas": costo_mano_obra_ots_cerradas,
         "costo_garantias": round(costo_garantias, 2),
         "utilidad_mes": utilidad_mes,
         "ticket_promedio_mes": ticket_promedio_mes,

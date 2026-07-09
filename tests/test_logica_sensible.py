@@ -456,6 +456,37 @@ class TestOperativo(unittest.TestCase):
         self.assertEqual(item["detalle"], "")
         self.assertEqual(item["subtotal"], 20000)
 
+    def test_mano_de_obra_con_costo_resta_de_la_utilidad_estimada(self):
+        # Trabajo externo pagado a un tercero: sí es plata real que sale del
+        # taller, así que debe restar de la utilidad estimada (antes solo
+        # restaban los repuestos, dejando afuera la mano de obra externa).
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 100000})
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={
+                "tipo": "mano_obra", "descripcion": "Programación electrónica",
+                "detalle": "Trabajo externo - Lucas Medina",
+                "cantidad": 1, "costo_unitario": 25000, "aplica_iva": True,
+            },
+        )
+        detalle = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertAlmostEqual(detalle["mano_obra_cargada"], 29750)  # 25.000 + 19%
+        self.assertAlmostEqual(detalle["utilidad_estimada"], 100000 - 29750)
+
+    def test_mano_de_obra_interna_sin_costo_no_afecta_la_utilidad(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 100000})
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "mano_obra", "descripcion": "Diagnóstico interno", "cantidad": 1},
+        )
+        detalle = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertAlmostEqual(detalle["mano_obra_cargada"], 0)
+        self.assertAlmostEqual(detalle["utilidad_estimada"], 100000)
+
 
 class TestOperativoFase35(unittest.TestCase):
     """Sub-flujos ampliados del módulo Operativo (Fase 3.5): presupuesto con
@@ -1583,6 +1614,138 @@ class TestAgenteWhatsApp(unittest.TestCase):
             resp = self._subir_nota_de_voz("+56900556677")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("formato no soportado", resp.get_json()["error"])
+
+    # -- Foto de factura por WhatsApp: queda pendiente de revisión humana,
+    # nunca se sube sola al inventario. Reutiliza la misma IA de visión que
+    # /api/facturas/escanear-foto (ver TestEscanearFotoFactura), mockeada
+    # acá también para no depender de ANTHROPIC_API_KEY en los tests. --
+
+    def _subir_foto_por_agente(self, telefono, filename="factura.jpg", contenido=b"contenido-falso-de-una-foto"):
+        return self.client.post(
+            "/api/agente/simular-mensaje-foto",
+            data={"telefono": telefono, "foto": (io.BytesIO(contenido), filename)},
+            content_type="multipart/form-data",
+        )
+
+    def _contar_pendientes(self):
+        with taller_app.app.app_context():
+            return taller_app.get_db().execute("SELECT COUNT(*) AS n FROM facturas_whatsapp_pendientes").fetchone()["n"]
+
+    def test_telefono_no_registrado_no_puede_mandar_facturas(self):
+        antes = self._contar_pendientes()
+        respuesta_ia = {"numero_factura": "AG-000", "fecha": "", "proveedor_nombre": "", "proveedor_rut": "", "lineas": []}
+        with patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self._subir_foto_por_agente("+56900990099")
+        data = resp.get_json()
+        self.assertEqual(data["accion"], "no_autorizado")
+        # Un teléfono no registrado no llega ni siquiera a llamar a la IA,
+        # así que no debe haber quedado ningún pendiente nuevo.
+        self.assertEqual(self._contar_pendientes(), antes)
+
+    def _preparar_pendiente(self, sufijo):
+        """Helper (NO es un test): registra un mecánico y un producto con
+        datos únicos por 'sufijo' (para no chocar entre tests que comparten
+        la misma base persistida durante toda la clase) y manda una foto de
+        factura simulada por el agente. Devuelve (pendiente_id, producto_id,
+        numero_factura)."""
+        telefono = f"+5693{sufijo}"
+        numero = f"AG-{sufijo}"
+        nombre_producto = f"CORREA DE DISTRIBUCION TESTAGENTE{sufijo}"
+        self._registrar_mecanico(f"Mecánico Facturas {sufijo}", telefono)
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            producto_id = _crear_producto(db, nombre_producto, stock_disponible=3)
+
+        respuesta_ia = {
+            "numero_factura": numero,
+            "fecha": "2026-07-09",
+            "proveedor_nombre": f"Repuestos Agente Test {sufijo}",
+            "proveedor_rut": "",
+            "lineas": [{"descripcion": nombre_producto, "cantidad": 4, "precio_unitario": 8000}],
+        }
+        with patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self._subir_foto_por_agente(telefono)
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["accion"], "factura_recibida")
+
+        pendientes = self.client.get("/api/facturas/whatsapp-pendientes?estado=pendiente").get_json()["pendientes"]
+        pendiente = next(p for p in pendientes if p["datos"]["numero"] == numero)
+        return pendiente["id"], producto_id, numero
+
+    def test_foto_de_factura_queda_pendiente_de_revision_y_no_toca_el_inventario(self):
+        pendiente_id, producto_id, numero = self._preparar_pendiente("100001")
+
+        # Todavía NO se creó ninguna factura real ni se movió stock: queda
+        # pendiente de que alguien la revise y apruebe a mano.
+        stock_actual = self.client.get(f"/api/productos/{producto_id}").get_json()["stock_disponible"]
+        self.assertEqual(stock_actual, 3)
+        self.assertEqual(self.client.get(f"/api/facturas/numero/{numero}").status_code, 404)
+
+        pendiente = self.client.get(f"/api/facturas/whatsapp-pendientes/{pendiente_id}").get_json()
+        self.assertEqual(pendiente["estado"], "pendiente")
+        self.assertEqual(pendiente["datos"]["numero"], numero)
+        self.assertEqual(pendiente["datos"]["lineas"][0]["producto_id"], producto_id)
+
+    def test_aprobar_pendiente_crea_la_factura_real_y_aplica_stock(self):
+        pendiente_id, producto_id, numero = self._preparar_pendiente("100002")
+
+        grupo = {
+            "numero": numero,
+            "proveedor_nombre": "Repuestos Agente Test 100002",
+            "proveedor_nuevo": True,
+            "proveedor_id": None,
+            "fecha": "2026-07-09",
+            "lineas": [{"producto_id": producto_id, "cantidad": 4, "precio_unitario": 8000}],
+        }
+        resp = self.client.post(f"/api/facturas/whatsapp-pendientes/{pendiente_id}/aprobar", json={"grupo": grupo})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["lineas_aplicadas"], 1)
+
+        # El stock ahora sí se movió, y la factura real quedó creada.
+        stock_actual = self.client.get(f"/api/productos/{producto_id}").get_json()["stock_disponible"]
+        self.assertEqual(stock_actual, 3 + 4)
+        self.assertEqual(self.client.get(f"/api/facturas/numero/{numero}").status_code, 200)
+
+        pendiente_actualizado = self.client.get(f"/api/facturas/whatsapp-pendientes/{pendiente_id}").get_json()
+        self.assertEqual(pendiente_actualizado["estado"], "aprobada")
+        self.assertEqual(pendiente_actualizado["factura_id"], data["factura_id"])
+
+        # No se puede volver a aprobar (ni rechazar) un pendiente ya procesado.
+        resp_repetido = self.client.post(f"/api/facturas/whatsapp-pendientes/{pendiente_id}/aprobar", json={"grupo": grupo})
+        self.assertEqual(resp_repetido.status_code, 400)
+
+    def test_rechazar_pendiente_no_crea_factura_ni_toca_stock(self):
+        pendiente_id, producto_id, numero = self._preparar_pendiente("100003")
+
+        resp = self.client.post(
+            f"/api/facturas/whatsapp-pendientes/{pendiente_id}/rechazar",
+            json={"nota": "Foto duplicada, ya se cargó antes a mano."},
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        stock_actual = self.client.get(f"/api/productos/{producto_id}").get_json()["stock_disponible"]
+        self.assertEqual(stock_actual, 3)
+        self.assertEqual(self.client.get(f"/api/facturas/numero/{numero}").status_code, 404)
+
+        pendiente_actualizado = self.client.get(f"/api/facturas/whatsapp-pendientes/{pendiente_id}").get_json()
+        self.assertEqual(pendiente_actualizado["estado"], "rechazada")
+        self.assertEqual(pendiente_actualizado["nota_rechazo"], "Foto duplicada, ya se cargó antes a mano.")
+
+    def test_ia_no_disponible_responde_con_error_explicable_y_no_crea_pendiente(self):
+        antes = self._contar_pendientes()
+        self._registrar_mecanico("Mecánico Sin IA", "+56944455566")
+        with patch.object(
+            taller_app, "_llamar_claude_vision_factura",
+            side_effect=RuntimeError("El escaneo de facturas por foto no está configurado todavía."),
+        ):
+            resp = self._subir_foto_por_agente("+56944455566")
+        data = resp.get_json()
+        self.assertEqual(data["accion"], "error")
+        self.assertFalse(data["exito"])
+        self.assertEqual(self._contar_pendientes(), antes)
 
 
 if __name__ == "__main__":

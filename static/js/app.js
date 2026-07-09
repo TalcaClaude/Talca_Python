@@ -143,7 +143,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "dashboard") cargarDashboard();
     if (vista === "bodega") cargarUbicaciones();
-    if (vista === "facturas") cargarFacturas();
+    if (vista === "facturas") { cargarFacturas(); cargarWhatsappPendientes(); }
     if (vista === "proveedores") cargarProveedores();
     if (vista === "movimientos") cargarMovimientos();
     if (vista === "mermas") cargarMermas();
@@ -3208,9 +3208,239 @@ document.getElementById("reportes-compras-desde").addEventListener("change", car
 document.getElementById("reportes-compras-hasta").addEventListener("change", cargarResumenReportes);
 
 // ---------------------------------------------------------------------------
+// Facturas pendientes de revisión (llegaron como foto por WhatsApp): el
+// agente ya las leyó con IA y las dejó guardadas — acá se ven, se corrigen
+// si hace falta y se aprueban (recién ahí se suman al inventario) o se
+// rechazan. Reutiliza el mismo patrón de autocompletar-y-agregar de las
+// líneas de "Nueva factura", una línea por producto.
+// ---------------------------------------------------------------------------
+
+state.whatsappPendientes = [];
+
+async function cargarWhatsappPendientes() {
+  try {
+    const data = await api("/api/facturas/whatsapp-pendientes?estado=pendiente");
+    state.whatsappPendientes = data.pendientes;
+    const badge = document.getElementById("badge-whatsapp-pendientes");
+    if (state.whatsappPendientes.length > 0) {
+      badge.textContent = state.whatsappPendientes.length;
+      badge.style.display = "inline-block";
+    } else {
+      badge.style.display = "none";
+    }
+    renderListaWhatsappPendientes();
+  } catch (e) {
+    // Silencioso: no bloquea el resto de Facturas si esto falla.
+  }
+}
+
+function renderListaWhatsappPendientes() {
+  const cont = document.getElementById("wap-lista");
+  if (!cont) return;
+  if (state.whatsappPendientes.length === 0) {
+    cont.innerHTML = `<p class="vacio-inline">No hay facturas pendientes de revisión.</p>`;
+    return;
+  }
+  cont.innerHTML = state.whatsappPendientes.map(p => {
+    const d = p.datos || {};
+    const resumen = [
+      d.numero ? `Folio ${escapeHtml(d.numero)}` : "Sin folio leído",
+      d.proveedor_nombre ? escapeHtml(d.proveedor_nombre) : "Proveedor sin identificar",
+      `${(d.lineas || []).length} línea(s)`,
+    ].join(" — ");
+    return `
+      <div class="wap-card">
+        <img src="/api/facturas/whatsapp-pendientes/${p.id}/foto" alt="Foto de la factura">
+        <div class="wap-card-info">
+          <strong>${resumen}</strong>
+          <span class="ayuda-inline">Mandada por ${escapeHtml(p.mecanico_nombre || p.telefono)} — ${fmtFecha(p.creado_en)}</span>
+        </div>
+        <button type="button" class="btn btn-secundario" data-wap-revisar="${p.id}">Revisar</button>
+      </div>
+    `;
+  }).join("");
+  cont.querySelectorAll("[data-wap-revisar]").forEach(btn => {
+    btn.addEventListener("click", () => abrirDetalleWhatsappPendiente(parseInt(btn.dataset.wapRevisar, 10)));
+  });
+}
+
+document.getElementById("btn-whatsapp-pendientes").addEventListener("click", async () => {
+  await cargarWhatsappPendientes();
+  abrirModal("modal-whatsapp-pendientes");
+});
+
+async function abrirDetalleWhatsappPendiente(id) {
+  try {
+    const pendiente = await api(`/api/facturas/whatsapp-pendientes/${id}`);
+    await asegurarDatosParaPreviewCargaMasiva(); // trae productos/proveedores para el autocompletar
+    document.getElementById("wapd-id").value = id;
+    document.getElementById("wapd-titulo").textContent = `Revisar factura pendiente #${id}`;
+    document.getElementById("wapd-imagen").src = `/api/facturas/whatsapp-pendientes/${id}/foto`;
+    document.getElementById("wapd-origen").textContent =
+      `Mandada por ${pendiente.mecanico_nombre || pendiente.telefono} el ${fmtFecha(pendiente.creado_en)}.`;
+
+    const d = pendiente.datos || {};
+    document.getElementById("wapd-numero").value = d.numero || "";
+    document.getElementById("wapd-proveedor").value = d.proveedor_nombre || "";
+    document.getElementById("wapd-fecha").value = d.fecha || "";
+
+    const aviso = document.getElementById("wapd-aviso");
+    if (!d.numero) {
+      aviso.style.display = "block";
+      aviso.textContent = "La IA no alcanzó a leer el número de folio en la foto — complétalo a mano antes de aprobar.";
+    } else {
+      aviso.style.display = "none";
+    }
+
+    const cont = document.getElementById("wapd-lineas");
+    cont.innerHTML = "";
+    (d.lineas && d.lineas.length ? d.lineas : [{}]).forEach(linea => {
+      cont.appendChild(filaLineaWapd(linea));
+    });
+
+    document.getElementById("btn-wapd-aprobar").disabled = pendiente.estado !== "pendiente";
+    document.getElementById("btn-wapd-rechazar").disabled = pendiente.estado !== "pendiente";
+
+    abrirModal("modal-whatsapp-pendiente-detalle");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function filaLineaWapd(linea) {
+  const div = document.createElement("tr");
+  div.className = "wapd-linea-row";
+  const productoActual = linea.producto_id
+    ? state.productosParaFactura.find(p => p.id === linea.producto_id)
+    : null;
+  div.innerHTML = `
+    <td>
+      <div class="campo campo-autocomplete" style="margin:0">
+        <input type="text" class="wapd-linea-producto-buscar" placeholder="Busca por nombre, código o N°…" autocomplete="off"
+               value="${productoActual ? escapeHtml(etiquetaProductoFactura(productoActual)) : escapeHtml(linea.texto_original || "")}">
+        <input type="hidden" class="wapd-linea-producto-id" value="${linea.producto_id || ""}">
+        <div class="autocomplete-resultados" style="display:none"></div>
+      </div>
+    </td>
+    <td><input type="number" class="wapd-linea-cantidad" min="0" step="1" value="${linea.cantidad != null ? linea.cantidad : ""}" style="width:80px"></td>
+    <td><input type="number" class="wapd-linea-precio" min="0" step="1" value="${linea.precio_unitario != null ? linea.precio_unitario : ""}" style="width:110px"></td>
+    <td><button type="button" class="btn-link btn-link--peligro wapd-linea-quitar">Quitar</button></td>
+  `;
+  div.querySelector(".wapd-linea-quitar").addEventListener("click", () => div.remove());
+
+  const inputBuscar = div.querySelector(".wapd-linea-producto-buscar");
+  const inputId = div.querySelector(".wapd-linea-producto-id");
+  const resultados = div.querySelector(".autocomplete-resultados");
+
+  function renderResultados(texto) {
+    const q = texto.trim();
+    if (!q) { resultados.style.display = "none"; return; }
+    const coincidencias = (state.productosParaFactura || []).filter(p =>
+      coincideBusqueda(q, p.nombre, p.descripcion, p.codigo_interno, p.id_sistema)
+    ).slice(0, 8);
+    if (coincidencias.length === 0) {
+      resultados.innerHTML = '<div class="autocomplete-sin-resultados">Sin productos que coincidan</div>';
+      resultados.style.display = "block";
+      return;
+    }
+    resultados.innerHTML = coincidencias.map(p => `
+      <div class="autocomplete-item" data-id="${p.id}">${escapeHtml(etiquetaProductoFactura(p))}</div>
+    `).join("");
+    resultados.style.display = "block";
+    resultados.querySelectorAll(".autocomplete-item").forEach(item => {
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const p = state.productosParaFactura.find(x => x.id === parseInt(item.dataset.id, 10));
+        if (p) {
+          inputId.value = p.id;
+          inputBuscar.value = etiquetaProductoFactura(p);
+          resultados.style.display = "none";
+        }
+      });
+    });
+  }
+
+  inputBuscar.addEventListener("input", () => { inputId.value = ""; renderResultados(inputBuscar.value); });
+  inputBuscar.addEventListener("focus", () => { if (inputBuscar.value.trim()) renderResultados(inputBuscar.value); });
+  inputBuscar.addEventListener("blur", () => setTimeout(() => { resultados.style.display = "none"; }, 150));
+
+  return div;
+}
+
+document.getElementById("btn-wapd-agregar-linea").addEventListener("click", () => {
+  document.getElementById("wapd-lineas").appendChild(filaLineaWapd({}));
+});
+
+function _leerGrupoWapdDesdeFormulario() {
+  const lineas = [];
+  document.querySelectorAll("#wapd-lineas .wapd-linea-row").forEach(tr => {
+    const productoId = tr.querySelector(".wapd-linea-producto-id").value;
+    const cantidad = tr.querySelector(".wapd-linea-cantidad").value;
+    const precio = tr.querySelector(".wapd-linea-precio").value;
+    if (!productoId && !cantidad && !precio) return; // fila vacía, se ignora
+    lineas.push({
+      producto_id: productoId ? parseInt(productoId, 10) : null,
+      cantidad: cantidad ? parseFloat(cantidad) : null,
+      precio_unitario: precio ? parseFloat(precio) : null,
+    });
+  });
+  const numero = document.getElementById("wapd-numero").value.trim().toUpperCase();
+  return {
+    numero,
+    proveedor_nombre: document.getElementById("wapd-proveedor").value.trim(),
+    proveedor_nuevo: true, // el backend resuelve si ya existe por nombre (ver aprobar_factura_whatsapp_pendiente)
+    proveedor_id: null,
+    fecha: document.getElementById("wapd-fecha").value || "",
+    lineas,
+  };
+}
+
+document.getElementById("btn-wapd-aprobar").addEventListener("click", async () => {
+  const id = document.getElementById("wapd-id").value;
+  const grupo = _leerGrupoWapdDesdeFormulario();
+  if (!grupo.numero) {
+    toast("Falta el número de folio.", true);
+    return;
+  }
+  if (grupo.lineas.length === 0) {
+    toast("Agrega al menos una línea con producto, cantidad y precio.", true);
+    return;
+  }
+  try {
+    const data = await api(`/api/facturas/whatsapp-pendientes/${id}/aprobar`, {
+      method: "POST",
+      body: JSON.stringify({ grupo }),
+    });
+    toast(`Factura aprobada y cargada al inventario (${data.lineas_aplicadas} línea(s)).`);
+    cerrarModal("modal-whatsapp-pendiente-detalle");
+    await Promise.all([cargarWhatsappPendientes(), cargarFacturas(), cargarProductos()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+document.getElementById("btn-wapd-rechazar").addEventListener("click", async () => {
+  const id = document.getElementById("wapd-id").value;
+  if (!confirm("¿Rechazar esta factura pendiente? No se sumará al inventario.")) return;
+  const nota = prompt("Motivo del rechazo (opcional):") || "";
+  try {
+    await api(`/api/facturas/whatsapp-pendientes/${id}/rechazar`, {
+      method: "POST",
+      body: JSON.stringify({ nota }),
+    });
+    toast("Factura rechazada.");
+    cerrarModal("modal-whatsapp-pendiente-detalle");
+    await cargarWhatsappPendientes();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
 cargarSesion();
 cargarProductos();
 cargarDashboard();
+cargarWhatsappPendientes();

@@ -91,6 +91,12 @@ FOTOS_DIR = os.path.join(os.path.dirname(DB_PATH), "fotos_productos")
 os.makedirs(FOTOS_DIR, exist_ok=True)
 EXTENSIONES_FOTO_PERMITIDAS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 
+# Fotos de facturas que llegan por WhatsApp (ver facturas_whatsapp_pendientes
+# y _procesar_foto_factura_whatsapp) — mismo criterio de guardarlas junto a
+# la base de datos.
+FACTURAS_WHATSAPP_DIR = os.path.join(os.path.dirname(DB_PATH), "facturas_whatsapp")
+os.makedirs(FACTURAS_WHATSAPP_DIR, exist_ok=True)
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "cambia-esta-clave-en-produccion-usando-la-variable-SECRET_KEY")
 
@@ -415,6 +421,28 @@ def init_db():
             estado_nuevo TEXT DEFAULT '',
             exito INTEGER NOT NULL DEFAULT 0,
             respuesta_texto TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+
+        -- Facturas de compra que llegaron como foto por WhatsApp: la IA las
+        -- lee y las deja acá en estado 'pendiente' (con la foto guardada y
+        -- los datos que alcanzó a extraer, ya en el mismo formato que usa
+        -- la previsualización de carga masiva/foto desde el navegador) para
+        -- que alguien con sesión iniciada las revise en "Facturas →
+        -- Pendientes de WhatsApp" y decida aprobarlas (crea la factura real
+        -- y aplica el stock) o rechazarlas. Nunca se suben solas al
+        -- inventario sin ese paso manual.
+        CREATE TABLE IF NOT EXISTS facturas_whatsapp_pendientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telefono TEXT NOT NULL,
+            mecanico_nombre TEXT DEFAULT '',
+            foto_archivo TEXT NOT NULL,
+            datos_json TEXT NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'pendiente',
+            factura_id INTEGER REFERENCES facturas(id),
+            revisado_por TEXT DEFAULT '',
+            revisado_en TEXT DEFAULT '',
+            nota_rechazo TEXT DEFAULT '',
             creado_en TEXT NOT NULL
         );
 
@@ -3246,6 +3274,245 @@ def escanear_foto_factura():
     })
 
 
+# ---------------------------------------------------------------------------
+# Facturas recibidas como foto por WhatsApp: un mecánico/encargado le manda
+# al agente la foto de una factura de compra, la IA la lee (misma función
+# _llamar_claude_vision_factura de arriba) y queda guardada en
+# facturas_whatsapp_pendientes en estado 'pendiente' — NUNCA se sube sola al
+# inventario. Alguien con sesión iniciada la revisa en "Facturas →
+# Pendientes de WhatsApp", corrige lo que haga falta (igual que la
+# previsualización de carga masiva) y recién ahí la aprueba o la rechaza.
+# ---------------------------------------------------------------------------
+
+def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes, mime_type):
+    """Lee la foto con IA, arma el mismo 'grupo' de previsualización que usa
+    escanear_foto_factura() (proveedor resuelto, líneas matcheadas contra el
+    catálogo, validación de errores) y lo deja guardado como pendiente de
+    revisión humana. Devuelve un dict con el mensaje de confirmación para
+    responderle al mecánico por WhatsApp y el id del pendiente creado.
+    Lanza RuntimeError (con mensaje explicable) si la IA no está disponible
+    o no pudo leer nada útil — el llamador se encarga de responder eso."""
+    extraido = _llamar_claude_vision_factura(imagen_bytes, mime_type)
+
+    numero = (extraido.get("numero_factura") or "").strip().upper()
+    numeros_existentes = {r["numero"] for r in db.execute("SELECT numero FROM facturas").fetchall()}
+    proveedores_nuevos_vistos = {}
+    prov_id, prov_nombre, es_nuevo = _carga_masiva_resolver_proveedor(
+        db, extraido.get("proveedor_nombre"), extraido.get("proveedor_rut"), proveedores_nuevos_vistos
+    )
+
+    grupo = {
+        "numero": numero,
+        "fecha": (extraido.get("fecha") or "").strip(),
+        "proveedor_nombre": prov_nombre,
+        "proveedor_rut": (extraido.get("proveedor_rut") or "").strip(),
+        "proveedor_nuevo": es_nuevo,
+        "proveedor_id": None if prov_id in (None, "NUEVO") else prov_id,
+        "lineas": [],
+        "errores": [],
+    }
+
+    for i, linea in enumerate(extraido.get("lineas") or [], start=1):
+        descripcion = (linea.get("descripcion") or "").strip()
+        producto = _buscar_producto_por_texto(db, descripcion)
+        try:
+            cantidad = int(linea.get("cantidad"))
+        except (TypeError, ValueError):
+            cantidad = None
+        try:
+            precio = float(linea.get("precio_unitario"))
+        except (TypeError, ValueError):
+            precio = None
+        grupo["lineas"].append({
+            "fila": i,
+            "producto_id": producto["id"] if producto else None,
+            "producto_nombre": row_to_dict(producto)["nombre"] if producto else None,
+            "cantidad": cantidad,
+            "precio_unitario": precio,
+            "errores": [],
+            "texto_original": descripcion,
+        })
+
+    _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes)
+    # A diferencia de la carga masiva por Excel, acá NO es un error bloqueante
+    # que falte el número de folio (la IA a veces no lo alcanza a leer bien
+    # en una foto de WhatsApp, sacada rápido y no siempre perfecta) — igual
+    # queda guardada como pendiente para que la persona lo complete a mano
+    # al revisarla, en vez de perderse el resto de los datos ya leídos.
+    grupo["errores"] = [e for e in grupo.get("errores", []) if "número" not in e.lower() and "folio" not in e.lower()]
+
+    nombre_archivo = f"{uuid.uuid4().hex}.jpg" if mime_type == "image/jpeg" else f"{uuid.uuid4().hex}.{mime_type.split('/')[-1]}"
+    with open(os.path.join(FACTURAS_WHATSAPP_DIR, nombre_archivo), "wb") as f:
+        f.write(imagen_bytes)
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO facturas_whatsapp_pendientes
+            (telefono, mecanico_nombre, foto_archivo, datos_json, estado, creado_en)
+        VALUES (?, ?, ?, ?, 'pendiente', ?)
+        """,
+        (telefono, mecanico_nombre, nombre_archivo, json.dumps(grupo, ensure_ascii=False), ts),
+    )
+    db.commit()
+    pendiente_id = cur.lastrowid
+
+    partes = ["Recibí la foto de una factura"]
+    if grupo["numero"]:
+        partes.append(f"folio {grupo['numero']}")
+    if grupo["proveedor_nombre"]:
+        partes.append(f"de {grupo['proveedor_nombre']}")
+    resumen = " ".join(partes) + f", con {len(grupo['lineas'])} línea(s) detectada(s)."
+    if not grupo["numero"]:
+        resumen += " No alcancé a leer el número de folio — hay que completarlo a mano al revisarla."
+    mensaje = (
+        f"{resumen} Quedó guardada como pendiente #{pendiente_id} en Facturas → \"Pendientes de WhatsApp\" — "
+        f"alguien del taller tiene que revisarla y aprobarla ahí antes de que se sume al inventario."
+    )
+    return {"mensaje": mensaje, "pendiente_id": pendiente_id}
+
+
+def _factura_whatsapp_pendiente_dict(fila):
+    d = dict(fila)
+    try:
+        d["datos"] = json.loads(d.pop("datos_json") or "{}")
+    except (TypeError, ValueError):
+        d["datos"] = {}
+        d.pop("datos_json", None)
+    return d
+
+
+@app.route("/api/facturas/whatsapp-pendientes", methods=["GET"])
+def listar_facturas_whatsapp_pendientes():
+    db = get_db()
+    estado = request.args.get("estado", "pendiente").strip()
+    if estado:
+        filas = db.execute(
+            "SELECT * FROM facturas_whatsapp_pendientes WHERE estado = ? ORDER BY creado_en DESC", (estado,)
+        ).fetchall()
+    else:
+        filas = db.execute("SELECT * FROM facturas_whatsapp_pendientes ORDER BY creado_en DESC").fetchall()
+    return jsonify({"pendientes": [_factura_whatsapp_pendiente_dict(f) for f in filas]})
+
+
+@app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>", methods=["GET"])
+def obtener_factura_whatsapp_pendiente(pendiente_id):
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    return jsonify(_factura_whatsapp_pendiente_dict(fila))
+
+
+@app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>/foto", methods=["GET"])
+def obtener_foto_factura_whatsapp_pendiente(pendiente_id):
+    db = get_db()
+    fila = db.execute("SELECT foto_archivo FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    ruta = os.path.join(FACTURAS_WHATSAPP_DIR, secure_filename(fila["foto_archivo"]))
+    if not os.path.exists(ruta):
+        return jsonify({"error": "La foto ya no está disponible en el servidor"}), 404
+    return send_file(ruta)
+
+
+@app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>/aprobar", methods=["POST"])
+def aprobar_factura_whatsapp_pendiente(pendiente_id):
+    """Aprueba un pendiente: usa el 'grupo' guardado (con las correcciones
+    que la persona haya hecho en el panel — número, proveedor, líneas) para
+    crear la factura real y aplicar el stock, exactamente igual que
+    carga_masiva_confirmar(). Solo se puede aprobar una vez."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if fila["estado"] != "pendiente":
+        return jsonify({"error": f"Este pendiente ya fue {fila['estado']}, no se puede volver a procesar."}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    # El panel manda el grupo corregido (con lo que la persona haya
+    # ajustado en la previsualización); si no manda nada, se usa tal cual
+    # quedó guardado desde WhatsApp.
+    grupo = data.get("grupo") or json.loads(fila["datos_json"] or "{}")
+
+    numero = (grupo.get("numero") or "").strip().upper()
+    if not numero:
+        return jsonify({"error": "Falta el número de folio — complétalo antes de aprobar."}), 400
+    ya_existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
+    if ya_existe:
+        return jsonify({"error": f"Ya existe una factura con el número '{numero}'."}), 400
+
+    # Tiene que abrirse ANTES de cualquier INSERT (ej. el proveedor nuevo más
+    # abajo) — sqlite3 en Python abre una transacción implícita apenas hay un
+    # primer DML, y _iniciar_transaccion_stock() no puede volver a abrir una
+    # sobre esa (ver mismo orden en carga_masiva_confirmar()).
+    _iniciar_transaccion_stock(db)
+
+    usuario = usuario_actual()
+    proveedor_id = grupo.get("proveedor_id")
+    if grupo.get("proveedor_nuevo") and grupo.get("proveedor_nombre"):
+        existente = db.execute(
+            "SELECT id FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (grupo["proveedor_nombre"],)
+        ).fetchone()
+        if existente:
+            proveedor_id = existente["id"]
+        else:
+            cur = db.execute(
+                "INSERT INTO proveedores (nombre, rut, creado_en) VALUES (?, ?, ?)",
+                (grupo["proveedor_nombre"], formatear_rut(grupo.get("proveedor_rut") or ""), now_iso()),
+            )
+            proveedor_id = cur.lastrowid
+
+    lineas_validadas = []
+    for linea in grupo.get("lineas") or []:
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea.get("producto_id"),)).fetchone()
+        if not producto or linea.get("cantidad") is None or linea.get("precio_unitario") is None:
+            continue
+        lineas_validadas.append((producto, linea["cantidad"], linea["precio_unitario"]))
+
+    if not lineas_validadas:
+        return jsonify({"error": "No hay ninguna línea válida (con producto, cantidad y precio) para aprobar."}), 400
+
+    factura_id = _registrar_factura(db, numero, proveedor_id, grupo.get("fecha") or "", lineas_validadas, usuario)
+
+    ts = now_iso()
+    db.execute(
+        """
+        UPDATE facturas_whatsapp_pendientes
+        SET estado = 'aprobada', factura_id = ?, revisado_por = ?, revisado_en = ?
+        WHERE id = ?
+        """,
+        (factura_id, usuario, ts, pendiente_id),
+    )
+    db.commit()
+
+    return jsonify({"ok": True, "factura_id": factura_id, "lineas_aplicadas": len(lineas_validadas)})
+
+
+@app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>/rechazar", methods=["POST"])
+def rechazar_factura_whatsapp_pendiente(pendiente_id):
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if fila["estado"] != "pendiente":
+        return jsonify({"error": f"Este pendiente ya fue {fila['estado']}, no se puede volver a procesar."}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    nota = (data.get("nota") or "").strip()
+    ts = now_iso()
+    db.execute(
+        """
+        UPDATE facturas_whatsapp_pendientes
+        SET estado = 'rechazada', revisado_por = ?, revisado_en = ?, nota_rechazo = ?
+        WHERE id = ?
+        """,
+        (usuario_actual(), ts, nota, pendiente_id),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/facturas/carga-masiva/confirmar", methods=["POST"])
 def carga_masiva_confirmar():
     _carga_masiva_limpiar_cache()
@@ -3550,7 +3817,7 @@ def _transcribir_audio_whatsapp(audio_bytes, mime_type):
     return texto
 
 
-def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto"):
+def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", imagen_bytes=None, imagen_mime=None):
     """Punto único de entrada para CUALQUIER mensaje que le llegue al
     agente, venga de /api/agente/simular-mensaje o /api/agente/simular-
     mensaje-voz (pruebas manuales desde el navegador) o de
@@ -3558,10 +3825,12 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto"):
     registro en agente_mensajes — incluso cuando no se pudo hacer nada —
     para poder auditar después qué pasó con cada mensaje.
 
-    'origen' es 'texto' o 'voz', solo para dejar registro de cómo llegó el
-    mensaje (si vino de una nota de voz, 'texto_mensaje' ya es la
-    transcripción — el resto de la lógica es idéntica sea cual sea el
-    origen)."""
+    'origen' es 'texto', 'voz' o 'foto_factura', solo para dejar registro de
+    cómo llegó el mensaje (si vino de una nota de voz, 'texto_mensaje' ya es
+    la transcripción — el resto de la lógica es idéntica sea cual sea el
+    origen). Si 'imagen_bytes' viene con datos, se interpreta como una foto
+    de factura de compra (ver _procesar_foto_factura_whatsapp) en vez de
+    intentar interpretar 'texto_mensaje' como un cambio de estado de OT."""
     telefono = _normalizar_telefono(telefono_crudo)
     texto_mensaje = (texto_mensaje or "").strip()
     ts = now_iso()
@@ -3590,9 +3859,6 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto"):
             "origen": origen,
         }
 
-    if not texto_mensaje:
-        return _registrar("", "error", None, "", "", False, "El mensaje llegó vacío.")
-
     mecanico = db.execute(
         "SELECT * FROM agente_mecanicos WHERE telefono = ? AND activo = 1", (telefono,)
     ).fetchone()
@@ -3602,6 +3868,16 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto"):
             "Este número no está registrado como mecánico en el sistema. Pide que te agreguen desde "
             "\"Agente IA\" en Logística.",
         )
+
+    if imagen_bytes is not None:
+        try:
+            resultado_factura = _procesar_foto_factura_whatsapp(db, telefono, mecanico["nombre"], imagen_bytes, imagen_mime)
+        except RuntimeError as e:
+            return _registrar(mecanico["nombre"], "error", None, "", "", False, f"No pude leer la factura: {e}")
+        return _registrar(mecanico["nombre"], "factura_recibida", None, "", "", True, resultado_factura["mensaje"])
+
+    if not texto_mensaje:
+        return _registrar("", "error", None, "", "", False, "El mensaje llegó vacío.")
 
     try:
         ordenes_abiertas = _agente_listar_ordenes_abiertas(db)
@@ -3772,6 +4048,28 @@ def simular_mensaje_voz_agente():
     return jsonify(resultado)
 
 
+@app.route("/api/agente/simular-mensaje-foto", methods=["POST"])
+def simular_mensaje_foto_agente():
+    """Igual que /api/agente/simular-mensaje, pero para probar el análisis
+    de fotos de facturas sin necesitar una cuenta de WhatsApp real: recibe
+    una imagen (multipart/form-data) y sigue exactamente el mismo camino
+    que una foto real mandada por WhatsApp (queda pendiente de revisión en
+    Facturas → Pendientes de WhatsApp, nunca se sube sola)."""
+    db = get_db()
+    telefono = (request.form.get("telefono") or "").strip()
+    archivo = request.files.get("foto")
+    if not telefono or not archivo or not archivo.filename:
+        return jsonify({"error": "Faltan el teléfono y/o la foto"}), 400
+
+    mime_por_extension = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}
+    extension = archivo.filename.rsplit(".", 1)[-1].lower() if "." in archivo.filename else ""
+    mime_type = mime_por_extension.get(extension) or archivo.mimetype or "image/jpeg"
+
+    imagen_bytes = archivo.read()
+    resultado = _agente_procesar_mensaje(db, telefono, "", origen="foto_factura", imagen_bytes=imagen_bytes, imagen_mime=mime_type)
+    return jsonify(resultado)
+
+
 @app.route("/api/agente/mensajes", methods=["GET"])
 def listar_mensajes_agente():
     db = get_db()
@@ -3807,37 +4105,60 @@ def webhook_whatsapp():
         texto = request.form.get("Body", "")
         db = get_db()
 
-        # Nota de voz: Twilio manda el mensaje sin texto (o con poco) y con
-        # NumMedia > 0 + MediaUrl0/MediaContentType0 apuntando al archivo.
-        # Solo se intenta transcribir el primer adjunto y solo si es audio
-        # (una foto adjunta, por ejemplo, no se procesa acá).
+        # Adjuntos: Twilio manda NumMedia > 0 + MediaUrl0/MediaContentType0
+        # apuntando al archivo. Se distingue por tipo: una foto se trata
+        # como una factura de compra a analizar (ver
+        # _procesar_foto_factura_whatsapp), un audio se transcribe como si
+        # fuera el texto del mensaje (nota de voz). Solo se mira el primer
+        # adjunto.
         num_media = int(request.form.get("NumMedia", "0") or "0")
         origen = "texto"
-        if num_media > 0 and not texto.strip():
+        imagen_bytes = None
+        imagen_mime = None
+        if num_media > 0:
             media_url = request.form.get("MediaUrl0", "")
             content_type = request.form.get("MediaContentType0", "")
-            if content_type.startswith("audio/") and media_url:
+            if content_type.startswith("image/") and media_url:
                 if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
                     return _twiml(
-                        "Recibí una nota de voz, pero el servidor todavía no tiene configuradas las "
-                        "credenciales de Twilio (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) para poder "
-                        "descargarla. Escribe el mensaje en texto mientras tanto."
+                        "Recibí una foto, pero el servidor todavía no tiene configuradas las credenciales de "
+                        "Twilio (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) para poder descargarla."
                     )
                 try:
                     media_resp = requests.get(
                         media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=60
                     )
                     media_resp.raise_for_status()
-                    texto = _transcribir_audio_whatsapp(media_resp.content, content_type)
-                    origen = "voz"
+                    imagen_bytes = media_resp.content
+                    imagen_mime = content_type
+                    origen = "foto_factura"
                 except requests.RequestException as e:
-                    return _twiml(f"No pude descargar tu nota de voz: {e}")
-                except RuntimeError as e:
-                    return _twiml(str(e))
+                    return _twiml(f"No pude descargar tu foto: {e}")
             elif not texto.strip():
-                return _twiml("Recibí un adjunto que no pude procesar (solo entiendo texto o notas de voz).")
+                if content_type.startswith("audio/") and media_url:
+                    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+                        return _twiml(
+                            "Recibí una nota de voz, pero el servidor todavía no tiene configuradas las "
+                            "credenciales de Twilio (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) para poder "
+                            "descargarla. Escribe el mensaje en texto mientras tanto."
+                        )
+                    try:
+                        media_resp = requests.get(
+                            media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=60
+                        )
+                        media_resp.raise_for_status()
+                        texto = _transcribir_audio_whatsapp(media_resp.content, content_type)
+                        origen = "voz"
+                    except requests.RequestException as e:
+                        return _twiml(f"No pude descargar tu nota de voz: {e}")
+                    except RuntimeError as e:
+                        return _twiml(str(e))
+                else:
+                    return _twiml("Recibí un adjunto que no pude procesar (solo entiendo texto, fotos de facturas o notas de voz).")
 
-        resultado = _agente_procesar_mensaje(db, telefono, texto, origen=origen)
+        resultado = _agente_procesar_mensaje(
+            db, telefono, texto, origen=origen, imagen_bytes=imagen_bytes, imagen_mime=imagen_mime
+        )
         return _twiml(resultado.get("respuesta_texto") or "No pude procesar tu mensaje.")
     except Exception:
         logging.exception("Error en /webhook/whatsapp")

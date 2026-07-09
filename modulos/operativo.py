@@ -1237,7 +1237,7 @@ def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
 # actualizar_qc() más abajo), a diferencia del resto que son solo texto
 # libre sin ningún efecto sobre el resto del sistema. responsable_diagnostico
 # y qc_inspector SÍ están en la lista blanca porque la función igual los
-# escribe (ver _agente_actualizar_diagnostico_o_prueba_ruta en app.py) —
+# escribe (ver _agente_ejecutar_una_accion en app.py) —
 # pero solo con el nombre del mecánico autenticado que mandó el mensaje,
 # nunca con lo que la IA haya interpretado del texto libre.
 _CAMPOS_DIAGNOSTICO_AGENTE = {"sintoma", "diagnostico_tecnico", "diagnostico", "responsable_diagnostico"}

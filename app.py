@@ -3697,13 +3697,40 @@ CAMPOS_PRUEBA_RUTA_AGENTE = {
     "qc_observaciones": "observaciones generales de la prueba de ruta",
 }
 
+# Guía extra SOLO para el campo 'diagnostico' del schema que se le manda a
+# la IA (nunca se usa como etiqueta corta en las respuestas al mecánico —
+# para eso está CAMPOS_DIAGNOSTICO_AGENTE de arriba). Va aparte porque este
+# campo es el único que se le muestra al cliente junto al presupuesto, así
+# que conviene pedirle a la IA un párrafo más desarrollado que el resto de
+# los campos (que son solo notas internas del taller).
+_DESCRIPCION_CAMPO_DIAGNOSTICO_CLIENTE = (
+    "Texto para el campo 'diagnóstico (resumen para el cliente)': va impreso junto al presupuesto que "
+    "recibe el cliente, así que tiene que ser un párrafo corto pero completo (no una sola frase suelta) "
+    "que mencione la falla encontrada, la causa técnica y el trabajo que se recomienda, en un lenguaje "
+    "simple que un cliente sin conocimientos mecánicos entienda — lo justo para que entienda POR QUÉ se "
+    "le está cobrando cada ítem, sin volverse un texto largo. Omitir si el mensaje no da esa información."
+)
+
+# Tope de acciones distintas que se procesan de un solo mensaje (ver
+# _agente_ejecutar_una_accion / _agente_procesar_mensaje). Un mensaje de
+# audio normalmente trae 1, a veces 2 (ej. "diagnóstico X, pásala a
+# reparación"); 5 es un margen generoso para no cortar casos reales, pero
+# acotado a propósito — así un mensaje raro/mal interpretado no puede hacer
+# que el agente encadene una cantidad de cambios indefinida de una sola
+# vez. También se refuerza en el propio schema de la IA (maxItems) para
+# que Claude ni siquiera intente devolver más.
+MAX_ACCIONES_POR_MENSAJE = 5
+
 
 def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
     """Usa Claude (misma integración por HTTPS directo que
     _llamar_claude_vision_factura, más arriba) para traducir un mensaje de
-    WhatsApp de un mecánico en una acción concreta. Devuelve siempre un
-    diccionario con al menos la clave 'accion' ('cambiar_estado_ot' o
-    'no_reconocida') — nunca texto libre, gracias a tool_choice forzado.
+    WhatsApp de un mecánico en una o MÁS acciones concretas — un mismo
+    mensaje/audio puede pedir varias cosas a la vez (ej. "diagnóstico X,
+    pásala a reparación" son dos acciones: 'actualizar_diagnostico' Y
+    'cambiar_estado_ot'). Devuelve siempre un diccionario con la clave
+    'acciones' (una lista, nunca vacía) — nunca texto libre, gracias a
+    tool_choice forzado.
 
     'ordenes_abiertas' (ver _agente_listar_ordenes_abiertas) se le pasa a
     la IA como contexto para que pueda identificar la OT por descripción
@@ -3735,7 +3762,10 @@ def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
     campos_diagnostico_schema = {
         campo: {
             "type": "string",
-            "description": f"Texto para el campo '{etiqueta}' del diagnóstico. Omitir si el mensaje no da esa información.",
+            "description": (
+                _DESCRIPCION_CAMPO_DIAGNOSTICO_CLIENTE if campo == "diagnostico"
+                else f"Texto para el campo '{etiqueta}' del diagnóstico. Omitir si el mensaje no da esa información."
+            ),
         }
         for campo, etiqueta in CAMPOS_DIAGNOSTICO_AGENTE.items()
     }
@@ -3747,48 +3777,67 @@ def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
         for campo, etiqueta in CAMPOS_PRUEBA_RUTA_AGENTE.items()
     }
 
+    accion_item_schema = {
+        "type": "object",
+        "properties": {
+            "tipo": {
+                "type": "string",
+                "enum": [
+                    "cambiar_estado_ot", "actualizar_diagnostico", "actualizar_prueba_ruta", "no_reconocida",
+                ],
+                "description": (
+                    "'cambiar_estado_ot' si el mensaje pide explícitamente cambiar el estado de una Orden de "
+                    "Trabajo Y menciona un número de OT claro (o un vehículo/cliente que identifica una sola "
+                    "OT sin ambigüedad). "
+                    "'actualizar_diagnostico' si el mensaje describe lo que el mecánico encontró o hizo "
+                    "durante el diagnóstico de una OT (síntoma, causa, pieza dañada, mediciones, etc.). "
+                    "'actualizar_prueba_ruta' si el mensaje describe el resultado de una prueba de ruta o "
+                    "inspección final de una OT (observaciones generales). "
+                    "'no_reconocida' si el mensaje completo (o una parte que no calza con ninguna de las "
+                    "anteriores) es un saludo, pregunta, o algo ambiguo/sin OT identificable."
+                ),
+            },
+            "ot_id": {
+                "type": "integer",
+                "description": "El número de OT a la que aplica ESTA acción (ej. 'OT 4012' -> 4012).",
+            },
+            "estado_destino": {
+                "type": "string",
+                "enum": ESTADOS_ORDEN,
+                "description": "Solo para tipo 'cambiar_estado_ot': el estado interno al que el mecánico quiere pasar la OT.",
+            },
+            **campos_diagnostico_schema,
+            **campos_prueba_ruta_schema,
+        },
+        "required": ["tipo"],
+    }
+
     herramienta = {
         "name": "interpretar_mensaje_taller",
-        "description": "Registra la acción que pide un mensaje de WhatsApp de un mecánico de un taller mecánico.",
+        "description": "Registra la o las acciones que pide un mensaje de WhatsApp de un mecánico de un taller mecánico.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "accion": {
-                    "type": "string",
-                    "enum": [
-                        "cambiar_estado_ot", "actualizar_diagnostico", "actualizar_prueba_ruta", "no_reconocida",
-                    ],
+                "acciones": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": MAX_ACCIONES_POR_MENSAJE,
+                    "items": accion_item_schema,
                     "description": (
-                        "'cambiar_estado_ot' SOLO si el mensaje pide explícitamente cambiar el estado de una "
-                        "Orden de Trabajo Y menciona un número de OT claro (o un vehículo/cliente que identifica "
-                        "una sola OT sin ambigüedad). "
-                        "'actualizar_diagnostico' si el mensaje describe lo que el mecánico encontró o hizo "
-                        "durante el diagnóstico de una OT (síntoma, causa, pieza dañada, mediciones, etc.) SIN "
-                        "pedir explícitamente un cambio de estado. "
-                        "'actualizar_prueba_ruta' si el mensaje describe el resultado de una prueba de ruta o "
-                        "inspección final de una OT (observaciones generales, quién la hizo) SIN pedir "
-                        "explícitamente un cambio de estado. "
-                        "'no_reconocida' en cualquier otro caso (saludo, pregunta, mensaje ambiguo, o sin "
-                        "número/vehículo identificable)."
+                        "Una entrada por cada intención DISTINTA que traiga el mensaje. La mayoría de los "
+                        "mensajes traen una sola, pero es común que traigan dos (ej. contar el diagnóstico Y "
+                        "pedir que se cambie el estado en el mismo audio) — en ese caso van dos objetos "
+                        "separados en esta lista, uno por intención, cada uno con su 'tipo' correspondiente. "
+                        "Si el mensaje completo no se entiende, esta lista igual debe traer un objeto con "
+                        "tipo 'no_reconocida'."
                     ),
                 },
-                "ot_id": {
-                    "type": "integer",
-                    "description": "El número de OT mencionado o identificado en el mensaje (ej. 'OT 4012' -> 4012).",
-                },
-                "estado_destino": {
-                    "type": "string",
-                    "enum": ESTADOS_ORDEN,
-                    "description": "Solo para 'cambiar_estado_ot': el estado interno al que el mecánico quiere pasar la OT.",
-                },
-                **campos_diagnostico_schema,
-                **campos_prueba_ruta_schema,
                 "resumen": {
                     "type": "string",
-                    "description": "Una frase corta en español que resuma qué entendiste del mensaje.",
+                    "description": "Una frase corta en español que resuma qué entendiste del mensaje completo (todas las acciones).",
                 },
             },
-            "required": ["accion", "resumen"],
+            "required": ["acciones", "resumen"],
         },
     }
 
@@ -3797,17 +3846,25 @@ def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
 
     prompt = (
         "Eres el traductor de mensajes de WhatsApp de mecánicos de un taller mecánico hacia el sistema de "
-        "gestión del taller. Los mecánicos escriben mensajes informales para avisar que avanzaron con una "
-        "Orden de Trabajo (OT). Pueden pedir tres cosas distintas:\n"
+        "gestión del taller. Los mecánicos escriben mensajes informales (a veces transcritos de un audio) "
+        "para avisar que avanzaron con una Orden de Trabajo (OT). Un mismo mensaje puede pedir VARIAS cosas "
+        "a la vez — tu trabajo es descomponerlo en una lista de acciones ('acciones'), una por cada "
+        "intención distinta que traiga, en vez de forzarlo a una sola. Las intenciones posibles son:\n"
         "1. Cambiar el estado de la OT, ej: \"ot 4012 trabajo de reparación listo, queda preparada para "
-        "prueba de ruta\", o sin decir el número: \"la haval h6 de matias vega esta esperando repuestos\".\n"
-        "2. Contar lo que encontraron en el DIAGNÓSTICO de una OT, sin pedir cambiar el estado, ej: \"ot 4012 "
-        "el sintoma era ruido en la suspension delantera, se detecto el amortiguador derecho roto, mediciones "
-        "ok en el resto\" — esto es 'actualizar_diagnostico'.\n"
-        "3. Contar el resultado de una PRUEBA DE RUTA / inspección final de una OT, sin pedir cambiar el "
-        "estado, ej: \"ot 4012 prueba de ruta ok, frenos y dirección responden bien, sin ruidos\" — esto es "
-        "'actualizar_prueba_ruta'. Quién hizo la prueba NUNCA se le pide a la IA — el sistema ya sabe quién "
-        "es porque es el mismo mecánico que mandó el mensaje.\n\n"
+        "prueba de ruta\", o sin decir el número: \"la haval h6 de matias vega esta esperando repuestos\" "
+        "— esto es 'cambiar_estado_ot'.\n"
+        "2. Contar lo que encontraron en el DIAGNÓSTICO de una OT, ej: \"ot 4012 el sintoma era ruido en la "
+        "suspension delantera, se detecto el amortiguador derecho roto\" — esto es 'actualizar_diagnostico'.\n"
+        "3. Contar el resultado de una PRUEBA DE RUTA / inspección final de una OT, ej: \"ot 4012 prueba de "
+        "ruta ok, frenos y dirección responden bien, sin ruidos\" — esto es 'actualizar_prueba_ruta'. Quién "
+        "hizo la prueba NUNCA se le pide a la IA — el sistema ya sabe quién es porque es el mismo mecánico "
+        "que mandó el mensaje.\n\n"
+        "Ejemplo de mensaje con DOS intenciones (esto es lo más importante de entender): \"diagnostico haval "
+        "de matias patina en 5ta marcha y se recomienda reconstruccion completa y pasar ot a reparacion\" "
+        "tiene que devolver DOS objetos en 'acciones': uno con tipo 'actualizar_diagnostico' (con el síntoma "
+        "\"patina en 5ta marcha\" y la recomendación de reconstrucción completa) Y otro con tipo "
+        "'cambiar_estado_ot' con estado_destino 'reparacion' — ambos con el mismo ot_id, el de esa OT. NO "
+        "elijas solo una de las dos: si el mensaje pide las dos cosas, van las dos.\n\n"
         "Los estados posibles de una OT son (usa EXACTAMENTE estas claves internas en 'estado_destino'):\n"
         f"{estados_descripcion}\n\n"
         "Campos disponibles para 'actualizar_diagnostico' (usa EXACTAMENTE estos nombres de campo):\n"
@@ -3817,7 +3874,7 @@ def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
         "Estas son TODAS las OT actualmente abiertas en el sistema (la única fuente válida de números de "
         "OT, clientes y vehículos — no existe ninguna otra):\n"
         f"{ordenes_descripcion}\n\n"
-        "Reglas para identificar DE CUÁL OT habla el mensaje:\n"
+        "Reglas para identificar DE CUÁL OT habla cada acción:\n"
         "1. Si el mensaje menciona un número de OT explícito (ej. 'OT 4012', 'orden 4012', '#4012'), usa ese "
         "número — tiene que aparecer tal cual en la lista de arriba.\n"
         "2. Si el mensaje NO menciona un número, pero describe un vehículo y/o un cliente (marca, modelo, "
@@ -3825,24 +3882,27 @@ def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
         "esa OT — no hace falta que el mecánico diga el número si la descripción ya identifica una sola OT "
         "sin ambigüedad. Los apellidos/nombres pueden venir con errores de tipeo o sin tildes.\n"
         "3. Si la descripción del vehículo/cliente podría calzar con MÁS DE UNA OT de la lista, o no calza "
-        "con ninguna, usa 'no_reconocida' y en 'resumen' explica la ambigüedad o que no encontraste esa OT "
-        "— nunca elijas una al azar entre varias posibles.\n"
-        "4. Si el mensaje es ambiguo, una pregunta, un saludo, o no tiene que ver con ninguna de las tres "
-        "acciones de arriba, usa 'no_reconocida'. Ante la duda, prefiere 'no_reconocida' — es preferible "
-        "pedirle al mecánico que aclare, a adivinar y modificar la OT equivocada.\n"
+        "con ninguna, usa 'no_reconocida' para esa intención y en 'resumen' explica la ambigüedad o que no "
+        "encontraste esa OT — nunca elijas una al azar entre varias posibles.\n"
+        "4. Si el mensaje completo es ambiguo, una pregunta, un saludo, o no tiene que ver con ninguna de "
+        "las tres intenciones de arriba, devuelve una sola acción con tipo 'no_reconocida'. Ante la duda, "
+        "prefiere 'no_reconocida' antes que adivinar y modificar la OT equivocada.\n"
         "5. Nunca inventes un número de OT que no esté en la lista de arriba.\n"
         "6. Para 'actualizar_diagnostico'/'actualizar_prueba_ruta': solo incluye los campos sobre los que el "
         "mensaje realmente da información — NUNCA inventes ni completes con texto vacío un campo que el "
         "mensaje no menciona, mejor omitirlo por completo (así no se borra información que ya estaba "
-        "cargada en el sistema). Si el mensaje pide EXPLÍCITAMENTE cambiar el estado (regla 1 de arriba), "
-        "usa 'cambiar_estado_ot' aunque también describa detalles de diagnóstico o prueba de ruta — el "
-        "cambio de estado tiene prioridad porque es lo que el mecánico pidió hacer.\n\n"
+        "cargada en el sistema). El campo 'diagnostico' (resumen para el cliente) sí conviene redactarlo "
+        "un poco más desarrollado que el resto — un párrafo corto que junte síntoma + causa + recomendación "
+        "en lenguaje simple, porque ese texto se le muestra al cliente junto al presupuesto.\n"
+        "7. Máximo una acción de tipo 'cambiar_estado_ot' y una de cada tipo de actualización por mensaje — "
+        "si el mensaje repite la misma intención dos veces para la misma OT, combínala en una sola acción "
+        "en vez de duplicarla.\n\n"
         f'Mensaje del mecánico:\n"{texto_mensaje}"'
     )
 
     payload = {
         "model": ANTHROPIC_MODEL,
-        "max_tokens": 512,
+        "max_tokens": 1024,
         "tools": [herramienta],
         "tool_choice": {"type": "tool", "name": "interpretar_mensaje_taller"},
         "messages": [{"role": "user", "content": prompt}],
@@ -3923,69 +3983,124 @@ def _transcribir_audio_whatsapp(audio_bytes, mime_type):
     return texto
 
 
-def _agente_actualizar_diagnostico_o_prueba_ruta(db, mecanico, interpretado, accion, _registrar):
-    """Maneja las acciones 'actualizar_diagnostico' y 'actualizar_prueba_ruta'
-    del agente de WhatsApp (ver _agente_procesar_mensaje). Ambas comparten
-    la misma lógica: validar la OT, extraer solo los campos "simples" que
-    el mensaje mencionó (CAMPOS_DIAGNOSTICO_AGENTE / CAMPOS_PRUEBA_RUTA_AGENTE
-    — nunca qc_resultado, que sí cambia el estado de la OT y por eso se deja
-    como acción manual desde el sistema) y aplicarlos directo, sin revisión
-    humana, tal como se pidió: son notas de texto sin ningún efecto
-    secundario sobre el resto del sistema.
+def _agente_ejecutar_una_accion(db, mecanico, accion):
+    """Ejecuta UNA acción ya interpretada (un elemento de la lista
+    'acciones' que devuelve _llamar_claude_interpretar_mensaje_agente) y
+    devuelve un resultado uniforme, sin tocar la auditoría — quien llama
+    (_agente_procesar_mensaje) junta los resultados de todas las acciones
+    de un mismo mensaje y hace un solo registro de auditoría al final.
 
+    Devuelve siempre:
+        {"tipo", "codigo", "ot_id", "estado_anterior", "estado_nuevo", "exito", "mensaje"}
+    ('codigo' es la misma etiqueta corta que antes se guardaba en la
+    columna 'accion' de agente_mensajes para una sola acción — ej.
+    'cambio_estado_ot' en éxito, 'transicion_no_permitida' o 'error' en
+    fallo — se mantiene igual para no perder esa distinción ahora que
+    varias acciones se consolidan en un solo registro de auditoría.)
+
+    Cubre las 4 acciones posibles: 'cambiar_estado_ot',
+    'actualizar_diagnostico', 'actualizar_prueba_ruta' y 'no_reconocida'.
     El responsable del diagnóstico / inspector de la prueba de ruta NUNCA
     sale de lo que la IA interpretó del mensaje — siempre es el mecánico
-    que efectivamente mandó el mensaje de WhatsApp (ya autenticado más
-    arriba en _agente_procesar_mensaje por su teléfono registrado), para
-    que ese dato no se pueda falsear ni completar con un nombre
-    equivocado."""
-    campos_agente = CAMPOS_DIAGNOSTICO_AGENTE if accion == "actualizar_diagnostico" else CAMPOS_PRUEBA_RUTA_AGENTE
-    etiqueta_accion = "diagnóstico" if accion == "actualizar_diagnostico" else "prueba de ruta"
-    campo_responsable = "responsable_diagnostico" if accion == "actualizar_diagnostico" else "qc_inspector"
+    que efectivamente mandó el mensaje de WhatsApp (ya autenticado en
+    _agente_procesar_mensaje por su teléfono registrado)."""
+    tipo = accion.get("tipo")
 
-    ot_id = interpretado.get("ot_id")
-    if not isinstance(ot_id, int):
-        return _registrar(
-            mecanico["nombre"], "error", None, "", "", False,
-            f"No pude identificar con claridad el número de OT en tu mensaje sobre el {etiqueta_accion}.",
+    def resultado(ot_id, exito, mensaje, estado_anterior="", estado_nuevo="", codigo=None):
+        return {
+            "tipo": tipo, "codigo": codigo or (tipo if exito else "error"), "ot_id": ot_id,
+            "estado_anterior": estado_anterior, "estado_nuevo": estado_nuevo,
+            "exito": exito, "mensaje": mensaje,
+        }
+
+    if tipo in ("actualizar_diagnostico", "actualizar_prueba_ruta"):
+        campos_agente = CAMPOS_DIAGNOSTICO_AGENTE if tipo == "actualizar_diagnostico" else CAMPOS_PRUEBA_RUTA_AGENTE
+        etiqueta_accion = "diagnóstico" if tipo == "actualizar_diagnostico" else "prueba de ruta"
+        campo_responsable = "responsable_diagnostico" if tipo == "actualizar_diagnostico" else "qc_inspector"
+
+        ot_id = accion.get("ot_id")
+        if not isinstance(ot_id, int):
+            return resultado(None, False, f"No pude identificar con claridad el número de OT en tu mensaje sobre el {etiqueta_accion}.")
+
+        orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (ot_id,)).fetchone()
+        if orden is None:
+            return resultado(ot_id, False, f"No encontré ninguna OT con el número {ot_id}.")
+
+        if orden["estado"] in ESTADOS_CERRADOS:
+            return resultado(
+                ot_id, False,
+                f'No pude actualizar el {etiqueta_accion}: la OT #{ot_id} ya está en estado '
+                f'"{ESTADOS_LABEL[orden["estado"]]}", que no admite cambios por este medio.',
+                estado_anterior=orden["estado"],
+            )
+
+        campos = {
+            columna: accion.get(columna)
+            for columna in campos_agente
+            if (accion.get(columna) or "").strip()
+        }
+        if not campos:
+            return resultado(ot_id, False, f"No encontré ningún dato concreto de {etiqueta_accion} en tu mensaje para la OT #{ot_id}.")
+
+        # Se agrega DESPUÉS de comprobar que hay datos reales que guardar
+        # (así un mensaje sin información de diagnóstico sigue
+        # rechazándose), pero siempre que se aplique algo, el responsable
+        # queda registrado — nunca se guarda un diagnóstico "huérfano" sin
+        # saber quién lo hizo.
+        campos[campo_responsable] = mecanico["nombre"]
+
+        actualizada, error = _actualizar_campos_orden_por_agente(db, ot_id, campos)
+        if error:
+            return resultado(ot_id, False, error)
+
+        campos_legibles = ", ".join(campos_agente[c] for c in campos if c in campos_agente)
+        return resultado(ot_id, True, f"Listo — actualicé el {etiqueta_accion} de la OT #{ot_id} ({campos_legibles}). ✅")
+
+    if tipo == "cambiar_estado_ot":
+        ot_id = accion.get("ot_id")
+        estado_destino = accion.get("estado_destino")
+        if not isinstance(ot_id, int) or estado_destino not in ESTADOS_ORDEN:
+            return resultado(
+                ot_id if isinstance(ot_id, int) else None, False,
+                "No pude identificar con claridad el número de OT o el estado de destino en tu mensaje.",
+            )
+
+        orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (ot_id,)).fetchone()
+        if orden is None:
+            return resultado(ot_id, False, f"No encontré ninguna OT con el número {ot_id}.")
+
+        estado_actual = orden["estado"]
+        permitidos = TRANSICIONES_AGENTE.get(estado_actual, set())
+        if estado_destino not in permitidos:
+            if not permitidos:
+                detalle = f'la OT #{ot_id} está en estado "{ESTADOS_LABEL[estado_actual]}", que ya no admite cambios por este medio.'
+            else:
+                opciones = ", ".join(f'"{ESTADOS_LABEL[e]}"' for e in sorted(permitidos))
+                detalle = (
+                    f'la OT #{ot_id} está en estado "{ESTADOS_LABEL[estado_actual]}" — desde ahí solo se puede '
+                    f"pasar a: {opciones}."
+                )
+            return resultado(
+                ot_id, False,
+                f"No pude aplicar ese cambio: {detalle} Si de verdad corresponde, hazlo manualmente desde el sistema.",
+                estado_anterior=estado_actual, codigo="transicion_no_permitida",
+            )
+
+        actualizada, error = _actualizar_estado_orden_por_agente(db, ot_id, estado_destino)
+        if error:
+            return resultado(ot_id, False, error, estado_anterior=estado_actual)
+
+        return resultado(
+            ot_id, True,
+            f'Listo — la OT #{ot_id} pasó de "{ESTADOS_LABEL[estado_actual]}" a "{ESTADOS_LABEL[estado_destino]}". ✅',
+            estado_anterior=estado_actual, estado_nuevo=estado_destino, codigo="cambio_estado_ot",
         )
 
-    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (ot_id,)).fetchone()
-    if orden is None:
-        return _registrar(mecanico["nombre"], "error", ot_id, "", "", False, f"No encontré ninguna OT con el número {ot_id}.")
-
-    if orden["estado"] in ESTADOS_CERRADOS:
-        return _registrar(
-            mecanico["nombre"], "error", ot_id, orden["estado"], "", False,
-            f'No pude actualizar el {etiqueta_accion}: la OT #{ot_id} ya está en estado '
-            f'"{ESTADOS_LABEL[orden["estado"]]}", que no admite cambios por este medio.',
-        )
-
-    campos = {
-        columna: interpretado.get(columna)
-        for columna in campos_agente
-        if (interpretado.get(columna) or "").strip()
-    }
-    if not campos:
-        return _registrar(
-            mecanico["nombre"], "error", ot_id, "", "", False,
-            f"No encontré ningún dato concreto de {etiqueta_accion} en tu mensaje para la OT #{ot_id}.",
-        )
-
-    # Se agrega DESPUÉS de comprobar que hay datos reales que guardar (así
-    # un mensaje sin información de diagnóstico sigue rechazándose), pero
-    # siempre que se aplique algo, el responsable queda registrado — nunca
-    # se guarda un diagnóstico "huérfano" sin saber quién lo hizo.
-    campos[campo_responsable] = mecanico["nombre"]
-
-    actualizada, error = _actualizar_campos_orden_por_agente(db, ot_id, campos)
-    if error:
-        return _registrar(mecanico["nombre"], "error", ot_id, "", "", False, error)
-
-    campos_legibles = ", ".join(campos_agente[c] for c in campos if c in campos_agente)
-    accion_registro = "actualizar_diagnostico" if accion == "actualizar_diagnostico" else "actualizar_prueba_ruta"
-    respuesta = f"Listo — actualicé el {etiqueta_accion} de la OT #{ot_id} ({campos_legibles}). ✅"
-    return _registrar(mecanico["nombre"], accion_registro, ot_id, "", "", True, respuesta)
+    # tipo == "no_reconocida" (o cualquier valor inesperado — se trata igual)
+    return resultado(
+        accion.get("ot_id") if isinstance(accion.get("ot_id"), int) else None, False,
+        "No pude identificar una acción concreta en esa parte de tu mensaje.", codigo="no_reconocida",
+    )
 
 
 def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", imagen_bytes=None, imagen_mime=None):
@@ -3995,6 +4110,13 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
     /webhook/whatsapp (WhatsApp real, vía Twilio). Siempre deja un
     registro en agente_mensajes — incluso cuando no se pudo hacer nada —
     para poder auditar después qué pasó con cada mensaje.
+
+    Un mismo mensaje puede traer VARIAS acciones (ver
+    _llamar_claude_interpretar_mensaje_agente) — ej. "diagnóstico X, pásala
+    a reparación" trae 'actualizar_diagnostico' y 'cambiar_estado_ot' a la
+    vez. Cada una se ejecuta con _agente_ejecutar_una_accion() y se
+    consolida en UN solo registro de auditoría por mensaje, con la
+    respuesta de todas juntas.
 
     'origen' es 'texto', 'voz' o 'foto_factura', solo para dejar registro de
     cómo llegó el mensaje (si vino de una nota de voz, 'texto_mensaje' ya es
@@ -4056,55 +4178,47 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
     except RuntimeError as e:
         return _registrar(mecanico["nombre"], "error", None, "", "", False, f"No pude leer tu mensaje: {e}")
 
-    accion = interpretado.get("accion")
+    acciones = interpretado.get("acciones")
+    if not isinstance(acciones, list) or not acciones:
+        acciones = [{"tipo": "no_reconocida"}]
+    # Tope defensivo — además de estar acotado en el propio schema
+    # (maxItems) que se le manda a la IA, se corta acá también por si
+    # algún día cambia el modelo/schema y llegara a devolver más.
+    acciones = acciones[:MAX_ACCIONES_POR_MENSAJE]
 
-    if accion in ("actualizar_diagnostico", "actualizar_prueba_ruta"):
-        return _agente_actualizar_diagnostico_o_prueba_ruta(db, mecanico, interpretado, accion, _registrar)
+    # Las actualizaciones de diagnóstico/prueba de ruta se aplican ANTES
+    # que el cambio de estado: así, si el mensaje además mueve la OT a un
+    # estado cerrado (entregado/cancelado), el diagnóstico ya alcanzó a
+    # quedar guardado en vez de perderse por el orden de ejecución.
+    orden_prioridad = {"actualizar_diagnostico": 0, "actualizar_prueba_ruta": 0, "cambiar_estado_ot": 1, "no_reconocida": 2}
+    acciones_ordenadas = sorted(acciones, key=lambda a: orden_prioridad.get(a.get("tipo"), 1))
 
-    if accion != "cambiar_estado_ot":
+    if all(a.get("tipo") == "no_reconocida" for a in acciones_ordenadas):
         motivo = interpretado.get("resumen") or "no reconocí una acción concreta en tu mensaje"
         return _registrar(
             mecanico["nombre"], "no_reconocida", None, "", "", False,
-            f"No pude identificar un cambio de estado claro ({motivo}). Si querías mover una OT, indica el "
-            f"número (ej. \"OT 4012\") y a qué estado pasa.",
+            f"No pude identificar una acción clara ({motivo}). Si querías mover una OT o contar un "
+            f"diagnóstico, indica el número (ej. \"OT 4012\") y qué pasó.",
         )
 
-    ot_id = interpretado.get("ot_id")
-    estado_destino = interpretado.get("estado_destino")
-    if not isinstance(ot_id, int) or estado_destino not in ESTADOS_ORDEN:
-        return _registrar(
-            mecanico["nombre"], "error", ot_id if isinstance(ot_id, int) else None, "", "", False,
-            "No pude identificar con claridad el número de OT o el estado de destino en tu mensaje.",
-        )
+    resultados = [_agente_ejecutar_una_accion(db, mecanico, a) for a in acciones_ordenadas]
 
-    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (ot_id,)).fetchone()
-    if orden is None:
-        return _registrar(mecanico["nombre"], "error", ot_id, "", "", False, f"No encontré ninguna OT con el número {ot_id}.")
+    # Consolidación en UN registro de auditoría por mensaje (no uno por
+    # acción): más fácil de leer en el historial, y el mecánico recibe una
+    # sola respuesta de WhatsApp con todo lo que pasó, en el mismo orden en
+    # que se ejecutó.
+    exito_general = any(r["exito"] for r in resultados)
+    respuesta_texto = "\n".join(r["mensaje"] for r in resultados)
+    accion_registro = "+".join(dict.fromkeys(r["codigo"] for r in resultados))
+    ot_id_registro = next((r["ot_id"] for r in resultados if r["ot_id"] is not None), None)
+    cambio_estado = next((r for r in resultados if r["tipo"] == "cambiar_estado_ot" and r["exito"]), None)
+    estado_anterior = cambio_estado["estado_anterior"] if cambio_estado else ""
+    estado_nuevo = cambio_estado["estado_nuevo"] if cambio_estado else ""
 
-    estado_actual = orden["estado"]
-    permitidos = TRANSICIONES_AGENTE.get(estado_actual, set())
-    if estado_destino not in permitidos:
-        if not permitidos:
-            detalle = f'la OT #{ot_id} está en estado "{ESTADOS_LABEL[estado_actual]}", que ya no admite cambios por este medio.'
-        else:
-            opciones = ", ".join(f'"{ESTADOS_LABEL[e]}"' for e in sorted(permitidos))
-            detalle = (
-                f'la OT #{ot_id} está en estado "{ESTADOS_LABEL[estado_actual]}" — desde ahí solo se puede '
-                f"pasar a: {opciones}."
-            )
-        return _registrar(
-            mecanico["nombre"], "transicion_no_permitida", ot_id, estado_actual, estado_destino, False,
-            f"No pude aplicar ese cambio: {detalle} Si de verdad corresponde, hazlo manualmente desde el sistema.",
-        )
-
-    actualizada, error = _actualizar_estado_orden_por_agente(db, ot_id, estado_destino)
-    if error:
-        return _registrar(mecanico["nombre"], "error", ot_id, estado_actual, estado_destino, False, error)
-
-    respuesta = (
-        f'Listo — la OT #{ot_id} pasó de "{ESTADOS_LABEL[estado_actual]}" a "{ESTADOS_LABEL[estado_destino]}". ✅'
+    return _registrar(
+        mecanico["nombre"], accion_registro, ot_id_registro, estado_anterior, estado_nuevo,
+        exito_general, respuesta_texto,
     )
-    return _registrar(mecanico["nombre"], "cambio_estado_ot", ot_id, estado_actual, estado_destino, True, respuesta)
 
 
 def _validar_firma_twilio(req):

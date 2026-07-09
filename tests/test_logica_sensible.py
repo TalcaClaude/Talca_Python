@@ -1588,6 +1588,12 @@ class TestAgenteWhatsApp(unittest.TestCase):
     def _simular(self, telefono, texto):
         return self.client.post("/api/agente/simular-mensaje", json={"telefono": telefono, "texto": texto})
 
+    def _ia(self, *acciones, resumen="ok"):
+        """Arma una respuesta simulada de _llamar_claude_interpretar_mensaje_agente
+        en el formato real (una lista de acciones — un mensaje puede pedir
+        más de una cosa a la vez, ver app.py)."""
+        return {"acciones": list(acciones), "resumen": resumen}
+
     def test_normalizar_telefono_uniforma_formatos_distintos(self):
         self.assertEqual(taller_app._normalizar_telefono("whatsapp:+569 1234 5678"), "+56912345678")
         self.assertEqual(taller_app._normalizar_telefono("+56 9 1234 5678"), "+56912345678")
@@ -1621,12 +1627,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         cliente = self._crear_cliente()
         orden = self._crear_orden(cliente["id"])  # nace en "recibido"
 
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": orden["id"],
-            "estado_destino": "diagnostico",
-            "resumen": "El mecánico avisa que ya revisó el equipo y pasa a diagnóstico",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "diagnostico"},
+            resumen="El mecánico avisa que ya revisó el equipo y pasa a diagnóstico",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56922222222", f"ot {orden['id']} ya la revise, pasa a diagnostico")
 
@@ -1651,12 +1655,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         cliente = self._crear_cliente()
         orden = self._crear_orden(cliente["id"])  # nace en "recibido"
 
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": orden["id"],
-            "estado_destino": "reparacion",
-            "resumen": "El auto llegó ya aprobado por el cliente, pasa directo a reparación",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "reparacion"},
+            resumen="El auto llegó ya aprobado por el cliente, pasa directo a reparación",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56933333333", f"ot {orden['id']} llegó aprobada, directo a reparación")
 
@@ -1676,12 +1678,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"])
         self._forzar_estado(orden["id"], "esperando_repuesto")
 
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": orden["id"],
-            "estado_destino": "control_calidad",
-            "resumen": "Llegó el repuesto y quedó lista para pruebas de ruta",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "control_calidad"},
+            resumen="Llegó el repuesto y quedó lista para pruebas de ruta",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56933344455", f"ot {orden['id']} lista para pruebas de ruta")
 
@@ -1699,12 +1699,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"])
         self._forzar_estado(orden["id"], "entregado")
 
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": orden["id"],
-            "estado_destino": "reparacion",
-            "resumen": "El mecánico dice que hay que revisarla de nuevo",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "reparacion"},
+            resumen="El mecánico dice que hay que revisarla de nuevo",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56933355566", f"ot {orden['id']} hay que revisarla de nuevo")
 
@@ -1717,7 +1715,7 @@ class TestAgenteWhatsApp(unittest.TestCase):
 
     def test_mensaje_no_reconocido_no_toca_ninguna_orden(self):
         self._registrar_mecanico("Luis Mecánico", "+56944444444")
-        respuesta_ia = {"accion": "no_reconocida", "resumen": "Es solo un saludo, no pide nada"}
+        respuesta_ia = self._ia({"tipo": "no_reconocida"}, resumen="Es solo un saludo, no pide nada")
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56944444444", "hola buenos días")
 
@@ -1732,12 +1730,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"])
         self._forzar_estado(orden["id"], "reparacion")
 
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": orden["id"],
-            "estado_destino": "control_calidad",
-            "resumen": "El mecánico terminó la reparación y pide prueba de ruta",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "control_calidad"},
+            resumen="El mecánico terminó la reparación y pide prueba de ruta",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular(
                 "+56955555555", f"ot {orden['id']} trabajo de reparación listo, queda preparada para prueba de ruta"
@@ -1752,12 +1748,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
 
     def test_ot_inexistente_responde_error_sin_romper(self):
         self._registrar_mecanico("Tomás Mecánico", "+56966666666")
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": 999999,
-            "estado_destino": "diagnostico",
-            "resumen": "Pide mover una OT que no existe",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "cambiar_estado_ot", "ot_id": 999999, "estado_destino": "diagnostico"},
+            resumen="Pide mover una OT que no existe",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56966666666", "ot 999999 lista para diagnostico")
 
@@ -1775,12 +1769,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         # para comprobar que no se borra.
         self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"diagnostico_tecnico": "REVISIÓN PREVIA OK"})
 
-        respuesta_ia = {
-            "accion": "actualizar_diagnostico",
-            "ot_id": orden["id"],
-            "resumen": "El mecánico reporta el síntoma encontrado",
-            "sintoma": "El auto no enciende en frío, batería descargada",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "actualizar_diagnostico", "ot_id": orden["id"], "sintoma": "El auto no enciende en frío, batería descargada"},
+            resumen="El mecánico reporta el síntoma encontrado",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular(
                 "+56911122233", f"ot {orden['id']} revisé el auto, no enciende en frío, la batería está descargada"
@@ -1813,13 +1805,13 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"])
         self._forzar_estado(orden["id"], "diagnostico")
 
-        respuesta_ia = {
-            "accion": "actualizar_diagnostico",
-            "ot_id": orden["id"],
-            "resumen": "Intento de suplantar al responsable",
-            "sintoma": "Ruido en el motor",
-            "responsable_diagnostico": "Otro Mecánico Cualquiera",
-        }
+        respuesta_ia = self._ia(
+            {
+                "tipo": "actualizar_diagnostico", "ot_id": orden["id"], "sintoma": "Ruido en el motor",
+                "responsable_diagnostico": "Otro Mecánico Cualquiera",
+            },
+            resumen="Intento de suplantar al responsable",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56911122266", f"ot {orden['id']} ruido en el motor")
 
@@ -1833,16 +1825,17 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"])
         self._forzar_estado(orden["id"], "control_calidad")
 
-        respuesta_ia = {
-            "accion": "actualizar_prueba_ruta",
-            "ot_id": orden["id"],
-            "resumen": "El mecánico deja observaciones de la prueba de ruta",
-            "qc_observaciones": "Frenos y dirección responden bien, sin ruidos extraños",
-            # Aunque la IA mandara esto por error, la función solo debe
-            # aplicar qc_observaciones (más el inspector, que ella misma
-            # fija) — nunca qc_resultado.
-            "qc_resultado": "aprobado",
-        }
+        respuesta_ia = self._ia(
+            {
+                "tipo": "actualizar_prueba_ruta", "ot_id": orden["id"],
+                "qc_observaciones": "Frenos y dirección responden bien, sin ruidos extraños",
+                # Aunque la IA mandara esto por error, la función solo debe
+                # aplicar qc_observaciones (más el inspector, que ella misma
+                # fija) — nunca qc_resultado.
+                "qc_resultado": "aprobado",
+            },
+            resumen="El mecánico deja observaciones de la prueba de ruta",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56911133344", f"ot {orden['id']} hice la prueba de ruta, todo bien, sin ruidos")
 
@@ -1866,11 +1859,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"])
         self._forzar_estado(orden["id"], "diagnostico")
 
-        respuesta_ia = {
-            "accion": "actualizar_diagnostico",
-            "ot_id": orden["id"],
-            "resumen": "El mecánico solo saluda, no da ningún dato de diagnóstico",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "actualizar_diagnostico", "ot_id": orden["id"]},
+            resumen="El mecánico solo saluda, no da ningún dato de diagnóstico",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56911144455", f"ot {orden['id']} hola, después te cuento")
 
@@ -1887,12 +1879,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"])
         self._forzar_estado(orden["id"], "entregado")
 
-        respuesta_ia = {
-            "accion": "actualizar_diagnostico",
-            "ot_id": orden["id"],
-            "resumen": "Manda un dato de diagnóstico tarde, la OT ya está entregada",
-            "sintoma": "Ruido en el motor",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "actualizar_diagnostico", "ot_id": orden["id"], "sintoma": "Ruido en el motor"},
+            resumen="Manda un dato de diagnóstico tarde, la OT ya está entregada",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56911155566", f"ot {orden['id']} el síntoma era ruido en el motor")
 
@@ -1903,35 +1893,98 @@ class TestAgenteWhatsApp(unittest.TestCase):
         actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
         self.assertNotEqual(actual["sintoma"], "RUIDO EN EL MOTOR")
 
-    def test_cambio_de_estado_explicito_tiene_prioridad_sobre_datos_de_diagnostico(self):
-        # Regla 6 del prompt de interpretación: si el mensaje además pide
-        # explícitamente un cambio de estado, esa acción manda — aunque el
-        # mismo mensaje también traiga detalles de diagnóstico. Acá no se
-        # está probando la IA (está mockeada), sino que el backend respeta
-        # cualquiera de las dos acciones que la IA elija sin mezclarlas.
+    def test_un_solo_mensaje_puede_traer_dos_acciones_a_la_vez(self):
+        # Ejemplo real pedido por el taller: "diagnostico haval de matias
+        # patina en 5ta marcha y se recomienda reconstruccion completa y
+        # pasar ot a reparacion" — un solo audio con DOS intenciones
+        # (actualizar el diagnóstico Y cambiar el estado). El agente tiene
+        # que reconocer y aplicar ambas, no solo una.
         self._registrar_mecanico("Hernán Mecánico", "+56911166677")
-        cliente = self._crear_cliente()
-        orden = self._crear_orden(cliente["id"])  # nace en "recibido"
+        cliente = self._crear_cliente("Matías Vega")
+        equipo = self._crear_equipo(cliente["id"], identificador="HAV900", marca="HAVAL", modelo="H6")
+        orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])  # nace en "recibido"
+        self._forzar_estado(orden["id"], "diagnostico")
 
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": orden["id"],
-            "estado_destino": "diagnostico",
-            "resumen": "El mecánico avisa el síntoma y pide pasar la OT a diagnóstico",
-            "sintoma": "No enciende",
-        }
+        respuesta_ia = self._ia(
+            {
+                "tipo": "actualizar_diagnostico", "ot_id": orden["id"],
+                "sintoma": "Patina en 5ta marcha",
+                "diagnostico_tecnico": "Se recomienda reconstrucción completa de la caja",
+                "diagnostico": "La caja de cambios patina en 5ta marcha; se recomienda una reconstrucción completa.",
+            },
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "reparacion"},
+            resumen="Diagnóstico de la Haval de Matías (patina en 5ta) y pasa a reparación",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
-            resp = self._simular("+56911166677", f"ot {orden['id']} no enciende, la paso a diagnóstico")
+            resp = self._simular(
+                "+56911166677",
+                "diagnostico haval de matias patina en 5ta marcha y se recomienda reconstruccion "
+                "completa y pasar ot a reparacion",
+            )
 
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         data = resp.get_json()
-        self.assertTrue(data["exito"])
-        self.assertEqual(data["accion"], "cambio_estado_ot")
+        self.assertTrue(data["exito"], data)
+        # Las dos acciones quedan reflejadas en el registro combinado.
+        self.assertIn("actualizar_diagnostico", data["accion"])
+        self.assertIn("cambio_estado_ot", data["accion"])
+        self.assertEqual(data["estado_anterior"], "diagnostico")
+        self.assertEqual(data["estado_nuevo"], "reparacion")
+        self.assertIn(str(orden["id"]), data["respuesta_texto"])
 
         actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        # El diagnóstico se guardó...
+        self.assertEqual(actual["sintoma"], "PATINA EN 5TA MARCHA")
+        self.assertIn("RECONSTRUCCIÓN COMPLETA", actual["diagnostico_tecnico"])
+        self.assertIn("RECONSTRUCCIÓN COMPLETA", actual["diagnostico"])
+        self.assertEqual(actual["responsable_diagnostico"], "HERNÁN MECÁNICO")
+        # ...Y el estado también cambió, las dos cosas del mismo mensaje.
+        self.assertEqual(actual["estado"], "reparacion")
+
+    def test_diagnostico_se_guarda_aunque_el_cambio_de_estado_del_mismo_mensaje_falle(self):
+        # El diagnóstico se aplica ANTES que el cambio de estado (ver
+        # _agente_procesar_mensaje) — así, si la parte del cambio de estado
+        # no se puede aplicar, el diagnóstico ya alcanzó a quedar guardado
+        # en vez de perderse. La OT queda en un estado abierto (no cerrado)
+        # para que el fallo del cambio de estado sea por otra razón (un
+        # 'estado_destino' inválido/inventado) y no se confunda con el caso
+        # de OT cerrada, que ya bloquearía las dos acciones por igual.
+        self._registrar_mecanico("Ismael Mecánico", "+56911177788")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "diagnostico")
+
+        respuesta_ia = self._ia(
+            {"tipo": "actualizar_diagnostico", "ot_id": orden["id"], "sintoma": "Ruido en suspensión"},
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "estado_que_no_existe"},
+            resumen="Manda diagnóstico y un estado de destino inválido",
+        )
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56911177788", f"ot {orden['id']} ruido en suspensión, pásala a un estado raro")
+
+        data = resp.get_json()
+        # Éxito general porque al menos una de las dos acciones sí se aplicó.
+        self.assertTrue(data["exito"])
+        self.assertIn("error", data["accion"])
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        # El diagnóstico quedó guardado a pesar de que el cambio de estado
+        # falló — la OT sigue en el mismo estado, como corresponde.
+        self.assertEqual(actual["sintoma"], "RUIDO EN SUSPENSIÓN")
         self.assertEqual(actual["estado"], "diagnostico")
-        # El campo sintoma no se tocó por esta vía: cambiar_estado_ot solo
-        # mueve estado/fecha_entrega_real, nunca campos de diagnóstico.
-        self.assertNotEqual(actual["sintoma"], "NO ENCIENDE")
+
+    def test_mensaje_sin_lista_de_acciones_se_trata_como_no_reconocido(self):
+        # Defensa por si la IA (bug, o cambio de modelo) devuelve un
+        # formato inesperado sin 'acciones' — no debe romper, se trata
+        # igual que un mensaje no reconocido.
+        self._registrar_mecanico("Julia Mecánica", "+56911188899")
+        respuesta_ia = {"resumen": "algo salió raro"}
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56911188899", "mensaje cualquiera")
+
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "no_reconocida")
 
     def test_registrar_mecanico_valida_telefono_y_evita_duplicados(self):
         resp_sin_nombre = self.client.post("/api/agente/mecanicos", json={"telefono": "+56977777777"})
@@ -1950,7 +2003,7 @@ class TestAgenteWhatsApp(unittest.TestCase):
 
     def test_todos_los_mensajes_quedan_en_la_auditoria(self):
         self._registrar_mecanico("Carla Mecánica", "+56999999999")
-        respuesta_ia = {"accion": "no_reconocida", "resumen": "saludo"}
+        respuesta_ia = self._ia({"tipo": "no_reconocida"}, resumen="saludo")
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             self._simular("+56999999999", "hola")
 
@@ -1986,7 +2039,7 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
         self._forzar_estado(orden["id"], "esperando_repuesto")
 
-        respuesta_ia = {"accion": "no_reconocida", "resumen": "no importa para este test"}
+        respuesta_ia = self._ia({"tipo": "no_reconocida"}, resumen="no importa para este test")
         with patch.object(
             taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia
         ) as mock_ia:
@@ -2019,12 +2072,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
         self._forzar_estado(orden["id"], "reparacion")
 
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": orden["id"],
-            "estado_destino": "control_calidad",
-            "resumen": "Identificó la OT por el vehículo (Audi A3 azul) sin número explícito",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "control_calidad"},
+            resumen="Identificó la OT por el vehículo (Audi A3 azul) sin número explícito",
+        )
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56900223344", "audi a3 azul en pruebas de ruta")
 
@@ -2047,7 +2098,7 @@ class TestAgenteWhatsApp(unittest.TestCase):
         cliente = self._crear_cliente()
         orden = self._crear_orden(cliente["id"])
 
-        respuesta_ia = {"accion": "no_reconocida", "resumen": "no importa para este test"}
+        respuesta_ia = self._ia({"tipo": "no_reconocida"}, resumen="no importa para este test")
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._simular("+56900334455", f"ot {orden['id']} en diagnostico")
 
@@ -2091,12 +2142,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         cliente = self._crear_cliente("Cliente Nota De Voz")
         orden = self._crear_orden(cliente["id"])  # nace en "recibido"
 
-        respuesta_ia = {
-            "accion": "cambiar_estado_ot",
-            "ot_id": orden["id"],
-            "estado_destino": "diagnostico",
-            "resumen": "El mecánico avisa por voz que ya revisó el equipo",
-        }
+        respuesta_ia = self._ia(
+            {"tipo": "cambiar_estado_ot", "ot_id": orden["id"], "estado_destino": "diagnostico"},
+            resumen="El mecánico avisa por voz que ya revisó el equipo",
+        )
         with patch.object(
             taller_app, "_transcribir_audio_whatsapp",
             return_value=f"ot {orden['id']} ya la revise, pasa a diagnostico",

@@ -58,6 +58,15 @@ ESTADOS_ORDEN = [
 # recibiendo repuestos o mano de obra nueva sin primero reabrirlas.
 ESTADOS_CERRADOS = {"entregado", "cancelado"}
 
+# Estados que están MÁS ADELANTE que "esperando_aprobacion" en el flujo normal
+# de una OT. Se usan para que la transición automática "presupuesto enviado
+# -> esperando_aprobacion" no empuje HACIA ATRÁS una orden que ya avanzó (ej.
+# si se reenvía el presupuesto por correo después de que el cliente ya
+# aprobó y el auto ya está en reparación, o incluso ya entregado).
+ESTADOS_POSTERIORES_A_APROBACION = {
+    "reparacion", "esperando_repuesto", "control_calidad", "listo", "entregado", "cancelado",
+}
+
 # Secuencia "normal" de una OT para el stepper del seguimiento público — sin
 # "cancelado", que no es un paso sino un estado terminal alternativo (se
 # muestra aparte, con su propio mensaje).
@@ -1813,6 +1822,17 @@ def actualizar_presupuesto(orden_id):
     nuevo_estado_orden = row["estado"]
     if estado_presupuesto == "aprobado" and row["presupuesto_estado"] != "aprobado":
         nuevo_estado_orden = "reparacion"
+    elif (
+        estado_presupuesto == "enviado"
+        and row["presupuesto_estado"] != "enviado"
+        and row["estado"] not in ESTADOS_POSTERIORES_A_APROBACION
+    ):
+        # Igual que con "aprobado" -> reparación: apenas el presupuesto queda
+        # marcado como enviado, la orden pasa sola a "esperando_aprobacion"
+        # para que quede claro que ahora se está a la espera de que el
+        # cliente responda. No se aplica si la orden ya iba más adelante
+        # (ver ESTADOS_POSTERIORES_A_APROBACION) para no hacerla retroceder.
+        nuevo_estado_orden = "esperando_aprobacion"
 
     ts = now_iso()
     db.execute(
@@ -1946,9 +1966,12 @@ def _armar_presupuesto_pdf(db, orden_id):
     ]))
     elementos.append(tabla_resumen)
 
-    if orden.get("presupuesto_notas"):
-        elementos.append(Paragraph("Notas", estilos["EtiquetaPresupuesto"]))
-        elementos.append(Paragraph(orden["presupuesto_notas"], estilos["Normal"]))
+    # OJO: "presupuesto_notas" NO se incluye acá a propósito — son notas
+    # internas del taller (ej. "cliente pidió esperar hasta fin de mes",
+    # "revisar con el proveedor tal"), nunca deben llegar al documento que
+    # se descarga o se manda por correo al cliente. Si el taller necesita
+    # comunicarle algo AL CLIENTE, eso va en el campo "Diagnóstico (resumen
+    # para el cliente)", que sí se imprime más arriba.
 
     # Nombre con el número real de OT y el nombre del cliente registrado en
     # la orden, tal como se pidió (ej. "Presupuesto Talleres Calificados
@@ -1978,11 +2001,15 @@ def presupuesto_enviar(orden_id):
     """Manda el mismo PDF del presupuesto directo al correo registrado del
     cliente, con copia a los correos del taller configurados en
     PRESUPUESTO_COPIA_TALLER (variable de entorno, separada por coma —
-    queda vacía hasta que se confirmen esas direcciones). Se hace un
-    import diferido de app.py (y no uno arriba del archivo) para evitar un
-    import circular: app.py es quien importa este blueprint, así que
-    operativo.py no puede depender de app.py al cargarse el módulo, solo
-    al momento de atender la request."""
+    queda vacía hasta que se confirmen esas direcciones). Si el correo se
+    manda con éxito, esto además marca el presupuesto como "enviado" y —
+    salvo que la orden ya vaya más adelante en el flujo (ver
+    ESTADOS_POSTERIORES_A_APROBACION) — la pasa sola a
+    "esperando_aprobacion", igual que si se hubiera guardado ese estado a
+    mano desde el desplegable. Se hace un import diferido de app.py (y no
+    uno arriba del archivo) para evitar un import circular: app.py es quien
+    importa este blueprint, así que operativo.py no puede depender de
+    app.py al cargarse el módulo, solo al momento de atender la request."""
     from app import _enviar_correo, PRESUPUESTO_COPIA_TALLER
 
     db = get_db()
@@ -2016,7 +2043,26 @@ def presupuesto_enviar(orden_id):
     )
     if not exito:
         return jsonify({"error": f"No se pudo enviar el correo: {detalle}"}), 502
-    return jsonify({"ok": True, "detalle": detalle, "destinatario": destinatario, "copia": PRESUPUESTO_COPIA_TALLER})
+
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    nuevo_estado_orden = row["estado"]
+    if (
+        row["presupuesto_estado"] != "enviado"
+        and row["estado"] not in ESTADOS_POSTERIORES_A_APROBACION
+    ):
+        nuevo_estado_orden = "esperando_aprobacion"
+    if row["presupuesto_estado"] != "enviado" or nuevo_estado_orden != row["estado"]:
+        db.execute(
+            "UPDATE ordenes_trabajo SET presupuesto_estado = ?, estado = ?, actualizado_en = ? WHERE id = ?",
+            ("enviado", nuevo_estado_orden, now_iso(), orden_id),
+        )
+        db.commit()
+    actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+
+    return jsonify({
+        "ok": True, "detalle": detalle, "destinatario": destinatario, "copia": PRESUPUESTO_COPIA_TALLER,
+        "orden": _orden_dict_detalle(db, actualizada),
+    })
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/orden-imprimible/pdf", methods=["GET"])

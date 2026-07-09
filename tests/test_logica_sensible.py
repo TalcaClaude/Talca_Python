@@ -650,6 +650,36 @@ class TestOperativoFase35(unittest.TestCase):
         self.assertEqual(actualizada["estado"], "reparacion")
         self.assertEqual(actualizada["presupuesto"]["total"], 100000)
 
+    def test_presupuesto_enviado_transiciona_la_orden_a_esperando_aprobacion(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self.assertEqual(orden["estado"], "recibido")
+
+        resp = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"estado": "enviado"})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        actualizada = resp.get_json()
+        self.assertEqual(actualizada["estado"], "esperando_aprobacion")
+
+        # Guardar el presupuesto de nuevo sin cambiar el estado (ej. solo se
+        # ajustó el IVA) no debe re-disparar nada raro: la orden se queda
+        # tranquila en esperando_aprobacion.
+        resp2 = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"iva": True})
+        self.assertEqual(resp2.get_json()["estado"], "esperando_aprobacion")
+
+    def test_presupuesto_marcado_enviado_no_retrocede_una_orden_ya_avanzada(self):
+        # Si la orden ya avanzó más allá de "esperando_aprobacion" (ej. ya
+        # está en reparación porque el presupuesto fue aprobado), volver a
+        # guardar el presupuesto con estado "enviado" no debe hacerla
+        # retroceder — sería un bug confuso para el taller.
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        resp = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"estado": "aprobado"})
+        self.assertEqual(resp.get_json()["estado"], "reparacion")
+
+        resp2 = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"estado": "enviado"})
+        self.assertEqual(resp2.status_code, 200, resp2.get_data(as_text=True))
+        self.assertEqual(resp2.get_json()["estado"], "reparacion")
+
     def test_presupuesto_con_descuento_e_iva_calcula_el_total_correcto(self):
         cliente = self._crear_cliente()
         orden = self._crear_orden(cliente["id"])
@@ -1237,6 +1267,61 @@ class TestPresupuestoDescargaEnvioYOrdenImprimible(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         texto = PdfReader(io.BytesIO(resp.data)).pages[0].extract_text()
         self.assertNotIn("Diagnóstico", texto)
+
+    def test_notas_internas_del_presupuesto_nunca_aparecen_en_el_pdf(self):
+        # Las "notas" del presupuesto son solo para uso interno del taller
+        # (ej. "cliente pidió esperar hasta fin de mes") — nunca deben
+        # llegar al documento que se descarga NI al que se manda por correo.
+        from pypdf import PdfReader
+
+        cliente = self._crear_cliente(nombre="Cliente Con Notas Internas", email="notas@ejemplo.com")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}/presupuesto",
+            json={"notas": "Cliente pidió esperar hasta fin de mes, no llamar antes"},
+        )
+
+        resp = self.client.get(f"/api/operativo/ordenes/{orden['id']}/presupuesto/pdf")
+        self.assertEqual(resp.status_code, 200)
+        texto = PdfReader(io.BytesIO(resp.data)).pages[0].extract_text()
+        self.assertNotIn("ESPERAR HASTA FIN DE MES", texto)
+        self.assertNotIn("NO LLAMAR ANTES", texto)
+
+        with patch.object(taller_app, "_enviar_correo", return_value=(True, "Enviado (simulado)")) as mock_envio, \
+             patch.object(taller_app, "PRESUPUESTO_COPIA_TALLER", []):
+            resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/presupuesto/enviar")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        pdf_adjunto = mock_envio.call_args.kwargs["adjunto_bytes"]
+        texto_adjunto = PdfReader(io.BytesIO(pdf_adjunto)).pages[0].extract_text()
+        self.assertNotIn("ESPERAR HASTA FIN DE MES", texto_adjunto)
+
+    def test_enviar_presupuesto_por_correo_marca_enviado_y_pasa_a_esperando_aprobacion(self):
+        cliente = self._crear_cliente(nombre="Cliente Auto Transicion", email="auto@ejemplo.com")
+        orden = self._crear_orden(cliente["id"])
+        self.assertEqual(orden["estado"], "recibido")
+
+        with patch.object(taller_app, "_enviar_correo", return_value=(True, "Enviado (simulado)")), \
+             patch.object(taller_app, "PRESUPUESTO_COPIA_TALLER", []):
+            resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/presupuesto/enviar")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["orden"]["presupuesto_estado"], "enviado")
+        self.assertEqual(data["orden"]["estado"], "esperando_aprobacion")
+
+    def test_enviar_presupuesto_por_correo_no_retrocede_una_orden_ya_avanzada(self):
+        # Si la orden ya está en reparación (ej. se reenvía el presupuesto
+        # por correo después de que el cliente ya aprobó), mandar el correo
+        # de nuevo NO debe hacerla retroceder a "esperando_aprobacion".
+        cliente = self._crear_cliente(nombre="Cliente Ya En Reparacion", email="reparacion@ejemplo.com")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"estado": "aprobado"})
+
+        with patch.object(taller_app, "_enviar_correo", return_value=(True, "Enviado (simulado)")), \
+             patch.object(taller_app, "PRESUPUESTO_COPIA_TALLER", []):
+            resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/presupuesto/enviar")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["orden"]["estado"], "reparacion")
 
     def test_responsable_del_diagnostico_se_registra_solo_con_la_sesion_activa(self):
         # El responsable NUNCA se toma de lo que mande el cliente en el PUT

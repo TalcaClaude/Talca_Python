@@ -1812,6 +1812,10 @@ document.getElementById("btn-opp-enviar-correo").addEventListener("click", async
     const resp = await api(`/api/operativo/ordenes/${ordenId}/presupuesto/enviar`, { method: "POST" });
     const copia = resp.copia && resp.copia.length ? ` (con copia a ${resp.copia.join(", ")})` : "";
     toast(`Presupuesto enviado a ${resp.destinatario}${copia}.`);
+    if (resp.orden) {
+      renderPresupuesto(resp.orden);
+      await refrescarResumenHub(ordenId);
+    }
   } catch (e2) {
     toast(e2.message, true);
   } finally {

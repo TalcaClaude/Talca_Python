@@ -910,15 +910,15 @@
         <textarea id="opp-diagnostico" rows="2" placeholder="Lo mismo que se cargó en la pestaña Diagnóstico (a mano o por audio de WhatsApp) — revísalo o ajústalo acá antes de mandar el presupuesto, este texto va impreso junto al precio."></textarea>
       </div>
       <div class="campo">
-        <label>Notas del presupuesto</label>
-        <textarea id="opp-notas" rows="2"></textarea>
+        <label>Notas internas (solo para el taller)</label>
+        <textarea id="opp-notas" rows="2" placeholder="Estas notas NUNCA se imprimen ni se mandan al cliente — son solo para uso interno del taller."></textarea>
       </div>
       <div class="modal-actions modal-actions--start">
         <button type="button" class="btn btn-secundario" id="btn-opp-descargar-pdf">⬇ Descargar PDF</button>
         <button type="button" class="btn btn-secundario" id="btn-opp-enviar-correo">✉ Enviar al correo del cliente</button>
         <button type="button" class="btn btn-primary" id="btn-opp-guardar">Guardar presupuesto</button>
       </div>
-      <p class="ayuda-inline">Al marcar el presupuesto como "Aprobado", la orden pasa automáticamente a Reparación. "Enviar al correo del cliente" manda el mismo PDF directo al correo registrado del cliente (con copia al taller).</p>
+      <p class="ayuda-inline">Al marcar el presupuesto como "Aprobado", la orden pasa automáticamente a Reparación. Al marcarlo como "Enviado al cliente" (o al usar "Enviar al correo del cliente", que manda el mismo PDF directo al correo registrado del cliente con copia al taller), la orden pasa automáticamente a "Esperando aprobación".</p>
     </div>
 
     <div class="op-tab-panel" id="opod-panel-repuestos" style="display:none">

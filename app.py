@@ -64,6 +64,7 @@ from core import (  # noqa: E402
     normalizar_busqueda,
     coincide_busqueda,
     now_iso,
+    sumar_dias_iso,
     fmt_money_pdf,
     usuario_actual,
     formatear_rut,
@@ -559,6 +560,68 @@ def init_db():
             rendicion_origen_id INTEGER REFERENCES caja_rendiciones(id),
             producto_id INTEGER REFERENCES productos(id),
             movimiento_inventario_id INTEGER REFERENCES movimientos(id),
+            creado_en TEXT NOT NULL
+        );
+
+        -- Cuentas por Cobrar (CxC): lo que los clientes le deben al taller.
+        -- Se genera SOLA (nunca a mano) cuando una orden de trabajo pasa a
+        -- "entregado" (ver modulos/operativo.py: _generar_o_actualizar_cxc)
+        -- — antes de eso la plata "de papel" de la OT puede seguir
+        -- cambiando (más ítems, ajustes de presupuesto), así que recién al
+        -- entregar el vehículo se "congela" el monto que quedó a deber. Los
+        -- abonos siguen viviendo en pagos_orden (no se duplica esa tabla);
+        -- 'estado' se recalcula solo cada vez que cambian los pagos de esa
+        -- orden (pendiente/parcial/pagada), nunca se edita a mano.
+        CREATE TABLE IF NOT EXISTS cuentas_por_cobrar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER UNIQUE NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+            cliente_id INTEGER NOT NULL REFERENCES clientes(id),
+            monto_total REAL NOT NULL DEFAULT 0,
+            fecha_emision TEXT NOT NULL,
+            fecha_vencimiento TEXT,
+            estado TEXT NOT NULL DEFAULT 'pendiente',   -- pendiente | parcial | pagada
+            creado_en TEXT NOT NULL,
+            actualizado_en TEXT NOT NULL
+        );
+
+        -- Cuentas por Pagar (CxP): lo que el taller le debe a sus
+        -- proveedores. Se genera SOLA al registrar una factura de compra
+        -- (ver app.py: _registrar_factura) por el total de esa factura, o
+        -- se puede crear a mano para gastos que no vienen de una factura de
+        -- inventario (ej. arriendo, servicios). factura_id queda NULL en
+        -- ese segundo caso.
+        CREATE TABLE IF NOT EXISTS cuentas_por_pagar (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            proveedor_id INTEGER REFERENCES proveedores(id),
+            factura_id INTEGER REFERENCES facturas(id) ON DELETE CASCADE,
+            concepto TEXT DEFAULT '',
+            monto_total REAL NOT NULL DEFAULT 0,
+            fecha_emision TEXT NOT NULL,
+            fecha_vencimiento TEXT,
+            estado TEXT NOT NULL DEFAULT 'pendiente',   -- pendiente | parcial | pagada | anulada
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            actualizado_en TEXT NOT NULL
+        );
+
+        -- Abonos/pagos contra una Cuenta por Pagar. A diferencia de CxC (que
+        -- reutiliza pagos_orden, ya existente), acá no había ninguna tabla
+        -- de "pagos a proveedor" — se crea de cero. Si se paga
+        -- 'desde_caja_chica', el pago además genera un gasto real en
+        -- caja_movimientos (ver app.py: _registrar_pago_cxp) para que la
+        -- salida de plata quede reflejada en el saldo de Caja Chica —
+        -- automatización pedida en el plan del módulo financiero ("Pago
+        -- proveedor → disminuir CxP y registrar egreso").
+        CREATE TABLE IF NOT EXISTS cxp_pagos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cxp_id INTEGER NOT NULL REFERENCES cuentas_por_pagar(id) ON DELETE CASCADE,
+            monto REAL NOT NULL,
+            fecha TEXT NOT NULL,
+            metodo_pago TEXT NOT NULL DEFAULT 'transferencia',
+            desde_caja_chica INTEGER NOT NULL DEFAULT 0,
+            caja_movimiento_id INTEGER REFERENCES caja_movimientos(id),
+            nota TEXT DEFAULT '',
+            usuario TEXT DEFAULT '',
             creado_en TEXT NOT NULL
         );
         """
@@ -2661,10 +2724,46 @@ def crear_factura():
     return jsonify(_factura_detalle(db, nueva)), 201
 
 
+# Cuentas por Pagar (CxP) — plazo por defecto para pagarle a un proveedor,
+# usado solo para calcular 'fecha_vencimiento' al generar la CxP de una
+# factura de compra (ver _generar_cxp_de_factura). Mismo criterio que
+# CXC_DIAS_VENCIMIENTO_DEFECTO en modulos/operativo.py: no es un plazo
+# legal, es el que el taller quiere usar para marcar una deuda a
+# proveedor como "vencida" en los reportes.
+CXP_DIAS_VENCIMIENTO_DEFECTO = 30
+
+
+def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validadas):
+    """Genera la Cuenta por Pagar de una factura de compra recién
+    registrada — el monto es la suma de cantidad×precio_unitario de todas
+    sus líneas. Se llama SIEMPRE desde _registrar_factura (nunca a mano),
+    así que cualquier factura que entre por cualquiera de sus tres caminos
+    (registro manual, carga masiva por Excel, foto de WhatsApp aprobada)
+    genera su CxP sola, sin que se pueda olvidar. No se genera si el total
+    es $0 (ej. factura de solo devoluciones)."""
+    monto_total = round(sum(cantidad * precio_unitario for _p, cantidad, precio_unitario in lineas_validadas), 2)
+    if monto_total <= 0:
+        return
+
+    fecha_emision = fecha or now_iso()
+    fecha_vencimiento = sumar_dias_iso(fecha_emision, CXP_DIAS_VENCIMIENTO_DEFECTO)
+    ts = now_iso()
+    db.execute(
+        """
+        INSERT INTO cuentas_por_pagar
+            (proveedor_id, factura_id, concepto, monto_total, fecha_emision, fecha_vencimiento, estado, usuario, creado_en, actualizado_en)
+        VALUES (?, ?, '', ?, ?, ?, 'pendiente', ?, ?, ?)
+        """,
+        (proveedor_id, factura_id, monto_total, fecha_emision, fecha_vencimiento, usuario_actual(), ts, ts),
+    )
+
+
 def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True):
     """Inserta la factura y sus líneas, aplicando el ingreso de stock si
-    corresponde. Separado de crear_factura() para poder reutilizarlo también
-    desde la carga masiva vía Excel (Módulo de compras)."""
+    corresponde, y generando su Cuenta por Pagar (ver
+    _generar_cxp_de_factura). Separado de crear_factura() para poder
+    reutilizarlo también desde la carga masiva vía Excel (Módulo de
+    compras) y desde la aprobación de facturas recibidas por WhatsApp."""
     ts = now_iso()
     cur = db.execute(
         "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en) VALUES (?, ?, ?, ?)",
@@ -2693,6 +2792,8 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
                 "UPDATE factura_lineas SET aplicada = 1, aplicada_en = ? WHERE id = ?",
                 (now_iso(), cur_linea.lastrowid),
             )
+
+    _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validadas)
 
     return factura_id
 

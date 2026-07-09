@@ -490,6 +490,198 @@ def caja_detalle_rendicion(rendicion_id):
     d["reposicion_automatica"] = _rendicion_tuvo_reposicion(db, rendicion_id)
     return jsonify(d)
 
+# ---------------------------------------------------------------------------
+# Cuentas por Cobrar (CxC) y Cuentas por Pagar (CxP) — las tablas se generan
+# solas (ver modulos/operativo.py: _generar_o_actualizar_cxc, y app.py:
+# _generar_cxp_de_factura); acá solo viven los endpoints de lectura y el
+# registro de pagos a proveedor. No hay endpoint para crear una CxC a mano
+# (siempre nace de una OT entregada) ni para editar su monto (queda
+# "congelado" al momento de la entrega, ver comentario en operativo.py).
+# ---------------------------------------------------------------------------
+
+def _cxc_total_pagado(db, orden_id):
+    return db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE orden_id = ?", (orden_id,)
+    ).fetchone()[0]
+
+
+@bp.route("/api/finanzas/cxc", methods=["GET"])
+def finanzas_listar_cxc():
+    """Lista las Cuentas por Cobrar (una por OT entregada con precio > 0),
+    con datos del cliente y la orden para mostrar en la tabla, y el saldo
+    pendiente calculado en vivo a partir de pagos_orden (ver
+    _recalcular_estado_cxc en modulos/operativo.py, que ya mantiene
+    'estado' al día — acá solo se agrega el número exacto de saldo)."""
+    db = get_db()
+    estado = request.args.get("estado", "").strip()
+    q = request.args.get("q", "").strip()
+
+    sql = """
+        SELECT cxc.*, c.nombre AS cliente_nombre, c.telefono AS cliente_telefono,
+               o.fecha_recepcion, o.fecha_entrega_real, o.mecanico
+        FROM cuentas_por_cobrar cxc
+        JOIN clientes c ON c.id = cxc.cliente_id
+        JOIN ordenes_trabajo o ON o.id = cxc.orden_id
+        WHERE 1=1
+    """
+    params = []
+    if estado:
+        sql += " AND cxc.estado = ?"
+        params.append(estado)
+    sql += " ORDER BY cxc.fecha_vencimiento ASC, cxc.id DESC"
+    rows = db.execute(sql, params).fetchall()
+
+    cuentas = []
+    for r in rows:
+        d = dict(r)
+        total_pagado = _cxc_total_pagado(db, d["orden_id"])
+        d["total_pagado"] = total_pagado
+        d["saldo"] = round(d["monto_total"] - total_pagado, 2)
+        cuentas.append(d)
+
+    if q:
+        cuentas = [c for c in cuentas if coincide_busqueda(q, c.get("cliente_nombre"), c.get("cliente_telefono"))]
+
+    total_pendiente = round(sum(c["saldo"] for c in cuentas if c["estado"] != "pagada"), 2)
+    return jsonify({"cuentas": cuentas, "total": len(cuentas), "total_pendiente": total_pendiente})
+
+
+@bp.route("/api/finanzas/cxp", methods=["GET"])
+def finanzas_listar_cxp():
+    """Lista las Cuentas por Pagar (una por factura de compra registrada),
+    con datos del proveedor/factura y el saldo pendiente calculado a
+    partir de los abonos en cxp_pagos."""
+    db = get_db()
+    estado = request.args.get("estado", "").strip()
+    q = request.args.get("q", "").strip()
+
+    sql = """
+        SELECT cxp.*, p.nombre AS proveedor_nombre, f.numero AS factura_numero
+        FROM cuentas_por_pagar cxp
+        LEFT JOIN proveedores p ON p.id = cxp.proveedor_id
+        LEFT JOIN facturas f ON f.id = cxp.factura_id
+        WHERE 1=1
+    """
+    params = []
+    if estado:
+        sql += " AND cxp.estado = ?"
+        params.append(estado)
+    sql += " ORDER BY cxp.fecha_vencimiento ASC, cxp.id DESC"
+    rows = db.execute(sql, params).fetchall()
+
+    cuentas = []
+    for r in rows:
+        d = dict(r)
+        total_pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (d["id"],)
+        ).fetchone()[0]
+        d["total_pagado"] = total_pagado
+        d["saldo"] = round(d["monto_total"] - total_pagado, 2)
+        cuentas.append(d)
+
+    if q:
+        cuentas = [c for c in cuentas if coincide_busqueda(q, c.get("proveedor_nombre"), c.get("factura_numero"), c.get("concepto"))]
+
+    total_pendiente = round(sum(c["saldo"] for c in cuentas if c["estado"] != "anulada" and c["estado"] != "pagada"), 2)
+    return jsonify({"cuentas": cuentas, "total": len(cuentas), "total_pendiente": total_pendiente})
+
+
+def _recalcular_estado_cxp(db, cxp_id):
+    """Mismo criterio que _recalcular_estado_cxc en modulos/operativo.py
+    (pendiente/parcial/pagada), pero a partir de cxp_pagos. No toca una
+    CxP que ya esté 'anulada' (esa es una decisión manual, no derivada de
+    los pagos)."""
+    cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE id = ?", (cxp_id,)).fetchone()
+    if cxp is None or cxp["estado"] == "anulada":
+        return
+    total_pagado = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (cxp_id,)
+    ).fetchone()[0]
+    if total_pagado <= 0:
+        nuevo_estado = "pendiente"
+    elif total_pagado >= cxp["monto_total"]:
+        nuevo_estado = "pagada"
+    else:
+        nuevo_estado = "parcial"
+    if nuevo_estado != cxp["estado"]:
+        db.execute(
+            "UPDATE cuentas_por_pagar SET estado = ?, actualizado_en = ? WHERE id = ?",
+            (nuevo_estado, now_iso(), cxp_id),
+        )
+
+
+@bp.route("/api/finanzas/cxp/<int:cxp_id>/pagos", methods=["POST"])
+def finanzas_pagar_cxp(cxp_id):
+    """Registra un abono a una Cuenta por Pagar. Si viene 'desde_caja_chica'
+    en true, además genera un gasto real en caja_movimientos (categoría
+    'Pago a proveedor') para que la salida de plata quede reflejada en el
+    saldo de Caja Chica — automatización pedida en el plan del módulo
+    financiero ('Pago proveedor → disminuir CxP y registrar egreso').
+    cxp_pagos.caja_movimiento_id queda enlazado a ese gasto para poder
+    seguir el rastro en ambos sentidos."""
+    db = get_db()
+    cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE id = ?", (cxp_id,)).fetchone()
+    if cxp is None:
+        return jsonify({"error": "Cuenta por pagar no encontrada"}), 404
+    if cxp["estado"] == "anulada":
+        return jsonify({"error": "Esta cuenta por pagar está anulada"}), 400
+
+    data = request.get_json(silent=True) or {}
+    try:
+        monto = float(data.get("monto"))
+        if monto <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
+
+    saldo_actual = cxp["monto_total"] - db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (cxp_id,)
+    ).fetchone()[0]
+    if monto > saldo_actual + 0.01:
+        return jsonify({"error": f"El monto supera el saldo pendiente (${round(saldo_actual):,})".replace(",", ".")}), 400
+
+    metodo_pago = (data.get("metodo_pago") or "transferencia").strip()
+    nota = (data.get("nota") or "").strip().upper()
+    desde_caja_chica = bool(data.get("desde_caja_chica"))
+    fecha = now_iso()
+    ts = fecha
+
+    caja_movimiento_id = None
+    if desde_caja_chica:
+        proveedor_nombre = ""
+        if cxp["proveedor_id"]:
+            fila_prov = db.execute("SELECT nombre FROM proveedores WHERE id = ?", (cxp["proveedor_id"],)).fetchone()
+            proveedor_nombre = fila_prov["nombre"] if fila_prov else ""
+        cur_mov = db.execute(
+            """
+            INSERT INTO caja_movimientos (
+                tipo, fecha, monto, categoria, descripcion, proveedor, usuario, creado_en
+            ) VALUES ('gasto', ?, ?, 'Pago a proveedor', ?, ?, ?, ?)
+            """,
+            (fecha, monto, nota or f"PAGO CXP #{cxp_id}", proveedor_nombre, usuario_actual(), ts),
+        )
+        caja_movimiento_id = cur_mov.lastrowid
+
+    db.execute(
+        """
+        INSERT INTO cxp_pagos (cxp_id, monto, fecha, metodo_pago, desde_caja_chica, caja_movimiento_id, nota, usuario, creado_en)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (cxp_id, monto, fecha, metodo_pago, 1 if desde_caja_chica else 0, caja_movimiento_id, nota, usuario_actual(), ts),
+    )
+    _recalcular_estado_cxp(db, cxp_id)
+    db.commit()
+
+    actualizada = db.execute("SELECT * FROM cuentas_por_pagar WHERE id = ?", (cxp_id,)).fetchone()
+    d = dict(actualizada)
+    total_pagado = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (cxp_id,)
+    ).fetchone()[0]
+    d["total_pagado"] = total_pagado
+    d["saldo"] = round(d["monto_total"] - total_pagado, 2)
+    return jsonify(d), 201
+
+
 def _gastos_caja_para_reporte(desde, hasta):
     db = get_db()
     sql = "SELECT * FROM caja_movimientos WHERE tipo = 'gasto'"

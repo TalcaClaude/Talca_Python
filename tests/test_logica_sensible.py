@@ -2471,6 +2471,242 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(self._contar_pendientes(), antes)
 
 
+class TestCuentasPorCobrar(unittest.TestCase):
+    """La CxC de una OT se genera sola al entregarla (nunca a mano), queda
+    'congelada' en ese monto, no se duplica si la orden vuelve a pasar por
+    'entregado', y su estado (pendiente/parcial/pagada) sigue en vivo lo
+    que pasa con pagos_orden. Si esto se rompe, el taller puede terminar
+    cobrándole dos veces al mismo cliente por la misma OT, o mostrando una
+    cuenta "pendiente" que en realidad ya se pagó completa."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre="Cliente CxC"):
+        resp = self.client.post("/api/operativo/clientes", json={"nombre": nombre})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden(self, cliente_id):
+        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _cxc_de_orden(self, orden_id):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            row = db.execute("SELECT * FROM cuentas_por_cobrar WHERE orden_id = ?", (orden_id,)).fetchone()
+            return dict(row) if row else None
+
+    def test_entregar_una_orden_con_precio_genera_su_cxc(self):
+        cliente = self._crear_cliente("Cliente CxC - genera")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 100000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+
+        cxc = self._cxc_de_orden(orden["id"])
+        self.assertIsNotNone(cxc)
+        self.assertEqual(cxc["monto_total"], 100000)
+        self.assertEqual(cxc["estado"], "pendiente")
+        self.assertEqual(cxc["cliente_id"], cliente["id"])
+
+    def test_entregar_una_orden_sin_precio_no_genera_cxc(self):
+        cliente = self._crear_cliente("Cliente CxC - sin precio")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+
+        self.assertIsNone(self._cxc_de_orden(orden["id"]))
+
+    def test_reentregar_una_orden_no_duplica_ni_pisa_el_monto_ya_congelado(self):
+        cliente = self._crear_cliente("Cliente CxC - vaiven")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 50000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+
+        # Se revierte a un estado abierto y se sube el precio, luego se
+        # vuelve a entregar: la CxC ya emitida no debe cambiar de monto.
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "reparacion"})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 999999})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            total = db.execute(
+                "SELECT COUNT(*) FROM cuentas_por_cobrar WHERE orden_id = ?", (orden["id"],)
+            ).fetchone()[0]
+        self.assertEqual(total, 1)
+        cxc = self._cxc_de_orden(orden["id"])
+        self.assertEqual(cxc["monto_total"], 50000)
+
+    def test_estado_de_la_cxc_pasa_a_parcial_y_luego_a_pagada_con_los_abonos(self):
+        cliente = self._crear_cliente("Cliente CxC - abonos")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 100000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+
+        pago1 = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/pagos",
+            json={"metodo_pago": "efectivo", "monto": 40000},
+        )
+        self.assertEqual(pago1.status_code, 201, pago1.get_data(as_text=True))
+        self.assertEqual(self._cxc_de_orden(orden["id"])["estado"], "parcial")
+
+        pago2_resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/pagos",
+            json={"metodo_pago": "efectivo", "monto": 60000},
+        )
+        self.assertEqual(self._cxc_de_orden(orden["id"])["estado"], "pagada")
+
+        # Al eliminar un abono, el estado vuelve a recalcularse (no queda
+        # "pagada" congelada si en realidad ya no está toda la plata).
+        pago2_id = pago2_resp.get_json()["id"]
+        self.client.delete(f"/api/operativo/ordenes/{orden['id']}/pagos/{pago2_id}")
+        self.assertEqual(self._cxc_de_orden(orden["id"])["estado"], "parcial")
+
+    def test_endpoint_de_listado_de_cxc_calcula_el_saldo_pendiente(self):
+        cliente = self._crear_cliente("Cliente CxC - listado")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 80000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/pagos",
+            json={"metodo_pago": "efectivo", "monto": 30000},
+        )
+
+        resp = self.client.get("/api/finanzas/cxc")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        fila = next(c for c in data["cuentas"] if c["orden_id"] == orden["id"])
+        self.assertEqual(fila["saldo"], 50000)
+        self.assertEqual(fila["estado"], "parcial")
+
+
+class TestCuentasPorPagar(unittest.TestCase):
+    """La CxP se genera sola al registrar una factura de compra (por
+    cualquiera de sus caminos: acá se prueba el manual, que es el único
+    directamente expuesto por HTTP en este archivo), y un pago registrado
+    contra ella recalcula su estado y — si es 'desde_caja_chica' — además
+    genera un gasto real en Caja Chica enlazado. Si esto se rompe, el
+    taller puede pagarle dos veces a un proveedor por la misma factura, o
+    perder el rastro de plata que salió de caja chica para pagar deuda."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_producto_http(self, nombre, stock_disponible=0, costo_compra=1000):
+        resp = self.client.post(
+            "/api/productos",
+            json={"nombre": nombre, "stock_disponible": stock_disponible, "costo_compra": costo_compra},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_factura(self, numero, producto_id, cantidad=5, precio_unitario=1000):
+        resp = self.client.post(
+            "/api/facturas",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto_id, "cantidad": cantidad, "precio_unitario": precio_unitario}],
+                "aplicar_stock": True,
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _cxp_de_factura(self, factura_id):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            row = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura_id,)).fetchone()
+            return dict(row) if row else None
+
+    def test_registrar_una_factura_genera_su_cxp_por_el_total(self):
+        producto = self._crear_producto_http("Producto - CxP genera", stock_disponible=0)
+        factura = self._crear_factura("FACT-CXP-001", producto["id"], cantidad=5, precio_unitario=2000)
+
+        cxp = self._cxp_de_factura(factura["id"])
+        self.assertIsNotNone(cxp)
+        self.assertEqual(cxp["monto_total"], 10000)
+        self.assertEqual(cxp["estado"], "pendiente")
+
+    def test_pagar_cxp_sin_caja_chica_no_toca_caja_movimientos(self):
+        producto = self._crear_producto_http("Producto - CxP pago sin caja", stock_disponible=0)
+        factura = self._crear_factura("FACT-CXP-002", producto["id"], cantidad=2, precio_unitario=5000)
+        cxp = self._cxp_de_factura(factura["id"])
+
+        antes = self.client.get("/api/caja/resumen").get_json()
+        resp = self.client.post(
+            f"/api/finanzas/cxp/{cxp['id']}/pagos",
+            json={"monto": 4000, "metodo_pago": "transferencia"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        despues = self.client.get("/api/caja/resumen").get_json()
+        self.assertEqual(antes["total_gastado"], despues["total_gastado"])
+
+        actualizada = resp.get_json()
+        self.assertEqual(actualizada["estado"], "parcial")
+        self.assertEqual(actualizada["saldo"], 6000)
+
+    def test_pagar_cxp_desde_caja_chica_genera_gasto_enlazado(self):
+        producto = self._crear_producto_http("Producto - CxP pago con caja", stock_disponible=0)
+        factura = self._crear_factura("FACT-CXP-003", producto["id"], cantidad=1, precio_unitario=8000)
+        cxp = self._cxp_de_factura(factura["id"])
+
+        antes = self.client.get("/api/caja/resumen").get_json()
+        resp = self.client.post(
+            f"/api/finanzas/cxp/{cxp['id']}/pagos",
+            json={"monto": 8000, "metodo_pago": "efectivo", "desde_caja_chica": True},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        despues = self.client.get("/api/caja/resumen").get_json()
+        self.assertEqual(despues["total_gastado"], antes["total_gastado"] + 8000)
+
+        actualizada = resp.get_json()
+        self.assertEqual(actualizada["estado"], "pagada")
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            pago = db.execute(
+                "SELECT * FROM cxp_pagos WHERE cxp_id = ? ORDER BY id DESC LIMIT 1", (cxp["id"],)
+            ).fetchone()
+            self.assertIsNotNone(pago["caja_movimiento_id"])
+            mov = db.execute(
+                "SELECT * FROM caja_movimientos WHERE id = ?", (pago["caja_movimiento_id"],)
+            ).fetchone()
+            self.assertEqual(mov["categoria"], "Pago a proveedor")
+            self.assertEqual(mov["monto"], 8000)
+
+    def test_no_se_puede_pagar_mas_del_saldo_pendiente(self):
+        producto = self._crear_producto_http("Producto - CxP excede saldo", stock_disponible=0)
+        factura = self._crear_factura("FACT-CXP-004", producto["id"], cantidad=1, precio_unitario=3000)
+        cxp = self._cxp_de_factura(factura["id"])
+
+        resp = self.client.post(
+            f"/api/finanzas/cxp/{cxp['id']}/pagos",
+            json={"monto": 999999, "metodo_pago": "efectivo"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_endpoint_de_listado_de_cxp_calcula_el_saldo_pendiente(self):
+        producto = self._crear_producto_http("Producto - CxP listado", stock_disponible=0)
+        factura = self._crear_factura("FACT-CXP-005", producto["id"], cantidad=1, precio_unitario=7000)
+        cxp = self._cxp_de_factura(factura["id"])
+        self.client.post(f"/api/finanzas/cxp/{cxp['id']}/pagos", json={"monto": 2000, "metodo_pago": "efectivo"})
+
+        resp = self.client.get("/api/finanzas/cxp")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        fila = next(c for c in data["cuentas"] if c["id"] == cxp["id"])
+        self.assertEqual(fila["saldo"], 5000)
+        self.assertEqual(fila["estado"], "parcial")
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

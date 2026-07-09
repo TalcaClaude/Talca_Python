@@ -158,6 +158,19 @@ def now_iso():
     return datetime.now().isoformat(timespec="seconds")
 
 
+def sumar_dias_iso(fecha_iso, dias):
+    """'2026-07-09T10:00:00' + 30 días -> '2026-08-08T10:00:00'. Tolera que
+    la fecha venga sin la parte de hora (ej. solo '2026-07-09'), o vacía —
+    en ese caso usa el momento actual como base. Compartida entre módulos
+    (Operativo la usa para vencimiento de CxC, Facturas/CxP para
+    vencimiento de CxP) para no repetir la misma cuenta dos veces."""
+    try:
+        base = datetime.fromisoformat(fecha_iso)
+    except (TypeError, ValueError):
+        base = datetime.now()
+    return (base + timedelta(days=dias)).isoformat(timespec="seconds")
+
+
 def fmt_money_pdf(valor):
     """Formatea un monto en pesos chilenos para los reportes PDF (con
     separador de miles), igual que se ve en la interfaz."""

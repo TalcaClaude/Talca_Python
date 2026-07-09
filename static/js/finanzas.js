@@ -6,6 +6,8 @@ const state = {
   cajaMovimientoActivoId: null,
 };
 
+const ESTADO_CXX_LABEL = { pendiente: "Pendiente", parcial: "Parcial", pagada: "Pagada", anulada: "Anulada" };
+
 // ---------------------------------------------------------------------------
 // Utilidades compartidas (duplicadas de app.js/operativo.js: cada módulo
 // carga su propio JS — ver comentario equivalente en operativo.js).
@@ -107,15 +109,21 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     const vista = tabBtn.dataset.vista;
     document.getElementById("vista-resumen").style.display = vista === "resumen" ? "block" : "none";
     document.getElementById("vista-caja").style.display = vista === "caja" ? "block" : "none";
+    document.getElementById("vista-cxc").style.display = vista === "cxc" ? "block" : "none";
+    document.getElementById("vista-cxp").style.display = vista === "cxp" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
       resumen: "Finanzas — Resumen",
       caja: "Finanzas — Caja Chica",
+      cxc: "Finanzas — Cuentas por Cobrar",
+      cxp: "Finanzas — Cuentas por Pagar",
       reportes: "Finanzas — Reportes",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "resumen") cargarResumenFinanzas();
     if (vista === "caja") cargarCaja();
+    if (vista === "cxc") cargarCxc();
+    if (vista === "cxp") cargarCxp();
   });
 });
 
@@ -583,6 +591,143 @@ async function verDetalleRendicion(id) {
     tbody.innerHTML = `<tr><td colspan="3" class="vacio">Error: ${e.message}</td></tr>`;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Cuentas por Cobrar (CxC) — solo lectura: se generan solas al entregar una
+// OT (ver modulos/operativo.py: _generar_o_actualizar_cxc). Los abonos se
+// registran desde la ficha de la OT en el módulo Operativo, no acá.
+// ---------------------------------------------------------------------------
+
+async function cargarCxc() {
+  const tbody = document.getElementById("tbody-cxc");
+  const params = new URLSearchParams();
+  const q = document.getElementById("cxc-buscar").value.trim();
+  const estado = document.getElementById("cxc-filtro-estado").value;
+  if (q) params.set("q", q);
+  if (estado) params.set("estado", estado);
+
+  try {
+    const data = await api("/api/finanzas/cxc?" + params.toString());
+    document.getElementById("cxc-total-pendiente").textContent = fmtMoney(data.total_pendiente);
+
+    if (data.cuentas.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" class="vacio">No se encontraron cuentas por cobrar con esos filtros.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = data.cuentas.map(c => `
+      <tr>
+        <td>${escapeHtml(c.cliente_nombre)}</td>
+        <td class="mono">#${c.orden_id}</td>
+        <td class="mono">${c.fecha_entrega_real ? fmtFecha(c.fecha_entrega_real) : "—"}</td>
+        <td class="mono">${c.fecha_vencimiento ? fmtFecha(c.fecha_vencimiento) : "—"}</td>
+        <td class="num mono">${fmtMoney(c.monto_total)}</td>
+        <td class="num mono">${fmtMoney(c.total_pagado)}</td>
+        <td class="num mono">${fmtMoney(c.saldo)}</td>
+        <td><span class="mov-tipo mov-tipo--${c.estado === "pagada" ? "entrada" : c.estado === "parcial" ? "salida" : "perdida"}">${ESTADO_CXX_LABEL[c.estado] || c.estado}</span></td>
+      </tr>`).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar Cuentas por Cobrar: ${e.message}</td></tr>`;
+  }
+}
+
+let cxcBuscarTimeout;
+document.getElementById("cxc-buscar").addEventListener("input", () => {
+  clearTimeout(cxcBuscarTimeout);
+  cxcBuscarTimeout = setTimeout(cargarCxc, 250);
+});
+document.getElementById("cxc-filtro-estado").addEventListener("change", cargarCxc);
+
+// ---------------------------------------------------------------------------
+// Cuentas por Pagar (CxP) — se generan solas al registrar una factura de
+// compra (ver app.py: _generar_cxp_de_factura). Acá se listan y se
+// registran los abonos a proveedor.
+// ---------------------------------------------------------------------------
+
+let cxpCuentas = [];
+
+async function cargarCxp() {
+  const tbody = document.getElementById("tbody-cxp");
+  const params = new URLSearchParams();
+  const q = document.getElementById("cxp-buscar").value.trim();
+  const estado = document.getElementById("cxp-filtro-estado").value;
+  if (q) params.set("q", q);
+  if (estado) params.set("estado", estado);
+
+  try {
+    const data = await api("/api/finanzas/cxp?" + params.toString());
+    cxpCuentas = data.cuentas;
+    document.getElementById("cxp-total-pendiente").textContent = fmtMoney(data.total_pendiente);
+
+    if (data.cuentas.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="9" class="vacio">No se encontraron cuentas por pagar con esos filtros.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = data.cuentas.map(c => {
+      const puedePagar = c.estado !== "pagada" && c.estado !== "anulada";
+      return `
+      <tr>
+        <td>${escapeHtml(c.proveedor_nombre) || "—"}</td>
+        <td>${escapeHtml(c.factura_numero ? `Factura ${c.factura_numero}` : c.concepto) || "—"}</td>
+        <td class="mono">${fmtFecha(c.fecha_emision)}</td>
+        <td class="mono">${c.fecha_vencimiento ? fmtFecha(c.fecha_vencimiento) : "—"}</td>
+        <td class="num mono">${fmtMoney(c.monto_total)}</td>
+        <td class="num mono">${fmtMoney(c.total_pagado)}</td>
+        <td class="num mono">${fmtMoney(c.saldo)}</td>
+        <td><span class="mov-tipo mov-tipo--${c.estado === "pagada" ? "entrada" : c.estado === "parcial" ? "salida" : "perdida"}">${ESTADO_CXX_LABEL[c.estado] || c.estado}</span></td>
+        <td>${puedePagar ? `<button type="button" class="btn btn-secundario" data-pagar-cxp="${c.id}">Registrar pago</button>` : ""}</td>
+      </tr>`;
+    }).join("");
+
+    tbody.querySelectorAll("[data-pagar-cxp]").forEach(btn => {
+      btn.addEventListener("click", () => abrirPagoCxp(parseInt(btn.dataset.pagarCxp, 10)));
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar Cuentas por Pagar: ${e.message}</td></tr>`;
+  }
+}
+
+let cxpBuscarTimeout;
+document.getElementById("cxp-buscar").addEventListener("input", () => {
+  clearTimeout(cxpBuscarTimeout);
+  cxpBuscarTimeout = setTimeout(cargarCxp, 250);
+});
+document.getElementById("cxp-filtro-estado").addEventListener("change", cargarCxp);
+
+function abrirPagoCxp(id) {
+  const c = cxpCuentas.find(x => x.id === id);
+  if (!c) return;
+  document.getElementById("form-cxp-pago").reset();
+  document.getElementById("cxpp-cxp-id").value = c.id;
+  document.getElementById("cxpp-monto").value = c.saldo;
+  document.getElementById("cxpp-monto").max = c.saldo;
+  document.getElementById("modal-cxp-pago-titulo").textContent =
+    `Registrar pago — ${c.proveedor_nombre || (c.factura_numero ? `Factura ${c.factura_numero}` : "CxP #" + c.id)}`;
+  document.getElementById("cxp-pago-saldo").textContent = `Saldo pendiente: ${fmtMoney(c.saldo)}`;
+  abrirModal("modal-cxp-pago");
+}
+
+document.getElementById("form-cxp-pago").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const cxpId = document.getElementById("cxpp-cxp-id").value;
+  try {
+    await api(`/api/finanzas/cxp/${cxpId}/pagos`, {
+      method: "POST",
+      body: JSON.stringify({
+        monto: Number(document.getElementById("cxpp-monto").value),
+        metodo_pago: document.getElementById("cxpp-metodo").value,
+        nota: document.getElementById("cxpp-nota").value,
+        desde_caja_chica: document.getElementById("cxpp-desde-caja").checked,
+      }),
+    });
+    toast("Pago registrado");
+    cerrarModal("modal-cxp-pago");
+    await cargarCxp();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Reportes

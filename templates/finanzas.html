@@ -30,6 +30,8 @@
   <nav class="tabs">
     <button class="tab activo" data-vista="resumen">Resumen</button>
     <button class="tab" data-vista="caja">Caja Chica</button>
+    <button class="tab" data-vista="cxc">Cuentas por Cobrar</button>
+    <button class="tab" data-vista="cxp">Cuentas por Pagar</button>
     <button class="tab" data-vista="reportes">Reportes</button>
   </nav>
 
@@ -124,6 +126,84 @@
         </tr>
       </thead>
       <tbody id="tbody-caja">
+        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-cxc" style="display:none">
+
+  <p class="ayuda-inline">Se generan solas al entregar una orden de trabajo con precio cargado (nunca a mano) — el monto queda congelado en ese momento. El saldo se recalcula en vivo según los abonos registrados en cada OT.</p>
+
+  <section class="toolbar">
+    <input type="text" id="cxc-buscar" placeholder="Buscar por cliente o teléfono…">
+    <select id="cxc-filtro-estado">
+      <option value="">Cualquier estado</option>
+      <option value="pendiente">Pendiente</option>
+      <option value="parcial">Parcial</option>
+      <option value="pagada">Pagada</option>
+    </select>
+    <span style="flex:1"></span>
+    <span class="ayuda-inline">Total pendiente: <strong id="cxc-total-pendiente" class="mono">$0</strong></span>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Cliente</th>
+          <th>OT</th>
+          <th>Fecha entrega</th>
+          <th>Vencimiento</th>
+          <th class="num">Total</th>
+          <th class="num">Pagado</th>
+          <th class="num">Saldo</th>
+          <th>Estado</th>
+        </tr>
+      </thead>
+      <tbody id="tbody-cxc">
+        <tr><td colspan="8" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-cxp" style="display:none">
+
+  <p class="ayuda-inline">Se generan solas al registrar una factura de compra (nunca a mano) por el total de esa factura. Un pago "desde caja chica" además genera un gasto real en Caja Chica, enlazado a ese abono.</p>
+
+  <section class="toolbar">
+    <input type="text" id="cxp-buscar" placeholder="Buscar por proveedor, factura o concepto…">
+    <select id="cxp-filtro-estado">
+      <option value="">Cualquier estado</option>
+      <option value="pendiente">Pendiente</option>
+      <option value="parcial">Parcial</option>
+      <option value="pagada">Pagada</option>
+      <option value="anulada">Anulada</option>
+    </select>
+    <span style="flex:1"></span>
+    <span class="ayuda-inline">Total pendiente: <strong id="cxp-total-pendiente" class="mono">$0</strong></span>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Proveedor</th>
+          <th>Factura / Concepto</th>
+          <th>Emisión</th>
+          <th>Vencimiento</th>
+          <th class="num">Total</th>
+          <th class="num">Pagado</th>
+          <th class="num">Saldo</th>
+          <th>Estado</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-cxp">
         <tr><td colspan="9" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
@@ -358,6 +438,47 @@
         </tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<!-- Modal: Registrar pago de una Cuenta por Pagar -->
+<div class="modal-overlay" id="modal-cxp-pago">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-cxp-pago-titulo">Registrar pago</h2>
+      <button class="modal-close" data-close="modal-cxp-pago">&times;</button>
+    </div>
+    <p class="ayuda-inline" id="cxp-pago-saldo"></p>
+    <form id="form-cxp-pago">
+      <input type="hidden" id="cxpp-cxp-id">
+      <div class="grid-2">
+        <div class="campo">
+          <label>Monto ($ CLP) *</label>
+          <input type="number" id="cxpp-monto" required min="1" step="1">
+        </div>
+        <div class="campo">
+          <label>Método de pago</label>
+          <select id="cxpp-metodo">
+            <option value="transferencia">Transferencia</option>
+            <option value="efectivo">Efectivo</option>
+            <option value="cheque">Cheque</option>
+            <option value="tarjeta">Tarjeta</option>
+          </select>
+        </div>
+      </div>
+      <div class="campo">
+        <label>Nota (opcional)</label>
+        <input type="text" id="cxpp-nota" placeholder="Ej: Pago parcial acordado con el proveedor">
+      </div>
+      <label class="toggle-critico">
+        <input type="checkbox" id="cxpp-desde-caja">
+        Pagar desde Caja Chica — genera un gasto real en Caja Chica enlazado a este abono
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-cxp-pago">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Registrar pago</button>
+      </div>
+    </form>
   </div>
 </div>
 

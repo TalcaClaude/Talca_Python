@@ -45,6 +45,7 @@ from core import (
     formatear_rut,
     get_db,
     now_iso,
+    sumar_dias_iso,
     usuario_actual,
 )
 
@@ -85,6 +86,14 @@ ESTADOS_PRESUPUESTO = ["pendiente", "enviado", "aprobado", "rechazado"]
 RESULTADOS_QC_ITEM = ["ok", "falla", "na"]  # resultado de cada punto del checklist
 RESULTADOS_QC = ["pendiente", "aprobado", "rechazado"]  # veredicto general de la orden
 IVA_PORCENTAJE = 0.19
+
+# Cuentas por Cobrar (CxC) — plazo por defecto para pagar una OT entregada,
+# usado solo para calcular 'fecha_vencimiento' al generar la CxC (ver
+# _generar_o_actualizar_cxc). No es un plazo legal ni contractual, es solo
+# el criterio con el que el taller quiere que el sistema marque una deuda
+# de cliente como "vencida" en los reportes — se puede ajustar acá si el
+# taller define otro plazo estándar más adelante.
+CXC_DIAS_VENCIMIENTO_DEFECTO = 30
 
 
 def _item_subtotal(item):
@@ -866,6 +875,76 @@ def _orden_dict(db, row):
     return d
 
 
+# ---------------------------------------------------------------------------
+# Cuentas por Cobrar (CxC) — se generan solas al entregar una OT, nunca a
+# mano (ver editar_orden y _actualizar_estado_orden_por_agente, los dos
+# únicos lugares donde una orden puede pasar a 'entregado'). Viven en la
+# tabla cuentas_por_cobrar (ver init_db en app.py); los abonos siguen
+# viviendo en pagos_orden, que ya existía — no se duplica esa tabla, solo
+# se usa para recalcular 'estado' acá.
+# ---------------------------------------------------------------------------
+
+def _generar_o_actualizar_cxc(db, orden_row):
+    """Genera la Cuenta por Cobrar de una OT la PRIMERA vez que pasa a
+    'entregado' — el monto queda 'congelado' con el valor_neto + IVA de ese
+    momento (después de entregada, la OT ya no debería seguir sumando
+    ítems). Es idempotente: si la orden vuelve a pasar por 'entregado' más
+    de una vez (ej. se revirtió el estado a mano y se volvió a entregar),
+    NO genera una segunda CxC ni pisa el monto ya emitido — eso evitaría
+    que un vaivén de estados infle por accidente la deuda del cliente.
+    Una OT sin precio cargado (valor_total = 0) no genera CxC: no tiene
+    sentido una cuenta por cobrar de $0."""
+    orden_id = orden_row["id"]
+    ya_existe = db.execute("SELECT id FROM cuentas_por_cobrar WHERE orden_id = ?", (orden_id,)).fetchone()
+    if ya_existe:
+        return
+
+    valor_neto = orden_row["precio_referencial"] or 0
+    valor_iva_monto = round(valor_neto * IVA_PORCENTAJE, 2) if orden_row["precio_iva"] else 0.0
+    valor_total = round(valor_neto + valor_iva_monto, 2)
+    if valor_total <= 0:
+        return
+
+    fecha_emision = orden_row["fecha_entrega_real"] or now_iso()
+    fecha_vencimiento = sumar_dias_iso(fecha_emision, CXC_DIAS_VENCIMIENTO_DEFECTO)
+    ts = now_iso()
+    db.execute(
+        """
+        INSERT INTO cuentas_por_cobrar
+            (orden_id, cliente_id, monto_total, fecha_emision, fecha_vencimiento, estado, creado_en, actualizado_en)
+        VALUES (?, ?, ?, ?, ?, 'pendiente', ?, ?)
+        """,
+        (orden_id, orden_row["cliente_id"], valor_total, fecha_emision, fecha_vencimiento, ts, ts),
+    )
+    _recalcular_estado_cxc(db, orden_id)
+
+
+def _recalcular_estado_cxc(db, orden_id):
+    """Recalcula 'estado' (pendiente/parcial/pagada) de la CxC de una orden
+    según lo que de verdad se ha abonado en pagos_orden — se llama después
+    de agregar o eliminar un pago (ver agregar_pago_orden/
+    eliminar_pago_orden) y al generar la CxC. No hace nada si esa orden
+    todavía no tiene una CxC generada (ej. no se ha entregado, o se entregó
+    sin precio cargado)."""
+    cxc = db.execute("SELECT * FROM cuentas_por_cobrar WHERE orden_id = ?", (orden_id,)).fetchone()
+    if cxc is None:
+        return
+    total_pagado = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE orden_id = ?", (orden_id,)
+    ).fetchone()[0]
+    if total_pagado <= 0:
+        nuevo_estado = "pendiente"
+    elif total_pagado >= cxc["monto_total"]:
+        nuevo_estado = "pagada"
+    else:
+        nuevo_estado = "parcial"
+    if nuevo_estado != cxc["estado"]:
+        db.execute(
+            "UPDATE cuentas_por_cobrar SET estado = ?, actualizado_en = ? WHERE id = ?",
+            (nuevo_estado, now_iso(), cxc["id"]),
+        )
+
+
 @bp.route("/api/operativo/dashboard", methods=["GET"])
 def dashboard_operativo():
     """KPIs para el dashboard del módulo Operativo:
@@ -1232,6 +1311,9 @@ def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if actualizada["estado"] == "entregado":
+        _generar_o_actualizar_cxc(db, actualizada)
+        db.commit()
     return _orden_dict(db, actualizada), None
 
 
@@ -1419,6 +1501,9 @@ def editar_orden(orden_id):
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if actualizada["estado"] == "entregado":
+        _generar_o_actualizar_cxc(db, actualizada)
+        db.commit()
     return jsonify(_orden_dict(db, actualizada))
 
 
@@ -1493,6 +1578,8 @@ def agregar_pago_orden(orden_id):
         (orden_id, metodo_pago, monto, fecha, usuario_actual(), ts),
     )
     db.commit()
+    _recalcular_estado_cxc(db, orden_id)
+    db.commit()
     nuevo = db.execute("SELECT * FROM pagos_orden WHERE id = ?", (cur.lastrowid,)).fetchone()
     return jsonify(dict(nuevo)), 201
 
@@ -1506,6 +1593,8 @@ def eliminar_pago_orden(orden_id, pago_id):
     if row is None:
         return jsonify({"error": "Pago no encontrado"}), 404
     db.execute("DELETE FROM pagos_orden WHERE id = ?", (pago_id,))
+    db.commit()
+    _recalcular_estado_cxc(db, orden_id)
     db.commit()
     return jsonify({"ok": True})
 

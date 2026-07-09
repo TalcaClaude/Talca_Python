@@ -20,6 +20,10 @@ import math
 import logging
 import traceback
 import base64
+import difflib
+import hmac
+import hashlib
+import html
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
@@ -191,6 +195,38 @@ RESPALDO_INTERVALO_HORAS = int(os.environ.get("RESPALDO_INTERVALO_HORAS", "24"))
 ALERTA_STOCK_INTERVALO_HORAS = int(os.environ.get("ALERTA_STOCK_INTERVALO_HORAS", "24"))
 ALERTA_STOCK_DESTINATARIO = os.environ.get("ALERTA_STOCK_DESTINATARIO", "") or SMTP_DESTINATARIO
 
+# ---------------------------------------------------------------------------
+# IA (Claude, Anthropic): usada para leer fotos de facturas y, a futuro,
+# para el agente de WhatsApp que traduce mensajes en acciones sobre el
+# sistema. Se llama por HTTPS directo con 'requests' (igual que Resend más
+# arriba) en vez de instalar el SDK oficial de Anthropic, para no sumar una
+# dependencia nueva al build. Sin ANTHROPIC_API_KEY configurada, estas
+# funciones fallan con un mensaje claro en vez de romper el resto del
+# sistema — todo lo demás sigue funcionando igual sin esta variable.
+# ---------------------------------------------------------------------------
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+
+# ---------------------------------------------------------------------------
+# Agente de WhatsApp: un mecánico le escribe a un número de WhatsApp y el
+# mensaje termina moviendo el estado de una Orden de Trabajo (OT) en el
+# sistema. TWILIO_AUTH_TOKEN es OPCIONAL — Twilio es el intermediario más
+# simple para conectar WhatsApp Business sin pasar por la verificación
+# directa de Meta, y firma cada webhook que nos manda; si se configura este
+# token, /webhook/whatsapp valida esa firma y rechaza cualquier request que
+# no venga realmente de Twilio. Sin el token, el webhook igual funciona
+# (para poder probarlo antes de tener la cuenta 100% configurada) pero sin
+# esa verificación extra — conviene setearlo apenas se tenga la cuenta.
+# No hace falta ninguna otra credencial de Twilio en el servidor: como
+# Twilio nos llama a nosotros (webhook) y nuestra respuesta (TwiML) YA es
+# el mensaje de vuelta, no hace falta llamar a ninguna API de Twilio para
+# enviar mensajes.
+# ---------------------------------------------------------------------------
+
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
+
 
 def _correo_transporte_configurado():
     """True si hay algún método de envío de correo configurado (Resend o
@@ -321,6 +357,32 @@ def init_db():
             telefono TEXT DEFAULT '',
             email TEXT DEFAULT '',
             direccion TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+
+        -- Agente de WhatsApp: qué mecánicos pueden escribirle al agente
+        -- (mapea el teléfono desde el que escriben a un nombre) y el
+        -- historial de cada mensaje que llegó, para poder auditar qué
+        -- movió el agente y por qué (o por qué no hizo nada).
+        CREATE TABLE IF NOT EXISTS agente_mecanicos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            telefono TEXT UNIQUE NOT NULL,
+            activo INTEGER NOT NULL DEFAULT 1,
+            creado_en TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS agente_mensajes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telefono TEXT NOT NULL,
+            mecanico_nombre TEXT DEFAULT '',
+            mensaje_texto TEXT NOT NULL,
+            accion TEXT DEFAULT '',
+            ot_id INTEGER,
+            estado_anterior TEXT DEFAULT '',
+            estado_nuevo TEXT DEFAULT '',
+            exito INTEGER NOT NULL DEFAULT 0,
+            respuesta_texto TEXT DEFAULT '',
             creado_en TEXT NOT NULL
         );
 
@@ -885,6 +947,10 @@ RUTAS_PUBLICAS = {
     "login", "static",
     # Seguimiento público de una OT por patente (sin login) — ver modulos/operativo.py.
     "operativo.seguimiento_publico", "operativo.api_seguimiento_publico",
+    # Webhook del agente de WhatsApp (Twilio nos llama sin sesión de este
+    # sistema — la única verificación posible es la firma de Twilio, ver
+    # _validar_firma_twilio).
+    "webhook_whatsapp",
 }
 
 
@@ -2485,6 +2551,137 @@ def _carga_masiva_limpiar_cache():
         CARGA_MASIVA_CACHE.pop(t, None)
 
 
+# ---------------------------------------------------------------------------
+# Escaneo de facturas por foto (IA): extrae número, fecha, proveedor y
+# líneas de una foto, y las deja en la MISMA previsualización con
+# corrección inline que usa la carga masiva por Excel (ver más abajo) — así
+# se reutiliza toda esa UI ya construida y probada, en vez de duplicarla.
+# ---------------------------------------------------------------------------
+
+def _llamar_claude_vision_factura(imagen_bytes, mime_type):
+    """Manda la foto de una factura a la API de Claude (Anthropic) y pide
+    que devuelva los datos estructurados vía tool use (mucho más confiable
+    que pedirle texto libre y tratar de parsearlo). Devuelve un dict con
+    numero_factura/fecha/proveedor_nombre/proveedor_rut/lineas, o lanza
+    RuntimeError con un mensaje explicable para mostrarle al usuario."""
+    if requests is None:
+        raise RuntimeError(
+            "Falta instalar la librería 'requests' en el servidor para poder usar el escaneo de fotos."
+        )
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError(
+            "El escaneo de facturas por foto no está configurado todavía: falta la variable de entorno "
+            "ANTHROPIC_API_KEY en el servidor. Mientras tanto puedes seguir registrando la factura a mano."
+        )
+
+    imagen_b64 = base64.b64encode(imagen_bytes).decode("ascii")
+
+    herramienta = {
+        "name": "extraer_factura",
+        "description": "Registra los datos leídos de la foto de una factura de compra de un taller mecánico.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "numero_factura": {"type": "string", "description": "Número o folio de la factura, tal como aparece impreso. Vacío si no se alcanza a leer."},
+                "fecha": {"type": "string", "description": "Fecha de la factura en formato AAAA-MM-DD. Vacío si no se ve con claridad."},
+                "proveedor_nombre": {"type": "string", "description": "Nombre o razón social del proveedor/emisor de la factura. Vacío si no se ve."},
+                "proveedor_rut": {"type": "string", "description": "RUT del proveedor si aparece impreso. Vacío si no."},
+                "lineas": {
+                    "type": "array",
+                    "description": "Cada producto/ítem que aparece en el detalle de la factura.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "descripcion": {"type": "string", "description": "Descripción del producto tal como aparece impresa en la factura."},
+                            "cantidad": {"type": "number"},
+                            "precio_unitario": {"type": "number", "description": "Precio unitario neto (sin IVA) si se puede distinguir; si no, el precio de la línea tal cual aparece."},
+                        },
+                        "required": ["descripcion", "cantidad", "precio_unitario"],
+                    },
+                },
+            },
+            "required": ["numero_factura", "lineas"],
+        },
+    }
+
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 2048,
+        "tools": [herramienta],
+        "tool_choice": {"type": "tool", "name": "extraer_factura"},
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": imagen_b64}},
+                {
+                    "type": "text",
+                    "text": (
+                        "Esta es una foto de una factura de compra de un taller mecánico. "
+                        "Extrae los datos usando la herramienta extraer_factura. Si algún dato no se "
+                        "alcanza a leer con confianza (letra borrosa, foto cortada, etc.), déjalo vacío "
+                        "en vez de inventarlo — alguien va a revisar y corregir a mano antes de guardar."
+                    ),
+                },
+            ],
+        }],
+    }
+
+    try:
+        resp = requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"No se pudo contactar al servicio de IA: {e}")
+
+    if resp.status_code >= 400:
+        detalle = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
+        raise RuntimeError(f"El servicio de IA respondió con error ({resp.status_code}): {detalle}")
+
+    data = resp.json()
+    for bloque in data.get("content", []):
+        if bloque.get("type") == "tool_use" and bloque.get("name") == "extraer_factura":
+            return bloque.get("input") or {}
+
+    raise RuntimeError("La IA no devolvió los datos en el formato esperado. Intenta con una foto más nítida.")
+
+
+def _buscar_producto_por_texto(db, texto):
+    """Intenta encontrar, entre los productos existentes, el que mejor
+    calza con una descripción de texto libre (típicamente sacada de una
+    foto de factura escaneada por IA — ahí no hay ID ni categoría/modelo
+    exactos como en la carga masiva por Excel, solo el nombre que puso el
+    proveedor). Usa comparación de texto simple (difflib), sin
+    dependencias nuevas. Umbral conservador a propósito: es mejor dejar la
+    línea sin matchear (y que la persona la busque a mano en el
+    autocompletar) que asignarle el producto equivocado sin que se note."""
+    texto_norm = (texto or "").strip().upper()
+    if not texto_norm:
+        return None
+
+    productos = db.execute("SELECT * FROM productos").fetchall()
+    mejor = None
+    mejor_score = 0.0
+    for p in productos:
+        candidato = f"{p['nombre'] or ''} {p['codigo_interno'] or ''}".strip().upper()
+        if not candidato:
+            continue
+        score = difflib.SequenceMatcher(None, texto_norm, candidato).ratio()
+        if score > mejor_score:
+            mejor_score = score
+            mejor = p
+
+    if mejor is not None and mejor_score >= 0.45:
+        return mejor
+    return None
+
+
 @app.route("/api/facturas/carga-masiva/plantilla", methods=["GET"])
 def carga_masiva_plantilla():
     """Descarga un Excel de ejemplo con las columnas esperadas, más una hoja
@@ -2849,6 +3046,155 @@ def carga_masiva_corregir_linea():
     })
 
 
+@app.route("/api/facturas/carga-masiva/corregir-proveedor", methods=["POST"])
+def carga_masiva_corregir_proveedor():
+    """Corrige el proveedor de UNA factura de la previsualización — a
+    diferencia de las líneas (producto/cantidad/precio), el proveedor no se
+    editaba inline todavía. Se necesita sobre todo para el escaneo por
+    foto, donde la IA puede leer mal el nombre del proveedor y no hay forma
+    de elegir el correcto de la lista antes de confirmar."""
+    _carga_masiva_limpiar_cache()
+    data = request.get_json(force=True, silent=True) or {}
+    token = data.get("token")
+    numero_factura = (data.get("numero_factura") or "").strip().upper()
+    proveedor_id = data.get("proveedor_id")  # None/"" = sin proveedor
+
+    entrada = CARGA_MASIVA_CACHE.get(token)
+    if not entrada:
+        return jsonify({"error": "La previsualización expiró o no es válida. Vuelve a subir el archivo o la foto."}), 400
+
+    grupo = next((g for g in entrada["facturas"] if g["numero"] == numero_factura), None)
+    if grupo is None:
+        return jsonify({"error": "No se encontró esa factura en la previsualización"}), 404
+
+    db = get_db()
+    if proveedor_id in (None, ""):
+        grupo["proveedor_id"] = None
+        grupo["proveedor_nombre"] = None
+        grupo["proveedor_nuevo"] = False
+    else:
+        try:
+            proveedor_id = int(proveedor_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Proveedor inválido"}), 400
+        proveedor = db.execute("SELECT * FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone()
+        if not proveedor:
+            return jsonify({"error": "El proveedor seleccionado no existe"}), 400
+        grupo["proveedor_id"] = proveedor["id"]
+        grupo["proveedor_nombre"] = proveedor["nombre"]
+        grupo["proveedor_nuevo"] = False
+
+    numeros_existentes = {r["numero"] for r in db.execute("SELECT numero FROM facturas").fetchall()}
+    _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes)
+
+    return jsonify({
+        "factura": grupo,
+        "resumen": _carga_masiva_resumen(entrada["facturas"]),
+    })
+
+
+@app.route("/api/facturas/escanear-foto", methods=["POST"])
+def escanear_foto_factura():
+    """Sube una foto de una factura de compra y usa IA (Claude, con
+    visión) para leer proveedor, fecha, número y líneas — para no tener que
+    tipearla a mano. El resultado se muestra en la MISMA previsualización
+    con corrección inline que usa la carga masiva por Excel, así que todo
+    lo que se pueda corregir ahí (producto, cantidad, precio, proveedor) se
+    corrige exactamente igual antes de confirmar."""
+    _carga_masiva_limpiar_cache()
+    archivo = request.files.get("foto")
+    if not archivo or not archivo.filename:
+        return jsonify({"error": "Debes adjuntar una foto de la factura"}), 400
+
+    extension = archivo.filename.rsplit(".", 1)[-1].lower() if "." in archivo.filename else ""
+    mime_por_extension = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}
+    mime_type = mime_por_extension.get(extension)
+    if not mime_type:
+        return jsonify({
+            "error": "Formato de foto no soportado. Usa JPG, PNG, WEBP o GIF. Si tu teléfono guarda las fotos "
+                     "en HEIC, toma la foto directo desde este botón (con la cámara) en vez de elegirla de tu galería."
+        }), 400
+
+    imagen_bytes = archivo.read()
+    if not imagen_bytes:
+        return jsonify({"error": "La foto llegó vacía. Intenta subirla de nuevo."}), 400
+    if len(imagen_bytes) > 10 * 1024 * 1024:
+        return jsonify({"error": "La foto es muy pesada (máximo 10 MB). Intenta con menos resolución."}), 400
+
+    try:
+        extraido = _llamar_claude_vision_factura(imagen_bytes, mime_type)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+
+    db = get_db()
+    numero = (extraido.get("numero_factura") or "").strip().upper()
+    if not numero:
+        # Sin número no hay cómo identificar la factura ni evitar duplicados,
+        # y esta previsualización (a diferencia de las líneas) todavía no
+        # permite corregir el número a mano — así que en vez de inventar un
+        # marcador y dejar la persona atrapada, se corta acá con un mensaje
+        # claro: mejor completarla con "Nueva factura" usando lo que sí se
+        # alcanzó a leer.
+        return jsonify({
+            "error": "No se pudo leer el número de factura en la foto. Prueba con una foto más nítida, "
+                     "o usa \"+ Nueva factura\" y complétala a mano con los datos que sí se alcanzan a ver.",
+        }), 422
+
+    numeros_existentes = {r["numero"] for r in db.execute("SELECT numero FROM facturas").fetchall()}
+
+    proveedores_nuevos_vistos = {}
+    prov_id, prov_nombre, es_nuevo = _carga_masiva_resolver_proveedor(
+        db, extraido.get("proveedor_nombre"), extraido.get("proveedor_rut"), proveedores_nuevos_vistos
+    )
+
+    grupo = {
+        "numero": numero,
+        "fecha": (extraido.get("fecha") or "").strip(),
+        "proveedor_nombre": prov_nombre,
+        "proveedor_rut": (extraido.get("proveedor_rut") or "").strip(),
+        "proveedor_nuevo": es_nuevo,
+        "proveedor_id": None if prov_id in (None, "NUEVO") else prov_id,
+        "lineas": [],
+        "errores": [],
+    }
+
+    for i, linea in enumerate(extraido.get("lineas") or [], start=1):
+        descripcion = (linea.get("descripcion") or "").strip()
+        producto = _buscar_producto_por_texto(db, descripcion)
+        try:
+            cantidad = int(linea.get("cantidad"))
+        except (TypeError, ValueError):
+            cantidad = None
+        try:
+            precio = float(linea.get("precio_unitario"))
+        except (TypeError, ValueError):
+            precio = None
+        grupo["lineas"].append({
+            "fila": i,
+            "producto_id": producto["id"] if producto else None,
+            "producto_nombre": row_to_dict(producto)["nombre"] if producto else None,
+            "cantidad": cantidad,
+            "precio_unitario": precio,
+            "errores": [],
+            # Texto tal como lo leyó la IA en la foto — se muestra como ayuda
+            # en la previsualización cuando no matcheó ningún producto, para
+            # que la persona sepa qué buscar en el autocompletar.
+            "texto_original": descripcion,
+        })
+
+    _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes)
+
+    token = uuid.uuid4().hex
+    CARGA_MASIVA_CACHE[token] = {"creado_en": time.time(), "usuario": usuario_actual(), "facturas": [grupo]}
+
+    return jsonify({
+        "token": token,
+        "facturas": [grupo],
+        "resumen": _carga_masiva_resumen([grupo]),
+        "origen": "foto",
+    })
+
+
 @app.route("/api/facturas/carga-masiva/confirmar", methods=["POST"])
 def carga_masiva_confirmar():
     _carga_masiva_limpiar_cache()
@@ -2909,6 +3255,384 @@ def carga_masiva_confirmar():
     CARGA_MASIVA_CACHE.pop(token, None)
 
     return jsonify({"creadas": creadas, "omitidas": omitidas, "total_creadas": len(creadas)})
+
+
+# ---------------------------------------------------------------------------
+# Agente de WhatsApp: un mecánico le escribe un mensaje de texto libre (ej.
+# "ot 4012 trabajo de reparación listo, queda preparada para prueba de
+# ruta") y el agente lo traduce en un cambio de estado de esa Orden de
+# Trabajo. Hoy la ÚNICA acción que el agente puede ejecutar es cambiar el
+# estado de una OT, a propósito: dejar que un mensaje de texto libre
+# dispare acciones más sensibles (borrar algo, tocar presupuestos o
+# precios) es un riesgo que no vale la pena todavía.
+#
+# Todavía no hay ninguna cuenta de WhatsApp Business conectada (eso lo
+# hace el dueño del taller por su cuenta, ver instrucciones de entrega) —
+# así que todo esto se probó con /api/agente/simular-mensaje (un mensaje
+# "de prueba" desde el navegador, sin pasar por WhatsApp de verdad) y con
+# la IA de Claude mockeada en los tests automatizados. El webhook real
+# (/webhook/whatsapp, pensado para Twilio) usa exactamente la misma
+# función de procesamiento por debajo, así que en cuanto se conecte una
+# cuenta real no hay que tocar nada de esta lógica.
+# ---------------------------------------------------------------------------
+
+# Transiciones de estado que el agente tiene permitido aplicar. Es
+# DELIBERADAMENTE más estricto que el PUT genérico de /api/operativo/ordenes
+# (que un humano puede usar para corregir manualmente cualquier estado): un
+# mensaje de texto interpretado por IA no debería poder saltarse pasos del
+# flujo normal del taller (ej. de "recibido" directo a "entregado"), aunque
+# el sistema en sí lo permita para un ajuste manual. Si el mecánico pide una
+# transición que no está en esta lista, el agente NO la aplica y responde
+# explicando qué transiciones sí están disponibles desde el estado actual.
+TRANSICIONES_AGENTE = {
+    "recibido": {"diagnostico"},
+    "diagnostico": {"presupuesto"},
+    "presupuesto": {"esperando_aprobacion"},
+    "esperando_aprobacion": {"reparacion", "cancelado"},
+    "reparacion": {"esperando_repuesto", "control_calidad"},
+    "esperando_repuesto": {"reparacion"},
+    "control_calidad": {"listo", "reparacion"},
+    "listo": {"entregado"},
+    "entregado": set(),
+    "cancelado": set(),
+}
+
+
+def _normalizar_telefono(valor):
+    """Deja un teléfono en un formato comparable sin importar cómo lo haya
+    mandado Twilio ('whatsapp:+56912345678') o cómo lo haya tipeado la
+    persona al registrar un mecánico ('+56 9 1234 5678', '56912345678',
+    etc.): se queda solo con dígitos y un '+' inicial opcional."""
+    valor = (valor or "").strip()
+    if valor.lower().startswith("whatsapp:"):
+        valor = valor[len("whatsapp:"):]
+    con_signo = valor.startswith("+")
+    solo_digitos = re.sub(r"\D", "", valor)
+    return ("+" if con_signo else "") + solo_digitos
+
+
+def _llamar_claude_interpretar_mensaje_agente(texto_mensaje):
+    """Usa Claude (misma integración por HTTPS directo que
+    _llamar_claude_vision_factura, más arriba) para traducir un mensaje de
+    WhatsApp de un mecánico en una acción concreta. Devuelve siempre un
+    diccionario con al menos la clave 'accion' ('cambiar_estado_ot' o
+    'no_reconocida') — nunca texto libre, gracias a tool_choice forzado."""
+    if requests is None:
+        raise RuntimeError("Falta la librería 'requests' en el servidor — no se puede contactar a la IA.")
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("No hay una clave de IA configurada (ANTHROPIC_API_KEY) en el servidor.")
+
+    estados_descripcion = "\n".join(f'- {clave}: "{ESTADOS_LABEL[clave]}"' for clave in ESTADOS_ORDEN)
+
+    herramienta = {
+        "name": "interpretar_mensaje_taller",
+        "description": "Registra la acción que pide un mensaje de WhatsApp de un mecánico de un taller mecánico.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "accion": {
+                    "type": "string",
+                    "enum": ["cambiar_estado_ot", "no_reconocida"],
+                    "description": (
+                        "'cambiar_estado_ot' SOLO si el mensaje pide explícitamente cambiar el estado de una "
+                        "Orden de Trabajo Y menciona un número de OT claro. 'no_reconocida' en cualquier otro "
+                        "caso (saludo, pregunta, mensaje ambiguo, o sin número de OT)."
+                    ),
+                },
+                "ot_id": {
+                    "type": "integer",
+                    "description": "El número de OT mencionado en el mensaje (ej. 'OT 4012' -> 4012).",
+                },
+                "estado_destino": {
+                    "type": "string",
+                    "enum": ESTADOS_ORDEN,
+                    "description": "El estado interno (de la lista dada) al que el mecánico quiere pasar la OT.",
+                },
+                "resumen": {
+                    "type": "string",
+                    "description": "Una frase corta en español que resuma qué entendiste del mensaje.",
+                },
+            },
+            "required": ["accion", "resumen"],
+        },
+    }
+
+    prompt = (
+        "Eres el traductor de mensajes de WhatsApp de mecánicos de un taller mecánico hacia el sistema de "
+        "gestión del taller. Los mecánicos escriben mensajes informales para avisar que avanzaron con una "
+        "Orden de Trabajo (OT), por ejemplo: \"ot 4012 trabajo de reparación listo, queda preparada para "
+        "prueba de ruta\".\n\n"
+        "Los estados posibles de una OT son (usa EXACTAMENTE estas claves internas en 'estado_destino'):\n"
+        f"{estados_descripcion}\n\n"
+        "Reglas:\n"
+        "1. Solo interpreta el mensaje como 'cambiar_estado_ot' si menciona explícitamente un número de OT "
+        "(ej. 'OT 4012', 'orden 4012', '#4012') Y describe con claridad a qué estado avanza.\n"
+        "2. Si el mensaje no menciona un número de OT, es ambiguo, es una pregunta, un saludo, o no tiene "
+        "que ver con cambiar el estado de una OT, usa 'no_reconocida'. Ante la duda, prefiere "
+        "'no_reconocida' — es preferible pedirle al mecánico que aclare, a adivinar y mover la OT al "
+        "estado equivocado.\n"
+        "3. Nunca inventes un número de OT que no esté en el mensaje.\n\n"
+        f'Mensaje del mecánico:\n"{texto_mensaje}"'
+    )
+
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 512,
+        "tools": [herramienta],
+        "tool_choice": {"type": "tool", "name": "interpretar_mensaje_taller"},
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    try:
+        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=60)
+    except requests.RequestException as e:
+        raise RuntimeError(f"No se pudo contactar al servicio de IA: {e}")
+
+    if resp.status_code >= 400:
+        detalle = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
+        raise RuntimeError(f"El servicio de IA respondió con error ({resp.status_code}): {detalle}")
+
+    data = resp.json()
+    for bloque in data.get("content", []):
+        if bloque.get("type") == "tool_use" and bloque.get("name") == "interpretar_mensaje_taller":
+            return bloque.get("input") or {}
+
+    raise RuntimeError("La IA no devolvió una respuesta en el formato esperado.")
+
+
+def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje):
+    """Punto único de entrada para CUALQUIER mensaje que le llegue al
+    agente, venga de /api/agente/simular-mensaje (prueba manual desde el
+    navegador) o de /webhook/whatsapp (WhatsApp real, vía Twilio). Siempre
+    deja un registro en agente_mensajes — incluso cuando no se pudo hacer
+    nada — para poder auditar después qué pasó con cada mensaje."""
+    telefono = _normalizar_telefono(telefono_crudo)
+    texto_mensaje = (texto_mensaje or "").strip()
+    ts = now_iso()
+
+    def _registrar(mecanico_nombre, accion, ot_id, estado_anterior, estado_nuevo, exito, respuesta_texto):
+        db.execute(
+            """
+            INSERT INTO agente_mensajes
+                (telefono, mecanico_nombre, mensaje_texto, accion, ot_id,
+                 estado_anterior, estado_nuevo, exito, respuesta_texto, creado_en)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (telefono, mecanico_nombre, texto_mensaje, accion, ot_id,
+             estado_anterior, estado_nuevo, 1 if exito else 0, respuesta_texto, ts),
+        )
+        db.commit()
+        return {
+            "telefono": telefono,
+            "mecanico_nombre": mecanico_nombre,
+            "accion": accion,
+            "ot_id": ot_id,
+            "estado_anterior": estado_anterior,
+            "estado_nuevo": estado_nuevo,
+            "exito": exito,
+            "respuesta_texto": respuesta_texto,
+        }
+
+    if not texto_mensaje:
+        return _registrar("", "error", None, "", "", False, "El mensaje llegó vacío.")
+
+    mecanico = db.execute(
+        "SELECT * FROM agente_mecanicos WHERE telefono = ? AND activo = 1", (telefono,)
+    ).fetchone()
+    if not mecanico:
+        return _registrar(
+            "", "no_autorizado", None, "", "", False,
+            "Este número no está registrado como mecánico en el sistema. Pide que te agreguen desde "
+            "\"Agente IA\" en Logística.",
+        )
+
+    try:
+        interpretado = _llamar_claude_interpretar_mensaje_agente(texto_mensaje)
+    except RuntimeError as e:
+        return _registrar(mecanico["nombre"], "error", None, "", "", False, f"No pude leer tu mensaje: {e}")
+
+    accion = interpretado.get("accion")
+    if accion != "cambiar_estado_ot":
+        motivo = interpretado.get("resumen") or "no reconocí una acción concreta en tu mensaje"
+        return _registrar(
+            mecanico["nombre"], "no_reconocida", None, "", "", False,
+            f"No pude identificar un cambio de estado claro ({motivo}). Si querías mover una OT, indica el "
+            f"número (ej. \"OT 4012\") y a qué estado pasa.",
+        )
+
+    ot_id = interpretado.get("ot_id")
+    estado_destino = interpretado.get("estado_destino")
+    if not isinstance(ot_id, int) or estado_destino not in ESTADOS_ORDEN:
+        return _registrar(
+            mecanico["nombre"], "error", ot_id if isinstance(ot_id, int) else None, "", "", False,
+            "No pude identificar con claridad el número de OT o el estado de destino en tu mensaje.",
+        )
+
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (ot_id,)).fetchone()
+    if orden is None:
+        return _registrar(mecanico["nombre"], "error", ot_id, "", "", False, f"No encontré ninguna OT con el número {ot_id}.")
+
+    estado_actual = orden["estado"]
+    permitidos = TRANSICIONES_AGENTE.get(estado_actual, set())
+    if estado_destino not in permitidos:
+        if not permitidos:
+            detalle = f'la OT #{ot_id} está en estado "{ESTADOS_LABEL[estado_actual]}", que ya no admite cambios por este medio.'
+        else:
+            opciones = ", ".join(f'"{ESTADOS_LABEL[e]}"' for e in sorted(permitidos))
+            detalle = (
+                f'la OT #{ot_id} está en estado "{ESTADOS_LABEL[estado_actual]}" — desde ahí solo se puede '
+                f"pasar a: {opciones}."
+            )
+        return _registrar(
+            mecanico["nombre"], "transicion_no_permitida", ot_id, estado_actual, estado_destino, False,
+            f"No pude aplicar ese cambio: {detalle} Si de verdad corresponde, hazlo manualmente desde el sistema.",
+        )
+
+    actualizada, error = _actualizar_estado_orden_por_agente(db, ot_id, estado_destino)
+    if error:
+        return _registrar(mecanico["nombre"], "error", ot_id, estado_actual, estado_destino, False, error)
+
+    respuesta = (
+        f'Listo — la OT #{ot_id} pasó de "{ESTADOS_LABEL[estado_actual]}" a "{ESTADOS_LABEL[estado_destino]}". ✅'
+    )
+    return _registrar(mecanico["nombre"], "cambio_estado_ot", ot_id, estado_actual, estado_destino, True, respuesta)
+
+
+def _validar_firma_twilio(req):
+    """Valida que un request al webhook realmente venga de Twilio, según
+    su algoritmo documentado: HMAC-SHA1 del AUTH_TOKEN sobre la URL
+    completa + cada parámetro del POST (ordenado alfabéticamente),
+    codificado en base64, comparado contra el header X-Twilio-Signature.
+    Solo se llama si TWILIO_AUTH_TOKEN está configurado (ver más arriba);
+    no se ha podido probar contra tráfico real de Twilio en este entorno
+    de desarrollo (no hay cuenta conectada), así que conviene revisarla
+    con cuidado apenas se conecte una cuenta real."""
+    firma_recibida = req.headers.get("X-Twilio-Signature", "")
+    if not firma_recibida:
+        return False
+    base = req.url
+    for clave in sorted(req.form.keys()):
+        base += clave + req.form[clave]
+    firma_calculada = base64.b64encode(
+        hmac.new(TWILIO_AUTH_TOKEN.encode("utf-8"), base.encode("utf-8"), hashlib.sha1).digest()
+    ).decode("utf-8")
+    return hmac.compare_digest(firma_calculada, firma_recibida)
+
+
+@app.route("/api/agente/mecanicos", methods=["GET"])
+def listar_mecanicos_agente():
+    db = get_db()
+    filas = db.execute("SELECT * FROM agente_mecanicos ORDER BY nombre").fetchall()
+    return jsonify([dict(r) for r in filas])
+
+
+@app.route("/api/agente/mecanicos", methods=["POST"])
+def crear_mecanico_agente():
+    db = get_db()
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = (data.get("nombre") or "").strip()
+    telefono = _normalizar_telefono(data.get("telefono"))
+    if not nombre:
+        return jsonify({"error": "Falta el nombre del mecánico"}), 400
+    if len(telefono.lstrip("+")) < 8:
+        return jsonify({"error": "El teléfono no parece válido. Inclúyelo con código de país, ej: +56912345678"}), 400
+    existente = db.execute("SELECT id FROM agente_mecanicos WHERE telefono = ?", (telefono,)).fetchone()
+    if existente:
+        return jsonify({"error": "Ya hay un mecánico registrado con ese teléfono"}), 400
+    cur = db.execute(
+        "INSERT INTO agente_mecanicos (nombre, telefono, activo, creado_en) VALUES (?, ?, 1, ?)",
+        (nombre.upper(), telefono, now_iso()),
+    )
+    db.commit()
+    fila = db.execute("SELECT * FROM agente_mecanicos WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(fila)), 201
+
+
+@app.route("/api/agente/mecanicos/<int:mecanico_id>", methods=["PUT"])
+def editar_mecanico_agente(mecanico_id):
+    db = get_db()
+    fila = db.execute("SELECT * FROM agente_mecanicos WHERE id = ?", (mecanico_id,)).fetchone()
+    if not fila:
+        return jsonify({"error": "No existe ese mecánico"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    activo = fila["activo"]
+    if "activo" in data:
+        activo = 1 if data.get("activo") else 0
+    db.execute("UPDATE agente_mecanicos SET activo = ? WHERE id = ?", (activo, mecanico_id))
+    db.commit()
+    actualizado = db.execute("SELECT * FROM agente_mecanicos WHERE id = ?", (mecanico_id,)).fetchone()
+    return jsonify(dict(actualizado))
+
+
+@app.route("/api/agente/mecanicos/<int:mecanico_id>", methods=["DELETE"])
+def eliminar_mecanico_agente(mecanico_id):
+    db = get_db()
+    db.execute("DELETE FROM agente_mecanicos WHERE id = ?", (mecanico_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/agente/simular-mensaje", methods=["POST"])
+def simular_mensaje_agente():
+    """Deja probar el agente completo (IA + validación de transición +
+    cambio de estado real) desde el navegador, sin necesitar una cuenta de
+    WhatsApp conectada — útil tanto para probar hoy como para hacer una
+    demo. Ejecuta EXACTAMENTE la misma lógica que usaría un mensaje real
+    de WhatsApp (_agente_procesar_mensaje), así que un mensaje simulado
+    puede mover una OT de verdad — se avisa en la interfaz."""
+    db = get_db()
+    data = request.get_json(force=True, silent=True) or {}
+    telefono = (data.get("telefono") or "").strip()
+    texto = (data.get("texto") or "").strip()
+    if not telefono or not texto:
+        return jsonify({"error": "Faltan el teléfono y/o el mensaje"}), 400
+    resultado = _agente_procesar_mensaje(db, telefono, texto)
+    return jsonify(resultado)
+
+
+@app.route("/api/agente/mensajes", methods=["GET"])
+def listar_mensajes_agente():
+    db = get_db()
+    filas = db.execute("SELECT * FROM agente_mensajes ORDER BY id DESC LIMIT 100").fetchall()
+    return jsonify([dict(r) for r in filas])
+
+
+@app.route("/webhook/whatsapp", methods=["POST"])
+def webhook_whatsapp():
+    """Punto de entrada para mensajes REALES de WhatsApp, pensado para el
+    formato que manda Twilio (form-encoded, con 'From' y 'Body') — Twilio
+    es la forma más simple de conectar WhatsApp Business sin pasar por la
+    verificación directa de Meta. Como acá no hay ninguna cuenta real
+    conectada todavía, este endpoint no se ha podido probar con tráfico
+    real, solo con /api/agente/simular-mensaje (misma función por debajo)
+    y con tests automatizados. Nunca debería devolver un error 500:
+    cualquier excepción se atrapa acá mismo y se responde con un TwiML de
+    error genérico, para que WhatsApp no quede reintentando en loop.
+
+    Es una ruta pública (ver RUTAS_PUBLICAS) porque Twilio no manda ninguna
+    sesión de este sistema — la única verificación posible es la firma de
+    Twilio (ver _validar_firma_twilio), y solo si se configuró
+    TWILIO_AUTH_TOKEN."""
+    def _twiml(texto, status=200):
+        cuerpo = f"<?xml version='1.0' encoding='UTF-8'?><Response><Message>{html.escape(texto)}</Message></Response>"
+        return cuerpo, status, {"Content-Type": "text/xml; charset=utf-8"}
+
+    try:
+        if TWILIO_AUTH_TOKEN and not _validar_firma_twilio(request):
+            return _twiml("No se pudo verificar el origen del mensaje.", 403)
+
+        telefono = request.form.get("From", "")
+        texto = request.form.get("Body", "")
+        db = get_db()
+        resultado = _agente_procesar_mensaje(db, telefono, texto)
+        return _twiml(resultado.get("respuesta_texto") or "No pude procesar tu mensaje.")
+    except Exception:
+        logging.exception("Error en /webhook/whatsapp")
+        return _twiml("Hubo un error interno procesando tu mensaje. Avisa en el taller.")
 
 
 # ---------------------------------------------------------------------------
@@ -4660,7 +5384,13 @@ def reportes_resumen():
 from modulos.finanzas import bp as bp_finanzas  # noqa: E402
 app.register_blueprint(bp_finanzas)
 
-from modulos.operativo import bp as bp_operativo, init_operativo_db  # noqa: E402
+from modulos.operativo import (  # noqa: E402
+    bp as bp_operativo,
+    init_operativo_db,
+    ESTADOS_ORDEN,
+    ESTADOS_LABEL,
+    _actualizar_estado_orden_por_agente,
+)
 app.register_blueprint(bp_operativo)
 
 

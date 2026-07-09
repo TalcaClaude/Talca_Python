@@ -18,6 +18,8 @@ const state = {
   proveedorActivoId: null,
   sesion: { username: null, nombre: null },
   usuarios: [],
+  agenteMecanicos: [],
+  agenteMensajes: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -104,6 +106,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-planificacion").style.display = vista === "planificacion" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
+    document.getElementById("vista-agente_ia").style.display = vista === "agente_ia" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
       dashboard: "Dashboard",
@@ -117,6 +120,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       planificacion: "Planificación de Compras",
       reportes: "Reportes y Exportaciones",
       usuarios: "Usuarios",
+      agente_ia: "Agente IA (WhatsApp)",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "dashboard") cargarDashboard();
@@ -129,6 +133,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "planificacion") cargarPlanificacion();
     if (vista === "reportes") cargarResumenReportes();
     if (vista === "usuarios") cargarUsuarios();
+    if (vista === "agente_ia") cargarAgenteIA();
   });
 });
 
@@ -1792,6 +1797,8 @@ function cmMostrarPaso(paso) {
 
 document.getElementById("btn-carga-masiva-facturas").addEventListener("click", () => {
   document.getElementById("cm-archivo").value = "";
+  document.getElementById("cm-titulo").textContent = "Carga masiva de facturas (Excel)";
+  document.getElementById("btn-cm-volver").textContent = "Volver a subir otro archivo";
   state.cargaMasivaToken = null;
   state.cargaMasivaFacturas = [];
   cmMostrarPaso("subir");
@@ -1800,10 +1807,34 @@ document.getElementById("btn-carga-masiva-facturas").addEventListener("click", (
 
 document.getElementById("btn-cm-volver").addEventListener("click", () => {
   document.getElementById("cm-archivo").value = "";
+  document.getElementById("cm-titulo").textContent = "Carga masiva de facturas (Excel)";
   state.cargaMasivaToken = null;
   state.cargaMasivaFacturas = [];
   cmMostrarPaso("subir");
 });
+
+// Datos que necesita la previsualización con corrección inline, sin
+// importar si viene de un Excel o de una foto: la lista de productos (para
+// el autocompletar) y la de proveedores (para el selector de proveedor).
+async function asegurarDatosParaPreviewCargaMasiva() {
+  if (!state.productosParaFactura || state.productosParaFactura.length === 0) {
+    try {
+      const dataProductos = await api("/api/productos");
+      state.productosParaFactura = dataProductos.productos;
+    } catch (e) {
+      // Si falla, igual se puede ver la previsualización; solo no se podrá
+      // corregir el producto inline (quedaría el mensaje de error nomás).
+    }
+  }
+  if (!state.proveedores || state.proveedores.length === 0) {
+    try {
+      const dataProveedores = await api("/api/proveedores");
+      state.proveedores = dataProveedores.proveedores;
+    } catch (e) {
+      // Igual, no es bloqueante — solo no se podrá corregir el proveedor inline.
+    }
+  }
+}
 
 document.getElementById("btn-cm-previsualizar").addEventListener("click", async () => {
   const archivo = document.getElementById("cm-archivo").files[0];
@@ -1819,21 +1850,44 @@ document.getElementById("btn-cm-previsualizar").addEventListener("click", async 
     if (!res.ok) throw new Error(data.error || "No se pudo leer el archivo");
     state.cargaMasivaToken = data.token;
     state.cargaMasivaFacturas = data.facturas;
-    // Se necesita la lista de productos para el autocompletar de corrección
-    // inline (si un producto no calzó, se busca y elige de esta misma lista).
-    if (!state.productosParaFactura || state.productosParaFactura.length === 0) {
-      try {
-        const dataProductos = await api("/api/productos");
-        state.productosParaFactura = dataProductos.productos;
-      } catch (e) {
-        // Si falla, igual se puede ver la previsualización; solo no se podrá
-        // corregir el producto inline (quedaría el mensaje de error nomás).
-      }
-    }
+    await asegurarDatosParaPreviewCargaMasiva();
     renderPreviewCargaMasiva(data.resumen);
     cmMostrarPaso("preview");
   } catch (e) {
     toast(e.message, true);
+  }
+});
+
+// ---- Escaneo de factura por foto (IA) ----
+
+document.getElementById("btn-escanear-foto-factura").addEventListener("click", () => {
+  document.getElementById("input-escanear-foto-factura").value = "";
+  document.getElementById("input-escanear-foto-factura").click();
+});
+
+document.getElementById("input-escanear-foto-factura").addEventListener("change", async (e) => {
+  const archivo = e.target.files[0];
+  if (!archivo) return;
+
+  toast("Leyendo la foto con IA — puede tardar unos segundos…");
+  const formData = new FormData();
+  formData.append("foto", archivo);
+  try {
+    const res = await fetch("/api/facturas/escanear-foto", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "No se pudo leer la foto");
+
+    state.cargaMasivaToken = data.token;
+    state.cargaMasivaFacturas = data.facturas;
+    await asegurarDatosParaPreviewCargaMasiva();
+
+    document.getElementById("cm-titulo").textContent = "Factura escaneada — revisa antes de confirmar";
+    document.getElementById("btn-cm-volver").textContent = "Escanear otra foto";
+    renderPreviewCargaMasiva(data.resumen);
+    cmMostrarPaso("preview");
+    abrirModal("modal-carga-masiva");
+  } catch (e2) {
+    toast(e2.message, true);
   }
 });
 
@@ -1850,9 +1904,6 @@ function renderPreviewCargaMasiva(resumen) {
   document.getElementById("cm-lista-facturas").innerHTML = state.cargaMasivaFacturas.map(f => {
     const claseEstado = f.valida ? "badge-urgencia badge-urgencia--proximo" : "badge-urgencia badge-urgencia--critico";
     const textoEstado = f.valida ? "Lista para cargar" : "Con errores — se omitirá";
-    const proveedorTxt = f.proveedor_nombre
-      ? `${escapeHtml(f.proveedor_nombre)}${f.proveedor_nuevo ? " (se creará)" : ""}`
-      : "Sin proveedor";
     const lineasHtml = f.lineas.map(l => {
       if (!l.errores.length) {
         return `
@@ -1863,9 +1914,13 @@ function renderPreviewCargaMasiva(resumen) {
           <td></td>
         </tr>`;
       }
+      const pistaTexto = !l.producto_id && l.texto_original
+        ? `<p class="subtexto" style="margin:0 0 4px">Detectado en la foto: "${escapeHtml(l.texto_original)}"</p>`
+        : "";
       return `
       <tr class="fila-con-error" data-cm-linea="${escapeHtml(f.numero)}|${l.fila}">
         <td class="campo-autocomplete">
+          ${pistaTexto}
           <input type="text" class="cm-linea-producto-buscar" placeholder="Busca por nombre, código o N°…" autocomplete="off"
                  value="${l.producto_nombre ? escapeHtml(l.producto_nombre) : ""}">
           <input type="hidden" class="cm-linea-producto-id" value="${l.producto_id ?? ""}">
@@ -1879,10 +1934,23 @@ function renderPreviewCargaMasiva(resumen) {
         </td>
       </tr>`;
     }).join("");
+    const opcionesProveedor = (state.proveedores || [])
+      .map(p => `<option value="${p.id}" ${p.id === f.proveedor_id ? "selected" : ""}>${escapeHtml(p.nombre)}</option>`)
+      .join("");
+    const selectorProveedor = `
+      <div class="campo" style="max-width:320px; margin:6px 0">
+        <label style="font-size:12px">Proveedor${f.proveedor_nuevo ? " (detectado — revisa que sea el correcto)" : ""}</label>
+        <select class="cm-factura-proveedor-id" data-cm-factura="${escapeHtml(f.numero)}">
+          <option value="">Sin proveedor</option>
+          ${f.proveedor_nuevo && f.proveedor_nombre ? `<option value="__nuevo__" selected>Crear nuevo: "${escapeHtml(f.proveedor_nombre)}"</option>` : ""}
+          ${opcionesProveedor}
+        </select>
+      </div>`;
     return `
       <div class="dash-panel" style="margin-bottom:14px">
         <h3 class="dash-titulo">${escapeHtml(f.numero)} <span class="${claseEstado}">${textoEstado}</span></h3>
-        <p class="ayuda-inline">Proveedor: ${proveedorTxt}${f.fecha ? ` · Fecha: ${escapeHtml(f.fecha)}` : ""}</p>
+        ${f.fecha ? `<p class="ayuda-inline">Fecha: ${escapeHtml(f.fecha)}</p>` : ""}
+        ${selectorProveedor}
         ${f.errores.length && !f.lineas.some(l => l.errores.length) ? `<p class="ayuda-inline ayuda-inline--bloqueado">${f.errores.map(escapeHtml).join("<br>")}</p>` : ""}
         <table class="tabla">
           <thead><tr><th>Producto</th><th class="num">Cantidad</th><th class="num">Precio unit.</th><th>Errores</th></tr></thead>
@@ -1895,6 +1963,32 @@ function renderPreviewCargaMasiva(resumen) {
   document.querySelectorAll("#cm-lista-facturas .cm-linea-guardar").forEach(btn => {
     btn.addEventListener("click", () => guardarCorreccionLineaCargaMasiva(btn.closest("tr")));
   });
+  document.querySelectorAll("#cm-lista-facturas .cm-factura-proveedor-id").forEach(select => {
+    select.addEventListener("change", () => guardarCorreccionProveedorCargaMasiva(select));
+  });
+}
+
+async function guardarCorreccionProveedorCargaMasiva(select) {
+  const numeroFactura = select.dataset.cmFactura;
+  const valor = select.value;
+  if (valor === "__nuevo__") return; // ya es el estado actual, no hay nada que corregir
+
+  try {
+    const data = await api("/api/facturas/carga-masiva/corregir-proveedor", {
+      method: "POST",
+      body: JSON.stringify({
+        token: state.cargaMasivaToken,
+        numero_factura: numeroFactura,
+        proveedor_id: valor || null,
+      }),
+    });
+    const idx = state.cargaMasivaFacturas.findIndex(f => f.numero === data.factura.numero);
+    if (idx !== -1) state.cargaMasivaFacturas[idx] = data.factura;
+    renderPreviewCargaMasiva(data.resumen);
+    toast("Proveedor corregido");
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 function activarAutocompletesCargaMasiva() {
@@ -2678,6 +2772,155 @@ document.getElementById("btn-eliminar-usuario").addEventListener("click", async 
     await cargarUsuarios();
   } catch (e) {
     toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Agente IA (WhatsApp): mecánicos registrados, simulador de mensajes y
+// auditoría de lo que el agente hizo (o no pudo hacer) con cada mensaje.
+// ---------------------------------------------------------------------------
+
+async function cargarAgenteIA() {
+  await Promise.all([cargarMecanicosAgente(), cargarMensajesAgente()]);
+}
+
+async function cargarMecanicosAgente() {
+  const tbody = document.getElementById("tbody-mecanicos-agente");
+  try {
+    state.agenteMecanicos = await api("/api/agente/mecanicos");
+    renderTablaMecanicosAgente();
+    renderSelectMecanicosAgente();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Error al cargar mecánicos: ${e.message}</td></tr>`;
+  }
+}
+
+function renderTablaMecanicosAgente() {
+  const tbody = document.getElementById("tbody-mecanicos-agente");
+  if (!state.agenteMecanicos.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Todavía no hay mecánicos registrados.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = state.agenteMecanicos.map(m => `
+    <tr data-id="${m.id}">
+      <td>${escapeHtml(m.nombre)}</td>
+      <td class="mono">${escapeHtml(m.telefono)}</td>
+      <td><span class="badge-urgencia ${m.activo ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${m.activo ? "Activo" : "Inactivo"}</span></td>
+      <td>
+        <button type="button" class="btn btn-secundario btn-chico" data-toggle-mecanico="${m.id}">${m.activo ? "Desactivar" : "Activar"}</button>
+        <button type="button" class="btn btn-danger btn-chico" data-eliminar-mecanico="${m.id}">Eliminar</button>
+      </td>
+    </tr>
+  `).join("");
+
+  tbody.querySelectorAll("[data-toggle-mecanico]").forEach(btn => {
+    btn.addEventListener("click", () => alternarActivoMecanicoAgente(parseInt(btn.dataset.toggleMecanico, 10)));
+  });
+  tbody.querySelectorAll("[data-eliminar-mecanico]").forEach(btn => {
+    btn.addEventListener("click", () => eliminarMecanicoAgente(parseInt(btn.dataset.eliminarMecanico, 10)));
+  });
+}
+
+function renderSelectMecanicosAgente() {
+  const select = document.getElementById("sim-agente-telefono");
+  const valorPrevio = select.value;
+  select.innerHTML = `<option value="">Selecciona un mecánico…</option>` + state.agenteMecanicos
+    .filter(m => m.activo)
+    .map(m => `<option value="${escapeHtml(m.telefono)}">${escapeHtml(m.nombre)} (${escapeHtml(m.telefono)})</option>`)
+    .join("");
+  select.value = valorPrevio;
+}
+
+async function alternarActivoMecanicoAgente(id) {
+  const m = state.agenteMecanicos.find(x => x.id === id);
+  if (!m) return;
+  try {
+    await api(`/api/agente/mecanicos/${id}`, { method: "PUT", body: JSON.stringify({ activo: !m.activo }) });
+    toast(m.activo ? "Mecánico desactivado" : "Mecánico activado");
+    await cargarMecanicosAgente();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function eliminarMecanicoAgente(id) {
+  const m = state.agenteMecanicos.find(x => x.id === id);
+  if (!m) return;
+  if (!confirm(`¿Eliminar al mecánico "${m.nombre}"? Ya no va a poder usar el agente.`)) return;
+  try {
+    await api(`/api/agente/mecanicos/${id}`, { method: "DELETE" });
+    toast("Mecánico eliminado");
+    await cargarMecanicosAgente();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-nuevo-mecanico-agente").addEventListener("click", () => {
+  document.getElementById("form-mecanico-agente").reset();
+  abrirModal("modal-mecanico-agente");
+});
+
+document.getElementById("form-mecanico-agente").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const payload = {
+    nombre: document.getElementById("mec-nombre").value,
+    telefono: document.getElementById("mec-telefono").value,
+  };
+  try {
+    await api("/api/agente/mecanicos", { method: "POST", body: JSON.stringify(payload) });
+    toast("Mecánico creado");
+    cerrarModal("modal-mecanico-agente");
+    await cargarMecanicosAgente();
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function cargarMensajesAgente() {
+  const tbody = document.getElementById("tbody-mensajes-agente");
+  try {
+    state.agenteMensajes = await api("/api/agente/mensajes");
+    renderTablaMensajesAgente();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
+  }
+}
+
+function renderTablaMensajesAgente() {
+  const tbody = document.getElementById("tbody-mensajes-agente");
+  if (!state.agenteMensajes.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Todavía no ha llegado ningún mensaje.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = state.agenteMensajes.map(m => `
+    <tr>
+      <td class="mono">${fmtFecha(m.creado_en)}</td>
+      <td>${escapeHtml(m.mecanico_nombre) || "—"}</td>
+      <td>${escapeHtml(m.mensaje_texto)}</td>
+      <td><span class="badge-urgencia ${m.exito ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${escapeHtml(m.respuesta_texto)}</span></td>
+    </tr>
+  `).join("");
+}
+
+document.getElementById("form-simular-agente").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const telefono = document.getElementById("sim-agente-telefono").value;
+  const texto = document.getElementById("sim-agente-texto").value;
+  const resultadoDiv = document.getElementById("sim-agente-resultado");
+  resultadoDiv.style.display = "block";
+  resultadoDiv.innerHTML = `<p class="ayuda-inline">Enviando…</p>`;
+  try {
+    const data = await api("/api/agente/simular-mensaje", {
+      method: "POST",
+      body: JSON.stringify({ telefono, texto }),
+    });
+    const clase = data.exito ? "ayuda-inline" : "ayuda-inline ayuda-inline--bloqueado";
+    resultadoDiv.innerHTML = `<p class="${clase}">${escapeHtml(data.respuesta_texto)}</p>`;
+    document.getElementById("sim-agente-texto").value = "";
+    await cargarMensajesAgente();
+  } catch (e2) {
+    resultadoDiv.innerHTML = `<p class="ayuda-inline ayuda-inline--bloqueado">${escapeHtml(e2.message)}</p>`;
   }
 });
 

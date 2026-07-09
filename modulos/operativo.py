@@ -1112,6 +1112,39 @@ def crear_orden():
     return jsonify(_orden_dict(db, nueva)), 201
 
 
+def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
+    """Aplica un cambio de estado a una orden de trabajo — pensado para el
+    agente de WhatsApp (ver app.py: _agente_procesar_mensaje). A diferencia
+    de editar_orden() (el PUT genérico que usa el tablero de tarjetas y
+    puede tocar ~15 campos a la vez), esta función SOLO toca
+    estado/fecha_entrega_real: un mensaje de texto libre interpretado por
+    IA no debería poder modificar diagnóstico, presupuesto, ítems, ni
+    ningún otro campo, aunque el mensaje mencione algo de eso de pasada.
+
+    Devuelve (orden_dict, None) si funcionó, o (None, mensaje_de_error) si
+    no — nunca lanza una excepción, para que el llamador (que además tiene
+    que dejar un registro de auditoría) controle el flujo sin try/except."""
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if row is None:
+        return None, f"No existe ninguna orden de trabajo con el número {orden_id}."
+    if estado_nuevo not in ESTADOS_ORDEN:
+        return None, f"Estado inválido: {estado_nuevo}"
+
+    fecha_entrega_real = row["fecha_entrega_real"]
+    if estado_nuevo == "entregado" and not fecha_entrega_real:
+        # Mismo criterio que editar_orden(): se completa sola la primera
+        # vez que la orden pasa a "entregado".
+        fecha_entrega_real = now_iso()
+
+    db.execute(
+        "UPDATE ordenes_trabajo SET estado = ?, fecha_entrega_real = ?, actualizado_en = ? WHERE id = ?",
+        (estado_nuevo, fecha_entrega_real, now_iso(), orden_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    return _orden_dict(db, actualizada), None
+
+
 @bp.route("/api/operativo/ordenes/<int:orden_id>", methods=["PUT"])
 def editar_orden(orden_id):
     db = get_db()

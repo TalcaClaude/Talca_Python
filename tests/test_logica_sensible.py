@@ -23,6 +23,7 @@ Importante: la base de datos de prueba es un archivo temporal separado
 app.py y se borra al terminar todos los tests del archivo.
 """
 
+import io
 import math
 import os
 import statistics
@@ -30,6 +31,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 # ---- Antes de importar app.py hay que apuntar DB_PATH a un archivo
 # temporal: app.py llama a init_db() apenas se importa el módulo, así que
@@ -818,6 +820,414 @@ class TestOperativoFase35(unittest.TestCase):
         item = resp.get_json()
         self.assertTrue(item["usuario"])
         self.assertIsNotNone(item["creado_en"])
+
+
+class TestBuscarProductoPorTexto(unittest.TestCase):
+    """_buscar_producto_por_texto es el matcher difuso que intenta hacer
+    calzar la descripción libre que la IA lee en una foto de factura con un
+    producto ya existente. Si el umbral se relaja demasiado, se le puede
+    asignar a una línea el producto equivocado sin que nadie lo note — así
+    que estos tests fijan el comportamiento esperado en los tres casos que
+    importan: calce exacto, calce parecido-pero-no-igual, y texto que no
+    tiene nada que ver (debe devolver None, nunca "adivinar")."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    # Nota: la base de prueba viene con el catálogo real de ~1050 productos
+    # (repuestos de caja de cambios) precargado desde init_db(), y cada
+    # método de este test corre sobre la MISMA base (no se resetea entre
+    # tests). Por eso cada producto de prueba se crea con un nombre único
+    # (con el nombre del propio test method como marca), para no chocar ni
+    # con el catálogo real ni con productos creados por otro test.
+
+    def test_calce_exacto(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            nombre = "FILTRO DE AIRE BOSCH FA-220 TESTCALCEEXACTO"
+            producto_id = _crear_producto(db, nombre, stock_disponible=10)
+            producto = taller_app._buscar_producto_por_texto(db, nombre)
+            self.assertIsNotNone(producto)
+            self.assertEqual(producto["id"], producto_id)
+
+    def test_calce_parecido_por_encima_del_umbral(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            # Mismo producto, descrito de forma parecida a como lo pondría
+            # un proveedor en su factura (sin la marca, con alguna palabra
+            # de más) — debería seguir encontrando el mismo producto.
+            producto_id = _crear_producto(db, "FILTRO AIRE TESTCALCEPARECIDO BOSCH FA-221", stock_disponible=10)
+            producto = taller_app._buscar_producto_por_texto(db, "FILTRO AIRE BOSCH FA-221")
+            self.assertIsNotNone(producto)
+            self.assertEqual(producto["id"], producto_id)
+
+    def test_texto_no_relacionado_no_matchea(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            # Deliberadamente sin relación con nada del catálogo (ni con lo
+            # que crean otros tests) — tiene que devolver None en vez de
+            # "adivinar" el más parecido, aunque exista algún producto con
+            # una similitud casual baja.
+            producto = taller_app._buscar_producto_por_texto(db, "ZZZ-NOPE-9999 TEXTO INVENTADO SIN RELACION")
+            self.assertIsNone(producto)
+
+    def test_texto_vacio_no_matchea(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            self.assertIsNone(taller_app._buscar_producto_por_texto(db, ""))
+            self.assertIsNone(taller_app._buscar_producto_por_texto(db, None))
+
+
+class TestEscanearFotoFactura(unittest.TestCase):
+    """El endpoint /api/facturas/escanear-foto no llama a la IA real en los
+    tests (no hay ANTHROPIC_API_KEY en este entorno): se reemplaza
+    _llamar_claude_vision_factura por una respuesta enlatada, igual a la
+    que devolvería Claude Vision, y se verifica que todo el resto del
+    camino (armar el "grupo", matchear producto, guardar en el cache de
+    carga masiva, y poder confirmar la factura desde ahí) funcione tal
+    cual funciona para la carga masiva por Excel — es el mismo motivo por
+    el que ambas comparten código."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _subir_foto(self, filename="factura.jpg", contenido=b"contenido-falso-de-una-foto"):
+        return self.client.post(
+            "/api/facturas/escanear-foto",
+            data={"foto": (io.BytesIO(contenido), filename)},
+            content_type="multipart/form-data",
+        )
+
+    def test_extension_no_soportada_es_rechazada(self):
+        resp = self._subir_foto(filename="factura.heic")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("HEIC", resp.get_json()["error"] + "no soportado")
+
+    def test_sin_numero_de_factura_devuelve_422_con_mensaje_claro(self):
+        respuesta_ia = {
+            "numero_factura": "",
+            "fecha": "2026-07-08",
+            "proveedor_nombre": "Proveedor Foto Test",
+            "proveedor_rut": "",
+            "lineas": [],
+        }
+        with patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self._subir_foto()
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("número de factura", resp.get_json()["error"])
+
+    def test_foto_reconocida_arma_preview_matcheando_producto_existente(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            producto_id = _crear_producto(db, "PASTILLAS DE FRENO DELANTERAS TRW TESTFOTO1", stock_disponible=5)
+        respuesta_ia = {
+            "numero_factura": "FOTO-001",
+            "fecha": "2026-07-08",
+            "proveedor_nombre": "Proveedor Foto Test",
+            "proveedor_rut": "",
+            "lineas": [
+                {"descripcion": "PASTILLAS DE FRENO DELANTERAS TRW TESTFOTO1", "cantidad": 2, "precio_unitario": 15000},
+                {"descripcion": "ZZZ-NOPE-9999 TEXTO INVENTADO SIN RELACION", "cantidad": 1, "precio_unitario": 5000},
+            ],
+        }
+        with patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self._subir_foto()
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["origen"], "foto")
+        self.assertTrue(data["token"])
+
+        grupo = data["facturas"][0]
+        self.assertEqual(grupo["numero"], "FOTO-001")
+        self.assertTrue(grupo["proveedor_nuevo"])
+        # Los proveedores "nuevos" (los que aún no existen en el sistema)
+        # se guardan tal como los leyó la IA, sin forzar mayúsculas — solo
+        # se normalizan a mayúsculas los proveedores YA existentes en la
+        # base (ver _carga_masiva_resolver_proveedor).
+        self.assertEqual(grupo["proveedor_nombre"], "Proveedor Foto Test")
+
+        linea_matcheada, linea_sin_matchear = grupo["lineas"]
+        self.assertEqual(linea_matcheada["producto_id"], producto_id)
+        self.assertIsNone(linea_sin_matchear["producto_id"])
+        # La línea sin match debe traer el texto original de la IA, para
+        # mostrarlo como ayuda en la previsualización.
+        self.assertEqual(linea_sin_matchear["texto_original"], "ZZZ-NOPE-9999 TEXTO INVENTADO SIN RELACION")
+
+        # La factura completa no puede estar "valida" todavía: tiene una
+        # línea sin producto asignado.
+        self.assertFalse(grupo["valida"])
+
+    def test_corregir_linea_y_proveedor_deja_la_factura_lista_para_confirmar(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            producto_1_id = _crear_producto(db, "PASTILLAS DE FRENO DELANTERAS TRW TESTFOTO2", stock_disponible=5)
+            # Producto DISTINTO para la línea 2: si se corrigiera al mismo
+            # producto que la línea 1, la validación de "producto duplicado
+            # en la misma factura" (correcta y ya probada en carga masiva
+            # por Excel) bloquearía la confirmación — acá se quiere probar
+            # el camino feliz, así que cada línea va a un producto distinto.
+            producto_2_id = _crear_producto(db, "FILTRO DE ACEITE TESTFOTO2B", stock_disponible=8)
+            cur = db.execute(
+                "INSERT INTO proveedores (nombre, rut, creado_en) VALUES (?, ?, ?)",
+                ("Proveedor Foto Ya Existe", "", taller_app.now_iso()),
+            )
+            db.commit()
+            proveedor_existente_id = cur.lastrowid
+        respuesta_ia = {
+            "numero_factura": "FOTO-002",
+            "fecha": "2026-07-08",
+            "proveedor_nombre": "Proveedor Foto Corrige",  # no calza con el existente -> llega como "nuevo"
+            "proveedor_rut": "",
+            "lineas": [
+                {"descripcion": "PASTILLAS DE FRENO DELANTERAS TRW TESTFOTO2", "cantidad": 2, "precio_unitario": 15000},
+                {"descripcion": "QQQ-XYZ-7777 OTRO TEXTO SIN RELACION ALGUNA", "cantidad": 1, "precio_unitario": 3000},
+            ],
+        }
+        with patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self._subir_foto()
+        data = resp.get_json()
+        token = data["token"]
+        self.assertTrue(data["facturas"][0]["proveedor_nuevo"])  # confirma la premisa del test
+
+        # Corregir la línea sin match asignándole un producto existente
+        # (simula lo que haría la persona a través del autocompletar).
+        resp_linea = self.client.post(
+            "/api/facturas/carga-masiva/corregir-linea",
+            json={
+                "token": token,
+                "numero_factura": "FOTO-002",
+                "fila": 2,
+                "producto_id": producto_2_id,
+                "cantidad": 1,
+                "precio_unitario": 3000,
+            },
+        )
+        self.assertEqual(resp_linea.status_code, 200, resp_linea.get_data(as_text=True))
+        self.assertEqual(resp_linea.get_json()["factura"]["errores"], [])
+
+        # Corregir el proveedor detectado (nuevo) por uno que ya existe en
+        # el sistema — este es el endpoint agregado específicamente para la
+        # previsualización por foto (POST .../corregir-proveedor).
+        resp_prov = self.client.post(
+            "/api/facturas/carga-masiva/corregir-proveedor",
+            json={"token": token, "numero_factura": "FOTO-002", "proveedor_id": proveedor_existente_id},
+        )
+        self.assertEqual(resp_prov.status_code, 200, resp_prov.get_data(as_text=True))
+        factura_corregida = resp_prov.get_json()["factura"]
+        self.assertEqual(factura_corregida["proveedor_id"], proveedor_existente_id)
+        self.assertEqual(factura_corregida["proveedor_nombre"], "Proveedor Foto Ya Existe")
+        self.assertFalse(factura_corregida["proveedor_nuevo"])
+        self.assertTrue(factura_corregida["valida"])
+
+        resp_confirmar = self.client.post("/api/facturas/carga-masiva/confirmar", json={"token": token})
+        self.assertEqual(resp_confirmar.status_code, 200, resp_confirmar.get_data(as_text=True))
+        confirmadas = resp_confirmar.get_json()
+        self.assertIn("FOTO-002", confirmadas.get("creadas", []))
+
+        facturas = self.client.get("/api/facturas").get_json()["facturas"]
+        factura_creada = next(f for f in facturas if f["numero"] == "FOTO-002")
+        # No debe haberse creado un proveedor nuevo — tiene que quedar
+        # asociada al proveedor existente que se eligió en la corrección.
+        self.assertEqual(factura_creada["proveedor_id"], proveedor_existente_id)
+
+
+class TestAgenteWhatsApp(unittest.TestCase):
+    """El agente de WhatsApp traduce un mensaje de texto libre de un
+    mecánico en un cambio de estado de una Orden de Trabajo (OT). Como
+    todavía no hay ninguna cuenta de WhatsApp conectada, estos tests usan
+    /api/agente/simular-mensaje (mismo código que usaría un mensaje real,
+    ver app.py: _agente_procesar_mensaje) y reemplazan la llamada a la IA
+    por una respuesta enlatada. Lo más importante que cubren: que un
+    teléfono no registrado NO puede mover nada, y que el agente respeta su
+    propia lista de transiciones permitidas (más estricta que el PUT
+    genérico que usa el tablero) aunque la IA le pida saltarse pasos."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre="Cliente Agente Test"):
+        resp = self.client.post("/api/operativo/clientes", json={"nombre": nombre})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden(self, cliente_id):
+        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _forzar_estado(self, orden_id, estado):
+        resp = self.client.put(f"/api/operativo/ordenes/{orden_id}", json={"estado": estado})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+    def _registrar_mecanico(self, nombre, telefono):
+        resp = self.client.post("/api/agente/mecanicos", json={"nombre": nombre, "telefono": telefono})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _simular(self, telefono, texto):
+        return self.client.post("/api/agente/simular-mensaje", json={"telefono": telefono, "texto": texto})
+
+    def test_normalizar_telefono_uniforma_formatos_distintos(self):
+        self.assertEqual(taller_app._normalizar_telefono("whatsapp:+569 1234 5678"), "+56912345678")
+        self.assertEqual(taller_app._normalizar_telefono("+56 9 1234 5678"), "+56912345678")
+        self.assertEqual(taller_app._normalizar_telefono("56912345678"), "56912345678")
+
+    def test_telefono_no_registrado_no_puede_mover_nada(self):
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        # Ni siquiera se llega a llamar a la IA: el teléfono no está
+        # registrado como mecánico, así que se corta antes.
+        resp = self._simular("+56900000001", f"ot {orden['id']} lista para diagnostico")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["accion"], "no_autorizado")
+        self.assertFalse(data["exito"])
+
+        # La orden no debe haberse tocado.
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "recibido")
+
+    def test_mecanico_inactivo_no_puede_usar_el_agente(self):
+        mecanico = self._registrar_mecanico("Juan Mecánico", "+56911111111")
+        resp_desactivar = self.client.put(f"/api/agente/mecanicos/{mecanico['id']}", json={"activo": False})
+        self.assertEqual(resp_desactivar.status_code, 200)
+
+        resp = self._simular("+56911111111", "hola")
+        self.assertEqual(resp.get_json()["accion"], "no_autorizado")
+
+    def test_cambio_de_estado_valido_se_aplica_de_verdad(self):
+        self._registrar_mecanico("Pedro Mecánico", "+56922222222")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])  # nace en "recibido"
+
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": orden["id"],
+            "estado_destino": "diagnostico",
+            "resumen": "El mecánico avisa que ya revisó el equipo y pasa a diagnóstico",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56922222222", f"ot {orden['id']} ya la revise, pasa a diagnostico")
+
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["accion"], "cambio_estado_ot")
+        self.assertEqual(data["estado_anterior"], "recibido")
+        self.assertEqual(data["estado_nuevo"], "diagnostico")
+        self.assertIn(str(orden["id"]), data["respuesta_texto"])
+
+        # El cambio tiene que verse reflejado de verdad en la orden.
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "diagnostico")
+
+    def test_transicion_no_permitida_por_el_agente_no_se_aplica(self):
+        self._registrar_mecanico("Ana Mecánica", "+56933333333")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        # "recibido" no tiene permitido saltar directo a "entregado" según
+        # TRANSICIONES_AGENTE, aunque el PUT genérico técnicamente lo
+        # permitiría — es justo la protección extra que agrega el agente.
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": orden["id"],
+            "estado_destino": "entregado",
+            "resumen": "El mecánico dice que ya se entregó",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56933333333", f"ot {orden['id']} ya se la lleva el cliente")
+
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "transicion_no_permitida")
+
+        # La orden tiene que seguir exactamente donde estaba.
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "recibido")
+
+    def test_mensaje_no_reconocido_no_toca_ninguna_orden(self):
+        self._registrar_mecanico("Luis Mecánico", "+56944444444")
+        respuesta_ia = {"accion": "no_reconocida", "resumen": "Es solo un saludo, no pide nada"}
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56944444444", "hola buenos días")
+
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "no_reconocida")
+        self.assertIsNone(data["ot_id"])
+
+    def test_transicion_valida_desde_estado_intermedio(self):
+        self._registrar_mecanico("Sofía Mecánica", "+56955555555")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "reparacion")
+
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": orden["id"],
+            "estado_destino": "control_calidad",
+            "resumen": "El mecánico terminó la reparación y pide prueba de ruta",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular(
+                "+56955555555", f"ot {orden['id']} trabajo de reparación listo, queda preparada para prueba de ruta"
+            )
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["estado_nuevo"], "control_calidad")
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "control_calidad")
+
+    def test_ot_inexistente_responde_error_sin_romper(self):
+        self._registrar_mecanico("Tomás Mecánico", "+56966666666")
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": 999999,
+            "estado_destino": "diagnostico",
+            "resumen": "Pide mover una OT que no existe",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56966666666", "ot 999999 lista para diagnostico")
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "error")
+
+    def test_registrar_mecanico_valida_telefono_y_evita_duplicados(self):
+        resp_sin_nombre = self.client.post("/api/agente/mecanicos", json={"telefono": "+56977777777"})
+        self.assertEqual(resp_sin_nombre.status_code, 400)
+
+        resp_telefono_invalido = self.client.post(
+            "/api/agente/mecanicos", json={"nombre": "Alguien", "telefono": "123"}
+        )
+        self.assertEqual(resp_telefono_invalido.status_code, 400)
+
+        self._registrar_mecanico("Duplicado Uno", "+56988888888")
+        resp_duplicado = self.client.post(
+            "/api/agente/mecanicos", json={"nombre": "Duplicado Dos", "telefono": "+56988888888"}
+        )
+        self.assertEqual(resp_duplicado.status_code, 400)
+
+    def test_todos_los_mensajes_quedan_en_la_auditoria(self):
+        self._registrar_mecanico("Carla Mecánica", "+56999999999")
+        respuesta_ia = {"accion": "no_reconocida", "resumen": "saludo"}
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            self._simular("+56999999999", "hola")
+
+        mensajes = self.client.get("/api/agente/mensajes").get_json()
+        self.assertTrue(any(m["telefono"] == "+56999999999" for m in mensajes))
 
 
 if __name__ == "__main__":

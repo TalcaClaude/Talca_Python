@@ -18,8 +18,6 @@ const state = {
   proveedorActivoId: null,
   sesion: { username: null, nombre: null },
   usuarios: [],
-  agenteMecanicos: [],
-  agenteMensajes: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -106,7 +104,6 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-planificacion").style.display = vista === "planificacion" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
-    document.getElementById("vista-agente_ia").style.display = vista === "agente_ia" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
     const titulos = {
       dashboard: "Dashboard",
@@ -120,7 +117,6 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       planificacion: "Planificación de Compras",
       reportes: "Reportes y Exportaciones",
       usuarios: "Usuarios",
-      agente_ia: "Agente IA (WhatsApp)",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "dashboard") cargarDashboard();
@@ -133,7 +129,6 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "planificacion") cargarPlanificacion();
     if (vista === "reportes") cargarResumenReportes();
     if (vista === "usuarios") cargarUsuarios();
-    if (vista === "agente_ia") cargarAgenteIA();
   });
 });
 
@@ -2772,155 +2767,6 @@ document.getElementById("btn-eliminar-usuario").addEventListener("click", async 
     await cargarUsuarios();
   } catch (e) {
     toast(e.message, true);
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Agente IA (WhatsApp): mecánicos registrados, simulador de mensajes y
-// auditoría de lo que el agente hizo (o no pudo hacer) con cada mensaje.
-// ---------------------------------------------------------------------------
-
-async function cargarAgenteIA() {
-  await Promise.all([cargarMecanicosAgente(), cargarMensajesAgente()]);
-}
-
-async function cargarMecanicosAgente() {
-  const tbody = document.getElementById("tbody-mecanicos-agente");
-  try {
-    state.agenteMecanicos = await api("/api/agente/mecanicos");
-    renderTablaMecanicosAgente();
-    renderSelectMecanicosAgente();
-  } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Error al cargar mecánicos: ${e.message}</td></tr>`;
-  }
-}
-
-function renderTablaMecanicosAgente() {
-  const tbody = document.getElementById("tbody-mecanicos-agente");
-  if (!state.agenteMecanicos.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Todavía no hay mecánicos registrados.</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = state.agenteMecanicos.map(m => `
-    <tr data-id="${m.id}">
-      <td>${escapeHtml(m.nombre)}</td>
-      <td class="mono">${escapeHtml(m.telefono)}</td>
-      <td><span class="badge-urgencia ${m.activo ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${m.activo ? "Activo" : "Inactivo"}</span></td>
-      <td>
-        <button type="button" class="btn btn-secundario btn-chico" data-toggle-mecanico="${m.id}">${m.activo ? "Desactivar" : "Activar"}</button>
-        <button type="button" class="btn btn-danger btn-chico" data-eliminar-mecanico="${m.id}">Eliminar</button>
-      </td>
-    </tr>
-  `).join("");
-
-  tbody.querySelectorAll("[data-toggle-mecanico]").forEach(btn => {
-    btn.addEventListener("click", () => alternarActivoMecanicoAgente(parseInt(btn.dataset.toggleMecanico, 10)));
-  });
-  tbody.querySelectorAll("[data-eliminar-mecanico]").forEach(btn => {
-    btn.addEventListener("click", () => eliminarMecanicoAgente(parseInt(btn.dataset.eliminarMecanico, 10)));
-  });
-}
-
-function renderSelectMecanicosAgente() {
-  const select = document.getElementById("sim-agente-telefono");
-  const valorPrevio = select.value;
-  select.innerHTML = `<option value="">Selecciona un mecánico…</option>` + state.agenteMecanicos
-    .filter(m => m.activo)
-    .map(m => `<option value="${escapeHtml(m.telefono)}">${escapeHtml(m.nombre)} (${escapeHtml(m.telefono)})</option>`)
-    .join("");
-  select.value = valorPrevio;
-}
-
-async function alternarActivoMecanicoAgente(id) {
-  const m = state.agenteMecanicos.find(x => x.id === id);
-  if (!m) return;
-  try {
-    await api(`/api/agente/mecanicos/${id}`, { method: "PUT", body: JSON.stringify({ activo: !m.activo }) });
-    toast(m.activo ? "Mecánico desactivado" : "Mecánico activado");
-    await cargarMecanicosAgente();
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-async function eliminarMecanicoAgente(id) {
-  const m = state.agenteMecanicos.find(x => x.id === id);
-  if (!m) return;
-  if (!confirm(`¿Eliminar al mecánico "${m.nombre}"? Ya no va a poder usar el agente.`)) return;
-  try {
-    await api(`/api/agente/mecanicos/${id}`, { method: "DELETE" });
-    toast("Mecánico eliminado");
-    await cargarMecanicosAgente();
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-document.getElementById("btn-nuevo-mecanico-agente").addEventListener("click", () => {
-  document.getElementById("form-mecanico-agente").reset();
-  abrirModal("modal-mecanico-agente");
-});
-
-document.getElementById("form-mecanico-agente").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const payload = {
-    nombre: document.getElementById("mec-nombre").value,
-    telefono: document.getElementById("mec-telefono").value,
-  };
-  try {
-    await api("/api/agente/mecanicos", { method: "POST", body: JSON.stringify(payload) });
-    toast("Mecánico creado");
-    cerrarModal("modal-mecanico-agente");
-    await cargarMecanicosAgente();
-  } catch (e2) {
-    toast(e2.message, true);
-  }
-});
-
-async function cargarMensajesAgente() {
-  const tbody = document.getElementById("tbody-mensajes-agente");
-  try {
-    state.agenteMensajes = await api("/api/agente/mensajes");
-    renderTablaMensajesAgente();
-  } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
-  }
-}
-
-function renderTablaMensajesAgente() {
-  const tbody = document.getElementById("tbody-mensajes-agente");
-  if (!state.agenteMensajes.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Todavía no ha llegado ningún mensaje.</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = state.agenteMensajes.map(m => `
-    <tr>
-      <td class="mono">${fmtFecha(m.creado_en)}</td>
-      <td>${escapeHtml(m.mecanico_nombre) || "—"}</td>
-      <td>${escapeHtml(m.mensaje_texto)}</td>
-      <td><span class="badge-urgencia ${m.exito ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${escapeHtml(m.respuesta_texto)}</span></td>
-    </tr>
-  `).join("");
-}
-
-document.getElementById("form-simular-agente").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const telefono = document.getElementById("sim-agente-telefono").value;
-  const texto = document.getElementById("sim-agente-texto").value;
-  const resultadoDiv = document.getElementById("sim-agente-resultado");
-  resultadoDiv.style.display = "block";
-  resultadoDiv.innerHTML = `<p class="ayuda-inline">Enviando…</p>`;
-  try {
-    const data = await api("/api/agente/simular-mensaje", {
-      method: "POST",
-      body: JSON.stringify({ telefono, texto }),
-    });
-    const clase = data.exito ? "ayuda-inline" : "ayuda-inline ayuda-inline--bloqueado";
-    resultadoDiv.innerHTML = `<p class="${clase}">${escapeHtml(data.respuesta_texto)}</p>`;
-    document.getElementById("sim-agente-texto").value = "";
-    await cargarMensajesAgente();
-  } catch (e2) {
-    resultadoDiv.innerHTML = `<p class="ayuda-inline ayuda-inline--bloqueado">${escapeHtml(e2.message)}</p>`;
   }
 });
 

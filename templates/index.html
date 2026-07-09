@@ -41,7 +41,6 @@
     <button class="tab" data-vista="planificacion">Planificación</button>
     <button class="tab" data-vista="reportes">Reportes</button>
     <button class="tab" data-vista="usuarios">Usuarios</button>
-    <button class="tab" data-vista="agente_ia">Agente IA</button>
   </nav>
 
   <section class="vista" id="vista-dashboard">
@@ -267,76 +266,6 @@
         </tr>
       </thead>
       <tbody id="tbody-usuarios">
-        <tr><td colspan="4" class="vacio">Cargando…</td></tr>
-      </tbody>
-    </table>
-  </section>
-
-  </section>
-
-  <section class="vista" id="vista-agente_ia" style="display:none">
-
-  <section class="toolbar">
-    <p class="bodega-intro">
-      Agente de WhatsApp: un mecánico registrado abajo puede escribir un mensaje (ej. "OT 4012 lista para
-      diagnóstico") y el sistema mueve el estado de la orden solo. Todavía no hay una cuenta de WhatsApp
-      conectada — mientras tanto, prueba el agente completo con el simulador de mensajes.
-    </p>
-    <button class="btn btn-primary" id="btn-nuevo-mecanico-agente">+ Nuevo mecánico</button>
-  </section>
-
-  <section class="tabla-wrap">
-    <table class="tabla">
-      <thead>
-        <tr>
-          <th>Nombre</th>
-          <th>Teléfono</th>
-          <th>Estado</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody id="tbody-mecanicos-agente">
-        <tr><td colspan="4" class="vacio">Cargando…</td></tr>
-      </tbody>
-    </table>
-  </section>
-
-  <section class="dash-panel" style="margin-top:18px">
-    <h3 class="dash-titulo">Simulador de mensajes</h3>
-    <p class="ayuda-inline">
-      Simula un mensaje de WhatsApp sin necesitar una cuenta conectada — usa exactamente la misma lógica que
-      usaría un mensaje real, así que si el mensaje pide un cambio de estado válido, la orden se mueve de
-      verdad.
-    </p>
-    <form id="form-simular-agente">
-      <div class="campo">
-        <label>Mecánico (por su teléfono registrado) *</label>
-        <select id="sim-agente-telefono" required>
-          <option value="">Selecciona un mecánico…</option>
-        </select>
-      </div>
-      <div class="campo">
-        <label>Mensaje *</label>
-        <textarea id="sim-agente-texto" rows="3" required placeholder='Ej: "ot 4012 trabajo de reparación listo, queda preparada para prueba de ruta"'></textarea>
-      </div>
-      <div class="modal-actions" style="justify-content:flex-start">
-        <button type="submit" class="btn btn-primary">Enviar mensaje de prueba</button>
-      </div>
-    </form>
-    <div id="sim-agente-resultado" style="display:none; margin-top:10px"></div>
-  </section>
-
-  <section class="tabla-wrap" style="margin-top:18px">
-    <table class="tabla">
-      <thead>
-        <tr>
-          <th>Fecha</th>
-          <th>Mecánico</th>
-          <th>Mensaje</th>
-          <th>Resultado</th>
-        </tr>
-      </thead>
-      <tbody id="tbody-mensajes-agente">
         <tr><td colspan="4" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
@@ -1146,31 +1075,6 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-usuario">Cancelar</button>
         <button type="submit" class="btn btn-primary">Guardar usuario</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Modal: Nuevo mecánico (agente de WhatsApp) -->
-<div class="modal-overlay" id="modal-mecanico-agente">
-  <div class="modal">
-    <div class="modal-head">
-      <h2>Nuevo mecánico</h2>
-      <button class="modal-close" data-close="modal-mecanico-agente">&times;</button>
-    </div>
-    <form id="form-mecanico-agente">
-      <div class="campo">
-        <label>Nombre *</label>
-        <input type="text" id="mec-nombre" required placeholder="Ej: Juan Pérez" autocomplete="off">
-      </div>
-      <div class="campo">
-        <label>Teléfono de WhatsApp *</label>
-        <input type="text" id="mec-telefono" required placeholder="Ej: +56912345678" autocomplete="off">
-        <p class="ayuda-inline">Con código de país (ej. +56 para Chile). Es el número desde el que va a escribirle al agente.</p>
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="btn btn-secundario" data-close="modal-mecanico-agente">Cancelar</button>
-        <button type="submit" class="btn btn-primary">Guardar mecánico</button>
       </div>
     </form>
   </div>

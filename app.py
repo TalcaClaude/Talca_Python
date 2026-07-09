@@ -227,6 +227,36 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
 
+# TWILIO_ACCOUNT_SID sí es obligatorio para las notas de VOZ (no para
+# texto): para descargar el audio de un mensaje de voz hay que pedírselo a
+# la URL que manda Twilio (MediaUrl0), y esa descarga requiere autenticarse
+# con Basic Auth usando el Account SID como usuario y el Auth Token como
+# contraseña — es la única llamada que este sistema le hace a la API de
+# Twilio (para todo lo demás, incluido responder mensajes, alcanza con el
+# TwiML que devuelve el webhook). Sin este SID, un mensaje de voz que
+# llegue simplemente no se puede transcribir y el agente responde
+# explicando eso — el resto del sistema sigue funcionando igual.
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
+
+# ---------------------------------------------------------------------------
+# Transcripción de notas de voz de WhatsApp: la API de Claude no acepta
+# audio como entrada (solo texto/imágenes), así que las notas de voz se
+# transcriben primero con la API de OpenAI (Whisper) y el TEXTO resultante
+# se manda al mismo traductor de Claude que ya procesa los mensajes
+# escritos (_llamar_claude_interpretar_mensaje_agente) — no hace falta
+# duplicar ninguna lógica de interpretación. whisper-1 es el modelo con
+# mayor tolerancia de formatos de los que ofrece OpenAI; WhatsApp manda las
+# notas de voz en ogg/opus, que no aparece en la lista de formatos
+# "oficialmente" documentados, pero en la práctica la API igual las acepta
+# — si algún día dejara de aceptarlas, el error se atrapa y el mecánico
+# recibe un mensaje claro en vez de que el sistema se caiga.
+# ---------------------------------------------------------------------------
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_TRANSCRIBE_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
+OPENAI_TRANSCRIBE_URL = "https://api.openai.com/v1/audio/transcriptions"
+OPENAI_AUDIO_MAX_BYTES = 25 * 1024 * 1024  # límite documentado de OpenAI
+
 
 def _correo_transporte_configurado():
     """True si hay algún método de envío de correo configurado (Resend o
@@ -845,6 +875,14 @@ def init_db():
     )
     db.commit()
 
+    # ---- Migración 12: el agente de WhatsApp ahora también acepta notas de
+    # voz (además de texto). Se guarda de qué tipo era cada mensaje para
+    # poder mostrarlo en el historial/auditoría del agente.
+    columnas_agente_mensajes = [c[1] for c in db.execute("PRAGMA table_info(agente_mensajes)").fetchall()]
+    if "origen" not in columnas_agente_mensajes:
+        db.execute("ALTER TABLE agente_mensajes ADD COLUMN origen TEXT NOT NULL DEFAULT 'texto'")
+        db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -1010,10 +1048,10 @@ def logout():
 #
 # La página de inicio ("/") es el selector de módulos: se ve justo después
 # de iniciar sesión, y desde ahí se entra a cada módulo (Logística,
-# Operativo, y los que se agreguen — Finanzas, RRHH). Cada módulo tiene su
-# propia plantilla y su propio archivo JS (ver static/js/), pero todos
-# comparten el mismo login y la misma sesión — no hay que autenticarse de
-# nuevo al cambiar de módulo.
+# Operativo, Finanzas, Agente IA, y los que se agreguen — ej. RRHH). Cada
+# módulo tiene su propia plantilla y su propio archivo JS (ver static/js/),
+# pero todos comparten el mismo login y la misma sesión — no hay que
+# autenticarse de nuevo al cambiar de módulo.
 
 @app.route("/")
 def inicio():
@@ -1033,6 +1071,11 @@ def vista_operativo():
 @app.route("/finanzas")
 def vista_finanzas():
     return render_template("finanzas.html")
+
+
+@app.route("/agente-ia")
+def vista_agente_ia():
+    return render_template("agente_ia.html")
 
 
 @app.route("/api/sesion", methods=["GET"])
@@ -3275,27 +3318,10 @@ def carga_masiva_confirmar():
 # función de procesamiento por debajo, así que en cuanto se conecte una
 # cuenta real no hay que tocar nada de esta lógica.
 # ---------------------------------------------------------------------------
-
-# Transiciones de estado que el agente tiene permitido aplicar. Es
-# DELIBERADAMENTE más estricto que el PUT genérico de /api/operativo/ordenes
-# (que un humano puede usar para corregir manualmente cualquier estado): un
-# mensaje de texto interpretado por IA no debería poder saltarse pasos del
-# flujo normal del taller (ej. de "recibido" directo a "entregado"), aunque
-# el sistema en sí lo permita para un ajuste manual. Si el mecánico pide una
-# transición que no está en esta lista, el agente NO la aplica y responde
-# explicando qué transiciones sí están disponibles desde el estado actual.
-TRANSICIONES_AGENTE = {
-    "recibido": {"diagnostico"},
-    "diagnostico": {"presupuesto"},
-    "presupuesto": {"esperando_aprobacion"},
-    "esperando_aprobacion": {"reparacion", "cancelado"},
-    "reparacion": {"esperando_repuesto", "control_calidad"},
-    "esperando_repuesto": {"reparacion"},
-    "control_calidad": {"listo", "reparacion"},
-    "listo": {"entregado"},
-    "entregado": set(),
-    "cancelado": set(),
-}
+# TRANSICIONES_AGENTE (qué cambios de estado puede aplicar el agente) se
+# define más abajo, después de importar ESTADOS_ORDEN/ESTADOS_CERRADOS desde
+# modulos.operativo (ver el import al final del archivo) — acá solo queda la
+# función que la usa.
 
 
 def _normalizar_telefono(valor):
@@ -3311,18 +3337,66 @@ def _normalizar_telefono(valor):
     return ("+" if con_signo else "") + solo_digitos
 
 
-def _llamar_claude_interpretar_mensaje_agente(texto_mensaje):
+def _agente_listar_ordenes_abiertas(db):
+    """Lista liviana (sin ítems/pagos/costos, a diferencia de _orden_dict)
+    de las OT que todavía admiten cambios de estado — cliente + datos del
+    vehículo incluidos — para dárselas de contexto a la IA y que pueda
+    identificar una OT por descripción ('la Haval H6 de Matías Vega')
+    cuando el mecánico no escribe el número. Como el sistema ya impide que
+    un mismo vehículo tenga dos OT abiertas a la vez (ver
+    test_no_se_puede_crear_2_ot_abiertas_para_el_mismo_equipo), identificar
+    por vehículo es tan confiable como por número mientras no haya
+    ambigüedad entre clientes/vehículos distintos con nombres parecidos."""
+    placeholders = ", ".join("?" for _ in ESTADOS_CERRADOS)
+    filas = db.execute(
+        f"""
+        SELECT o.id AS ot_id, o.estado,
+               c.nombre AS cliente_nombre,
+               e.marca, e.modelo, e.color, e.identificador AS patente
+        FROM ordenes_trabajo o
+        JOIN clientes c ON c.id = o.cliente_id
+        LEFT JOIN equipos e ON e.id = o.equipo_id
+        WHERE o.estado NOT IN ({placeholders})
+        ORDER BY o.id
+        """,
+        list(ESTADOS_CERRADOS),
+    ).fetchall()
+    return [dict(f) for f in filas]
+
+
+def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
     """Usa Claude (misma integración por HTTPS directo que
     _llamar_claude_vision_factura, más arriba) para traducir un mensaje de
     WhatsApp de un mecánico en una acción concreta. Devuelve siempre un
     diccionario con al menos la clave 'accion' ('cambiar_estado_ot' o
-    'no_reconocida') — nunca texto libre, gracias a tool_choice forzado."""
+    'no_reconocida') — nunca texto libre, gracias a tool_choice forzado.
+
+    'ordenes_abiertas' (ver _agente_listar_ordenes_abiertas) se le pasa a
+    la IA como contexto para que pueda identificar la OT por descripción
+    del vehículo o del cliente (ej. "la Haval H6 de Matías Vega quedó
+    esperando repuestos") y no solo cuando el mecánico escribe el número
+    explícito — así el mensaje puede ser bastante más natural."""
     if requests is None:
         raise RuntimeError("Falta la librería 'requests' en el servidor — no se puede contactar a la IA.")
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("No hay una clave de IA configurada (ANTHROPIC_API_KEY) en el servidor.")
 
     estados_descripcion = "\n".join(f'- {clave}: "{ESTADOS_LABEL[clave]}"' for clave in ESTADOS_ORDEN)
+
+    if ordenes_abiertas:
+        lineas_ordenes = []
+        for o in ordenes_abiertas:
+            vehiculo = " ".join(
+                p for p in [o.get("marca"), o.get("modelo"), o.get("color")] if p
+            ) or "(sin vehículo registrado)"
+            patente = f", patente {o['patente']}" if o.get("patente") else ""
+            lineas_ordenes.append(
+                f"- OT {o['ot_id']}: cliente \"{o['cliente_nombre']}\", vehículo {vehiculo}{patente}, "
+                f"estado actual: \"{ESTADOS_LABEL.get(o['estado'], o['estado'])}\""
+            )
+        ordenes_descripcion = "\n".join(lineas_ordenes)
+    else:
+        ordenes_descripcion = "(no hay ninguna OT abierta en este momento)"
 
     herramienta = {
         "name": "interpretar_mensaje_taller",
@@ -3361,17 +3435,27 @@ def _llamar_claude_interpretar_mensaje_agente(texto_mensaje):
         "Eres el traductor de mensajes de WhatsApp de mecánicos de un taller mecánico hacia el sistema de "
         "gestión del taller. Los mecánicos escriben mensajes informales para avisar que avanzaron con una "
         "Orden de Trabajo (OT), por ejemplo: \"ot 4012 trabajo de reparación listo, queda preparada para "
-        "prueba de ruta\".\n\n"
+        "prueba de ruta\", o sin decir el número: \"la haval h6 de matias vega esta esperando repuestos\", "
+        "o \"audi a3 azul en pruebas de ruta\".\n\n"
         "Los estados posibles de una OT son (usa EXACTAMENTE estas claves internas en 'estado_destino'):\n"
         f"{estados_descripcion}\n\n"
-        "Reglas:\n"
-        "1. Solo interpreta el mensaje como 'cambiar_estado_ot' si menciona explícitamente un número de OT "
-        "(ej. 'OT 4012', 'orden 4012', '#4012') Y describe con claridad a qué estado avanza.\n"
-        "2. Si el mensaje no menciona un número de OT, es ambiguo, es una pregunta, un saludo, o no tiene "
-        "que ver con cambiar el estado de una OT, usa 'no_reconocida'. Ante la duda, prefiere "
-        "'no_reconocida' — es preferible pedirle al mecánico que aclare, a adivinar y mover la OT al "
-        "estado equivocado.\n"
-        "3. Nunca inventes un número de OT que no esté en el mensaje.\n\n"
+        "Estas son TODAS las OT actualmente abiertas en el sistema (la única fuente válida de números de "
+        "OT, clientes y vehículos — no existe ninguna otra):\n"
+        f"{ordenes_descripcion}\n\n"
+        "Reglas para identificar DE CUÁL OT habla el mensaje:\n"
+        "1. Si el mensaje menciona un número de OT explícito (ej. 'OT 4012', 'orden 4012', '#4012'), usa ese "
+        "número — tiene que aparecer tal cual en la lista de arriba.\n"
+        "2. Si el mensaje NO menciona un número, pero describe un vehículo y/o un cliente (marca, modelo, "
+        "color, patente, nombre) que calza CLARAMENTE con UNA SOLA de las OT de la lista, usa el número de "
+        "esa OT — no hace falta que el mecánico diga el número si la descripción ya identifica una sola OT "
+        "sin ambigüedad. Los apellidos/nombres pueden venir con errores de tipeo o sin tildes.\n"
+        "3. Si la descripción del vehículo/cliente podría calzar con MÁS DE UNA OT de la lista, o no calza "
+        "con ninguna, usa 'no_reconocida' y en 'resumen' explica la ambigüedad o que no encontraste esa OT "
+        "— nunca elijas una al azar entre varias posibles.\n"
+        "4. Si el mensaje es ambiguo, una pregunta, un saludo, o no tiene que ver con cambiar el estado de "
+        "una OT, usa 'no_reconocida'. Ante la duda, prefiere 'no_reconocida' — es preferible pedirle al "
+        "mecánico que aclare, a adivinar y mover la OT equivocada.\n"
+        "5. Nunca inventes un número de OT que no esté en la lista de arriba.\n\n"
         f'Mensaje del mecánico:\n"{texto_mensaje}"'
     )
 
@@ -3404,12 +3488,72 @@ def _llamar_claude_interpretar_mensaje_agente(texto_mensaje):
     raise RuntimeError("La IA no devolvió una respuesta en el formato esperado.")
 
 
-def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje):
+def _transcribir_audio_whatsapp(audio_bytes, mime_type):
+    """Transcribe una nota de voz a texto usando la API de OpenAI (ver
+    bloque de configuración más arriba). Devuelve el texto transcrito, o
+    lanza RuntimeError con un mensaje en español listo para mostrarle al
+    mecánico si algo falla (sin OPENAI_API_KEY, audio muy pesado, formato
+    rechazado, error de red, etc.) — nunca deja pasar una excepción cruda."""
+    if requests is None:
+        raise RuntimeError("Falta la librería 'requests' en el servidor — no se puede transcribir audio.")
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "No hay una clave de transcripción configurada (OPENAI_API_KEY) en el servidor — todavía no "
+            "puedo entender notas de voz, escribe el mensaje en texto mientras tanto."
+        )
+    if not audio_bytes:
+        raise RuntimeError("La nota de voz llegó vacía.")
+    if len(audio_bytes) > OPENAI_AUDIO_MAX_BYTES:
+        raise RuntimeError("La nota de voz es demasiado pesada (máximo 25 MB).")
+
+    extension = "ogg"
+    if mime_type:
+        subtipo = mime_type.split("/")[-1].split(";")[0].strip().lower()
+        if subtipo:
+            extension = subtipo
+    nombre_archivo = f"nota_voz.{extension}"
+
+    try:
+        resp = requests.post(
+            OPENAI_TRANSCRIBE_URL,
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            files={"file": (nombre_archivo, audio_bytes, mime_type or "audio/ogg")},
+            data={"model": OPENAI_TRANSCRIBE_MODEL},
+            timeout=90,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"No se pudo contactar al servicio de transcripción: {e}")
+
+    if resp.status_code >= 400:
+        detalle = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
+        raise RuntimeError(
+            f"El servicio de transcripción respondió con error ({resp.status_code}): {detalle}. Puede que el "
+            "formato de la nota de voz no sea compatible — intenta escribir el mensaje en texto."
+        )
+
+    try:
+        data = resp.json()
+    except ValueError:
+        raise RuntimeError("El servicio de transcripción devolvió una respuesta inesperada.")
+
+    texto = (data.get("text") or "").strip()
+    if not texto:
+        raise RuntimeError("No se pudo entender nada en la nota de voz — intenta de nuevo o escribe el mensaje.")
+    return texto
+
+
+def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto"):
     """Punto único de entrada para CUALQUIER mensaje que le llegue al
-    agente, venga de /api/agente/simular-mensaje (prueba manual desde el
-    navegador) o de /webhook/whatsapp (WhatsApp real, vía Twilio). Siempre
-    deja un registro en agente_mensajes — incluso cuando no se pudo hacer
-    nada — para poder auditar después qué pasó con cada mensaje."""
+    agente, venga de /api/agente/simular-mensaje o /api/agente/simular-
+    mensaje-voz (pruebas manuales desde el navegador) o de
+    /webhook/whatsapp (WhatsApp real, vía Twilio). Siempre deja un
+    registro en agente_mensajes — incluso cuando no se pudo hacer nada —
+    para poder auditar después qué pasó con cada mensaje.
+
+    'origen' es 'texto' o 'voz', solo para dejar registro de cómo llegó el
+    mensaje (si vino de una nota de voz, 'texto_mensaje' ya es la
+    transcripción — el resto de la lógica es idéntica sea cual sea el
+    origen)."""
     telefono = _normalizar_telefono(telefono_crudo)
     texto_mensaje = (texto_mensaje or "").strip()
     ts = now_iso()
@@ -3419,11 +3563,11 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje):
             """
             INSERT INTO agente_mensajes
                 (telefono, mecanico_nombre, mensaje_texto, accion, ot_id,
-                 estado_anterior, estado_nuevo, exito, respuesta_texto, creado_en)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 estado_anterior, estado_nuevo, exito, respuesta_texto, origen, creado_en)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (telefono, mecanico_nombre, texto_mensaje, accion, ot_id,
-             estado_anterior, estado_nuevo, 1 if exito else 0, respuesta_texto, ts),
+             estado_anterior, estado_nuevo, 1 if exito else 0, respuesta_texto, origen, ts),
         )
         db.commit()
         return {
@@ -3435,6 +3579,7 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje):
             "estado_nuevo": estado_nuevo,
             "exito": exito,
             "respuesta_texto": respuesta_texto,
+            "origen": origen,
         }
 
     if not texto_mensaje:
@@ -3451,7 +3596,8 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje):
         )
 
     try:
-        interpretado = _llamar_claude_interpretar_mensaje_agente(texto_mensaje)
+        ordenes_abiertas = _agente_listar_ordenes_abiertas(db)
+        interpretado = _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas)
     except RuntimeError as e:
         return _registrar(mecanico["nombre"], "error", None, "", "", False, f"No pude leer tu mensaje: {e}")
 
@@ -3594,6 +3740,30 @@ def simular_mensaje_agente():
     return jsonify(resultado)
 
 
+@app.route("/api/agente/simular-mensaje-voz", methods=["POST"])
+def simular_mensaje_voz_agente():
+    """Igual que /api/agente/simular-mensaje, pero para probar notas de
+    voz sin necesitar una cuenta de WhatsApp real: recibe un archivo de
+    audio (multipart/form-data), lo transcribe con
+    _transcribir_audio_whatsapp y de ahí en adelante sigue exactamente el
+    mismo camino que un mensaje escrito."""
+    db = get_db()
+    telefono = (request.form.get("telefono") or "").strip()
+    archivo = request.files.get("audio")
+    if not telefono or not archivo or not archivo.filename:
+        return jsonify({"error": "Faltan el teléfono y/o el archivo de audio"}), 400
+
+    audio_bytes = archivo.read()
+    try:
+        texto = _transcribir_audio_whatsapp(audio_bytes, archivo.mimetype)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+
+    resultado = _agente_procesar_mensaje(db, telefono, texto, origen="voz")
+    resultado["transcripcion"] = texto
+    return jsonify(resultado)
+
+
 @app.route("/api/agente/mensajes", methods=["GET"])
 def listar_mensajes_agente():
     db = get_db()
@@ -3628,7 +3798,38 @@ def webhook_whatsapp():
         telefono = request.form.get("From", "")
         texto = request.form.get("Body", "")
         db = get_db()
-        resultado = _agente_procesar_mensaje(db, telefono, texto)
+
+        # Nota de voz: Twilio manda el mensaje sin texto (o con poco) y con
+        # NumMedia > 0 + MediaUrl0/MediaContentType0 apuntando al archivo.
+        # Solo se intenta transcribir el primer adjunto y solo si es audio
+        # (una foto adjunta, por ejemplo, no se procesa acá).
+        num_media = int(request.form.get("NumMedia", "0") or "0")
+        origen = "texto"
+        if num_media > 0 and not texto.strip():
+            media_url = request.form.get("MediaUrl0", "")
+            content_type = request.form.get("MediaContentType0", "")
+            if content_type.startswith("audio/") and media_url:
+                if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+                    return _twiml(
+                        "Recibí una nota de voz, pero el servidor todavía no tiene configuradas las "
+                        "credenciales de Twilio (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) para poder "
+                        "descargarla. Escribe el mensaje en texto mientras tanto."
+                    )
+                try:
+                    media_resp = requests.get(
+                        media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=60
+                    )
+                    media_resp.raise_for_status()
+                    texto = _transcribir_audio_whatsapp(media_resp.content, content_type)
+                    origen = "voz"
+                except requests.RequestException as e:
+                    return _twiml(f"No pude descargar tu nota de voz: {e}")
+                except RuntimeError as e:
+                    return _twiml(str(e))
+            elif not texto.strip():
+                return _twiml("Recibí un adjunto que no pude procesar (solo entiendo texto o notas de voz).")
+
+        resultado = _agente_procesar_mensaje(db, telefono, texto, origen=origen)
         return _twiml(resultado.get("respuesta_texto") or "No pude procesar tu mensaje.")
     except Exception:
         logging.exception("Error en /webhook/whatsapp")
@@ -5389,9 +5590,29 @@ from modulos.operativo import (  # noqa: E402
     init_operativo_db,
     ESTADOS_ORDEN,
     ESTADOS_LABEL,
+    ESTADOS_CERRADOS,
     _actualizar_estado_orden_por_agente,
 )
 app.register_blueprint(bp_operativo)
+
+# Transiciones de estado que el agente de WhatsApp tiene permitido aplicar
+# (ver _agente_procesar_mensaje más arriba). A pedido del taller, el agente
+# puede mover una OT desde CUALQUIER estado abierto hacia CUALQUIER otro
+# estado (no solo el "siguiente paso" del flujo normal) — en la práctica un
+# auto puede llegar ya aprobado (recibido -> reparación directo) o pasar de
+# pruebas de ruta directo a entregado, sin pasar por cada paso intermedio.
+# Lo único que se mantiene estricto es que un estado "cerrado" (ver
+# ESTADOS_CERRADOS: entregado y cancelado) NO se puede volver a mover por
+# este medio — sacar una OT de ahí exige un ajuste manual desde el sistema,
+# precisamente para que un mensaje de WhatsApp mal interpretado no pueda
+# generar un descuadre en el cierre de mes o en el dashboard. Se calcula a
+# partir de ESTADOS_ORDEN/ESTADOS_CERRADOS (en vez de escribirlo a mano) para
+# que un estado nuevo que se agregue a futuro quede incluido acá
+# automáticamente sin tener que acordarse de tocar esta lista.
+TRANSICIONES_AGENTE = {
+    estado: (set(ESTADOS_ORDEN) - {estado} if estado not in ESTADOS_CERRADOS else set())
+    for estado in ESTADOS_ORDEN
+}
 
 
 init_db()

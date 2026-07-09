@@ -9,6 +9,16 @@ const state = {
   catalogoVehiculos: null, // { marcas: [...], modelos: {marca: [...]} } — catálogo de referencia (no depende del historial de OTs)
 };
 
+// Actualización en vivo del tablero de OT: mientras la pestaña "Órdenes de
+// Trabajo" esté abierta, se refresca sola cada pocos segundos — para ver,
+// por ejemplo, cuando el agente de WhatsApp mueve una tarjeta sin tener que
+// recargar la página. opArrastrandoTarjeta evita que un refresco automático
+// interrumpa un drag-and-drop en curso (el tablero se reconstruye entero en
+// cada render, lo que cortaría el arrastre nativo del navegador a medias).
+let opPollingIntervalId = null;
+let opArrastrandoTarjeta = false;
+const OP_POLLING_MS = 4000;
+
 // ---------------------------------------------------------------------------
 // Utilidades compartidas (duplicadas de app.js: cada módulo carga su propio JS)
 // ---------------------------------------------------------------------------
@@ -198,8 +208,12 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
       reportes: "Operativo — Reportes",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
+    detenerPollingOrdenes();
     if (vista === "dashboard") cargarDashboardOperativo();
-    if (vista === "ordenes") cargarOperativo();
+    if (vista === "ordenes") {
+      cargarOperativo();
+      iniciarPollingOrdenes();
+    }
     if (vista === "clientes") cargarClientesTab();
     if (vista === "garantias") cargarGarantiasTab();
     if (vista === "reportes") cargarResumenReportesOperativo();
@@ -249,7 +263,7 @@ const OP_ESTADOS_LABEL = {
   listo: "Listo", entregado: "Entregado", cancelado: "Cancelado",
 };
 
-async function cargarOperativo() {
+async function cargarOperativo(silencioso = false) {
   try {
     const [dataOrdenes, dataClientes, dataProductos] = await Promise.all([
       api("/api/operativo/ordenes"),
@@ -263,7 +277,36 @@ async function cargarOperativo() {
     await cargarCatalogoVehiculos();
     poblarDatalistsOperativo();
   } catch (e) {
-    toast(e.message, true);
+    // silencioso=true: se usa desde el refresco automático de fondo (ver
+    // iniciarPollingOrdenes) — un error de red pasajero ahí no debería
+    // interrumpir al usuario con un toast cada pocos segundos.
+    if (!silencioso) toast(e.message, true);
+  }
+}
+
+// ---- Actualización en vivo del tablero (ver declaración de
+// opPollingIntervalId más arriba) ----
+
+function iniciarPollingOrdenes() {
+  detenerPollingOrdenes();
+  opPollingIntervalId = setInterval(async () => {
+    if (opArrastrandoTarjeta) return; // no interrumpir un drag-and-drop en curso
+    if (state.opOrdenActivaId) {
+      // Hay un modal de detalle de OT abierto: refrescarResumenHub ya deja
+      // sincronizados tanto ese modal como el tablero de atrás (llama a
+      // cargarOperativo internamente), así que no hace falta hacer las dos
+      // cosas por separado.
+      await refrescarResumenHub(state.opOrdenActivaId);
+    } else {
+      await cargarOperativo(true);
+    }
+  }, OP_POLLING_MS);
+}
+
+function detenerPollingOrdenes() {
+  if (opPollingIntervalId) {
+    clearInterval(opPollingIntervalId);
+    opPollingIntervalId = null;
   }
 }
 
@@ -534,9 +577,11 @@ function renderTableroOperativo() {
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", card.dataset.id);
       card.classList.add("dragging");
+      opArrastrandoTarjeta = true;
     });
     card.addEventListener("dragend", () => {
       card.classList.remove("dragging");
+      opArrastrandoTarjeta = false;
     });
   });
 }
@@ -2051,9 +2096,11 @@ function renderTableroGarantias() {
       e.dataTransfer.effectAllowed = "move";
       e.dataTransfer.setData("text/plain", card.dataset.id);
       card.classList.add("dragging");
+      opArrastrandoTarjeta = true;
     });
     card.addEventListener("dragend", () => {
       card.classList.remove("dragging");
+      opArrastrandoTarjeta = false;
     });
   });
 }

@@ -1059,14 +1059,25 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         return resp.get_json()
 
-    def _crear_orden(self, cliente_id):
-        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id})
+    def _crear_orden(self, cliente_id, equipo_id=None):
+        payload = {"cliente_id": cliente_id}
+        if equipo_id is not None:
+            payload["equipo_id"] = equipo_id
+        resp = self.client.post("/api/operativo/ordenes", json=payload)
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         return resp.get_json()
 
     def _forzar_estado(self, orden_id, estado):
         resp = self.client.put(f"/api/operativo/ordenes/{orden_id}", json={"estado": estado})
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+    def _crear_equipo(self, cliente_id, identificador="ZZ0000", marca="Marca", modelo="Modelo"):
+        resp = self.client.post(
+            "/api/operativo/equipos",
+            json={"cliente_id": cliente_id, "identificador": identificador, "marca": marca, "modelo": modelo},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
 
     def _registrar_mecanico(self, nombre, telefono):
         resp = self.client.post("/api/agente/mecanicos", json={"nombre": nombre, "telefono": telefono})
@@ -1130,29 +1141,78 @@ class TestAgenteWhatsApp(unittest.TestCase):
         actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
         self.assertEqual(actual["estado"], "diagnostico")
 
-    def test_transicion_no_permitida_por_el_agente_no_se_aplica(self):
+    def test_el_agente_permite_saltar_pasos_intermedios(self):
+        # A pedido del taller: el agente ya NO exige seguir el flujo paso a
+        # paso — un auto puede llegar ya aprobado y saltar directo de
+        # "recibido" a "reparación", o de "pruebas de ruta" (control_calidad)
+        # directo a "entregado", sin pasar por los estados intermedios.
         self._registrar_mecanico("Ana Mecánica", "+56933333333")
         cliente = self._crear_cliente()
-        orden = self._crear_orden(cliente["id"])
-        # "recibido" no tiene permitido saltar directo a "entregado" según
-        # TRANSICIONES_AGENTE, aunque el PUT genérico técnicamente lo
-        # permitiría — es justo la protección extra que agrega el agente.
+        orden = self._crear_orden(cliente["id"])  # nace en "recibido"
+
         respuesta_ia = {
             "accion": "cambiar_estado_ot",
             "ot_id": orden["id"],
-            "estado_destino": "entregado",
-            "resumen": "El mecánico dice que ya se entregó",
+            "estado_destino": "reparacion",
+            "resumen": "El auto llegó ya aprobado por el cliente, pasa directo a reparación",
         }
         with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
-            resp = self._simular("+56933333333", f"ot {orden['id']} ya se la lleva el cliente")
+            resp = self._simular("+56933333333", f"ot {orden['id']} llegó aprobada, directo a reparación")
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["accion"], "cambio_estado_ot")
+        self.assertEqual(data["estado_nuevo"], "reparacion")
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "reparacion")
+
+    def test_esperando_repuesto_puede_pasar_directo_a_control_calidad(self):
+        # Antes solo se permitía volver a "reparación" desde "esperando
+        # repuesto" — ahora puede ir directo a "pruebas de ruta" también.
+        self._registrar_mecanico("Vicente Mecánico", "+56933344455")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "esperando_repuesto")
+
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": orden["id"],
+            "estado_destino": "control_calidad",
+            "resumen": "Llegó el repuesto y quedó lista para pruebas de ruta",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56933344455", f"ot {orden['id']} lista para pruebas de ruta")
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["estado_nuevo"], "control_calidad")
+
+    def test_el_agente_no_puede_sacar_una_ot_de_entregado(self):
+        # Esto sí se mantiene estricto: una OT "entregado" (o "cancelado")
+        # es un estado cerrado y no se puede volver a mover por mensaje de
+        # WhatsApp — evita descuadres en el cierre de mes o en el dashboard.
+        # Sacarla de ahí exige un ajuste manual desde el sistema.
+        self._registrar_mecanico("Bernardo Mecánico", "+56933355566")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        self._forzar_estado(orden["id"], "entregado")
+
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": orden["id"],
+            "estado_destino": "reparacion",
+            "resumen": "El mecánico dice que hay que revisarla de nuevo",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56933355566", f"ot {orden['id']} hay que revisarla de nuevo")
 
         data = resp.get_json()
         self.assertFalse(data["exito"])
         self.assertEqual(data["accion"], "transicion_no_permitida")
 
-        # La orden tiene que seguir exactamente donde estaba.
         actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
-        self.assertEqual(actual["estado"], "recibido")
+        self.assertEqual(actual["estado"], "entregado")
 
     def test_mensaje_no_reconocido_no_toca_ninguna_orden(self):
         self._registrar_mecanico("Luis Mecánico", "+56944444444")
@@ -1228,6 +1288,180 @@ class TestAgenteWhatsApp(unittest.TestCase):
 
         mensajes = self.client.get("/api/agente/mensajes").get_json()
         self.assertTrue(any(m["telefono"] == "+56999999999" for m in mensajes))
+
+    def test_listar_ordenes_abiertas_excluye_entregadas_y_canceladas(self):
+        cliente = self._crear_cliente("Matías Vega")
+        equipo = self._crear_equipo(cliente["id"], identificador="HAV001", marca="HAVAL", modelo="H6")
+        orden_abierta = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+
+        cliente2 = self._crear_cliente("Otro Cliente Cerrado")
+        orden_cerrada = self._crear_orden(cliente2["id"])
+        self._forzar_estado(orden_cerrada["id"], "entregado")
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            abiertas = taller_app._agente_listar_ordenes_abiertas(db)
+
+        ids_abiertas = [o["ot_id"] for o in abiertas]
+        self.assertIn(orden_abierta["id"], ids_abiertas)
+        self.assertNotIn(orden_cerrada["id"], ids_abiertas)
+
+        entrada = next(o for o in abiertas if o["ot_id"] == orden_abierta["id"])
+        self.assertEqual(entrada["cliente_nombre"], "MATÍAS VEGA")
+        self.assertEqual(entrada["marca"], "HAVAL")
+        self.assertEqual(entrada["modelo"], "H6")
+
+    def test_el_agente_le_pasa_a_la_ia_las_ordenes_abiertas_como_contexto(self):
+        self._registrar_mecanico("Diego Mecánico", "+56900112233")
+        cliente = self._crear_cliente("Matías Vega")
+        equipo = self._crear_equipo(cliente["id"], identificador="HAV002", marca="HAVAL", modelo="H6")
+        orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+        self._forzar_estado(orden["id"], "esperando_repuesto")
+
+        respuesta_ia = {"accion": "no_reconocida", "resumen": "no importa para este test"}
+        with patch.object(
+            taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia
+        ) as mock_ia:
+            self._simular("+56900112233", "la haval h6 de matias vega esta esperando repuestos")
+
+        # La función de interpretación tiene que haber recibido, como
+        # segundo argumento, el listado de OT abiertas — incluyendo esta
+        # orden con su cliente y vehículo — para que la IA pueda resolver
+        # la OT por descripción aunque el mensaje no traiga un número.
+        mock_ia.assert_called_once()
+        args = mock_ia.call_args.args
+        self.assertEqual(args[0], "la haval h6 de matias vega esta esperando repuestos")
+        ordenes_pasadas = args[1]
+        entrada = next((o for o in ordenes_pasadas if o["ot_id"] == orden["id"]), None)
+        self.assertIsNotNone(entrada)
+        self.assertEqual(entrada["cliente_nombre"], "MATÍAS VEGA")
+        self.assertEqual(entrada["marca"], "HAVAL")
+        self.assertEqual(entrada["modelo"], "H6")
+
+    def test_identificar_ot_por_vehiculo_sin_numero_mueve_el_estado_real(self):
+        # Simula lo que la IA real haría al recibir el contexto de OT
+        # abiertas: resolver el número de OT a partir de la descripción del
+        # vehículo, sin que el mecánico lo haya escrito. Lo que le importa
+        # a este test es que, una vez resuelto el ot_id, el resto del
+        # camino (validar transición y aplicar el cambio) funciona igual
+        # que cuando el número viene explícito en el mensaje.
+        self._registrar_mecanico("Fernanda Mecánica", "+56900223344")
+        cliente = self._crear_cliente("Rodrigo Soto")
+        equipo = self._crear_equipo(cliente["id"], identificador="AUD001", marca="AUDI", modelo="A3")
+        orden = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+        self._forzar_estado(orden["id"], "reparacion")
+
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": orden["id"],
+            "estado_destino": "control_calidad",
+            "resumen": "Identificó la OT por el vehículo (Audi A3 azul) sin número explícito",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56900223344", "audi a3 azul en pruebas de ruta")
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["ot_id"], orden["id"])
+        self.assertEqual(data["estado_nuevo"], "control_calidad")
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "control_calidad")
+
+    # ---- Notas de voz: la API de Claude no acepta audio, así que un
+    # mensaje de voz se transcribe primero con OpenAI (Whisper) y el texto
+    # resultante sigue el mismo camino que un mensaje escrito. Estos tests
+    # mockean tanto la transcripción como la IA de Claude (no hay
+    # OPENAI_API_KEY/ANTHROPIC_API_KEY reales en este entorno).
+
+    def test_mensaje_de_texto_normal_queda_registrado_con_origen_texto(self):
+        self._registrar_mecanico("Marta Mecánica", "+56900334455")
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+
+        respuesta_ia = {"accion": "no_reconocida", "resumen": "no importa para este test"}
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._simular("+56900334455", f"ot {orden['id']} en diagnostico")
+
+        data = resp.get_json()
+        self.assertEqual(data["origen"], "texto")
+        with taller_app.app.app_context():
+            fila = taller_app.get_db().execute(
+                "SELECT origen FROM agente_mensajes ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(fila["origen"], "texto")
+
+    def test_transcribir_audio_sin_openai_api_key_da_error_claro(self):
+        with patch.object(taller_app, "OPENAI_API_KEY", ""):
+            with self.assertRaises(RuntimeError) as ctx:
+                taller_app._transcribir_audio_whatsapp(b"audio-falso", "audio/ogg")
+        self.assertIn("OPENAI_API_KEY", str(ctx.exception))
+
+    def test_transcribir_audio_vacio_da_error_claro(self):
+        with patch.object(taller_app, "OPENAI_API_KEY", "clave-de-prueba"):
+            with self.assertRaises(RuntimeError) as ctx:
+                taller_app._transcribir_audio_whatsapp(b"", "audio/ogg")
+        self.assertIn("vacía", str(ctx.exception))
+
+    def _subir_nota_de_voz(self, telefono, contenido=b"audio-falso-de-prueba", filename="nota.ogg"):
+        return self.client.post(
+            "/api/agente/simular-mensaje-voz",
+            data={"telefono": telefono, "audio": (io.BytesIO(contenido), filename)},
+            content_type="multipart/form-data",
+        )
+
+    def test_simular_mensaje_voz_sin_telefono_o_archivo_da_400(self):
+        resp = self.client.post(
+            "/api/agente/simular-mensaje-voz",
+            data={"telefono": ""},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_simular_mensaje_voz_transcribe_y_mueve_la_ot(self):
+        self._registrar_mecanico("Ignacio Mecánico", "+56900445566")
+        cliente = self._crear_cliente("Cliente Nota De Voz")
+        orden = self._crear_orden(cliente["id"])  # nace en "recibido"
+
+        respuesta_ia = {
+            "accion": "cambiar_estado_ot",
+            "ot_id": orden["id"],
+            "estado_destino": "diagnostico",
+            "resumen": "El mecánico avisa por voz que ya revisó el equipo",
+        }
+        with patch.object(
+            taller_app, "_transcribir_audio_whatsapp",
+            return_value=f"ot {orden['id']} ya la revise, pasa a diagnostico",
+        ) as mock_transcribir, patch.object(
+            taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia
+        ):
+            resp = self._subir_nota_de_voz("+56900445566")
+
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        mock_transcribir.assert_called_once()
+        data = resp.get_json()
+        self.assertTrue(data["exito"])
+        self.assertEqual(data["origen"], "voz")
+        self.assertIn(str(orden["id"]), data["transcripcion"])
+
+        actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(actual["estado"], "diagnostico")
+
+        with taller_app.app.app_context():
+            fila = taller_app.get_db().execute(
+                "SELECT origen FROM agente_mensajes ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(fila["origen"], "voz")
+
+    def test_simular_mensaje_voz_cuando_falla_la_transcripcion_devuelve_400_claro(self):
+        self._registrar_mecanico("Pilar Mecánica", "+56900556677")
+        with patch.object(
+            taller_app, "_transcribir_audio_whatsapp",
+            side_effect=RuntimeError("El servicio de transcripción respondió con error (415): formato no soportado."),
+        ):
+            resp = self._subir_nota_de_voz("+56900556677")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("formato no soportado", resp.get_json()["error"])
 
 
 if __name__ == "__main__":

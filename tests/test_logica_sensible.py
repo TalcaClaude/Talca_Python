@@ -1033,6 +1033,139 @@ class TestOperativoFase35(unittest.TestCase):
         self.assertIsNotNone(item["creado_en"])
 
 
+class TestPresupuestoDescargaEnvioYOrdenImprimible(unittest.TestCase):
+    """Cubre las funcionalidades nuevas: (1) el PDF del presupuesto se
+    descarga con el nombre "Presupuesto Talleres Calificados OT<n>
+    <cliente>", (2) se puede mandar ese mismo PDF directo al correo
+    registrado del cliente (con copia al taller), (3) el cliente ahora
+    tiene un campo de dirección, y (4) existe una vista imprimible de la OT
+    para el cliente que muestra valores pero NUNCA costos internos ni
+    utilidad."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre="José Alegría", email=""):
+        resp = self.client.post(
+            "/api/operativo/clientes",
+            json={"nombre": nombre, "email": email, "direccion": "Av. Siempre Viva 742"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden(self, cliente_id):
+        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def test_direccion_del_cliente_se_guarda_y_se_puede_editar(self):
+        cliente = self._crear_cliente(nombre="Cliente Con Dirección")
+        self.assertEqual(cliente["direccion"], "AV. SIEMPRE VIVA 742")
+
+        resp = self.client.put(
+            f"/api/operativo/clientes/{cliente['id']}", json={"direccion": "Nueva Dirección 123"}
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["direccion"], "NUEVA DIRECCIÓN 123")
+
+    def test_nombre_de_descarga_del_presupuesto_incluye_ot_y_cliente(self):
+        cliente = self._crear_cliente(nombre="José Alegría")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.get(f"/api/operativo/ordenes/{orden['id']}/presupuesto/pdf")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("Content-Type"), "application/pdf")
+        disposicion = resp.headers.get("Content-Disposition", "")
+        self.assertIn(f"OT{orden['id']}", disposicion)
+        self.assertIn("Presupuesto Talleres Calificados", disposicion)
+        # El nombre se guarda en mayúsculas en la base; el archivo debe verse
+        # con formato de nombre propio (title case), no todo en mayúsculas.
+        # El navegador usa el filename*=UTF-8'' (RFC 6266) para el nombre
+        # real con tildes — el filename= plano es solo el respaldo ASCII
+        # para clientes HTTP viejos, así que ahí "José" se ve sin tilde
+        # ("Jose") a propósito; eso no es un bug.
+        self.assertIn("filename*=UTF-8''Presupuesto%20Talleres%20Calificados%20OT", disposicion)
+        self.assertIn("Jos%C3%A9%20Alegr%C3%ADa.pdf", disposicion)
+
+    def test_enviar_presupuesto_sin_correo_registrado_da_error_claro(self):
+        cliente = self._crear_cliente(nombre="Cliente Sin Correo", email="")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/presupuesto/enviar")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("correo registrado", resp.get_json()["error"])
+
+    def test_enviar_presupuesto_con_correo_llama_al_envio_con_copia_al_taller(self):
+        cliente = self._crear_cliente(nombre="Cliente Con Correo", email="cliente@ejemplo.com")
+        orden = self._crear_orden(cliente["id"])
+
+        with patch.object(taller_app, "_enviar_correo", return_value=(True, "Enviado (simulado)")) as mock_envio, \
+             patch.object(taller_app, "PRESUPUESTO_COPIA_TALLER", ["taller1@ejemplo.com", "taller2@ejemplo.com"]):
+            resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/presupuesto/enviar")
+
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["destinatario"], "cliente@ejemplo.com")
+        self.assertEqual(data["copia"], ["taller1@ejemplo.com", "taller2@ejemplo.com"])
+
+        mock_envio.assert_called_once()
+        args, kwargs = mock_envio.call_args
+        self.assertEqual(args[0], "cliente@ejemplo.com")
+        self.assertEqual(kwargs["cc"], ["taller1@ejemplo.com", "taller2@ejemplo.com"])
+        self.assertTrue(kwargs["adjunto_bytes"])  # el PDF va adjunto de verdad, no solo el link
+        self.assertIn(f"OT{orden['id']}", kwargs["adjunto_nombre"])
+
+    def test_enviar_presupuesto_propaga_el_error_si_falla_el_transporte_de_correo(self):
+        cliente = self._crear_cliente(nombre="Cliente Correo Falla", email="falla@ejemplo.com")
+        orden = self._crear_orden(cliente["id"])
+
+        with patch.object(taller_app, "_enviar_correo", return_value=(False, "SMTP caído")):
+            resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/presupuesto/enviar")
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn("SMTP caído", resp.get_json()["error"])
+
+    def test_vista_imprimible_de_la_ot_no_incluye_costos_ni_utilidad(self):
+        from pypdf import PdfReader
+
+        cliente = self._crear_cliente(nombre="Cliente Vista Imprimible")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 150000})
+        # Un ítem de mano de obra con costo real (ej. trabajo externo): si
+        # el documento imprimible mostrara costos, este monto (37500)
+        # aparecería en el PDF — la prueba confirma que NO aparece.
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "mano_obra", "descripcion": "Trabajo externo", "cantidad": 1, "costo_unitario": 37500},
+        )
+
+        resp = self.client.get(f"/api/operativo/ordenes/{orden['id']}/orden-imprimible/pdf")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("Content-Type"), "application/pdf")
+        disposicion = resp.headers.get("Content-Disposition", "")
+        self.assertIn(f"OT{orden['id']}", disposicion)
+        self.assertIn("Cliente Vista Imprimible", disposicion)
+
+        texto = PdfReader(io.BytesIO(resp.data)).pages[0].extract_text()
+        # El cuerpo del documento muestra el nombre tal cual se guarda en la
+        # base (mayúsculas, igual que el resto de la app) — solo el nombre
+        # del ARCHIVO se pasa por title() para que se vea prolijo al
+        # descargarlo.
+        self.assertIn("CLIENTE VISTA IMPRIMIBLE", texto)
+        self.assertIn("Total OT", texto)
+        self.assertIn("Total pagado", texto)
+        self.assertIn("Total por pagar", texto)
+        # Nada de costos internos ni utilidad — ese es justo el punto de
+        # este documento (a diferencia de la pestaña "Costos", de uso
+        # interno del taller).
+        self.assertNotIn("37.500", texto)
+        self.assertNotIn("Costo de repuestos", texto)
+        self.assertNotIn("Costo mano de obra", texto)
+        self.assertNotIn("Utilidad", texto)
+
+
 class TestBusquedaSinTildesMultipalabra(unittest.TestCase):
     """coincide_busqueda/normalizar_busqueda (core.py) son la base de TODOS
     los buscadores del sistema: ignoran tildes/mayúsculas y tratan cada

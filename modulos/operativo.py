@@ -287,6 +287,13 @@ def init_operativo_db(db):
     # usa app.py:init_db() — no rompe datos existentes.
     # -----------------------------------------------------------------
 
+    # Dirección del cliente (para la vista imprimible de la OT y el envío
+    # de documentos oficiales) — no existía en el diseño original.
+    columnas_cliente = [c[1] for c in db.execute("PRAGMA table_info(clientes)").fetchall()]
+    if "direccion" not in columnas_cliente:
+        db.execute("ALTER TABLE clientes ADD COLUMN direccion TEXT DEFAULT ''")
+    db.commit()
+
     # Datos del vehículo en sí (no cambian entre visitas) viven en equipos,
     # no en la orden — así el historial de vehículo no obliga a
     # re-escribirlos cada vez que el mismo auto vuelve al taller.
@@ -564,12 +571,13 @@ def crear_cliente():
 
     ts = now_iso()
     cur = db.execute(
-        "INSERT INTO clientes (nombre, telefono, email, rut, notas, creado_en) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO clientes (nombre, telefono, email, rut, direccion, notas, creado_en) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             nombre,
             (data.get("telefono") or "").strip(),
             (data.get("email") or "").strip(),
             formatear_rut((data.get("rut") or "").strip()),
+            (data.get("direccion") or "").strip().upper(),
             (data.get("notas") or "").strip().upper(),
             ts,
         ),
@@ -592,12 +600,13 @@ def editar_cliente(cliente_id):
         return jsonify({"error": "El nombre del cliente es obligatorio"}), 400
 
     db.execute(
-        "UPDATE clientes SET nombre = ?, telefono = ?, email = ?, rut = ?, notas = ? WHERE id = ?",
+        "UPDATE clientes SET nombre = ?, telefono = ?, email = ?, rut = ?, direccion = ?, notas = ? WHERE id = ?",
         (
             nombre,
             (data.get("telefono", row["telefono"]) or "").strip(),
             (data.get("email", row["email"]) or "").strip(),
             formatear_rut((data.get("rut", row["rut"]) or "").strip()),
+            (data.get("direccion", row["direccion"]) or "").strip().upper(),
             (data.get("notas", row["notas"]) or "").strip().upper(),
             cliente_id,
         ),
@@ -783,7 +792,9 @@ def eliminar_equipo(equipo_id):
 
 def _orden_dict(db, row):
     d = dict(row)
-    cliente = db.execute("SELECT id, nombre, telefono, rut, email FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+    cliente = db.execute(
+        "SELECT id, nombre, telefono, rut, email, direccion FROM clientes WHERE id = ?", (d["cliente_id"],)
+    ).fetchone()
     d["cliente"] = dict(cliente) if cliente else None
     equipo = None
     if d["equipo_id"]:
@@ -1720,15 +1731,28 @@ def actualizar_presupuesto(orden_id):
     return jsonify(_orden_dict_detalle(db, actualizada))
 
 
-@bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/pdf", methods=["GET"])
-def presupuesto_pdf(orden_id):
-    """Genera el presupuesto en PDF, listo para descargar y enviárselo al
-    cliente (por correo, WhatsApp, etc.). Usa los mismos datos que ya se
-    ven en el modal de Presupuesto — cliente, vehículo, ítems y totales."""
-    db = get_db()
+def _nombre_archivo_seguro(texto):
+    """Deja un texto listo para usarse como nombre de archivo: saca los
+    caracteres que Windows/macOS no permiten en nombres de archivo, pero
+    conserva espacios, tildes y mayúsculas/minúsculas tal como están (para
+    que se vea igual de prolijo que el pedido original, ej. "Presupuesto
+    Talleres Calificados OT7956 José Alegría")."""
+    invalidos = '<>:"/\\|?*'
+    limpio = "".join(c for c in (texto or "") if c not in invalidos)
+    return " ".join(limpio.split())  # colapsa espacios repetidos
+
+
+def _armar_presupuesto_pdf(db, orden_id):
+    """Arma (pero no construye) el PDF del presupuesto: devuelve
+    (buffer, doc, elementos, nombre_archivo, orden), o (None, None, None,
+    None, None) si la orden no existe. Se separó de la ruta de descarga
+    para poder reutilizar exactamente el mismo armado también al mandarlo
+    por correo (ver /presupuesto/enviar) — cada quien decide si construye
+    el PDF para descargarlo (_pdf_response) o para adjuntarlo a un correo
+    (doc.build + buffer.getvalue())."""
     row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     if row is None:
-        return jsonify({"error": "Orden no encontrada"}), 404
+        return None, None, None, None, None
     orden = _orden_dict_detalle(db, row)
     cliente = orden.get("cliente") or {}
     equipo = orden.get("equipo") or {}
@@ -1752,7 +1776,7 @@ def presupuesto_pdf(orden_id):
     estilos.add(ParagraphStyle(name="EtiquetaPresupuesto", fontSize=9, textColor="#666666", spaceBefore=10, spaceAfter=2))
 
     elementos = [
-        Paragraph("Taller Mecánico", estilos["TituloPresupuesto"]),
+        Paragraph("Talleres Calificados", estilos["TituloPresupuesto"]),
         Paragraph(f"Presupuesto — Orden de trabajo #{orden_id} · generado el {datetime.now().strftime('%d-%m-%Y %H:%M')}", estilos["SubtituloPresupuesto"]),
     ]
 
@@ -1821,7 +1845,186 @@ def presupuesto_pdf(orden_id):
         elementos.append(Paragraph("Notas", estilos["EtiquetaPresupuesto"]))
         elementos.append(Paragraph(orden["presupuesto_notas"], estilos["Normal"]))
 
-    nombre = f"presupuesto_ot{orden_id}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
+    # Nombre con el número real de OT y el nombre del cliente registrado en
+    # la orden, tal como se pidió (ej. "Presupuesto Talleres Calificados
+    # OT7956 José Alegría"). El nombre del cliente se guarda en mayúsculas
+    # en la base (ver crear_cliente), así que se pasa por .title() para que
+    # el archivo se vea con formato de nombre propio y no todo en mayúsculas.
+    nombre_cliente = (cliente.get("nombre") or "").title()
+    nombre = _nombre_archivo_seguro(f"Presupuesto Talleres Calificados OT{orden_id} {nombre_cliente}").strip()
+    nombre = f"{nombre}.pdf"
+    return buffer, doc, elementos, nombre, orden
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/pdf", methods=["GET"])
+def presupuesto_pdf(orden_id):
+    """Genera el presupuesto en PDF, listo para descargar y enviárselo al
+    cliente (por correo, WhatsApp, etc.). Usa los mismos datos que ya se
+    ven en el modal de Presupuesto — cliente, vehículo, ítems y totales."""
+    db = get_db()
+    buffer, doc, elementos, nombre, orden = _armar_presupuesto_pdf(db, orden_id)
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    return _pdf_response(buffer, doc, elementos, nombre)
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/enviar", methods=["POST"])
+def presupuesto_enviar(orden_id):
+    """Manda el mismo PDF del presupuesto directo al correo registrado del
+    cliente, con copia a los correos del taller configurados en
+    PRESUPUESTO_COPIA_TALLER (variable de entorno, separada por coma —
+    queda vacía hasta que se confirmen esas direcciones). Se hace un
+    import diferido de app.py (y no uno arriba del archivo) para evitar un
+    import circular: app.py es quien importa este blueprint, así que
+    operativo.py no puede depender de app.py al cargarse el módulo, solo
+    al momento de atender la request."""
+    from app import _enviar_correo, PRESUPUESTO_COPIA_TALLER
+
+    db = get_db()
+    buffer, doc, elementos, nombre, orden = _armar_presupuesto_pdf(db, orden_id)
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+
+    cliente = orden.get("cliente") or {}
+    destinatario = (cliente.get("email") or "").strip()
+    if not destinatario:
+        return jsonify({
+            "error": "Este cliente no tiene un correo registrado. Agrégalo en la ficha del cliente "
+                     "(pestaña Clientes) e intenta de nuevo."
+        }), 400
+
+    doc.build(elementos)
+    buffer.seek(0)
+    pdf_bytes = buffer.getvalue()
+
+    nombre_cliente = (cliente.get("nombre") or "").title() or "cliente"
+    asunto = f"Presupuesto Talleres Calificados — OT{orden_id}"
+    cuerpo = (
+        f"Hola {nombre_cliente},\n\n"
+        f"Te adjuntamos el presupuesto de la orden de trabajo OT{orden_id}.\n\n"
+        f"Ante cualquier consulta, contáctanos.\n\n"
+        f"Talleres Calificados"
+    )
+    exito, detalle = _enviar_correo(
+        destinatario, asunto, cuerpo,
+        adjunto_bytes=pdf_bytes, adjunto_nombre=nombre, cc=PRESUPUESTO_COPIA_TALLER,
+    )
+    if not exito:
+        return jsonify({"error": f"No se pudo enviar el correo: {detalle}"}), 502
+    return jsonify({"ok": True, "detalle": detalle, "destinatario": destinatario, "copia": PRESUPUESTO_COPIA_TALLER})
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/orden-imprimible/pdf", methods=["GET"])
+def orden_imprimible_pdf(orden_id):
+    """Documento imprimible que se le entrega al cliente como comprobante
+    oficial de la orden de trabajo: todos los datos de la recepción (cliente
+    y vehículo) más los valores (total, pagado, por pagar) — a propósito
+    SIN costos internos (repuestos, mano de obra) ni utilidad, porque ese es
+    un documento para el cliente, no para uso interno del taller (para eso
+    ya existe la pestaña "Costos" dentro de la orden)."""
+    db = get_db()
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    orden = _orden_dict_detalle(db, row)
+    cliente = orden.get("cliente") or {}
+    equipo = orden.get("equipo") or {}
+    try:
+        equipamiento = json.loads(orden.get("equipamiento_json") or "{}")
+    except (TypeError, ValueError):
+        equipamiento = {}
+
+    import io
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        topMargin=1.6 * cm, bottomMargin=1.6 * cm, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+    )
+    estilos = getSampleStyleSheet()
+    estilos.add(ParagraphStyle(name="TituloOrdenImp", fontSize=18, leading=22, spaceAfter=2, fontName="Helvetica-Bold"))
+    estilos.add(ParagraphStyle(name="SubtituloOrdenImp", fontSize=10, textColor="#666666", spaceAfter=16))
+    estilos.add(ParagraphStyle(name="SeccionOrdenImp", fontSize=11, textColor="#1F2430", spaceBefore=14, spaceAfter=6, fontName="Helvetica-Bold"))
+
+    elementos = [
+        Paragraph("Talleres Calificados", estilos["TituloOrdenImp"]),
+        Paragraph(
+            f"Orden de trabajo OT{orden_id} · generado el {datetime.now().strftime('%d-%m-%Y %H:%M')}",
+            estilos["SubtituloOrdenImp"],
+        ),
+    ]
+
+    def _tabla_datos(filas):
+        t = Table(filas, colWidths=[3.4 * cm, 5.3 * cm, 3.4 * cm, 5.3 * cm])
+        t.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        return t
+
+    elementos.append(Paragraph("Datos del cliente", estilos["SeccionOrdenImp"]))
+    elementos.append(_tabla_datos([
+        ["Cliente:", cliente.get("nombre") or "—", "RUT:", cliente.get("rut") or "—"],
+        ["Teléfono:", cliente.get("telefono") or "—", "Email:", cliente.get("email") or "—"],
+        ["Dirección:", cliente.get("direccion") or "—", "", ""],
+    ]))
+
+    elementos.append(Paragraph("Datos del vehículo", estilos["SeccionOrdenImp"]))
+    elementos.append(_tabla_datos([
+        ["Patente:", equipo.get("identificador") or "—", "VIN:", equipo.get("vin") or "—"],
+        ["Marca:", equipo.get("marca") or "—", "Modelo:", equipo.get("modelo") or "—"],
+        ["Color:", equipo.get("color") or "—", "Año:", equipo.get("anio") or "—"],
+        ["Transmisión:", equipo.get("modelo_transmision") or "—", "Motor (cc):", equipo.get("motor_cc") or "—"],
+    ]))
+
+    estanque = orden.get("estanque_nivel")
+    elementos.append(Paragraph("Datos de la recepción", estilos["SeccionOrdenImp"]))
+    elementos.append(_tabla_datos([
+        ["Fecha recepción:", (orden.get("fecha_recepcion") or "—")[:10], "Encargado:", orden.get("recepcionado_por") or "—"],
+        ["Kilometraje:", str(orden.get("kilometraje")) if orden.get("kilometraje") is not None else "—",
+         "Estanque:", f"{estanque} / 8" if estanque is not None else "—"],
+        ["Referencia:", orden.get("referencia") or "—", "", ""],
+    ]))
+    elementos.append(Spacer(1, 4))
+    elementos.append(Paragraph(f"<b>Trabajo a realizar:</b> {orden.get('trabajo_a_realizar') or '—'}", estilos["Normal"]))
+    if orden.get("descripcion_problema"):
+        elementos.append(Spacer(1, 4))
+        elementos.append(Paragraph(f"<b>Comentarios:</b> {orden['descripcion_problema']}", estilos["Normal"]))
+
+    elementos.append(Paragraph("Equipamiento con el que ingresó el vehículo", estilos["SeccionOrdenImp"]))
+    marcados = [item for item in EQUIPAMIENTO_ITEMS if equipamiento.get(item)]
+    elementos.append(Paragraph(", ".join(marcados) if marcados else "Sin equipamiento adicional registrado.", estilos["Normal"]))
+
+    # Valores: a propósito solo lo que le corresponde ver al cliente (lo
+    # que se le cobra, lo pagado y lo pendiente) — nada de costos internos
+    # de repuestos/mano de obra ni de utilidad, eso es información interna
+    # del taller y no debe salir en un documento que se lleva el cliente.
+    elementos.append(Paragraph("Valores", estilos["SeccionOrdenImp"]))
+    resumen = [["Total OT", fmt_money_pdf(orden.get("valor_total") or 0)]]
+    resumen.append(["Total pagado", fmt_money_pdf(orden.get("total_pagado") or 0)])
+    resumen.append(["Total por pagar", fmt_money_pdf(orden.get("total_por_pagar") or 0)])
+    tabla_valores = Table(resumen, colWidths=[15.2 * cm, 2.8 * cm])
+    tabla_valores.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -2), "Helvetica"),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10.5),
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.75, colors.HexColor("#333333")),
+        ("TOPPADDING", (0, -1), (-1, -1), 6),
+    ]))
+    elementos.append(tabla_valores)
+
+    nombre_cliente = (cliente.get("nombre") or "").title()
+    nombre = _nombre_archivo_seguro(f"Orden de Trabajo Talleres Calificados OT{orden_id} {nombre_cliente}").strip()
+    nombre = f"{nombre}.pdf"
     return _pdf_response(buffer, doc, elementos, nombre)
 
 

@@ -203,6 +203,16 @@ RESPALDO_INTERVALO_HORAS = int(os.environ.get("RESPALDO_INTERVALO_HORAS", "24"))
 ALERTA_STOCK_INTERVALO_HORAS = int(os.environ.get("ALERTA_STOCK_INTERVALO_HORAS", "24"))
 ALERTA_STOCK_DESTINATARIO = os.environ.get("ALERTA_STOCK_DESTINATARIO", "") or SMTP_DESTINATARIO
 
+# Correos del taller que van en copia (CC) cuando se le manda un presupuesto
+# al cliente por correo — separados por coma. Quedan vacíos por defecto
+# hasta que el usuario confirme cuáles direcciones usar; mientras tanto el
+# envío sigue funcionando igual, solo que sin copia a nadie del taller.
+# Configúralo agregando la variable de entorno PRESUPUESTO_COPIA_TALLER en
+# Railway (ej: "ventas@talleres.cl,jefe@talleres.cl").
+PRESUPUESTO_COPIA_TALLER = [
+    correo.strip() for correo in os.environ.get("PRESUPUESTO_COPIA_TALLER", "").split(",") if correo.strip()
+]
+
 # ---------------------------------------------------------------------------
 # IA (Claude, Anthropic): usada para leer fotos de facturas y, a futuro,
 # para el agente de WhatsApp que traduce mensajes en acciones sobre el
@@ -4291,11 +4301,12 @@ def backup_restaurar():
 # Envío de correo: Resend (HTTPS) primero, SMTP como respaldo
 # ---------------------------------------------------------------------------
 
-def _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None):
+def _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None, cc=None):
     """Manda un correo usando la API HTTPS de Resend (https://resend.com).
     No usa el protocolo SMTP, así que no lo afectan los bloqueos de puerto
     SMTP que aplican varios hostings (incluido Railway en sus planes
-    gratis/Trial/Hobby). Devuelve (exito: bool, detalle: str)."""
+    gratis/Trial/Hobby). 'cc' es una lista opcional de correos en copia.
+    Devuelve (exito: bool, detalle: str)."""
     if requests is None:
         return False, (
             "No se pudo enviar por Resend: falta instalar la librería 'requests' en el "
@@ -4309,6 +4320,8 @@ def _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes=None
             "subject": asunto,
             "text": cuerpo_texto,
         }
+        if cc:
+            payload["cc"] = list(cc)
         if adjunto_bytes is not None:
             payload["attachments"] = [{
                 "filename": adjunto_nombre or "adjunto",
@@ -4331,15 +4344,17 @@ def _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes=None
         return False, f"Error al enviar por Resend: {e}"
 
 
-def _enviar_correo_smtp(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None):
+def _enviar_correo_smtp(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None, cc=None):
     """Manda un correo por SMTP tradicional (ej: Gmail). Solo funciona si
-    el hosting no bloquea el puerto SMTP saliente. Devuelve
-    (exito: bool, detalle: str)."""
+    el hosting no bloquea el puerto SMTP saliente. 'cc' es una lista
+    opcional de correos en copia. Devuelve (exito: bool, detalle: str)."""
     try:
         msg = EmailMessage()
         msg["Subject"] = asunto
         msg["From"] = SMTP_USER
         msg["To"] = destinatario
+        if cc:
+            msg["Cc"] = ", ".join(cc)
         msg.set_content(cuerpo_texto)
         if adjunto_bytes is not None:
             msg.add_attachment(
@@ -4350,22 +4365,28 @@ def _enviar_correo_smtp(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as smtp:
             smtp.starttls()
             smtp.login(SMTP_USER, SMTP_PASSWORD)
-            smtp.send_message(msg)
+            # Los destinatarios reales del envío SMTP hay que pasarlos
+            # explícitos (send_message solo lee To/Cc/Bcc del mensaje si no
+            # se le indica to_addrs, pero se es explícito acá para que quede
+            # claro que el CC sí se está mandando y no solo mostrando).
+            destinatarios = [destinatario] + list(cc or [])
+            smtp.send_message(msg, to_addrs=destinatarios)
 
-        return True, f"Enviado a {destinatario} (vía SMTP)"
+        return True, f"Enviado a {destinatario}" + (f" (copia a {', '.join(cc)})" if cc else "") + " (vía SMTP)"
     except Exception as e:
         return False, f"Error al enviar por SMTP: {e}"
 
 
-def _enviar_correo(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None):
+def _enviar_correo(destinatario, asunto, cuerpo_texto, adjunto_bytes=None, adjunto_nombre=None, cc=None):
     """Envía un correo por el transporte disponible: Resend si hay
     RESEND_API_KEY configurada (se prueba primero — funciona incluso si el
-    hosting bloquea SMTP), si no, SMTP tradicional. Devuelve
+    hosting bloquea SMTP), si no, SMTP tradicional. 'cc' es una lista
+    opcional de correos en copia (se aplica en ambos transportes). Devuelve
     (exito: bool, detalle: str)."""
     if RESEND_API_KEY and requests is not None:
-        return _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes, adjunto_nombre)
+        return _enviar_correo_resend(destinatario, asunto, cuerpo_texto, adjunto_bytes, adjunto_nombre, cc)
     if SMTP_USER and SMTP_PASSWORD:
-        return _enviar_correo_smtp(destinatario, asunto, cuerpo_texto, adjunto_bytes, adjunto_nombre)
+        return _enviar_correo_smtp(destinatario, asunto, cuerpo_texto, adjunto_bytes, adjunto_nombre, cc)
     if RESEND_API_KEY and requests is None:
         return False, (
             "Hay RESEND_API_KEY configurada pero falta instalar la librería 'requests' en el "

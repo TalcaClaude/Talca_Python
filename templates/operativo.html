@@ -309,6 +309,10 @@
         <input type="text" id="opc-rut">
       </div>
       <div class="campo">
+        <label>Dirección</label>
+        <input type="text" id="opc-direccion" placeholder="Ej: Av. Siempre Viva 742, Santiago">
+      </div>
+      <div class="campo">
         <label>Notas</label>
         <textarea id="opc-notas" rows="2"></textarea>
       </div>
@@ -358,6 +362,73 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-op-equipo">Cancelar</button>
         <button type="submit" class="btn btn-primary">Guardar equipo</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Módulo Operativo: corregir datos del vehículo ya ingresado (ej. color o VIN mal escritos en la recepción) -->
+<div class="modal-overlay" id="modal-op-equipo-editar">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Editar datos del vehículo</h2>
+      <button class="modal-close" data-close="modal-op-equipo-editar">&times;</button>
+    </div>
+    <form id="form-op-equipo-editar">
+      <input type="hidden" id="opee-id">
+      <div class="grid-2">
+        <div class="campo">
+          <label>Patente / identificador</label>
+          <input type="text" id="opee-identificador">
+        </div>
+        <div class="campo">
+          <label>VIN</label>
+          <input type="text" id="opee-vin">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Marca</label>
+          <input type="text" id="opee-marca">
+        </div>
+        <div class="campo">
+          <label>Modelo</label>
+          <input type="text" id="opee-modelo">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Color</label>
+          <input type="text" id="opee-color" list="dl-op-colores">
+        </div>
+        <div class="campo">
+          <label>Año</label>
+          <input type="number" id="opee-anio" min="1900" step="1">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Transmisión</label>
+          <input type="text" id="opee-transmision" list="dl-op-transmisiones">
+        </div>
+        <div class="campo">
+          <label>Puertas</label>
+          <select id="opee-puertas">
+            <option value="">—</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5">5</option>
+          </select>
+        </div>
+      </div>
+      <div class="campo">
+        <label>Motor (cc)</label>
+        <input type="text" id="opee-motor-cc">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-op-equipo-editar">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar corrección</button>
       </div>
     </form>
   </div>
@@ -615,12 +686,12 @@
     </div>
 
     <div class="op-tab-panel" id="opod-panel-ot">
-      <h3 class="subtitulo">Cliente</h3>
-      <div class="op-resumen-cliente-auto" id="opod-resumen-cliente"></div>
-      <h3 class="subtitulo">Vehículo</h3>
-      <div class="op-resumen-cliente-auto" id="opod-resumen-vehiculo"></div>
+      <!-- La info de cliente y vehículo ya no se repite acá: vive completa
+           en la pestaña "Recepción" (con botón de editar). Esta pestaña
+           empieza directo en "Estado" para dejarla más compacta. -->
       <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-ver-historial" style="display:none">Ver historial de este vehículo</button></p>
       <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-copiar-seguimiento">🔗 Copiar link de seguimiento para el cliente</button></p>
+      <p class="ayuda-inline"><button type="button" class="btn-link" id="btn-opod-orden-imprimible">🖨 Vista imprimible de la orden (para entregar al cliente)</button></p>
 
       <div class="grid-2">
         <div class="campo">
@@ -723,7 +794,11 @@
     </div>
 
     <div class="op-tab-panel" id="opod-panel-recepcion" style="display:none">
-      <p class="ayuda-inline">Estos datos se registraron al ingresar el vehículo y no se pueden modificar aquí.</p>
+      <p class="ayuda-inline">
+        Estos datos se registraron al ingresar el vehículo.
+        <button type="button" class="btn-link" id="btn-oprl-editar-vehiculo">✏ Editar datos del vehículo</button>
+        (por si hay que corregir el color, el VIN u otro dato mal ingresado)
+      </p>
       <div class="op-resumen-cliente-auto" id="op-recepcion-lectura"></div>
       <h3 class="subtitulo">Equipamiento — qué trajo el vehículo</h3>
       <div class="op-equipamiento-grid op-equipamiento-grid--lectura" id="op-equipamiento-grid-lectura"></div>
@@ -844,9 +919,10 @@
       </div>
       <div class="modal-actions modal-actions--start">
         <button type="button" class="btn btn-secundario" id="btn-opp-descargar-pdf">⬇ Descargar PDF</button>
+        <button type="button" class="btn btn-secundario" id="btn-opp-enviar-correo">✉ Enviar al correo del cliente</button>
         <button type="button" class="btn btn-primary" id="btn-opp-guardar">Guardar presupuesto</button>
       </div>
-      <p class="ayuda-inline">Al marcar el presupuesto como "Aprobado", la orden pasa automáticamente a Reparación. Usa "Descargar PDF" para enviarle el presupuesto al cliente.</p>
+      <p class="ayuda-inline">Al marcar el presupuesto como "Aprobado", la orden pasa automáticamente a Reparación. "Enviar al correo del cliente" manda el mismo PDF directo al correo registrado del cliente (con copia al taller).</p>
     </div>
 
     <div class="op-tab-panel" id="opod-panel-repuestos" style="display:none">

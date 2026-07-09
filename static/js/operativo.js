@@ -4,6 +4,7 @@ const state = {
   opClientes: [],
   opEquiposClienteActual: [],
   opOrdenActivaId: null,
+  opRecepcionEquipoActual: null,
   opProductos: [],
   opGarantias: [],
   catalogoVehiculos: null, // { marcas: [...], modelos: {marca: [...]} } — catálogo de referencia (no depende del historial de OTs)
@@ -574,7 +575,20 @@ function renderTableroOperativo() {
           ${o.prioridad && o.prioridad !== "media" ? `<span class="badge-prioridad badge-prioridad--${o.prioridad}">${escapeHtml(o.prioridad)}</span>` : ""}
         </div>
         <div class="op-card-cliente">${escapeHtml(o.cliente ? o.cliente.nombre : "Sin cliente")}</div>
-        ${o.equipo ? `<div class="op-card-equipo">${escapeHtml([o.equipo.marca, o.equipo.modelo].filter(Boolean).join(" · ") || o.equipo.identificador || "")}</div>` : ""}
+        ${o.equipo ? (() => {
+          const nombre = [o.equipo.marca, o.equipo.modelo].filter(Boolean).join(" ") || o.equipo.identificador || "";
+          const anioColor = [o.equipo.anio, o.equipo.color].filter(Boolean).join(" · ");
+          const tituloCompleto = [nombre, anioColor].filter(Boolean).join(" · ");
+          // Año y color van en un span aparte de ancho fijo (no crece con el
+          // texto) para que SIEMPRE se alcancen a ver, aunque la columna sea
+          // angosta — es justo la info nueva que se pidió agregar, así que
+          // no puede ser lo primero que se recorte. Marca/modelo, que ya se
+          // mostraba antes, es lo que se recorta con "…" si no cabe todo.
+          return `<div class="op-card-equipo" title="${escapeHtml(tituloCompleto)}">
+            <span class="op-card-equipo-nombre">${escapeHtml(nombre)}</span>
+            ${anioColor ? `<span class="op-card-equipo-extra">${escapeHtml(anioColor)}</span>` : ""}
+          </div>`;
+        })() : ""}
         <div class="op-card-valor">${fmtMoney(o.precio_referencial || 0)}</div>
         <div class="op-card-meta">
           <span>Recepción: ${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</span>
@@ -659,6 +673,7 @@ function abrirEdicionClienteOperativo(id) {
   document.getElementById("opc-telefono").value = c.telefono || "";
   document.getElementById("opc-email").value = c.email || "";
   document.getElementById("opc-rut").value = c.rut || "";
+  document.getElementById("opc-direccion").value = c.direccion || "";
   document.getElementById("opc-notas").value = c.notas || "";
   document.getElementById("modal-op-cliente-titulo").textContent = "Editar cliente";
   opClienteCallback = cargarClientesTab;
@@ -831,6 +846,7 @@ document.getElementById("form-op-cliente").addEventListener("submit", async (e) 
     telefono: document.getElementById("opc-telefono").value.trim(),
     email: document.getElementById("opc-email").value.trim(),
     rut: document.getElementById("opc-rut").value.trim(),
+    direccion: document.getElementById("opc-direccion").value.trim(),
     notas: document.getElementById("opc-notas").value.trim(),
   };
   try {
@@ -1189,32 +1205,21 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
 // Detalle de orden: SOLO resumen de cliente/auto + botones de acceso.
 // ---------------------------------------------------------------------------
 
-// Pestaña "OT": toda la info del cliente y del vehículo (sin el checklist
-// de equipamiento, que solo se ve en "Recepción").
+// La pestaña "OT" ya no repite los datos de cliente/vehículo (viven
+// completos en "Recepción", con botón de editar) — acá solo se arma el
+// título compacto de la ventana ("Orden #7956 — José Alegría · AB1234")
+// para poder identificar de un vistazo qué orden se está viendo, y se deja
+// listo el botón de "copiar link de seguimiento" (que sí necesita la
+// patente aunque no se muestre el bloque completo del vehículo).
 function renderResumenClienteAuto(orden) {
   const cliente = orden.cliente;
   const equipo = orden.equipo;
-  const filasCliente = cliente ? [
-    ["Cliente", cliente.nombre],
-    ["Teléfono", cliente.telefono || "—"],
-    ["RUT", cliente.rut || "—"],
-    ["Email", cliente.email || "—"],
-  ] : [["Cliente", "Sin cliente"]];
-  const filasAuto = equipo ? [
-    ["Marca", equipo.marca || "—"],
-    ["Modelo", equipo.modelo || "—"],
-    ["Patente", equipo.identificador || "—"],
-    ["Color", equipo.color || "—"],
-    ["Año", equipo.anio || "—"],
-    ["Transmisión", equipo.modelo_transmision || "—"],
-    ["Motor (cc)", equipo.motor_cc || "—"],
-    ["VIN", equipo.vin || "—"],
-  ] : [["Vehículo", "Sin vehículo asociado"]];
 
-  const filas = (arr) => arr.map(([k, v]) => `<div class="op-resumen-fila"><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join("");
-
-  document.getElementById("opod-resumen-cliente").innerHTML = filas(filasCliente);
-  document.getElementById("opod-resumen-vehiculo").innerHTML = filas(filasAuto);
+  const partesTitulo = [`Orden #${orden.id}`];
+  const identificacion = [cliente ? cliente.nombre : "", equipo ? equipo.identificador : ""]
+    .filter(Boolean).join(" · ");
+  if (identificacion) partesTitulo.push(identificacion);
+  document.getElementById("opod-titulo").textContent = partesTitulo.join(" — ");
 
   const btnSeguimiento = document.getElementById("btn-opod-copiar-seguimiento");
   const patente = equipo ? equipo.identificador : "";
@@ -1256,6 +1261,14 @@ document.getElementById("btn-opod-copiar-seguimiento").addEventListener("click",
     return;
   }
   mostrarLinkSeguimiento(patente);
+});
+
+// Vista imprimible: documento oficial que se le entrega al cliente (datos
+// de recepción + valores, SIN costos internos ni utilidad — ver
+// orden_imprimible_pdf en modulos/operativo.py).
+document.getElementById("btn-opod-orden-imprimible").addEventListener("click", () => {
+  const ordenId = document.getElementById("opod-id").value;
+  window.open(`/api/operativo/ordenes/${ordenId}/orden-imprimible/pdf`, "_blank");
 });
 
 document.getElementById("btn-op-link-seguimiento-copiar").addEventListener("click", async () => {
@@ -1544,6 +1557,11 @@ async function abrirRecepcionLectura() {
     const cliente = orden.cliente || {};
     const estanque = orden.estanque_nivel;
 
+    // Se guarda el equipo tal cual llegó de la API (con su id) para poder
+    // prellenar el modal de "Editar datos del vehículo" sin tener que
+    // volver a pedirlo — el botón de editar vive en esta misma pestaña.
+    state.opRecepcionEquipoActual = equipo.id ? equipo : null;
+
     const filasVehiculo = [
       ["VIN", equipo.vin || "—"],
       ["Patente", equipo.identificador || "—"],
@@ -1556,6 +1574,7 @@ async function abrirRecepcionLectura() {
     ];
     const filasRecepcion = [
       ["RUT Cliente", cliente.rut || "—"],
+      ["Dirección Cliente", cliente.direccion || "—"],
       ["Encargado", orden.recepcionado_por || "—"],
       ["Kilometraje", orden.kilometraje != null ? orden.kilometraje : "—"],
       ["Estanque", estanque != null ? `${estanque} / 8` : "—"],
@@ -1577,6 +1596,59 @@ async function abrirRecepcionLectura() {
     toast(e.message, true);
   }
 }
+
+// Corrección de datos del vehículo ya ingresado (ej. el color o el VIN se
+// escribieron mal en la recepción). Se abre desde el botón "✏ Editar datos
+// del vehículo" dentro de la pestaña Recepción, y usa el mismo PUT
+// /api/operativo/equipos/<id> que ya existe (el que llena estos datos al
+// crear la orden) — acá solo se reutiliza para poder corregirlos después.
+document.getElementById("btn-oprl-editar-vehiculo").addEventListener("click", () => {
+  const equipo = state.opRecepcionEquipoActual;
+  if (!equipo) {
+    toast("Esta orden no tiene un vehículo asociado.", true);
+    return;
+  }
+  document.getElementById("opee-id").value = equipo.id;
+  document.getElementById("opee-identificador").value = equipo.identificador || "";
+  document.getElementById("opee-vin").value = equipo.vin || "";
+  document.getElementById("opee-marca").value = equipo.marca || "";
+  document.getElementById("opee-modelo").value = equipo.modelo || "";
+  document.getElementById("opee-color").value = equipo.color || "";
+  document.getElementById("opee-anio").value = equipo.anio != null ? equipo.anio : "";
+  document.getElementById("opee-transmision").value = equipo.modelo_transmision || "";
+  document.getElementById("opee-puertas").value = equipo.puertas || "";
+  document.getElementById("opee-motor-cc").value = equipo.motor_cc || "";
+  abrirModal("modal-op-equipo-editar");
+});
+
+document.getElementById("form-op-equipo-editar").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const equipoId = document.getElementById("opee-id").value;
+  try {
+    await api(`/api/operativo/equipos/${equipoId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        identificador: document.getElementById("opee-identificador").value.trim(),
+        vin: document.getElementById("opee-vin").value.trim(),
+        marca: document.getElementById("opee-marca").value.trim(),
+        modelo: document.getElementById("opee-modelo").value.trim(),
+        color: document.getElementById("opee-color").value.trim(),
+        anio: document.getElementById("opee-anio").value || null,
+        modelo_transmision: document.getElementById("opee-transmision").value.trim(),
+        puertas: document.getElementById("opee-puertas").value,
+        motor_cc: document.getElementById("opee-motor-cc").value.trim(),
+      }),
+    });
+    cerrarModal("modal-op-equipo-editar");
+    toast("Datos del vehículo actualizados.");
+    await abrirRecepcionLectura();
+    // El kanban y la tarjeta muestran año/color/patente — hay que refrescar
+    // para que la corrección se vea también ahí, no solo en Recepción.
+    await cargarOperativo();
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Diagnóstico
@@ -1726,6 +1798,25 @@ document.getElementById("btn-opp-guardar").addEventListener("click", async () =>
 document.getElementById("btn-opp-descargar-pdf").addEventListener("click", () => {
   const ordenId = document.getElementById("opod-id").value;
   window.open(`/api/operativo/ordenes/${ordenId}/presupuesto/pdf`, "_blank");
+});
+
+document.getElementById("btn-opp-enviar-correo").addEventListener("click", async (e) => {
+  const ordenId = document.getElementById("opod-id").value;
+  const btn = e.currentTarget;
+  if (!confirm("¿Enviar el presupuesto al correo registrado del cliente?")) return;
+  btn.disabled = true;
+  const textoOriginal = btn.textContent;
+  btn.textContent = "Enviando…";
+  try {
+    const resp = await api(`/api/operativo/ordenes/${ordenId}/presupuesto/enviar`, { method: "POST" });
+    const copia = resp.copia && resp.copia.length ? ` (con copia a ${resp.copia.join(", ")})` : "";
+    toast(`Presupuesto enviado a ${resp.destinatario}${copia}.`);
+  } catch (e2) {
+    toast(e2.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = textoOriginal;
+  }
 });
 
 // ---------------------------------------------------------------------------

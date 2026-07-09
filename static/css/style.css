@@ -345,9 +345,33 @@ body::before { content: none; }
 }
 
 .op-card-equipo {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-size: 12px;
   color: var(--accent-2);
   margin-bottom: 6px;
+}
+
+/* Marca/modelo (lo que ya se mostraba) se recorta con "…" cuando no cabe —
+   es un flex ítem que sí puede achicarse. */
+.op-card-equipo-nombre {
+  /* No baja de ~30px aunque la columna sea angosta y el año/color ocupen
+     espacio — así marca/modelo nunca desaparece del todo, solo se recorta. */
+  min-width: 30px;
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Año/color (lo nuevo que se pidió mostrar) va en un ítem que NO se achica,
+   para que nunca sea lo que se recorta cuando la tarjeta queda angosta —
+   así siempre queda visible sin alargar la tarjeta. */
+.op-card-equipo-extra {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  opacity: 0.85;
 }
 
 .op-card-valor {

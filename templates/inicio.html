@@ -122,6 +122,14 @@
       <h2>RRHH</h2>
       <p>Ficha de empleados, vacaciones y liquidaciones de sueldo. Próximamente.</p>
     </div>
+
+    {% if session.get("rol") == "admin" %}
+    <a class="modulo-card" href="/administracion">
+      <span class="modulo-tag">06</span>
+      <h2>Administración</h2>
+      <p>Usuarios, roles y permisos del sistema.</p>
+    </a>
+    {% endif %}
   </div>
 </div>
 

@@ -1,4 +1,8 @@
 const state = {
+  rol: null,
+  puedeFinanzas: true,
+  puedeBodega: true,
+  esAdmin: true,
   productos: [],
   categorias: [],
   productoActivo: null,
@@ -127,7 +131,8 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     document.getElementById("vista-usuarios").style.display = vista === "usuarios" ? "block" : "none";
     document.getElementById("btn-nuevo").style.display = vista === "productos" ? "inline-block" : "none";
-    document.getElementById("btn-importar-excel").style.display = vista === "productos" ? "inline-block" : "none";
+    document.getElementById("btn-importar-excel").style.display =
+      vista === "productos" && state.puedeFinanzas ? "inline-block" : "none";
     const titulos = {
       dashboard: "Dashboard",
       productos: "Administración de Inventario",
@@ -2818,11 +2823,38 @@ async function cargarSesion() {
   try {
     const s = await api("/api/sesion");
     state.sesion = s;
+    state.rol = s.rol;
+    state.esAdmin = s.rol === "admin";
+    state.puedeFinanzas = state.esAdmin || s.rol === "finanzas";
+    state.puedeBodega = state.esAdmin || s.rol === "bodega";
     document.getElementById("sesion-usuario").textContent = s.nombre ? `👤 ${s.nombre}` : "";
     document.getElementById("m-usuario").value = s.nombre || s.username || "";
+    aplicarVisibilidadPorRol();
   } catch (e) {
     console.error(e);
   }
+}
+
+// El backend siempre rechaza estas acciones si el rol no corresponde (ver
+// @requiere_rol en app.py) — esto solo evita mostrar botones que de todas
+// formas van a fallar. "Nueva factura"/"Importar Excel" quedan para
+// finanzas (que es quien registra facturas de compra); la pestaña
+// "Usuarios" y aprobar/rechazar fotos de factura por WhatsApp quedan para
+// bodega/admin (aprobar la recepción de mercadería es trabajo de bodega).
+function aplicarVisibilidadPorRol() {
+  document.getElementById("btn-nueva-factura").style.display = state.puedeFinanzas ? "" : "none";
+  document.querySelector('.tab[data-vista="usuarios"]').style.display = state.esAdmin ? "" : "none";
+  document.querySelectorAll(".wapd-solo-bodega").forEach(el => {
+    el.style.display = state.puedeBodega ? "" : "none";
+  });
+  const avisoSoloBodega = document.getElementById("wapd-aviso-solo-bodega");
+  if (avisoSoloBodega) avisoSoloBodega.style.display = state.puedeBodega ? "none" : "block";
+  // Reaplica el toggle de "Importar Excel" (depende también de qué pestaña
+  // está activa, no solo del rol) por si cargarSesion() resuelve después
+  // de que ya se dibujó la pestaña actual.
+  const vistaActiva = document.querySelector(".tab.activo")?.dataset.vista;
+  document.getElementById("btn-importar-excel").style.display =
+    vistaActiva === "productos" && state.puedeFinanzas ? "inline-block" : "none";
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ const AFP_INTERVALO_SONDEO_MS = 25000;
 let afpPendientesCache = [];
 let afpDetalleActivoId = null;
 let afpYaAbrioAutomaticamente = false;
+let afpPuedeBodega = true; // se corrige apenas resuelve afpCargarRol() — hasta entonces no se ocultan los botones para evitar parpadeo
 
 function afpEscapeHtml(str) {
   if (str === null || str === undefined) return "";
@@ -69,6 +70,15 @@ async function afpApi(path, options = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Error inesperado");
   return data;
+}
+
+async function afpCargarRol() {
+  try {
+    const s = await afpApi("/api/sesion");
+    afpPuedeBodega = s.rol === "admin" || s.rol === "bodega";
+  } catch (e) {
+    // Sin sesión válida (ej. venimos de /login) — no hay nada que sondear.
+  }
 }
 
 async function afpSondear() {
@@ -153,10 +163,30 @@ function afpAbrirDetalle(id) {
       <td>${afpEscapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}</td>
       <td class="num mono">${l.cantidad}</td>
       <td class="num afp-linea-recibido">
-        <input type="number" min="0" step="1" value="${l.cantidad}" data-producto-id="${l.producto_id}" class="afp-input-recibido">
+        <input type="number" min="0" step="1" value="${l.cantidad}" data-producto-id="${l.producto_id}" class="afp-input-recibido" ${afpPuedeBodega ? "" : "disabled"}>
       </td>
       <td class="num mono">${afpFmtMoney(l.precio_unitario)}</td>
     </tr>`).join("");
+
+  // El backend siempre rechaza aprobar/rechazar si el rol no es
+  // bodega/admin (ver @requiere_rol en app.py) — acá solo se evita
+  // mostrar botones que de todas formas iban a fallar, dejando la
+  // revisión visible en modo solo-lectura para cualquier otro rol
+  // (transparencia: finanzas puede ver que su factura sigue pendiente,
+  // aunque no pueda resolverla ella misma).
+  document.getElementById("afp-btn-aprobar").style.display = afpPuedeBodega ? "" : "none";
+  document.getElementById("afp-btn-rechazar").style.display = afpPuedeBodega ? "" : "none";
+  const campoNotaRechazo = document.getElementById("afp-nota-rechazo").closest(".campo");
+  campoNotaRechazo.style.display = afpPuedeBodega ? "" : "none";
+  let avisoSoloLectura = document.getElementById("afp-aviso-solo-lectura");
+  if (!avisoSoloLectura) {
+    avisoSoloLectura = document.createElement("p");
+    avisoSoloLectura.id = "afp-aviso-solo-lectura";
+    avisoSoloLectura.className = "ayuda-inline ayuda-inline--bloqueado";
+    campoNotaRechazo.after(avisoSoloLectura);
+  }
+  avisoSoloLectura.textContent = "Aprobar o rechazar la recepción es una acción del rol Bodega — esto queda solo como vista de revisión.";
+  avisoSoloLectura.style.display = afpPuedeBodega ? "none" : "block";
 
   afpAbrirModal("afp-modal-detalle");
 }
@@ -208,6 +238,6 @@ document.getElementById("afp-btn-rechazar")?.addEventListener("click", async () 
 });
 
 if (document.getElementById("afp-flotante")) {
-  afpSondear();
+  afpCargarRol().then(afpSondear);
   setInterval(afpSondear, AFP_INTERVALO_SONDEO_MS);
 }

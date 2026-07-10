@@ -84,6 +84,12 @@ async function cargarSesion() {
     const s = await api("/api/sesion");
     state.sesion = s;
     document.getElementById("sesion-usuario").textContent = s.nombre ? `👤 ${s.nombre}` : "";
+    // El backend siempre rechaza esto si el rol no es finanzas/admin (ver
+    // @requiere_rol en app.py) — acá solo se evita mostrar un botón que de
+    // todas formas iba a fallar.
+    const puedeFinanzas = s.rol === "admin" || s.rol === "finanzas";
+    const btnNuevaFacturaPendiente = document.getElementById("btn-nueva-factura-pendiente");
+    if (btnNuevaFacturaPendiente) btnNuevaFacturaPendiente.style.display = puedeFinanzas ? "" : "none";
   } catch (e) {
     console.error(e);
   }

@@ -20,10 +20,11 @@ import re
 import sqlite3
 import unicodedata
 from datetime import datetime, timedelta
+from functools import wraps
 import statistics
 import math
 
-from flask import g, request, send_file, session
+from flask import g, jsonify, request, send_file, session
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
@@ -184,6 +185,42 @@ def usuario_actual():
     la sesión iniciada (nunca un valor mandado por el cliente), para que no
     se pueda registrar un gasto o aporte a nombre de otra persona."""
     return session.get("nombre") or session.get("username") or "Sistema"
+
+
+# ---------------------------------------------------------------------------
+# Roles — usuarios.rol (ver migración en app.py). 'admin' puede todo
+# siempre; los demás roles solo lo que su rol tenga permitido en cada
+# endpoint (ver requiere_rol). Sesiones que ya estaban iniciadas ANTES de
+# este cambio no tienen 'rol' guardado en la sesión (se hizo login antes de
+# que existiera la columna) — se tratan como 'admin' mientras no vuelvan a
+# iniciar sesión, para no dejar a nadie bloqueado de un día para otro por
+# un despliegue; en el próximo login ya les queda su rol real.
+# ---------------------------------------------------------------------------
+
+ROLES_VALIDOS = ["admin", "finanzas", "bodega", "operativo"]
+
+
+def usuario_rol():
+    return session.get("rol") or "admin"
+
+
+def requiere_rol(*roles_permitidos):
+    """Decorador para endpoints sensibles: exige que la sesión activa tenga
+    uno de los roles indicados (o sea 'admin', que siempre puede todo).
+    Devuelve 403 con un mensaje claro si no corresponde — a diferencia de
+    solo ocultar el botón en la interfaz, esto se cumple aunque alguien
+    llame al endpoint directamente sin pasar por la pantalla. Sin
+    argumentos (requiere_rol()) significa "solo admin"."""
+    def decorador(vista):
+        @wraps(vista)
+        def envoltura(*args, **kwargs):
+            rol = usuario_rol()
+            if rol != "admin" and rol not in roles_permitidos:
+                permitidos = ", ".join(roles_permitidos) or "admin"
+                return jsonify({"error": f"Esta acción es solo para el rol {permitidos}. Tu rol actual es '{rol}'."}), 403
+            return vista(*args, **kwargs)
+        return envoltura
+    return decorador
 
 
 def formatear_rut(valor):

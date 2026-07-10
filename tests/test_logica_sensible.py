@@ -2923,6 +2923,146 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         self.assertEqual(despues, antes + 1)
 
 
+class TestRolesYPermisos(unittest.TestCase):
+    """Los roles (admin/finanzas/bodega/operativo — ver ROLES_VALIDOS en
+    core.py) no son solo cosméticos: los endpoints sensibles rechazan la
+    acción en el backend si la sesión activa no tiene el rol
+    correspondiente (ver requiere_rol), aunque se llame directo a la API
+    sin pasar por ningún botón. Si esto se rompe, cualquier usuario podría
+    aprobar recepciones de mercadería o crear facturas de compra sin que
+    le correspondiera, o administrar cuentas de otras personas."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin_client = taller_app.app.test_client()
+        cls.admin_client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_usuario(self, username, password, rol):
+        resp = self.admin_client.post(
+            "/api/admin/usuarios",
+            json={"username": username, "password": password, "nombre": username, "rol": rol},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _client_como(self, username, password):
+        client = taller_app.app.test_client()
+        resp = client.post("/login", data={"username": username, "password": password})
+        self.assertEqual(resp.status_code, 302, resp.get_data(as_text=True))
+        return client
+
+    def _crear_producto_http(self, client, nombre, stock_disponible=0, costo_compra=1000):
+        resp = client.post(
+            "/api/productos",
+            json={"nombre": nombre, "stock_disponible": stock_disponible, "costo_compra": costo_compra},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_pendiente_recepcion(self, client, producto_id, numero):
+        return client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "lineas": [{"producto_id": producto_id, "cantidad": 1, "precio_unitario": 1000}],
+                "condicion_pago": "credito",
+            },
+        )
+
+    def test_usuario_nuevo_hereda_el_rol_asignado_al_hacer_login(self):
+        self._crear_usuario("rol_test_finanzas1", "clave123456", "finanzas")
+        client = self._client_como("rol_test_finanzas1", "clave123456")
+        sesion = client.get("/api/sesion").get_json()
+        self.assertEqual(sesion["rol"], "finanzas")
+
+    def test_bodega_no_puede_crear_factura_pendiente_de_recepcion(self):
+        self._crear_usuario("rol_test_bodega1", "clave123456", "bodega")
+        client = self._client_como("rol_test_bodega1", "clave123456")
+        producto = self._crear_producto_http(self.admin_client, "Producto - rol bodega crea factura")
+        resp = self._crear_pendiente_recepcion(client, producto["id"], "FACT-ROL-001")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_finanzas_puede_crear_factura_pendiente_de_recepcion(self):
+        self._crear_usuario("rol_test_finanzas2", "clave123456", "finanzas")
+        client = self._client_como("rol_test_finanzas2", "clave123456")
+        producto = self._crear_producto_http(self.admin_client, "Producto - rol finanzas crea factura")
+        resp = self._crear_pendiente_recepcion(client, producto["id"], "FACT-ROL-002")
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+    def test_finanzas_no_puede_aprobar_recepcion(self):
+        self._crear_usuario("rol_test_finanzas3", "clave123456", "finanzas")
+        client = self._client_como("rol_test_finanzas3", "clave123456")
+        producto = self._crear_producto_http(self.admin_client, "Producto - rol finanzas no aprueba")
+        pendiente = self._crear_pendiente_recepcion(client, producto["id"], "FACT-ROL-003").get_json()
+        resp = client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_bodega_puede_aprobar_recepcion_creada_por_finanzas(self):
+        self._crear_usuario("rol_test_bodega2", "clave123456", "bodega")
+        bodega_client = self._client_como("rol_test_bodega2", "clave123456")
+        self._crear_usuario("rol_test_finanzas4", "clave123456", "finanzas")
+        finanzas_client = self._client_como("rol_test_finanzas4", "clave123456")
+        producto = self._crear_producto_http(self.admin_client, "Producto - rol bodega aprueba")
+        pendiente = self._crear_pendiente_recepcion(finanzas_client, producto["id"], "FACT-ROL-004").get_json()
+        resp = bodega_client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+    def test_operativo_no_puede_crear_ni_aprobar_facturas(self):
+        self._crear_usuario("rol_test_operativo1", "clave123456", "operativo")
+        client = self._client_como("rol_test_operativo1", "clave123456")
+        producto = self._crear_producto_http(self.admin_client, "Producto - rol operativo bloqueado")
+        resp = self._crear_pendiente_recepcion(client, producto["id"], "FACT-ROL-005")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_usuario_desactivado_no_puede_iniciar_sesion(self):
+        creado = self._crear_usuario("rol_test_desactivado1", "clave123456", "operativo")
+        resp_edit = self.admin_client.put(f"/api/admin/usuarios/{creado['id']}", json={"activo": False})
+        self.assertEqual(resp_edit.status_code, 200, resp_edit.get_data(as_text=True))
+        resp_login = self.admin_client.post("/login", data={"username": "rol_test_desactivado1", "password": "clave123456"})
+        self.assertEqual(resp_login.status_code, 403)
+
+    def test_admin_no_puede_desactivar_su_propia_cuenta(self):
+        sesion = self.admin_client.get("/api/sesion").get_json()
+        usuarios = self.admin_client.get("/api/admin/usuarios").get_json()["usuarios"]
+        admin_id = next(u["id"] for u in usuarios if u["username"] == sesion["username"])
+        resp = self.admin_client.put(f"/api/admin/usuarios/{admin_id}", json={"activo": False})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_solo_admin_puede_administrar_usuarios(self):
+        self._crear_usuario("rol_test_finanzas5", "clave123456", "finanzas")
+        client = self._client_como("rol_test_finanzas5", "clave123456")
+        resp = client.get("/api/admin/usuarios")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_resetear_password_permite_iniciar_sesion_con_la_nueva(self):
+        creado = self._crear_usuario("rol_test_reset1", "clave123456", "operativo")
+        resp = self.admin_client.post(
+            f"/api/admin/usuarios/{creado['id']}/resetear-password", json={"password": "nuevaclave789"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        client = taller_app.app.test_client()
+        resp_login_vieja = client.post("/login", data={"username": "rol_test_reset1", "password": "clave123456"})
+        self.assertEqual(resp_login_vieja.status_code, 401)
+        resp_login_nueva = client.post("/login", data={"username": "rol_test_reset1", "password": "nuevaclave789"})
+        self.assertEqual(resp_login_nueva.status_code, 302)
+
+    def test_usuario_viejo_creado_por_el_panel_historico_de_logistica_queda_como_operativo(self):
+        # /api/usuarios es el panel de creación de cuentas que ya existía
+        # en Logística antes de que hubiera roles — ahora solo lo puede
+        # usar admin, y como no tiene selector de rol, el usuario creado
+        # por ahí debe quedar con el rol de menos privilegios (operativo),
+        # nunca heredar 'admin' del valor por defecto de la columna.
+        resp = self.admin_client.post(
+            "/api/usuarios",
+            json={"username": "rol_test_legado1", "password": "clave1234", "nombre": "Legado"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        client = self._client_como("rol_test_legado1", "clave1234")
+        sesion = client.get("/api/sesion").get_json()
+        self.assertEqual(sesion["rol"], "operativo")
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

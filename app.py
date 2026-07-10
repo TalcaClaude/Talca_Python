@@ -67,6 +67,9 @@ from core import (  # noqa: E402
     sumar_dias_iso,
     fmt_money_pdf,
     usuario_actual,
+    usuario_rol,
+    requiere_rol,
+    ROLES_VALIDOS,
     formatear_rut,
     _estimar_lead_time_dias,
     _consumo_diario_stats,
@@ -1063,6 +1066,23 @@ def init_db():
         db.execute("ALTER TABLE facturas ADD COLUMN plazo_dias_credito INTEGER")
         db.commit()
 
+    # ---- Migración 14: roles de usuario (admin / finanzas / bodega /
+    # operativo — ver ROLES_VALIDOS en core.py) y la posibilidad de
+    # desactivar un usuario sin borrarlo (para no perder el rastro de qué
+    # hizo mientras tuvo la cuenta activa). Todo usuario que ya existiera
+    # ANTES de esta migración queda con rol 'admin' (el DEFAULT de la
+    # columna se aplica a las filas existentes) — es la opción más segura:
+    # nadie pierde acceso a nada de un día para otro solo por este
+    # despliegue. El propio rol 'admin' es quien después reasigna el rol
+    # que corresponda a cada quien desde el panel de Administración.
+    columnas_usuarios = [c[1] for c in db.execute("PRAGMA table_info(usuarios)").fetchall()]
+    if "rol" not in columnas_usuarios:
+        db.execute("ALTER TABLE usuarios ADD COLUMN rol TEXT NOT NULL DEFAULT 'admin'")
+        db.commit()
+    if "activo" not in columnas_usuarios:
+        db.execute("ALTER TABLE usuarios ADD COLUMN activo INTEGER NOT NULL DEFAULT 1")
+        db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -1207,11 +1227,16 @@ def login():
         _registrar_intento_fallido(ip)
         return render_template("login.html", error="Usuario o contraseña incorrectos."), 401
 
+    if not usuario["activo"]:
+        _registrar_intento_fallido(ip)
+        return render_template("login.html", error="Esta cuenta está desactivada. Habla con un administrador."), 403
+
     _limpiar_intentos(ip)
     session.clear()
     session["user_id"] = usuario["id"]
     session["username"] = usuario["username"]
     session["nombre"] = usuario["nombre"] or usuario["username"]
+    session["rol"] = usuario["rol"] or "admin"
     session.permanent = True
     return redirect(url_for("inicio"))
 
@@ -1220,6 +1245,119 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
+# Administración de usuarios y roles — solo 'admin' (ver vista_administracion
+# y el panel en templates/admin.html). No hay endpoint para borrar un
+# usuario de verdad: se desactiva (usuarios.activo = 0), que le bloquea el
+# login sin perder el rastro de qué hizo mientras la cuenta estuvo activa
+# (nada más en el sistema referencia usuarios.id por llave foránea, así que
+# un borrado real sería seguro en ese sentido, pero preferimos no perder
+# historial por accidente).
+# ---------------------------------------------------------------------------
+
+def _usuario_admin_dict(row):
+    d = dict(row)
+    d.pop("password_hash", None)
+    return d
+
+
+@app.route("/api/admin/usuarios", methods=["GET"])
+@requiere_rol()
+def listar_usuarios_admin():
+    db = get_db()
+    filas = db.execute("SELECT * FROM usuarios ORDER BY username COLLATE NOCASE").fetchall()
+    return jsonify({"usuarios": [_usuario_admin_dict(f) for f in filas]})
+
+
+@app.route("/api/admin/usuarios", methods=["POST"])
+@requiere_rol()
+def crear_usuario_admin():
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip().lower()
+    password = data.get("password") or ""
+    nombre = (data.get("nombre") or "").strip()
+    rol = (data.get("rol") or "").strip().lower()
+
+    if not username:
+        return jsonify({"error": "El nombre de usuario es obligatorio"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
+    if rol not in ROLES_VALIDOS:
+        return jsonify({"error": f"Rol inválido. Usa uno de: {', '.join(ROLES_VALIDOS)}"}), 400
+
+    db = get_db()
+    if db.execute("SELECT id FROM usuarios WHERE username = ?", (username,)).fetchone():
+        return jsonify({"error": f"Ya existe un usuario con el nombre '{username}'"}), 400
+
+    cur = db.execute(
+        "INSERT INTO usuarios (username, password_hash, nombre, rol, activo, creado_en) VALUES (?, ?, ?, ?, 1, ?)",
+        (username, generate_password_hash(password), nombre or username, rol, now_iso()),
+    )
+    db.commit()
+    nuevo = db.execute("SELECT * FROM usuarios WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(_usuario_admin_dict(nuevo)), 201
+
+
+@app.route("/api/admin/usuarios/<int:usuario_id>", methods=["PUT"])
+@requiere_rol()
+def editar_usuario_admin(usuario_id):
+    db = get_db()
+    fila = db.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "Usuario no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = fila["nombre"]
+    rol = fila["rol"]
+    activo = fila["activo"]
+
+    if "nombre" in data:
+        nombre = (data.get("nombre") or "").strip() or fila["username"]
+    if "rol" in data:
+        rol = (data.get("rol") or "").strip().lower()
+        if rol not in ROLES_VALIDOS:
+            return jsonify({"error": f"Rol inválido. Usa uno de: {', '.join(ROLES_VALIDOS)}"}), 400
+        if rol != "admin" and fila["rol"] == "admin" and fila["id"] == session.get("user_id"):
+            # No te puedes sacar a ti mismo el rol admin — si lo hicieras y
+            # fueras el único admin, nadie más podría volver a entrar al
+            # panel de Administración a revertirlo.
+            otros_admin = db.execute(
+                "SELECT COUNT(*) FROM usuarios WHERE rol = 'admin' AND activo = 1 AND id != ?", (usuario_id,)
+            ).fetchone()[0]
+            if otros_admin == 0:
+                return jsonify({"error": "No puedes quitarte el rol admin: eres el único usuario admin activo."}), 400
+    if "activo" in data:
+        activo = 1 if data.get("activo") else 0
+        if not activo and fila["id"] == session.get("user_id"):
+            return jsonify({"error": "No puedes desactivar tu propia cuenta."}), 400
+
+    db.execute(
+        "UPDATE usuarios SET nombre = ?, rol = ?, activo = ? WHERE id = ?",
+        (nombre, rol, activo, usuario_id),
+    )
+    db.commit()
+    actualizado = db.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    return jsonify(_usuario_admin_dict(actualizado))
+
+
+@app.route("/api/admin/usuarios/<int:usuario_id>/resetear-password", methods=["POST"])
+@requiere_rol()
+def resetear_password_usuario_admin(usuario_id):
+    db = get_db()
+    fila = db.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "Usuario no encontrado"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    password = data.get("password") or ""
+    if len(password) < 6:
+        return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
+
+    db.execute("UPDATE usuarios SET password_hash = ? WHERE id = ?", (generate_password_hash(password), usuario_id))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1258,9 +1396,22 @@ def vista_agente_ia():
     return render_template("agente_ia.html")
 
 
+@app.route("/administracion")
+def vista_administracion():
+    # No es un rol como los otros (finanzas/bodega/operativo no deberían
+    # ni ver esta pantalla) — si alguien sin ser admin entra a la URL a
+    # mano, se le manda de vuelta al selector de módulos en vez de mostrar
+    # una pantalla vacía o un error feo. Los endpoints de abajo
+    # (/api/admin/usuarios) igual están protegidos aparte con
+    # @requiere_rol(), así que esto es solo para la página en sí.
+    if usuario_rol() != "admin":
+        return redirect(url_for("inicio"))
+    return render_template("admin.html")
+
+
 @app.route("/api/sesion", methods=["GET"])
 def sesion_actual():
-    return jsonify({"username": session.get("username"), "nombre": session.get("nombre")})
+    return jsonify({"username": session.get("username"), "nombre": session.get("nombre"), "rol": usuario_rol()})
 
 
 # ---------------------------------------------------------------------------
@@ -2531,6 +2682,7 @@ def eliminar_proveedor(proveedor_id):
 # ---------------------------------------------------------------------------
 
 @app.route("/api/usuarios", methods=["GET"])
+@requiere_rol()
 def listar_usuarios():
     db = get_db()
     rows = db.execute("SELECT id, username, nombre, creado_en FROM usuarios ORDER BY username COLLATE NOCASE").fetchall()
@@ -2538,7 +2690,16 @@ def listar_usuarios():
 
 
 @app.route("/api/usuarios", methods=["POST"])
+@requiere_rol()
 def crear_usuario():
+    # Panel histórico de Logística (previo a que existieran los roles —
+    # ver /administracion para el panel completo, con selector de rol).
+    # Se restringió a solo-admin apenas se agregaron roles: antes cualquier
+    # sesión iniciada podía crear/editar/borrar cualquier cuenta, lo que ya
+    # no tiene sentido una vez que hay roles con distintos permisos. Los
+    # usuarios creados por acá quedan con rol 'operativo' (el de menos
+    # privilegios) por defecto — quien los cree puede ir a Administración
+    # después a cambiarles el rol si corresponde.
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
@@ -2555,7 +2716,7 @@ def crear_usuario():
         return jsonify({"error": f"Ya existe un usuario '{username}'"}), 400
 
     cur = db.execute(
-        "INSERT INTO usuarios (username, password_hash, nombre, creado_en) VALUES (?, ?, ?, ?)",
+        "INSERT INTO usuarios (username, password_hash, nombre, rol, activo, creado_en) VALUES (?, ?, ?, 'operativo', 1, ?)",
         (username, generate_password_hash(password), nombre, now_iso()),
     )
     db.commit()
@@ -2564,6 +2725,7 @@ def crear_usuario():
 
 
 @app.route("/api/usuarios/<int:usuario_id>", methods=["PUT"])
+@requiere_rol()
 def editar_usuario(usuario_id):
     db = get_db()
     row = db.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
@@ -2595,6 +2757,7 @@ def editar_usuario(usuario_id):
 
 
 @app.route("/api/usuarios/<int:usuario_id>", methods=["DELETE"])
+@requiere_rol()
 def eliminar_usuario(usuario_id):
     db = get_db()
     row = db.execute("SELECT id FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
@@ -2710,6 +2873,7 @@ def obtener_factura_por_numero(numero):
 
 
 @app.route("/api/facturas", methods=["POST"])
+@requiere_rol("finanzas")
 def crear_factura():
     data = request.get_json(force=True, silent=True) or {}
     numero = (data.get("numero") or "").strip().upper()
@@ -3991,6 +4155,7 @@ def obtener_foto_factura_whatsapp_pendiente(pendiente_id):
 
 
 @app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>/aprobar", methods=["POST"])
+@requiere_rol("bodega")
 def aprobar_factura_whatsapp_pendiente(pendiente_id):
     """Aprueba un pendiente: usa el 'grupo' guardado (con las correcciones
     que la persona haya hecho en el panel — número, proveedor, líneas) para
@@ -4064,6 +4229,7 @@ def aprobar_factura_whatsapp_pendiente(pendiente_id):
 
 
 @app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>/rechazar", methods=["POST"])
+@requiere_rol("bodega")
 def rechazar_factura_whatsapp_pendiente(pendiente_id):
     db = get_db()
     fila = db.execute("SELECT * FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
@@ -4157,6 +4323,7 @@ def detalle_factura_pendiente_recepcion(pendiente_id):
 
 
 @app.route("/api/facturas/pendientes-recepcion", methods=["POST"])
+@requiere_rol("finanzas")
 def crear_factura_pendiente_recepcion():
     data = request.get_json(force=True, silent=True) or {}
     numero = (data.get("numero") or "").strip().upper()
@@ -4241,6 +4408,7 @@ def crear_factura_pendiente_recepcion():
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/aprobar", methods=["POST"])
+@requiere_rol("bodega")
 def aprobar_factura_pendiente_recepcion(pendiente_id):
     """Aprueba la recepción: recibe (opcionalmente) las cantidades
     efectivamente contadas físicamente por línea — si una línea no viene en
@@ -4316,6 +4484,7 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/rechazar", methods=["POST"])
+@requiere_rol("bodega")
 def rechazar_factura_pendiente_recepcion(pendiente_id):
     db = get_db()
     fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
@@ -4340,6 +4509,7 @@ def rechazar_factura_pendiente_recepcion(pendiente_id):
 
 
 @app.route("/api/facturas/carga-masiva/confirmar", methods=["POST"])
+@requiere_rol("finanzas")
 def carga_masiva_confirmar():
     _carga_masiva_limpiar_cache()
     data = request.get_json(force=True, silent=True) or {}

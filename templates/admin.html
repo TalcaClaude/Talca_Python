@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario Taller — Administración</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-tag">ADM</span>
+      <div class="brand-text">
+        <h1>Inventario<span>Taller</span></h1>
+        <p class="brand-sub">Administración — Usuarios y roles</p>
+      </div>
+    </div>
+    <div class="topbar-acciones">
+      <span class="sesion-usuario" id="sesion-usuario"></span>
+      <a href="/" class="btn btn-secundario">← Módulos</a>
+      <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+    </div>
+  </header>
+
+  <p class="ayuda-inline">Cada usuario tiene un rol que determina qué puede hacer, además de lo que ve en pantalla: <strong>admin</strong> puede todo (incluyendo este panel); <strong>finanzas</strong> registra facturas de compra y administra Caja Chica / Cuentas por Cobrar y Pagar; <strong>bodega</strong> aprueba o rechaza la recepción de mercadería (contra lo que llegó físicamente) y administra el inventario; <strong>operativo</strong> trabaja las órdenes de trabajo del taller. El bloqueo por rol se aplica también del lado del servidor, no solo ocultando botones.</p>
+
+  <section class="toolbar">
+    <span style="flex:1"></span>
+    <button class="btn btn-primary" id="btn-nuevo-usuario">+ Nuevo usuario</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Usuario</th>
+          <th>Nombre</th>
+          <th>Rol</th>
+          <th>Estado</th>
+          <th>Creado</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-usuarios">
+        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+</div>
+
+<!-- Modal: Nuevo usuario -->
+<div class="modal-overlay" id="modal-nuevo-usuario">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Nuevo usuario</h2>
+      <button class="modal-close" data-close="modal-nuevo-usuario">&times;</button>
+    </div>
+    <form id="form-nuevo-usuario">
+      <div class="campo">
+        <label>Nombre de usuario (para iniciar sesión) *</label>
+        <input type="text" id="nu-username" required placeholder="Ej: mvega">
+      </div>
+      <div class="campo">
+        <label>Nombre completo</label>
+        <input type="text" id="nu-nombre" placeholder="Ej: Matías Vega">
+      </div>
+      <div class="campo">
+        <label>Contraseña inicial * (mínimo 6 caracteres)</label>
+        <input type="password" id="nu-password" required minlength="6">
+      </div>
+      <div class="campo">
+        <label>Rol *</label>
+        <select id="nu-rol" required>
+          <option value="admin">Admin — puede todo</option>
+          <option value="finanzas">Finanzas</option>
+          <option value="bodega">Bodega</option>
+          <option value="operativo" selected>Operativo</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-nuevo-usuario">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Crear usuario</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Editar usuario -->
+<div class="modal-overlay" id="modal-editar-usuario">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="eu-titulo">Editar usuario</h2>
+      <button class="modal-close" data-close="modal-editar-usuario">&times;</button>
+    </div>
+    <form id="form-editar-usuario">
+      <input type="hidden" id="eu-id">
+      <div class="campo">
+        <label>Nombre completo</label>
+        <input type="text" id="eu-nombre">
+      </div>
+      <div class="campo">
+        <label>Rol</label>
+        <select id="eu-rol">
+          <option value="admin">Admin — puede todo</option>
+          <option value="finanzas">Finanzas</option>
+          <option value="bodega">Bodega</option>
+          <option value="operativo">Operativo</option>
+        </select>
+      </div>
+      <label class="toggle-critico">
+        <input type="checkbox" id="eu-activo">
+        Cuenta activa (permite iniciar sesión)
+      </label>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-editar-usuario">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar cambios</button>
+      </div>
+    </form>
+    <h3 class="subtitulo">Resetear contraseña</h3>
+    <p class="ayuda-inline">Escribe una contraseña nueva y avísale a la persona — no se le manda ningún correo, se la tienes que decir tú.</p>
+    <div class="grid-2">
+      <div class="campo">
+        <label>Contraseña nueva (mínimo 6 caracteres)</label>
+        <input type="password" id="eu-password-nueva" minlength="6">
+      </div>
+      <div class="campo">
+        <label>&nbsp;</label>
+        <button type="button" class="btn btn-secundario" id="btn-resetear-password">Resetear contraseña</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+{% include "_alerta_facturas_pendientes.html" %}
+
+<script src="/static/js/admin.js?v={{ ASSET_VERSION }}"></script>
+<script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
+</body>
+</html>

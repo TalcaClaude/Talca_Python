@@ -3190,6 +3190,78 @@ class TestRolesYPermisos(unittest.TestCase):
         self.assertEqual(sesion["rol"], "operativo")
 
 
+class TestProveedoresDeduplicacion(unittest.TestCase):
+    """El RUT es el identificador confiable de un proveedor — un nombre
+    escrito distinto (typo de la IA leyendo una foto, mayúsculas/espacios
+    distintos, razón social abreviada) no debería generar un proveedor
+    duplicado si el RUT ya existe. Cubre tanto la creación manual
+    (POST /api/proveedores) como los caminos que crean un proveedor "al
+    vuelo" (WhatsApp, Excel, foto) reutilizando _buscar_proveedor_existente."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def test_crear_proveedor_con_rut_duplicado_falla_aunque_el_nombre_sea_distinto(self):
+        r1 = self.client.post("/api/proveedores", json={"nombre": "Repuestos Dedup Uno", "rut": "76543210-5"})
+        self.assertEqual(r1.status_code, 201, r1.get_data(as_text=True))
+
+        r2 = self.client.post("/api/proveedores", json={"nombre": "Repuestos Dedup Uno SPA (otro nombre)", "rut": "76.543.210-5"})
+        self.assertEqual(r2.status_code, 400, r2.get_data(as_text=True))
+        self.assertIn("RUT", r2.get_json()["error"])
+
+    def test_editar_proveedor_con_rut_de_otro_proveedor_falla(self):
+        a = self.client.post("/api/proveedores", json={"nombre": "Proveedor Dedup A", "rut": "11111111-1"}).get_json()
+        b = self.client.post("/api/proveedores", json={"nombre": "Proveedor Dedup B", "rut": "22222222-2"}).get_json()
+
+        resp = self.client.put(f"/api/proveedores/{b['id']}", json={"rut": "11.111.111-1"})
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("RUT", resp.get_json()["error"])
+
+    def test_whatsapp_no_duplica_proveedor_existente_con_nombre_distinto_pero_mismo_rut(self):
+        # Reproduce el bug reportado: una factura recibida por WhatsApp de
+        # un proveedor que ya existe (pero con el nombre escrito distinto)
+        # no debe crear un proveedor nuevo si el RUT calza.
+        existente = self.client.post(
+            "/api/proveedores", json={"nombre": "Repuestos Original SPA", "rut": "89012345-1"}
+        ).get_json()
+
+        telefono = "+56945566001"
+        self.client.post("/api/agente/mecanicos", json={"nombre": "Mecánico Dedup WhatsApp", "telefono": telefono})
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            producto_id = _crear_producto(db, "PRODUCTO DEDUP WHATSAPP", stock_disponible=1)
+
+        respuesta_ia = {
+            "numero_factura": "DEDUP-WSP-001",
+            "fecha": "2026-07-10",
+            "proveedor_nombre": "repuestos original",  # mismo proveedor, nombre distinto
+            "proveedor_rut": "89.012.345-1",
+            "lineas": [{"descripcion": "PRODUCTO DEDUP WHATSAPP", "cantidad": 1, "precio_unitario": 5000}],
+        }
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp", return_value={"tipo": "factura", "patente": ""}), \
+             patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self.client.post(
+                "/api/agente/simular-mensaje-foto",
+                data={"telefono": telefono, "foto": (io.BytesIO(b"foto-falsa"), "factura.jpg")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        pendientes = self.client.get("/api/facturas/pendientes-recepcion?estado=pendiente").get_json()["pendientes"]
+        pendiente = next(p for p in pendientes if p["numero"] == "DEDUP-WSP-001")
+        self.assertEqual(pendiente["proveedor_id"], existente["id"])
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            total_proveedores_con_ese_rut = db.execute(
+                "SELECT COUNT(*) AS n FROM proveedores WHERE rut = ?", ("89.012.345-1",)
+            ).fetchone()["n"]
+        self.assertEqual(total_proveedores_con_ese_rut, 1)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

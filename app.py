@@ -2612,11 +2612,17 @@ def crear_proveedor():
     if existe:
         return jsonify({"error": f"Ya existe un proveedor con el nombre '{nombre}'"}), 400
 
+    rut_normalizado = formatear_rut((data.get("rut") or "").strip())
+    if rut_normalizado:
+        existe_rut = db.execute("SELECT id, nombre FROM proveedores WHERE rut = ? AND rut != ''", (rut_normalizado,)).fetchone()
+        if existe_rut:
+            return jsonify({"error": f"Ya existe un proveedor con ese RUT: '{existe_rut['nombre']}'"}), 400
+
     cur = db.execute(
         "INSERT INTO proveedores (nombre, rut, telefono, email, direccion, creado_en) VALUES (?, ?, ?, ?, ?, ?)",
         (
             nombre,
-            formatear_rut((data.get("rut") or "").strip()),
+            rut_normalizado,
             (data.get("telefono") or "").strip(),
             (data.get("email") or "").strip(),
             (data.get("direccion") or "").strip().upper(),
@@ -2647,11 +2653,19 @@ def editar_proveedor(proveedor_id):
         return jsonify({"error": f"Ya existe otro proveedor con el nombre '{nombre}'"}), 400
 
     rut_nuevo = (data.get("rut") if data.get("rut") is not None else row["rut"]).strip()
+    rut_normalizado = formatear_rut(rut_nuevo)
+    if rut_normalizado:
+        duplicado_rut = db.execute(
+            "SELECT id, nombre FROM proveedores WHERE rut = ? AND rut != '' AND id != ?", (rut_normalizado, proveedor_id)
+        ).fetchone()
+        if duplicado_rut:
+            return jsonify({"error": f"Ya existe otro proveedor con ese RUT: '{duplicado_rut['nombre']}'"}), 400
+
     db.execute(
         "UPDATE proveedores SET nombre = ?, rut = ?, telefono = ?, email = ?, direccion = ? WHERE id = ?",
         (
             nombre,
-            formatear_rut(rut_nuevo),
+            rut_normalizado,
             (data.get("telefono") if data.get("telefono") is not None else row["telefono"]).strip(),
             (data.get("email") if data.get("email") is not None else row["email"]).strip(),
             (data.get("direccion") if data.get("direccion") is not None else row["direccion"]).strip().upper(),
@@ -3533,11 +3547,36 @@ def _carga_masiva_resolver_producto(db, fila):
     return producto, None
 
 
+def _buscar_proveedor_existente(db, nombre, rut):
+    """Punto ÚNICO para decidir si un proveedor 'nombre'/'rut' que viene de
+    una fuente externa (Excel, foto escaneada, WhatsApp) ya existe en el
+    sistema. El RUT es el identificador confiable — dos facturas del mismo
+    proveedor pueden traer el nombre escrito distinto ("Repuestos ABC" vs
+    "REPUESTOS ABC SPA", typos de la IA leyendo la foto, etc.) pero el RUT
+    normalizado (ver formatear_rut) no cambia, así que se prueba primero.
+    Si no hay RUT o no matchea, se cae a nombre exacto (case-insensitive)
+    como antes. Se usa en TODOS los caminos que pueden crear un proveedor
+    "al vuelo" (carga masiva, escaneo de foto, WhatsApp) para no duplicar
+    proveedores — ver también crear_proveedor(), que aplica la misma regla
+    cuando alguien lo crea a mano."""
+    rut_norm = formatear_rut((rut or "").strip())
+    if rut_norm:
+        fila = db.execute("SELECT * FROM proveedores WHERE rut = ? AND rut != ''", (rut_norm,)).fetchone()
+        if fila:
+            return fila
+    nombre = (nombre or "").strip()
+    if nombre:
+        fila = db.execute("SELECT * FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (nombre,)).fetchone()
+        if fila:
+            return fila
+    return None
+
+
 def _carga_masiva_resolver_proveedor(db, nombre, rut, proveedores_nuevos_en_este_lote):
     nombre = (nombre or "").strip()
     if not nombre:
         return None, None, False
-    existente = db.execute("SELECT * FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (nombre,)).fetchone()
+    existente = _buscar_proveedor_existente(db, nombre, rut)
     if existente:
         return existente["id"], existente["nombre"], False
     if nombre.upper() in proveedores_nuevos_en_este_lote:
@@ -3955,7 +3994,11 @@ def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes,
 
     proveedor_id = None if prov_id in (None, "NUEVO") else prov_id
     if es_nuevo and prov_nombre:
-        existente = db.execute("SELECT id FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (prov_nombre,)).fetchone()
+        # Doble chequeo (mismo criterio de _buscar_proveedor_existente, RUT
+        # primero) por si entre el resolver de arriba y acá alguien más creó
+        # el proveedor — evita el duplicado que se generaba antes al confiar
+        # solo en el resultado de _carga_masiva_resolver_proveedor.
+        existente = _buscar_proveedor_existente(db, prov_nombre, extraido.get("proveedor_rut"))
         if existente:
             proveedor_id = existente["id"]
         else:
@@ -4481,9 +4524,10 @@ def carga_masiva_confirmar():
 
         proveedor_id = grupo.get("proveedor_id")
         if grupo.get("proveedor_nuevo") and grupo.get("proveedor_nombre"):
-            existente = db.execute(
-                "SELECT id FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (grupo["proveedor_nombre"],)
-            ).fetchone()
+            # Mismo criterio de _buscar_proveedor_existente (RUT primero,
+            # nombre como respaldo) — revalidación por si se creó el
+            # proveedor recién, entre la previsualización y este confirmar.
+            existente = _buscar_proveedor_existente(db, grupo["proveedor_nombre"], grupo.get("proveedor_rut"))
             if existente:
                 proveedor_id = existente["id"]
             else:

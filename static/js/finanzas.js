@@ -31,6 +31,15 @@ function fmtFecha(iso) {
   return d.toLocaleString("es-CL", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+function diasDesde(fechaIso) {
+  if (!fechaIso) return "—";
+  const d = new Date(fechaIso);
+  if (isNaN(d)) return "—";
+  const dias = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (dias < 0) return "0";
+  return String(dias);
+}
+
 function toast(msg, isError = false) {
   const el = document.getElementById("toast");
   el.textContent = msg;
@@ -73,6 +82,18 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
+function normalizarBusqueda(texto) {
+  if (texto === null || texto === undefined) return "";
+  return String(texto).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+function coincideBusqueda(consulta, ...campos) {
+  const terminos = normalizarBusqueda(consulta).split(/\s+/).filter(Boolean);
+  if (!terminos.length) return true;
+  const texto = normalizarBusqueda(campos.filter(c => c !== null && c !== undefined && c !== "").join(" "));
+  return terminos.every(t => texto.includes(t));
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -82,6 +103,7 @@ async function api(path, options = {}) {
   if (!res.ok) {
     const err = new Error(data.error || "Error inesperado");
     err.requiereForzar = !!data.requiere_forzar;
+    err.data = data;
     throw err;
   }
   return data;
@@ -131,19 +153,22 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     document.getElementById("vista-caja").style.display = vista === "caja" ? "block" : "none";
     document.getElementById("vista-cxc").style.display = vista === "cxc" ? "block" : "none";
     document.getElementById("vista-cxp").style.display = vista === "cxp" ? "block" : "none";
+    document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
       resumen: "Finanzas — Resumen",
       caja: "Finanzas — Caja Chica",
       cxc: "Finanzas — Cuentas por Cobrar",
       cxp: "Finanzas — Cuentas por Pagar",
+      facturas: "Finanzas — Facturas",
       reportes: "Finanzas — Reportes",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "resumen") cargarResumenFinanzas();
     if (vista === "caja") cargarCaja();
     if (vista === "cxc") { cargarCxc(); cargarCxcAbonos(); }
-    if (vista === "cxp") { cargarCxp(); cargarFacturasPendientesRecepcion(); }
+    if (vista === "cxp") cargarCxp();
+    if (vista === "facturas") cargarFacturasPendientesRecepcion();
   });
 });
 
@@ -667,11 +692,11 @@ async function cargarCxc() {
         <td>${escapeHtml(c.cliente_nombre)}</td>
         <td class="mono">#${c.orden_id}</td>
         <td class="mono">${c.fecha_entrega_real ? fmtFecha(c.fecha_entrega_real) : "—"}</td>
-        <td class="mono">${c.fecha_vencimiento ? fmtFecha(c.fecha_vencimiento) : "—"}</td>
         <td class="num mono">${fmtMoney(c.monto_total)}</td>
         <td class="num mono">${fmtMoney(c.total_pagado)}</td>
         <td class="num mono">${fmtMoney(c.saldo)}</td>
         <td><span class="mov-tipo mov-tipo--${c.estado === "pagada" ? "entrada" : c.estado === "parcial" ? "salida" : "perdida"}">${ESTADO_CXX_LABEL[c.estado] || c.estado}</span></td>
+        <td class="num mono">${diasDesde(c.fecha_emision)}</td>
       </tr>`).join("");
     tbody.querySelectorAll("tr[data-orden-id]").forEach(tr => {
       tr.addEventListener("click", () => abrirDetalleOtCxc(parseInt(tr.dataset.ordenId, 10), "cerradas"));
@@ -708,7 +733,7 @@ async function cargarCxcAbonos() {
     document.getElementById("cxc-abonos-total-pendiente").textContent = fmtMoney(data.total_pendiente);
 
     if (data.cuentas.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="vacio">No hay OTs en reparación que estén bajo el anticipo pactado. 👍</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="vacio">No hay OTs en reparación que estén bajo el anticipo pactado. 👍</td></tr>`;
       return;
     }
 
@@ -725,13 +750,14 @@ async function cargarCxcAbonos() {
         <td class="num mono">${fmtMoney(c.anticipo_esperado)}</td>
         <td class="num mono">${fmtMoney(c.total_pagado)}</td>
         <td class="num mono">${fmtMoney(c.saldo_anticipo)}</td>
+        <td class="num mono">${diasDesde(c.fecha_recepcion)}</td>
       </tr>`;
     }).join("");
     tbody.querySelectorAll("tr[data-orden-id]").forEach(tr => {
       tr.addEventListener("click", () => abrirDetalleOtCxc(parseInt(tr.dataset.ordenId, 10), "abonos"));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar CxC por abonos: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar CxC por abonos: ${e.message}</td></tr>`;
   }
 }
 
@@ -1003,7 +1029,7 @@ async function cargarFacturasPendientesRecepcion() {
         p.origen === "whatsapp" ? `<a class="btn btn-secundario btn-chico" href="/api/facturas/pendientes-recepcion/${p.id}/foto" target="_blank" rel="noopener">Ver foto</a>` : "",
       ].filter(Boolean).join(" ");
       return `
-      <tr>
+      <tr class="fila-clicable" data-id="${p.id}">
         <td>${escapeHtml(p.numero) || "—"}</td>
         <td>${escapeHtml(p.proveedor_nombre) || "—"}</td>
         <td>${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}${p.condicion_pago === "credito" ? ` (${p.plazo_dias_credito}d)` : ""}${p.condicion_pago === "mixto" ? ` (${p.porcentaje_contado}% contado)` : ""}</td>
@@ -1014,13 +1040,138 @@ async function cargarFacturasPendientesRecepcion() {
         <td>${acciones}</td>
       </tr>`;
     }).join("");
-    tbody.querySelectorAll("[data-pfr-editar]").forEach(btn => {
-      btn.addEventListener("click", () => abrirEdicionFacturaPendiente(parseInt(btn.dataset.pfrEditar, 10)));
+    // La fila entera es clickeable para revisar (ver detalle, o eliminar
+    // si ya fue aprobada) — los botones de "Editar"/"Ver foto" están
+    // dentro de la misma fila, así que se detiene la propagación del
+    // click para que no abran el detalle Y la acción del botón a la vez.
+    tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+      tr.addEventListener("click", () => abrirDetalleFacturaPendiente(parseInt(tr.dataset.id, 10)));
     });
+    tbody.querySelectorAll("[data-pfr-editar]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        abrirEdicionFacturaPendiente(parseInt(btn.dataset.pfrEditar, 10));
+      });
+    });
+    tbody.querySelectorAll("a[href]").forEach(a => a.addEventListener("click", (e) => e.stopPropagation()));
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar: ${e.message}</td></tr>`;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Detalle de una factura (pendiente, aprobada o rechazada) al hacer click en
+// su fila — para las ya aprobadas, muestra las líneas tal como quedaron en
+// la factura real (con si se aplicaron o no a stock) y permite eliminarla
+// (mismo endpoint DELETE /api/facturas/<id> de siempre, que revierte el
+// stock que haya aplicado — pide confirmación en dos pasos igual que el
+// viejo modal de Logística: primero avisa qué se va a revertir, y solo al
+// confirmar de nuevo ejecuta el borrado con forzar=1).
+// ---------------------------------------------------------------------------
+
+let pfdPendienteActivo = null;
+let pfdFacturaIdReal = null;
+
+async function abrirDetalleFacturaPendiente(id) {
+  const p = state.facturasPendientes.find(x => x.id === id);
+  if (!p) return;
+  pfdPendienteActivo = p;
+  pfdFacturaIdReal = null;
+
+  document.getElementById("pfd-titulo").textContent = `Factura ${p.numero || "(sin folio)"}`;
+  document.getElementById("pfd-confirmar-eliminar").style.display = "none";
+  document.getElementById("pfd-btn-eliminar-confirmar").style.display = "none";
+  document.getElementById("pfd-btn-eliminar").style.display = "none";
+  document.getElementById("pfd-btn-editar").style.display = "none";
+
+  const etiquetaCondicion = {
+    contado: "Al contado",
+    credito: `A crédito, ${p.plazo_dias_credito} días`,
+    mixto: `Mixto — ${p.porcentaje_contado}% contado / ${100 - p.porcentaje_contado}% a crédito (${p.plazo_dias_credito} días)`,
+  };
+
+  let lineasParaMostrar = p.lineas || [];
+  let facturaReal = null;
+  if (p.estado === "aprobada" && p.factura_id) {
+    try {
+      facturaReal = await api(`/api/facturas/${p.factura_id}`);
+      lineasParaMostrar = facturaReal.lineas;
+      pfdFacturaIdReal = p.factura_id;
+    } catch (e) {
+      // Si no se pudo traer la factura real (ej. se eliminó desde otro
+      // lado), se sigue mostrando lo que había quedado guardado en el
+      // pendiente, solo que sin poder ofrecer "Eliminar".
+    }
+  }
+
+  document.getElementById("pfd-info").innerHTML = `
+    <p><strong>Proveedor:</strong> ${escapeHtml(p.proveedor_nombre) || "—"}</p>
+    <p><strong>Fecha:</strong> ${escapeHtml(p.fecha) || "—"}</p>
+    <p><strong>Condición de pago:</strong> ${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}</p>
+    <p><strong>Estado:</strong> ${ESTADO_PFR_LABEL[p.estado] || p.estado}</p>
+    <p><strong>Origen:</strong> ${ORIGEN_PFR_LABEL[p.origen] || p.origen || "—"}</p>
+    <p><strong>Registrada por:</strong> ${escapeHtml(p.creado_por) || "—"}</p>
+    ${p.estado === "rechazada" && p.nota_rechazo ? `<p><strong>Motivo de rechazo:</strong> ${escapeHtml(p.nota_rechazo)}</p>` : ""}
+  `;
+
+  document.getElementById("pfd-lineas").innerHTML = lineasParaMostrar.map(l => `
+    <tr>
+      <td>${escapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}</td>
+      <td class="num mono">${l.cantidad}</td>
+      <td class="num mono">${fmtMoney(l.precio_unitario)}</td>
+      <td>${facturaReal ? (l.aplicada ? "Ingresada a stock" : "No aplicada") : "—"}</td>
+    </tr>`).join("");
+
+  if (p.estado === "pendiente") {
+    document.getElementById("pfd-btn-editar").style.display = "";
+  }
+  if (pfdFacturaIdReal) {
+    document.getElementById("pfd-btn-eliminar").style.display = "";
+  }
+
+  abrirModal("modal-factura-pendiente-detalle");
+}
+
+document.getElementById("pfd-btn-editar").addEventListener("click", () => {
+  cerrarModal("modal-factura-pendiente-detalle");
+  if (pfdPendienteActivo) abrirEdicionFacturaPendiente(pfdPendienteActivo.id);
+});
+
+document.getElementById("pfd-btn-eliminar").addEventListener("click", async () => {
+  if (!pfdFacturaIdReal) return;
+  try {
+    await api(`/api/facturas/${pfdFacturaIdReal}`, { method: "DELETE" });
+    toast("Factura eliminada");
+    cerrarModal("modal-factura-pendiente-detalle");
+    await cargarFacturasPendientesRecepcion();
+  } catch (e) {
+    if (e.requiereForzar && e.data && e.data.lineas_a_revertir) {
+      document.getElementById("pfd-eliminar-resumen").textContent = e.data.error;
+      document.getElementById("pfd-eliminar-tbody").innerHTML = e.data.lineas_a_revertir.map(l => `
+        <tr>
+          <td>${escapeHtml(l.producto_nombre)}${l.codigo_interno ? ` (#${escapeHtml(l.codigo_interno)})` : ""}</td>
+          <td class="num mono">${l.cantidad}</td>
+        </tr>`).join("");
+      document.getElementById("pfd-confirmar-eliminar").style.display = "block";
+      document.getElementById("pfd-btn-eliminar").style.display = "none";
+      document.getElementById("pfd-btn-eliminar-confirmar").style.display = "";
+    } else {
+      toast(e.message, true);
+    }
+  }
+});
+
+document.getElementById("pfd-btn-eliminar-confirmar").addEventListener("click", async () => {
+  if (!pfdFacturaIdReal) return;
+  try {
+    await api(`/api/facturas/${pfdFacturaIdReal}?forzar=1`, { method: "DELETE" });
+    toast("Factura eliminada y stock revertido");
+    cerrarModal("modal-factura-pendiente-detalle");
+    await cargarFacturasPendientesRecepcion();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
 
 function actualizarTotalFacturaPendiente() {
   const filas = Array.from(document.querySelectorAll("#pfr-lineas .fac-linea-row"));
@@ -1089,6 +1240,7 @@ document.getElementById("btn-nueva-factura-pendiente").addEventListener("click",
   document.getElementById("pfr-aviso-condicion-fija").style.display = "none";
   document.getElementById("pfr-aviso-origen").style.display = "none";
   document.getElementById("pfr-foto-whatsapp").style.display = "none";
+  document.getElementById("pfr-producto-resultados").style.display = "none";
   try {
     await pfrCargarCatalogos();
   } catch (e) {
@@ -1138,6 +1290,7 @@ async function abrirEdicionFacturaPendiente(id) {
       cont.appendChild(filaLineaFacturaPendiente(pfrProductosCache, linea));
     });
     actualizarTotalFacturaPendiente();
+    document.getElementById("pfr-producto-resultados").style.display = "none";
     abrirModal("modal-factura-pendiente");
   } catch (e) {
     toast(e.message, true);
@@ -1146,6 +1299,82 @@ async function abrirEdicionFacturaPendiente(id) {
 
 document.getElementById("pfr-agregar-linea").addEventListener("click", () => {
   document.getElementById("pfr-lineas").appendChild(filaLineaFacturaPendiente(pfrProductosCache));
+  actualizarTotalFacturaPendiente();
+});
+
+// ---------------------------------------------------------------------------
+// Buscador de producto para agregar líneas a una factura de compra: al
+// hacer clic en un resultado se agrega la línea al tiro (cantidad 1, precio
+// sugerido = costo de compra del producto), SIN cerrar la lista de
+// resultados — así se puede seguir escribiendo/clickeando otros productos
+// sin perder el foco ni tener que reabrir nada (mismo patrón que
+// renderResultadosOpoi en operativo.js, para "Carga de repuestos" en una OT).
+// ---------------------------------------------------------------------------
+
+function renderResultadosPfr(texto) {
+  const resultados = document.getElementById("pfr-producto-resultados");
+  const q = texto.trim();
+  if (!q) {
+    resultados.style.display = "none";
+    return;
+  }
+  const coincidencias = pfrProductosCache.filter(p =>
+    coincideBusqueda(q, p.nombre, p.descripcion, p.codigo_interno, p.id_sistema)
+  ).slice(0, 8);
+  if (coincidencias.length === 0) {
+    resultados.innerHTML = '<div class="autocomplete-sin-resultados">Sin productos que coincidan</div>';
+    resultados.style.display = "block";
+    return;
+  }
+  resultados.innerHTML = coincidencias.map(p => `
+    <div class="autocomplete-item" data-id="${p.id}">
+      #${escapeHtml(p.id_sistema)} — ${escapeHtml(p.nombre)}
+      <span class="autocomplete-item-meta">Stock: ${p.stock_disponible}</span>
+    </div>
+  `).join("");
+  resultados.style.display = "block";
+  resultados.querySelectorAll(".autocomplete-item").forEach(item => {
+    // mousedown (no click) para que se dispare antes del blur del input,
+    // que si no cerraría la lista antes de alcanzar a procesar el click.
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const p = pfrProductosCache.find(x => x.id === parseInt(item.dataset.id, 10));
+      if (p) agregarLineaFacturaDesdeAutocomplete(p);
+    });
+  });
+}
+
+function agregarLineaFacturaDesdeAutocomplete(producto) {
+  // Si el producto ya tiene una línea en la factura, en vez de duplicarla
+  // se le suma 1 a la cantidad existente (mismo criterio de "no permitir
+  // producto repetido en la misma factura" que ya validaba el registro
+  // manual — ver _validar_lineas_pendiente en app.py).
+  const filaExistente = Array.from(document.querySelectorAll("#pfr-lineas .fac-linea-row"))
+    .find(fila => parseInt(fila.querySelector(".pfr-linea-producto-id").value, 10) === producto.id);
+  if (filaExistente) {
+    const inputCantidad = filaExistente.querySelector(".pfr-linea-cantidad");
+    inputCantidad.value = (parseFloat(inputCantidad.value) || 0) + 1;
+  } else {
+    document.getElementById("pfr-lineas").appendChild(filaLineaFacturaPendiente(pfrProductosCache, {
+      producto_id: producto.id,
+      cantidad: 1,
+      precio_unitario: producto.costo_compra || 0,
+    }));
+  }
+  actualizarTotalFacturaPendiente();
+  toast(`Agregado: ${producto.nombre}`);
+}
+
+document.getElementById("pfr-buscar-producto").addEventListener("input", (e) => {
+  renderResultadosPfr(e.target.value);
+});
+document.getElementById("pfr-buscar-producto").addEventListener("focus", (e) => {
+  if (e.target.value.trim()) renderResultadosPfr(e.target.value);
+});
+document.getElementById("pfr-buscar-producto").addEventListener("blur", () => {
+  // Pequeño delay para que el mousedown del resultado alcance a dispararse
+  // antes de que el blur oculte la lista.
+  setTimeout(() => { document.getElementById("pfr-producto-resultados").style.display = "none"; }, 150);
 });
 
 document.querySelectorAll('input[name="pfr-condicion"]').forEach(radio => {

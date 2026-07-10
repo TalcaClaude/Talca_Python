@@ -32,6 +32,7 @@
     <button class="tab" data-vista="caja">Caja Chica</button>
     <button class="tab" data-vista="cxc">Cuentas por Cobrar</button>
     <button class="tab" data-vista="cxp">Cuentas por Pagar</button>
+    <button class="tab" data-vista="facturas">Facturas</button>
     <button class="tab" data-vista="reportes">Reportes</button>
   </nav>
 
@@ -178,11 +179,11 @@
           <th>Cliente</th>
           <th>OT</th>
           <th>Fecha entrega</th>
-          <th>Vencimiento</th>
           <th class="num">Total</th>
           <th class="num">Pagado</th>
           <th class="num">Saldo</th>
           <th>Estado</th>
+          <th class="num">Días desde cierre</th>
         </tr>
       </thead>
       <tbody id="tbody-cxc">
@@ -215,10 +216,11 @@
           <th class="num">Anticipo esperado (50%)</th>
           <th class="num">Pagado</th>
           <th class="num">Falta para anticipo</th>
+          <th class="num">Días en reparación</th>
         </tr>
       </thead>
       <tbody id="tbody-cxc-abonos">
-        <tr><td colspan="8" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -266,7 +268,10 @@
     </table>
   </section>
 
-  <h3 class="subtitulo" style="margin-top:32px">Facturas de compra — condiciones de pago pactadas</h3>
+  </section>
+
+  <section class="vista" id="vista-facturas" style="display:none">
+
   <p class="ayuda-inline">Regístralas apenas se pacte la compra con el proveedor (contado, crédito a N días, o mixto). Quedan "pendientes de recepción": no se aplica stock ni se genera la Cuenta por Pagar hasta que alguien contraste esta factura contra lo que llegó físicamente y la apruebe — ver el aviso 📦 que aparece en cualquier pantalla mientras haya facturas por revisar.</p>
   <section class="toolbar">
     <span style="flex:1"></span>
@@ -639,8 +644,14 @@
       </div>
 
       <h3 class="subtitulo">Productos de la factura</h3>
+      <div class="campo campo-autocomplete" id="pfr-campo-buscar-producto">
+        <label>Buscar producto para agregar</label>
+        <input type="text" id="pfr-buscar-producto" placeholder="Busca por nombre, código o N°… (ej: 6f35 bomba)" autocomplete="off">
+        <div class="autocomplete-resultados" id="pfr-producto-resultados" style="display:none"></div>
+      </div>
+      <p class="ayuda-inline">Haz clic en un resultado para agregarlo a la factura — la lista se mantiene abierta para que puedas seguir agregando productos sin volver a escribir.</p>
       <div id="pfr-lineas"></div>
-      <button type="button" class="btn-link" id="pfr-agregar-linea">+ Agregar producto</button>
+      <button type="button" class="btn-link" id="pfr-agregar-linea">+ Agregar línea vacía</button>
       <p class="fac-total-linea">Total factura: <strong id="pfr-total-vivo">$0</strong></p>
 
       <div id="pfr-seccion-condicion">
@@ -678,6 +689,47 @@
         <button type="submit" class="btn btn-primary" id="pfr-btn-guardar">Registrar factura</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Modal: Revisar una factura de compra (pendiente/aprobada/rechazada) -->
+<div class="modal-overlay" id="modal-factura-pendiente-detalle">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="pfd-titulo">Factura</h2>
+      <button class="modal-close" data-close="modal-factura-pendiente-detalle">&times;</button>
+    </div>
+    <div id="pfd-info" class="ayuda"></div>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Producto</th>
+            <th class="num">Cantidad</th>
+            <th class="num">Precio unit.</th>
+            <th>Estado</th>
+          </tr>
+        </thead>
+        <tbody id="pfd-lineas"></tbody>
+      </table>
+    </div>
+
+    <div id="pfd-confirmar-eliminar" style="display:none">
+      <p class="ayuda-inline ayuda-inline--bloqueado" id="pfd-eliminar-resumen"></p>
+      <div class="tabla-wrap">
+        <table class="tabla">
+          <thead><tr><th>Producto</th><th class="num">Se revertirá del stock</th></tr></thead>
+          <tbody id="pfd-eliminar-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-factura-pendiente-detalle">Cerrar</button>
+      <button type="button" class="btn btn-secundario" id="pfd-btn-editar" style="display:none">Editar</button>
+      <button type="button" class="btn btn-danger" id="pfd-btn-eliminar" style="display:none">Eliminar factura</button>
+      <button type="button" class="btn btn-danger" id="pfd-btn-eliminar-confirmar" style="display:none">Sí, eliminar y revertir stock</button>
+    </div>
   </div>
 </div>
 

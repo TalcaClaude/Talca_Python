@@ -90,6 +90,8 @@ async function cargarSesion() {
     const puedeFinanzas = s.rol === "admin" || s.rol === "finanzas";
     const btnNuevaFacturaPendiente = document.getElementById("btn-nueva-factura-pendiente");
     if (btnNuevaFacturaPendiente) btnNuevaFacturaPendiente.style.display = puedeFinanzas ? "" : "none";
+    const btnNuevaCxpManual = document.getElementById("btn-nueva-cxp-manual");
+    if (btnNuevaCxpManual) btnNuevaCxpManual.style.display = puedeFinanzas ? "" : "none";
   } catch (e) {
     console.error(e);
   }
@@ -154,6 +156,16 @@ async function cargarResumenFinanzas() {
     document.getElementById("fin-s-gastos").textContent = fmtMoney(d.gastos);
     document.getElementById("fin-s-resultado").textContent = fmtMoney(d.resultado);
     document.getElementById("fin-s-saldo-caja").textContent = fmtMoney(d.saldo_caja_chica);
+
+    document.getElementById("fin-s-cxc-pendiente").textContent = fmtMoney(d.cxc_pendiente);
+    const elCxcVencido = document.getElementById("fin-s-cxc-vencido");
+    elCxcVencido.textContent = d.cxc_vencido > 0 ? `${fmtMoney(d.cxc_vencido)} vencida` : "sin vencidas";
+    elCxcVencido.classList.toggle("summary-sub--danger", d.cxc_vencido > 0);
+
+    document.getElementById("fin-s-cxp-pendiente").textContent = fmtMoney(d.cxp_pendiente);
+    const elCxpVencido = document.getElementById("fin-s-cxp-vencido");
+    elCxpVencido.textContent = d.cxp_vencido > 0 ? `${fmtMoney(d.cxp_vencido)} vencida` : "sin vencidas";
+    elCxpVencido.classList.toggle("summary-sub--danger", d.cxp_vencido > 0);
   } catch (e) {
     toast(e.message, true);
   }
@@ -672,6 +684,12 @@ async function cargarCxp() {
 
     tbody.innerHTML = data.cuentas.map(c => {
       const puedePagar = c.estado !== "pagada" && c.estado !== "anulada";
+      const puedeFinanzas = state.sesion && (state.sesion.rol === "admin" || state.sesion.rol === "finanzas");
+      const puedeAnular = puedeFinanzas && !c.factura_id && c.estado === "pendiente" && Number(c.total_pagado) === 0;
+      const acciones = [
+        puedePagar ? `<button type="button" class="btn btn-secundario" data-pagar-cxp="${c.id}">Registrar pago</button>` : "",
+        puedeAnular ? `<button type="button" class="btn btn-secundario" data-anular-cxp="${c.id}">Anular</button>` : "",
+      ].filter(Boolean).join(" ");
       return `
       <tr>
         <td>${escapeHtml(c.proveedor_nombre) || "—"}</td>
@@ -682,17 +700,82 @@ async function cargarCxp() {
         <td class="num mono">${fmtMoney(c.total_pagado)}</td>
         <td class="num mono">${fmtMoney(c.saldo)}</td>
         <td><span class="mov-tipo mov-tipo--${c.estado === "pagada" ? "entrada" : c.estado === "parcial" ? "salida" : "perdida"}">${ESTADO_CXX_LABEL[c.estado] || c.estado}</span></td>
-        <td>${puedePagar ? `<button type="button" class="btn btn-secundario" data-pagar-cxp="${c.id}">Registrar pago</button>` : ""}</td>
+        <td>${acciones}</td>
       </tr>`;
     }).join("");
 
     tbody.querySelectorAll("[data-pagar-cxp]").forEach(btn => {
       btn.addEventListener("click", () => abrirPagoCxp(parseInt(btn.dataset.pagarCxp, 10)));
     });
+    tbody.querySelectorAll("[data-anular-cxp]").forEach(btn => {
+      btn.addEventListener("click", () => anularCxpManual(parseInt(btn.dataset.anularCxp, 10)));
+    });
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar Cuentas por Pagar: ${e.message}</td></tr>`;
   }
 }
+
+async function anularCxpManual(id) {
+  if (!confirm("¿Anular esta cuenta por pagar? No se puede deshacer.")) return;
+  try {
+    await api(`/api/finanzas/cxp/${id}/anular`, { method: "POST" });
+    toast("Cuenta por pagar anulada");
+    await cargarCxp();
+    await cargarResumenFinanzas();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Registrar Cuenta por Pagar manual (gasto sin factura de repuestos) —
+// para deudas del taller que no vienen de una factura de compra registrada
+// en Logística (arriendo, servicios, contador, etc.). Ver
+// finanzas_crear_cxp_manual en modulos/finanzas.py.
+// ---------------------------------------------------------------------------
+
+let proveedoresCacheCxpManual = null;
+
+async function abrirModalCxpManual() {
+  document.getElementById("form-cxp-manual").reset();
+  document.getElementById("cxpm-fecha-emision").value = new Date().toISOString().slice(0, 10);
+  try {
+    if (!proveedoresCacheCxpManual) {
+      const data = await api("/api/proveedores");
+      proveedoresCacheCxpManual = data.proveedores;
+    }
+    const select = document.getElementById("cxpm-proveedor");
+    select.innerHTML = '<option value="">— Sin proveedor asociado —</option>' +
+      proveedoresCacheCxpManual.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join("");
+  } catch (e) {
+    toast(e.message, true);
+  }
+  abrirModal("modal-cxp-manual");
+}
+
+document.getElementById("btn-nueva-cxp-manual").addEventListener("click", abrirModalCxpManual);
+
+document.getElementById("form-cxp-manual").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/finanzas/cxp", {
+      method: "POST",
+      body: JSON.stringify({
+        concepto: document.getElementById("cxpm-concepto").value,
+        proveedor_id: document.getElementById("cxpm-proveedor").value || null,
+        monto_total: Number(document.getElementById("cxpm-monto").value),
+        fecha_emision: document.getElementById("cxpm-fecha-emision").value,
+        fecha_vencimiento: document.getElementById("cxpm-fecha-vencimiento").value,
+      }),
+    });
+    toast("Cuenta por pagar registrada");
+    cerrarModal("modal-cxp-manual");
+    await cargarCxp();
+    await cargarResumenFinanzas();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
 
 let cxpBuscarTimeout;
 document.getElementById("cxp-buscar").addEventListener("input", () => {

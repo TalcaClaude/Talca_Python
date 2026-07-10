@@ -181,6 +181,16 @@ body::before { content: none; }
   color: var(--danger);
 }
 
+.summary-sub {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.summary-sub--danger {
+  color: var(--danger);
+}
+
 /* ---------- Toolbar ---------- */
 
 .toolbar {

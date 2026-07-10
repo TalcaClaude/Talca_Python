@@ -63,6 +63,21 @@
     </div>
   </section>
 
+  <p class="ayuda-inline">Estos dos son una foto de hoy, no del período filtrado arriba — igual que el saldo de Caja Chica, lo que importa es cuánto falta por cobrar o pagar ahora mismo.</p>
+
+  <section class="summary" id="fin-resumen-summary-cxcxp">
+    <div class="summary-card">
+      <span class="summary-label">Cuentas por Cobrar pendientes</span>
+      <span class="summary-value" id="fin-s-cxc-pendiente">—</span>
+      <span class="summary-sub" id="fin-s-cxc-vencido"></span>
+    </div>
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">Cuentas por Pagar pendientes</span>
+      <span class="summary-value" id="fin-s-cxp-pendiente">—</span>
+      <span class="summary-sub" id="fin-s-cxp-vencido"></span>
+    </div>
+  </section>
+
   </section>
 
   <section class="vista" id="vista-caja" style="display:none">
@@ -173,7 +188,7 @@
 
   <section class="vista" id="vista-cxp" style="display:none">
 
-  <p class="ayuda-inline">Se generan solas al registrar una factura de compra (nunca a mano) por el total de esa factura. Un pago "desde caja chica" además genera un gasto real en Caja Chica, enlazado a ese abono.</p>
+  <p class="ayuda-inline">Se generan solas al registrar una factura de compra (nunca a mano) por el total de esa factura. También puedes registrar a mano una deuda que no viene de una factura de repuestos (arriendo, servicios, contador). Un pago "desde caja chica" además genera un gasto real en Caja Chica, enlazado a ese abono.</p>
 
   <section class="toolbar">
     <input type="text" id="cxp-buscar" placeholder="Buscar por proveedor, factura o concepto…">
@@ -186,6 +201,7 @@
     </select>
     <span style="flex:1"></span>
     <span class="ayuda-inline">Total pendiente: <strong id="cxp-total-pendiente" class="mono">$0</strong></span>
+    <button class="btn btn-secundario" id="btn-nueva-cxp-manual">+ Registrar gasto sin factura</button>
   </section>
 
   <section class="tabla-wrap">
@@ -501,6 +517,49 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-cxp-pago">Cancelar</button>
         <button type="submit" class="btn btn-primary">Registrar pago</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Registrar Cuenta por Pagar manual (gasto sin factura de repuestos) -->
+<div class="modal-overlay" id="modal-cxp-manual">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Registrar gasto sin factura</h2>
+      <button class="modal-close" data-close="modal-cxp-manual">&times;</button>
+    </div>
+    <p class="ayuda-inline">Para deudas que no vienen de una factura de repuestos — arriendo, servicios, contador, etc. Queda como Cuenta por Pagar pendiente, con su propio vencimiento.</p>
+    <form id="form-cxp-manual">
+      <div class="campo">
+        <label>Concepto *</label>
+        <input type="text" id="cxpm-concepto" required placeholder="Ej: Arriendo julio, Contador, Internet del taller">
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Proveedor (opcional)</label>
+          <select id="cxpm-proveedor">
+            <option value="">— Sin proveedor asociado —</option>
+          </select>
+        </div>
+        <div class="campo">
+          <label>Monto ($ CLP) *</label>
+          <input type="number" id="cxpm-monto" required min="1" step="1">
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Fecha de emisión</label>
+          <input type="date" id="cxpm-fecha-emision">
+        </div>
+        <div class="campo">
+          <label>Fecha de vencimiento (opcional)</label>
+          <input type="date" id="cxpm-fecha-vencimiento">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-cxp-manual">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Registrar</button>
       </div>
     </form>
   </div>

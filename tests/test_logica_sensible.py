@@ -2707,6 +2707,113 @@ class TestCuentasPorPagar(unittest.TestCase):
         self.assertEqual(fila["estado"], "parcial")
 
 
+class TestCuentasPorPagarManual(unittest.TestCase):
+    """Cierre de la Fase 2 de Finanzas: además de las CxP que se generan
+    solas desde una factura de compra, Finanzas puede registrar a mano una
+    deuda que no viene de una factura de repuestos (arriendo, servicios,
+    contador). Se prueba que quede con factura_id NULL, que solo se pueda
+    anular si no tiene abonos y no viene de una factura, y que el bloqueo
+    por rol sea real (solo finanzas/admin)."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin_client = taller_app.app.test_client()
+        cls.admin_client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_usuario(self, username, password, rol):
+        resp = self.admin_client.post(
+            "/api/admin/usuarios",
+            json={"username": username, "password": password, "nombre": username, "rol": rol},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _client_como(self, username, password):
+        client = taller_app.app.test_client()
+        resp = client.post("/login", data={"username": username, "password": password})
+        self.assertEqual(resp.status_code, 302, resp.get_data(as_text=True))
+        return client
+
+    def test_crear_cxp_manual_queda_pendiente_sin_factura(self):
+        resp = self.admin_client.post(
+            "/api/finanzas/cxp",
+            json={"concepto": "Arriendo julio", "monto_total": 350000},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertIsNone(data["factura_id"])
+        self.assertEqual(data["estado"], "pendiente")
+        self.assertEqual(data["saldo"], 350000)
+
+        listado = self.admin_client.get("/api/finanzas/cxp").get_json()
+        fila = next(c for c in listado["cuentas"] if c["id"] == data["id"])
+        self.assertEqual(fila["concepto"], "ARRIENDO JULIO")
+
+    def test_crear_cxp_manual_sin_concepto_falla(self):
+        resp = self.admin_client.post("/api/finanzas/cxp", json={"monto_total": 1000})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_crear_cxp_manual_sin_monto_valido_falla(self):
+        resp = self.admin_client.post("/api/finanzas/cxp", json={"concepto": "Test", "monto_total": 0})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anular_cxp_manual_sin_abonos_funciona(self):
+        creada = self.admin_client.post(
+            "/api/finanzas/cxp", json={"concepto": "Gasto a anular", "monto_total": 5000},
+        ).get_json()
+        resp = self.admin_client.post(f"/api/finanzas/cxp/{creada['id']}/anular")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["estado"], "anulada")
+
+    def test_anular_cxp_manual_con_abonos_falla(self):
+        creada = self.admin_client.post(
+            "/api/finanzas/cxp", json={"concepto": "Gasto con abono", "monto_total": 8000},
+        ).get_json()
+        self.admin_client.post(f"/api/finanzas/cxp/{creada['id']}/pagos", json={"monto": 2000, "metodo_pago": "efectivo"})
+        resp = self.admin_client.post(f"/api/finanzas/cxp/{creada['id']}/anular")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_anular_cxp_de_factura_falla(self):
+        producto = self.admin_client.post(
+            "/api/productos", json={"nombre": "Producto - CxP manual anular factura", "stock_disponible": 0, "costo_compra": 1000},
+        ).get_json()
+        factura = self.admin_client.post(
+            "/api/facturas",
+            json={
+                "numero": "FACT-CXPM-001",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
+                "aplicar_stock": True,
+            },
+        ).get_json()
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
+        resp = self.admin_client.post(f"/api/finanzas/cxp/{cxp['id']}/anular")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_solo_finanzas_o_admin_puede_crear_cxp_manual(self):
+        self._crear_usuario("operativo_cxpm", "clave123", "operativo")
+        client_operativo = self._client_como("operativo_cxpm", "clave123")
+        resp = client_operativo.post("/api/finanzas/cxp", json={"concepto": "No debería poder", "monto_total": 1000})
+        self.assertEqual(resp.status_code, 403)
+
+        self._crear_usuario("finanzas_cxpm", "clave123", "finanzas")
+        client_finanzas = self._client_como("finanzas_cxpm", "clave123")
+        resp = client_finanzas.post("/api/finanzas/cxp", json={"concepto": "Sí debería poder", "monto_total": 1000})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+    def test_resumen_financiero_incluye_cxc_y_cxp_pendientes(self):
+        self.admin_client.post("/api/finanzas/cxp", json={"concepto": "Gasto para resumen", "monto_total": 12345})
+        resp = self.admin_client.get("/api/finanzas/resumen")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        for campo in ("cxc_pendiente", "cxc_vencido", "cxp_pendiente", "cxp_vencido"):
+            self.assertIn(campo, data)
+        self.assertGreaterEqual(data["cxp_pendiente"], 12345)
+
+
 class TestFacturasPendientesDeRecepcion(unittest.TestCase):
     """Una factura que Finanzas registra con condiciones de pago (contado /
     crédito / mixto) no debe tocar el inventario ni generar Cuentas por

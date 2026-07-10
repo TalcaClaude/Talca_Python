@@ -42,6 +42,7 @@ from core import (
     fmt_money_pdf,
     get_db,
     now_iso,
+    requiere_rol,
     usuario_actual,
 )
 
@@ -546,6 +547,97 @@ def finanzas_listar_cxc():
     return jsonify({"cuentas": cuentas, "total": len(cuentas), "total_pendiente": total_pendiente})
 
 
+@bp.route("/api/finanzas/cxp", methods=["POST"])
+@requiere_rol("finanzas")
+def finanzas_crear_cxp_manual():
+    """Crea una Cuenta por Pagar 'a mano', sin pasar por una factura de
+    compra de inventario — para gastos del taller que no son repuestos
+    (arriendo, servicios, contador, etc.) pero igual hay que trackear como
+    deuda a un tercero con su vencimiento, en vez de perderlos en Caja
+    Chica (que es solo para gastos ya pagados en el momento). factura_id
+    queda NULL: eso es justamente lo que distingue una CxP manual de una
+    generada por _generar_cxp_de_factura (ver app.py), y lo que le permite
+    a este mismo endpoint eventualmente anularse (ver
+    finanzas_anular_cxp_manual) sin tocar ninguna factura ni stock."""
+    db = get_db()
+    data = request.get_json(force=True, silent=True) or {}
+
+    concepto = (data.get("concepto") or "").strip().upper()
+    if not concepto:
+        return jsonify({"error": "Describe el concepto de este gasto (ej. 'Arriendo julio', 'Contador')"}), 400
+
+    try:
+        monto_total = round(float(data.get("monto_total")), 2)
+        if monto_total <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
+
+    proveedor_id = None
+    if data.get("proveedor_id") not in (None, ""):
+        try:
+            proveedor_id = int(data.get("proveedor_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Proveedor inválido"}), 400
+        if db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone() is None:
+            return jsonify({"error": "El proveedor indicado no existe"}), 400
+
+    fecha_emision = (data.get("fecha_emision") or "").strip() or now_iso()
+    fecha_vencimiento = (data.get("fecha_vencimiento") or "").strip() or None
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO cuentas_por_pagar
+            (proveedor_id, factura_id, concepto, monto_total, fecha_emision, fecha_vencimiento, estado, usuario, creado_en, actualizado_en)
+        VALUES (?, NULL, ?, ?, ?, ?, 'pendiente', ?, ?, ?)
+        """,
+        (proveedor_id, concepto, monto_total, fecha_emision, fecha_vencimiento, usuario_actual(), ts, ts),
+    )
+    db.commit()
+
+    nueva = db.execute("SELECT * FROM cuentas_por_pagar WHERE id = ?", (cur.lastrowid,)).fetchone()
+    d = dict(nueva)
+    d["total_pagado"] = 0
+    d["saldo"] = d["monto_total"]
+    return jsonify(d), 201
+
+
+@bp.route("/api/finanzas/cxp/<int:cxp_id>/anular", methods=["POST"])
+@requiere_rol("finanzas")
+def finanzas_anular_cxp_manual(cxp_id):
+    """Anula una CxP creada a mano (factura_id NULL) que todavía no tiene
+    ningún abono registrado — para poder corregir un gasto cargado por
+    error sin dejar un número de deuda fantasma dando vueltas en los
+    reportes. Deliberadamente NO permite anular una CxP generada desde una
+    factura de compra (esa nace ligada al stock que ya entró a bodega;
+    corregirla es un problema de inventario, no de Finanzas) ni una que ya
+    tiene abonos (anularla ahí perdería el rastro de esa plata que ya
+    salió — hay que revertir el pago primero, no hay endpoint para eso
+    todavía)."""
+    db = get_db()
+    cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE id = ?", (cxp_id,)).fetchone()
+    if cxp is None:
+        return jsonify({"error": "Cuenta por pagar no encontrada"}), 404
+    if cxp["factura_id"] is not None:
+        return jsonify({"error": "Esta cuenta por pagar viene de una factura de compra y no se puede anular desde acá."}), 400
+    if cxp["estado"] == "anulada":
+        return jsonify({"error": "Esta cuenta por pagar ya está anulada"}), 400
+    total_pagado = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (cxp_id,)
+    ).fetchone()[0]
+    if total_pagado > 0:
+        return jsonify({"error": "Esta cuenta por pagar ya tiene abonos registrados y no se puede anular."}), 400
+
+    db.execute(
+        "UPDATE cuentas_por_pagar SET estado = 'anulada', actualizado_en = ? WHERE id = ?",
+        (now_iso(), cxp_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM cuentas_por_pagar WHERE id = ?", (cxp_id,)).fetchone()
+    return jsonify(dict(actualizada))
+
+
 @bp.route("/api/finanzas/cxp", methods=["GET"])
 def finanzas_listar_cxp():
     """Lista las Cuentas por Pagar (una por factura de compra registrada),
@@ -788,10 +880,61 @@ def _ingresos_para_reporte(desde, hasta):
     return [dict(r) for r in db.execute(sql, params).fetchall()]
 
 
+def _cxc_pendiente_y_vencido(db):
+    """Total pendiente de cobro (saldo real, no el 'de papel' de la OT) y
+    cuánto de eso ya está vencido a hoy — mismo criterio de saldo que usa
+    finanzas_listar_cxc, pero agregado en un solo número para el resumen.
+    'Pendiente' acá es 'no pagada por completo' (incluye parcial), no solo
+    estado == 'pendiente'."""
+    hoy = now_iso()
+    filas = db.execute(
+        "SELECT id, orden_id, monto_total, fecha_vencimiento FROM cuentas_por_cobrar WHERE estado != 'pagada'"
+    ).fetchall()
+    pendiente = 0.0
+    vencido = 0.0
+    for f in filas:
+        pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE orden_id = ?", (f["orden_id"],)
+        ).fetchone()[0]
+        saldo = f["monto_total"] - pagado
+        pendiente += saldo
+        if f["fecha_vencimiento"] and f["fecha_vencimiento"] < hoy:
+            vencido += saldo
+    return round(pendiente, 2), round(vencido, 2)
+
+
+def _cxp_pendiente_y_vencido(db):
+    """Mismo cálculo que _cxc_pendiente_y_vencido, para lo que el taller le
+    debe a proveedores y otros terceros (incluye las CxP manuales sin
+    factura). Excluye 'anulada' además de 'pagada' — una CxP anulada nunca
+    fue una deuda real."""
+    hoy = now_iso()
+    filas = db.execute(
+        "SELECT id, monto_total, fecha_vencimiento FROM cuentas_por_pagar WHERE estado NOT IN ('pagada', 'anulada')"
+    ).fetchall()
+    pendiente = 0.0
+    vencido = 0.0
+    for f in filas:
+        pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (f["id"],)
+        ).fetchone()[0]
+        saldo = f["monto_total"] - pagado
+        pendiente += saldo
+        if f["fecha_vencimiento"] and f["fecha_vencimiento"] < hoy:
+            vencido += saldo
+    return round(pendiente, 2), round(vencido, 2)
+
+
 def _resumen_financiero(desde, hasta):
     """Mismo cálculo que finanzas_resumen(), separado en una función aparte
     para que tanto el endpoint JSON como los reportes Excel/PDF usen
-    exactamente la misma lógica y nunca puedan mostrar números distintos."""
+    exactamente la misma lógica y nunca puedan mostrar números distintos.
+
+    ingresos/gastos/resultado sí dependen del rango de fechas elegido (son
+    flujo de un período). saldo_caja_chica, cxc_pendiente/cxc_vencido y
+    cxp_pendiente/cxp_vencido son fotos del momento actual — igual que el
+    saldo de caja chica, no tendría sentido un "pendiente de cobro al 30 de
+    junio" cuando lo que importa es cuánto falta por cobrar/pagar HOY."""
     db = get_db()
 
     def _suma_en_rango(sql_base):
@@ -810,11 +953,18 @@ def _resumen_financiero(desde, hasta):
     total_aportado = db.execute("SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'aporte'").fetchone()[0]
     total_gastado = db.execute("SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto'").fetchone()[0]
 
+    cxc_pendiente, cxc_vencido = _cxc_pendiente_y_vencido(db)
+    cxp_pendiente, cxp_vencido = _cxp_pendiente_y_vencido(db)
+
     return {
         "ingresos": round(ingresos, 2),
         "gastos": round(gastos, 2),
         "resultado": round(ingresos - gastos, 2),
         "saldo_caja_chica": round(total_aportado - total_gastado, 2),
+        "cxc_pendiente": cxc_pendiente,
+        "cxc_vencido": cxc_vencido,
+        "cxp_pendiente": cxp_pendiente,
+        "cxp_vencido": cxp_vencido,
     }
 
 
@@ -835,6 +985,10 @@ def reporte_finanzas_resumen():
     ws.append(["Gastos de Caja Chica", round(resumen["gastos"], 2)])
     ws.append(["Resultado del período", round(resumen["resultado"], 2)])
     ws.append(["Saldo actual de Caja Chica", round(resumen["saldo_caja_chica"], 2)])
+    ws.append(["Cuentas por Cobrar pendientes (hoy)", round(resumen["cxc_pendiente"], 2)])
+    ws.append(["  de las cuales vencidas", round(resumen["cxc_vencido"], 2)])
+    ws.append(["Cuentas por Pagar pendientes (hoy)", round(resumen["cxp_pendiente"], 2)])
+    ws.append(["  de las cuales vencidas", round(resumen["cxp_vencido"], 2)])
     _autoancho(ws)
 
     ws2 = wb.create_sheet("Ingresos (pagos)")
@@ -881,6 +1035,15 @@ def reporte_finanzas_resumen_pdf():
         [[
             fmt_money_pdf(resumen["ingresos"]), fmt_money_pdf(resumen["gastos"]),
             fmt_money_pdf(resumen["resultado"]), fmt_money_pdf(resumen["saldo_caja_chica"]),
+        ]],
+    )
+
+    _pdf_tabla(
+        elementos, estilos, "Cuentas por Cobrar y por Pagar (a hoy)",
+        ["CxC pendiente", "CxC vencida", "CxP pendiente", "CxP vencida"],
+        [[
+            fmt_money_pdf(resumen["cxc_pendiente"]), fmt_money_pdf(resumen["cxc_vencido"]),
+            fmt_money_pdf(resumen["cxp_pendiente"]), fmt_money_pdf(resumen["cxp_vencido"]),
         ]],
     )
 

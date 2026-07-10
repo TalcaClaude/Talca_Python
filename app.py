@@ -7263,6 +7263,185 @@ TRANSICIONES_AGENTE = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Migración de datos inicial (clientes / autos / OTs abiertas del taller)
+# ---------------------------------------------------------------------------
+# Endpoint de uso único (admin) para cargar los 3 archivos que salen del
+# script de preparación de datos (clientes_a_crear.json, autos_a_crear.json,
+# ordenes_a_crear.json). Reimplementa a propósito los mismos INSERT que
+# crear_cliente/crear_equipo/crear_orden en modulos/operativo.py — se evaluó
+# llamar esos endpoints directamente pero requieren un request de Flask real,
+# así que se replican sus reglas 1:1 (mismos campos, mismo default de estado
+# "recibido") en vez de eso. Si mañana cambian esas reglas, revisar también
+# acá si se vuelve a usar esta migración.
+def _migracion_inferir_estado(requerimiento):
+    t = (requerimiento or "").upper()
+    t = re.sub(r"<[^>]+>", " ", t)
+    if "NO APRUEBA" in t or ("PRESUPUESTO" in t and "DIAGNOSTIC" not in t):
+        return "esperando_aprobacion"
+    if "DIAGNOSTIC" in t:
+        return "diagnostico"
+    if "INGRESO" in t or not t.strip():
+        return "recibido"
+    return "reparacion"
+
+
+@app.route("/admin/migracion-datos", methods=["GET"])
+@requiere_rol()
+def vista_migracion_datos():
+    return render_template("migracion_datos.html")
+
+
+@app.route("/api/admin/migracion/importar", methods=["POST"])
+@requiere_rol()
+def migracion_importar():
+    db = get_db()
+
+    def leer_json(campo):
+        archivo = request.files.get(campo)
+        if not archivo or archivo.filename == "":
+            return []
+        try:
+            return json.loads(archivo.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    clientes_in = leer_json("clientes_json")
+    autos_in = leer_json("autos_json")
+    ordenes_in = leer_json("ordenes_json")
+    if clientes_in is None or autos_in is None or ordenes_in is None:
+        return jsonify({"error": "Uno de los 3 archivos no es un JSON válido"}), 400
+
+    resumen = {
+        "clientes_creados": 0, "clientes_reutilizados_existian": 0,
+        "autos_creados": 0, "autos_sin_cliente": [],
+        "ordenes_creadas": 0, "ordenes_sin_equipo": [],
+    }
+    ts = now_iso()
+
+    # ---- clientes: no duplicar contra los que YA existen en producción ----
+    rut_a_cliente_id = {}
+    for fila in db.execute("SELECT id, rut FROM clientes WHERE rut != ''"):
+        clave = re.sub(r"[.\-]", "", fila["rut"] or "").upper()
+        if clave:
+            rut_a_cliente_id[clave] = fila["id"]
+
+    for c in clientes_in:
+        rut_clave = (c.get("rut_clave") or "").strip()
+        if rut_clave and rut_clave in rut_a_cliente_id:
+            resumen["clientes_reutilizados_existian"] += 1
+            continue
+        direccion = c.get("direccion") or ""
+        if c.get("comuna"):
+            direccion = f"{direccion}, {c['comuna']}" if direccion else c["comuna"]
+        cur = db.execute(
+            "INSERT INTO clientes (nombre, telefono, email, rut, direccion, notas, creado_en) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                (c.get("nombre") or "").strip().upper(),
+                (c.get("telefono") or "").strip(),
+                (c.get("email") or "").strip(),
+                formatear_rut((c.get("rut_crudo") or "").strip()),
+                direccion.strip().upper(),
+                "",
+                ts,
+            ),
+        )
+        db.commit()
+        resumen["clientes_creados"] += 1
+        if rut_clave:
+            rut_a_cliente_id[rut_clave] = cur.lastrowid
+
+    # ---- autos ----
+    patente_a_equipo = {}
+    for fila in db.execute("SELECT id, cliente_id, identificador FROM equipos"):
+        if fila["identificador"]:
+            patente_a_equipo.setdefault(
+                fila["identificador"].strip().upper(),
+                {"equipo_id": fila["id"], "cliente_id": fila["cliente_id"]},
+            )
+
+    for a in autos_in:
+        patente = (a.get("patente") or "").strip().upper()
+        cliente_id = rut_a_cliente_id.get((a.get("rut_clave") or "").strip())
+        if not cliente_id:
+            resumen["autos_sin_cliente"].append(patente)
+            continue
+        anio_val = None
+        try:
+            av = str(a.get("anio") or "").strip()
+            if av:
+                anio_int = int(float(av))
+                if 1950 <= anio_int <= 2100:
+                    anio_val = anio_int
+        except (TypeError, ValueError):
+            anio_val = None
+        cur = db.execute(
+            """INSERT INTO equipos (
+                cliente_id, identificador, marca, modelo, notas, creado_en,
+                color, anio, modelo_transmision, puertas, motor_cc, vin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                cliente_id, patente,
+                (a.get("marca") or "").strip().upper(),
+                (a.get("modelo") or "").strip().upper(),
+                "", ts,
+                (a.get("color") or "").strip().upper(),
+                anio_val,
+                (a.get("transmision") or "").strip().upper(),
+                (a.get("puertas") or "").strip(),
+                "",
+                (a.get("chasis") or "").strip().upper(),
+            ),
+        )
+        db.commit()
+        resumen["autos_creados"] += 1
+        patente_a_equipo[patente] = {"equipo_id": cur.lastrowid, "cliente_id": cliente_id}
+
+    # ---- órdenes (ya vienen filtradas a solo ABIERTA desde el script) ----
+    for o in ordenes_in:
+        patente = (o.get("patente") or "").strip().upper()
+        info = patente_a_equipo.get(patente)
+        equipo_id = info["equipo_id"] if info else None
+        cliente_id = info["cliente_id"] if info else None
+        if cliente_id is None:
+            # Caso borde: la orden no corresponde a un vehículo real (ej. un
+            # préstamo de repuesto) — se enlaza solo por cliente, usando la
+            # clave de RUT que el script de preparación dejó explícita para
+            # estos casos, en vez de descartar la orden.
+            rut_clave_fallback = (o.get("cliente_rut_clave") or "").strip()
+            cliente_id = rut_a_cliente_id.get(rut_clave_fallback)
+        if cliente_id is None:
+            resumen["ordenes_sin_equipo"].append({"no": o.get("no"), "patente": patente})
+            continue
+        requerimiento = o.get("requerimiento") or ""
+        cur = db.execute(
+            """INSERT INTO ordenes_trabajo (
+                cliente_id, equipo_id, estado, descripcion_problema, mecanico,
+                fecha_recepcion, fecha_entrega_estimada, usuario, creado_en, actualizado_en,
+                kilometraje, prioridad, recepcionado_por
+            ) VALUES (?, ?, 'recibido', ?, '', ?, NULL, ?, ?, ?, NULL, 'media', ?)""",
+            (
+                cliente_id, equipo_id,
+                requerimiento.strip().upper(),
+                ts, usuario_actual(), ts, ts, usuario_actual(),
+            ),
+        )
+        orden_id = cur.lastrowid
+        precio = o.get("precio")
+        try:
+            precio_val = float(precio) if precio not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            precio_val = None
+        db.execute(
+            "UPDATE ordenes_trabajo SET estado = ?, precio_referencial = ?, actualizado_en = ? WHERE id = ?",
+            (_migracion_inferir_estado(requerimiento), precio_val, ts, orden_id),
+        )
+        db.commit()
+        resumen["ordenes_creadas"] += 1
+
+    return jsonify(resumen)
+
+
 init_db()
 iniciar_hilo_respaldos()
 iniciar_hilo_alertas_stock()

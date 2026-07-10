@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario Taller — Migración de datos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-tag">ADM</span>
+      <div class="brand-text">
+        <h1>Inventario<span>Taller</span></h1>
+        <p class="brand-sub">Migración de datos — clientes / autos / OTs abiertas</p>
+      </div>
+    </div>
+    <div class="topbar-acciones">
+      <a href="/" class="btn btn-secundario">← Módulos</a>
+      <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+    </div>
+  </header>
+
+  <p class="ayuda-inline">Herramienta de uso único para la carga inicial de datos del taller (migración desde el sistema anterior). Sube los 3 archivos JSON ya generados y procesados. Los clientes con RUT que ya exista en el sistema no se duplican — se reutiliza el cliente existente.</p>
+
+  <section class="tabla-wrap" style="padding: 24px; max-width: 640px;">
+    <form id="form-migracion">
+      <div class="campo">
+        <label>1) Clientes (clientes_a_crear.json)</label>
+        <input type="file" id="mig-clientes" accept=".json" required>
+      </div>
+      <div class="campo">
+        <label>2) Autos (autos_a_crear.json)</label>
+        <input type="file" id="mig-autos" accept=".json" required>
+      </div>
+      <div class="campo">
+        <label>3) Órdenes abiertas (ordenes_a_crear.json)</label>
+        <input type="file" id="mig-ordenes" accept=".json" required>
+      </div>
+      <button type="submit" class="btn btn-primary" id="mig-btn-enviar" style="margin-top: 16px;">Importar</button>
+    </form>
+    <div id="mig-resultado" style="margin-top: 24px; white-space: pre-wrap; font-family: 'IBM Plex Mono', monospace; font-size: 13px;"></div>
+  </section>
+
+</div>
+
+<script>
+document.getElementById("form-migracion").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("mig-btn-enviar");
+  const out = document.getElementById("mig-resultado");
+  const fd = new FormData();
+  fd.append("clientes_json", document.getElementById("mig-clientes").files[0]);
+  fd.append("autos_json", document.getElementById("mig-autos").files[0]);
+  fd.append("ordenes_json", document.getElementById("mig-ordenes").files[0]);
+  btn.disabled = true;
+  btn.textContent = "Importando… (puede tardar unos minutos, no cierres esta pestaña)";
+  out.textContent = "";
+  try {
+    const res = await fetch("/api/admin/migracion/importar", { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Error inesperado");
+    out.textContent = JSON.stringify(data, null, 2);
+  } catch (err) {
+    out.textContent = "ERROR: " + err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Importar";
+  }
+});
+</script>
+
+</body>
+</html>

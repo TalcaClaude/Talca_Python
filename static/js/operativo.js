@@ -236,6 +236,18 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
   });
 });
 
+// El sidebar enlaza a /operativo#vista (ver _sidebar.html). Como los tabs
+// se manejan 100% en JS, hay que leer el hash al cargar la página y también
+// reaccionar si cambia estando ya en esta vista.
+function activarPestanaDesdeHash() {
+  const vista = location.hash.replace("#", "");
+  if (!vista) return;
+  const tabBtn = document.querySelector(`.tab[data-vista="${vista}"]`);
+  if (tabBtn) tabBtn.click();
+}
+window.addEventListener("hashchange", activarPestanaDesdeHash);
+activarPestanaDesdeHash();
+
 // ---------------------------------------------------------------------------
 // Dashboard Operativo: KPIs
 // ---------------------------------------------------------------------------
@@ -280,6 +292,10 @@ async function cargarGraficosDashboardOperativo() {
 
     document.getElementById("op-chart-marcas").innerHTML = buildBarChartH(
       data.top_marcas.map(d => ({ label: d.marca, valor: d.cantidad }))
+    );
+
+    document.getElementById("op-chart-modelos").innerHTML = buildBarChartH(
+      data.top_modelos.map(d => ({ label: d.modelo, valor: d.cantidad }))
     );
 
     document.getElementById("op-chart-clientes").innerHTML = buildBarChartH(

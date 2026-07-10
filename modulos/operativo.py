@@ -1166,6 +1166,20 @@ def dashboard_operativo_graficos():
         ).fetchall()
     ]
 
+    # Modelos de auto que más se reparan (marca + modelo juntos, ej. "FORD
+    # RANGER"), a diferencia de top_marcas que solo agrupa por marca.
+    top_modelos = [
+        {"modelo": f"{r['marca']} {r['modelo']}".strip(), "cantidad": r["cantidad"]}
+        for r in db.execute(
+            """
+            SELECT e.marca AS marca, e.modelo AS modelo, COUNT(*) AS cantidad
+            FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
+            WHERE e.modelo != ''
+            GROUP BY e.marca, e.modelo ORDER BY cantidad DESC LIMIT 8
+            """
+        ).fetchall()
+    ]
+
     ranking_clientes = [
         {"nombre": r["nombre"], "cantidad": r["cantidad"], "monto": r["monto"]}
         for r in db.execute(
@@ -1196,6 +1210,7 @@ def dashboard_operativo_graficos():
         "tendencia_mensual": tendencia,
         "distribucion_estado": distribucion_estado,
         "top_marcas": top_marcas,
+        "top_modelos": top_modelos,
         "ranking_clientes": ranking_clientes,
         "tasa_garantias_mensual": tasa_garantias,
     })

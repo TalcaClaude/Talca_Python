@@ -154,6 +154,20 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
   });
 });
 
+// El sidebar enlaza a /logistica#vista (ver _sidebar.html). Como los tabs
+// se manejan 100% en JS (no hay rutas reales por pestaña), hay que leer el
+// hash al cargar la página y también reaccionar si cambia estando ya en
+// esta vista (un click en el sidebar a una pestaña de la MISMA página no
+// dispara una navegación completa, solo cambia el hash).
+function activarPestanaDesdeHash() {
+  const vista = location.hash.replace("#", "");
+  if (!vista) return;
+  const tabBtn = document.querySelector(`.tab[data-vista="${vista}"]`);
+  if (tabBtn) tabBtn.click();
+}
+window.addEventListener("hashchange", activarPestanaDesdeHash);
+activarPestanaDesdeHash();
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -1540,8 +1554,28 @@ async function cargarDashboard() {
       <div class="dash-bodega-stat"><span class="valor">${d.bodega.total_proveedores}</span><span class="label">Proveedores</span></div>
       <div class="dash-bodega-stat"><span class="valor">${d.bodega.facturas_pendientes}</span><span class="label">Facturas pendientes</span></div>
     `;
+
+    cargarGraficosDashboardLogistica();
   } catch (e) {
     toast(e.message, true);
+  }
+}
+
+async function cargarGraficosDashboardLogistica() {
+  try {
+    const data = await api("/api/logistica/dashboard/graficos");
+
+    document.getElementById("log-chart-movimientos").innerHTML = buildLineChartDoble(
+      data.movimientos_mensual.map(d => ({ mes: d.mes, a: d.entradas, b: d.salidas })),
+      "Entradas", "Salidas"
+    );
+
+    document.getElementById("log-chart-valor-categoria").innerHTML = buildBarChartH(
+      data.valor_por_categoria.map(d => ({ label: d.categoria, valor: d.valor, extra: chartFmtMoney(d.valor) })),
+      { padL: 140 }
+    );
+  } catch (e) {
+    console.error("Error cargando los gráficos de Logística:", e);
   }
 }
 

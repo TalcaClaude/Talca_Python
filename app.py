@@ -905,113 +905,19 @@ def init_db():
     )
     db.commit()
 
-    # ---- Migración 11: importación masiva del inventario físico real
-    # (levantamiento de bodega "BODEGA 1", cierre de junio 2026). Se corre
-    # una sola vez: si ya existe el producto con el primer ID de la carga
-    # (60001), no se vuelve a intentar en el próximo arranque. Los IDs
-    # quedan correlativos a partir de 60001 (no desde 1) porque así lo
-    # pidió el taller, dejando ese rango reservado como "productos
-    # cargados desde el levantamiento inicial" y evitando pisar cualquier
-    # producto que ya se haya cargado a mano con IDs bajos.
-    #
-    # Cada fila del Excel original era una unidad física (sin columna de
-    # cantidad), así que la cantidad de cada producto es el conteo de filas
-    # con el mismo modelo+descripción, y el costo es el promedio de esos
-    # precios (ponderado de forma natural, porque cada fila = 1 unidad).
-    # La ubicación numérica de 3 dígitos del Excel (ej. "232") se decodifica
-    # dígito a dígito en pasillo/estantería/nivel, igual que el resto del
-    # sistema; las ubicaciones en texto libre (ej. "Estante", "Pasillo")
-    # quedan abreviadas en el campo de ubicación antiguo (sin estructurar),
-    # que la interfaz ya muestra como "pendiente de asignar".
-    archivo_importacion_inicial = os.path.join(BASE_DIR, "data", "importacion_inventario_junio2026.json")
-    ya_importado = db.execute("SELECT 1 FROM productos WHERE id = ?", (60001,)).fetchone()
-    if not ya_importado and os.path.exists(archivo_importacion_inicial):
-        with open(archivo_importacion_inicial, "r", encoding="utf-8") as f:
-            datos_importacion = json.load(f)
-
-        ts = now_iso()
-        cache_ubicaciones = {}  # (pasillo, estanteria, nivel) -> ubicacion_id
-
-        # Nombres de categorías/modelos ya existentes, comparados en
-        # mayúsculas desde Python (no con "COLLATE NOCASE" de SQLite, que
-        # solo pliega A-Z y deja intactas las vocales con tilde, así que
-        # "Válvulas" y "VÁLVULAS" le parecerían distintas). Esto evita que
-        # la carga masiva duplique, por ejemplo, "Cuerpo de Válvulas" (una
-        # de las categorías con las que parte el sistema) como una segunda
-        # fila "CUERPO DE VÁLVULAS".
-        categorias_existentes = {
-            (r[0] or "").strip().upper() for r in db.execute("SELECT nombre FROM categorias").fetchall()
-        }
-        modelos_existentes = {
-            (r[0] or "").strip().upper() for r in db.execute("SELECT nombre FROM modelos").fetchall()
-        }
-
-        for item in datos_importacion["productos"]:
-            categoria = (item["categoria"] or "").strip().upper()
-            modelo = (item["modelo"] or "").strip().upper()
-            descripcion = (item["descripcion"] or "").strip().upper()
-            cantidad = int(item["cantidad"])
-            costo = float(item["costo_promedio"])
-            pid = int(item["id"])
-
-            ubicacion_id = None
-            pasillo = item.get("ubicacion_pasillo")
-            estanteria = item.get("ubicacion_estanteria")
-            nivel = item.get("ubicacion_nivel")
-            texto_legacy = item.get("ubicacion_texto_legacy") or ""
-
-            if pasillo is not None and estanteria is not None and nivel is not None:
-                combo = (pasillo, estanteria, nivel)
-                if combo not in cache_ubicaciones:
-                    fila_ubi = db.execute(
-                        "SELECT id FROM ubicaciones WHERE pasillo = ? AND estanteria = ? AND nivel = ?",
-                        combo,
-                    ).fetchone()
-                    if fila_ubi:
-                        cache_ubicaciones[combo] = fila_ubi["id"]
-                    else:
-                        codigo = codigo_ubicacion(pasillo, estanteria, nivel)
-                        cur_u = db.execute(
-                            "INSERT INTO ubicaciones (pasillo, estanteria, nivel, codigo, creado_en) VALUES (?, ?, ?, ?, ?)",
-                            (pasillo, estanteria, nivel, codigo, ts),
-                        )
-                        cache_ubicaciones[combo] = cur_u.lastrowid
-                ubicacion_id = cache_ubicaciones[combo]
-
-            db.execute(
-                """
-                INSERT INTO productos (
-                    id, codigo_interno, nombre, descripcion, categoria, marca, modelo,
-                    ubicacion, ubicacion_id, stock_disponible, stock_reservado, stock_merma,
-                    stock_minimo, costo_compra, creado_en, actualizado_en
-                ) VALUES (?, '', '', ?, ?, '', ?, ?, ?, ?, 0, 0, 0, ?, ?, ?)
-                """,
-                (pid, descripcion, categoria, modelo, texto_legacy, ubicacion_id, cantidad, costo, ts, ts),
-            )
-            nombre = nombre_automatico(categoria, modelo, "", pid)
-            db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nombre, pid))
-
-            if cantidad > 0:
-                db.execute(
-                    """
-                    INSERT INTO movimientos (producto_id, fecha, tipo, categoria, cantidad, motivo, usuario, costo_unitario, stock_resultante)
-                    VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, 'Carga inicial de inventario (importación masiva junio 2026)', 'Sistema (importación)', ?, ?)
-                    """,
-                    (pid, ts, cantidad, costo, cantidad),
-                )
-
-            if categoria and categoria not in categorias_existentes:
-                db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (categoria,))
-                categorias_existentes.add(categoria)
-            if modelo and modelo not in modelos_existentes:
-                db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (modelo,))
-                modelos_existentes.add(modelo)
-
-        db.commit()
-
-        for item in datos_importacion["productos"]:
-            _recalcular_stock_minimo(db, int(item["id"]))
-        db.commit()
+    # ---- (Migración 11 retirada) Antes existía acá una siembra automática
+    # del "levantamiento de bodega junio 2026" (data/importacion_inventario_
+    # junio2026.json) que se reinyectaba en cada arranque si no encontraba
+    # el producto guía (id 60001). El problema: en cuanto se usó "Importar
+    # Excel (reemplazar)" para cargar el inventario real y actualizado, esa
+    # importación borra TODOS los productos (incluido el 60001), así que en
+    # el siguiente reinicio del servidor (cada deploy de Railway reinicia el
+    # proceso) esta siembra volvía a dispararse y agregaba de nuevo el
+    # inventario viejo de junio ENCIMA del recién cargado — eso era el
+    # "inventario duplicado" (dos inventarios distintos conviviendo). Se
+    # retira por completo: la carga de productos ahora vive 100% en
+    # Productos → "Importar Excel", que sí reemplaza todo de una sola vez y
+    # no se repite sola en cada arranque.
 
     # ---- Índices de rendimiento: movimientos es la tabla que más va a
     # crecer con los años (cada entrada, salida y pérdida queda ahí para
@@ -5509,6 +5415,39 @@ def estado_sistema():
     })
 
 
+@app.route("/api/admin/limpiar-inventario-duplicado", methods=["POST"])
+@requiere_rol()
+def limpiar_inventario_duplicado():
+    """Herramienta de un solo uso para corregir el inventario duplicado
+    causado por la extinta 'Migración 11' (ver init_db): un lote de
+    productos con id >= 60001 pudo haberse reinyectado solo en algún
+    reinicio del servidor, encima del inventario real cargado a mano por
+    'Importar Excel'. Borra ese lote específico (y en cascada sus
+    movimientos/reservas/cálculo de stock mínimo asociados, por las
+    FOREIGN KEY ON DELETE CASCADE de esas tablas) dejando intacto todo lo
+    demás. Exige 'confirmar_texto' == 'LIMPIAR'. Es seguro correrla más de
+    una vez: si ya no quedan productos con id >= 60001, no borra nada."""
+    confirmar_texto = (request.get_json(silent=True) or {}).get("confirmar_texto", "").strip().upper()
+    if confirmar_texto != "LIMPIAR":
+        return jsonify({"error": "Falta confirmar la acción: envía confirmar_texto = 'LIMPIAR'."}), 400
+
+    db = get_db()
+    afectados = db.execute("SELECT COUNT(*) FROM productos WHERE id >= 60001").fetchone()[0]
+    if afectados == 0:
+        return jsonify({"mensaje": "No hay nada que limpiar: no quedan productos con id >= 60001.", "productos_eliminados": 0})
+
+    db.execute("DELETE FROM factura_lineas WHERE producto_id >= 60001")
+    db.execute("DELETE FROM productos WHERE id >= 60001")
+    db.commit()
+
+    productos_restantes = db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+    return jsonify({
+        "mensaje": f"Se eliminó el lote duplicado ({afectados} productos, ids 60001+) y sus movimientos/reservas asociados.",
+        "productos_eliminados": afectados,
+        "productos_restantes": productos_restantes,
+    })
+
+
 @app.route("/api/backup/descargar", methods=["GET"])
 def backup_descargar():
     if not os.path.exists(DB_PATH):
@@ -6390,6 +6329,52 @@ def dashboard():
             "total_proveedores": total_proveedores,
             "facturas_pendientes": facturas_pendientes,
         },
+    })
+
+
+@app.route("/api/logistica/dashboard/graficos", methods=["GET"])
+def logistica_dashboard_graficos():
+    """Gráficos del dashboard de Logística: movimientos mensuales
+    (entradas vs salidas, últimos 12 meses) y valor de inventario por
+    categoría (top 8) — mismo patrón que /api/operativo/dashboard/graficos
+    y /api/finanzas/resumen/graficos."""
+    db = get_db()
+    hoy = datetime.now()
+
+    meses = []
+    m = hoy.replace(day=1)
+    for _ in range(12):
+        meses.append(m)
+        m = (m - timedelta(days=1)).replace(day=1)
+    meses.reverse()
+
+    movimientos_mensual = []
+    for mes in meses:
+        pref = f"{mes.year:04d}-{mes.month:02d}"
+        entradas = db.execute(
+            "SELECT COALESCE(SUM(cantidad), 0) FROM movimientos WHERE tipo = 'entrada' AND substr(fecha, 1, 7) = ?",
+            (pref,),
+        ).fetchone()[0]
+        salidas = db.execute(
+            "SELECT COALESCE(SUM(cantidad), 0) FROM movimientos WHERE tipo = 'salida' AND substr(fecha, 1, 7) = ?",
+            (pref,),
+        ).fetchone()[0]
+        movimientos_mensual.append({"mes": pref, "entradas": entradas, "salidas": abs(salidas)})
+
+    valor_por_categoria = [
+        {"categoria": r["categoria"] or "(sin categoría)", "valor": r["valor"]}
+        for r in db.execute(
+            """
+            SELECT categoria, SUM((stock_disponible + stock_reservado) * costo_compra) AS valor
+            FROM productos
+            GROUP BY categoria ORDER BY valor DESC LIMIT 8
+            """
+        ).fetchall()
+    ]
+
+    return jsonify({
+        "movimientos_mensual": movimientos_mensual,
+        "valor_por_categoria": valor_por_categoria,
     })
 
 

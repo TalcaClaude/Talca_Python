@@ -9,13 +9,13 @@
 <nav class="sidebar">
   <div class="sidebar-brand">
     <h1>Inventario<span>Taller</span></h1>
-    <p>Panel del dueño</p>
+    <p>Panel Principal</p>
   </div>
 
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'panel' else '' }}">
     <a class="sidebar-modulo-header" href="/" style="text-decoration:none; display:flex;">
       <span class="sidebar-modulo-tag">00</span>
-      <span class="sidebar-modulo-nombre">Panel del dueño</span>
+      <span class="sidebar-modulo-nombre">Panel Principal</span>
     </a>
   </div>
 
@@ -26,10 +26,14 @@
       <span class="sidebar-chevron">⌄</span>
     </button>
     <div class="sidebar-submenu">
-      <a class="sidebar-subitem" href="/logistica#inventario">Inventario</a>
-      <a class="sidebar-subitem" href="/logistica#facturas-pendientes">Facturas pendientes</a>
+      <a class="sidebar-subitem" href="/logistica#dashboard">Dashboard</a>
+      <a class="sidebar-subitem" href="/logistica#productos">Inventario</a>
+      <a class="sidebar-subitem" href="/logistica#bodega">Bodega</a>
       <a class="sidebar-subitem" href="/logistica#proveedores">Proveedores</a>
       <a class="sidebar-subitem" href="/logistica#movimientos">Movimientos</a>
+      <a class="sidebar-subitem" href="/logistica#mermas">Mermas</a>
+      <a class="sidebar-subitem" href="/logistica#rotacion">Rotación</a>
+      <a class="sidebar-subitem" href="/logistica#planificacion">Planificación</a>
       <a class="sidebar-subitem" href="/logistica#reportes">Reportes</a>
     </div>
   </div>
@@ -65,16 +69,10 @@
   </div>
 
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'agente' else '' }}">
-    <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
+    <a class="sidebar-modulo-header" href="/agente-ia" style="text-decoration:none; display:flex;">
       <span class="sidebar-modulo-tag">04</span>
       <span class="sidebar-modulo-nombre">Agente IA</span>
-      <span class="sidebar-chevron">⌄</span>
-    </button>
-    <div class="sidebar-submenu">
-      <a class="sidebar-subitem" href="/agente-ia#mecanicos">Mecánicos</a>
-      <a class="sidebar-subitem" href="/agente-ia#conversaciones">Conversaciones</a>
-      <a class="sidebar-subitem" href="/agente-ia#auditoria">Auditoría</a>
-    </div>
+    </a>
   </div>
 </nav>
 

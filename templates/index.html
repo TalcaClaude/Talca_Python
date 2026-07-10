@@ -105,6 +105,19 @@
 
   </section>
 
+  <div class="chart-grid">
+    <div class="chart-card">
+      <h3>Entradas vs. salidas</h3>
+      <p class="chart-sub">Últimos 12 meses — unidades por movimiento</p>
+      <div id="log-chart-movimientos">Cargando…</div>
+    </div>
+    <div class="chart-card">
+      <h3>Valor de inventario por categoría</h3>
+      <p class="chart-sub">Top 8 — costo de compra × stock</p>
+      <div id="log-chart-valor-categoria">Cargando…</div>
+    </div>
+  </div>
+
   </section>
 
   <section class="vista" id="vista-productos" style="display:none">
@@ -1047,6 +1060,7 @@
 
 {% include "_alerta_facturas_pendientes.html" %}
 
+<script src="/static/js/charts.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/app.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
 </div>

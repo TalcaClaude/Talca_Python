@@ -172,6 +172,18 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
   });
 });
 
+// El sidebar enlaza a /finanzas#vista (ver _sidebar.html). Como los tabs
+// se manejan 100% en JS, hay que leer el hash al cargar la página y también
+// reaccionar si cambia estando ya en esta vista.
+function activarPestanaDesdeHash() {
+  const vista = location.hash.replace("#", "");
+  if (!vista) return;
+  const tabBtn = document.querySelector(`.tabs:not(.sub-tabs) > .tab[data-vista="${vista}"]`);
+  if (tabBtn) tabBtn.click();
+}
+window.addEventListener("hashchange", activarPestanaDesdeHash);
+activarPestanaDesdeHash();
+
 // ---------------------------------------------------------------------------
 // Sub-pestañas de Cuentas por Cobrar: "OTs cerradas" (tabla de siempre,
 // cuentas_por_cobrar) y "Por abonos" (OTs en reparación que todavía no

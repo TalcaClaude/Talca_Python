@@ -7529,6 +7529,199 @@ def migracion_importar():
     return jsonify(resumen)
 
 
+@app.route("/api/admin/migracion/repuestos-ot-abiertas", methods=["POST"])
+@requiere_rol()
+def migracion_repuestos_ot_abiertas():
+    """Carga los repuestos y mano de obra externa históricos (de la base
+    legacy TalleresTC) hacia las OT ABIERTAS ya migradas — a diferencia de
+    /api/admin/migracion/importar (que crea clientes/autos/OT), esto NO
+    crea órdenes nuevas: solo agrega orden_items a órdenes que ya existen
+    en el sistema, emparejándolas por patente del vehículo.
+
+    Espera un archivo 'repuestos_json' con una lista de objetos:
+    [{legacy_no, patente, repuestos: [{modelo, descripcion, costo_unitario, ...}],
+      mano_obra: [{nombre_reparador, detalle, cantidad, precio, ...}]}, ...]
+
+    Es seguro correrla más de una vez sobre la misma orden: si esa orden
+    ya tiene ítems cargados por esta migración (usuario = 'Migración
+    histórica'), se salta para no duplicar."""
+    archivo = request.files.get("repuestos_json")
+    if not archivo or archivo.filename == "":
+        return jsonify({"error": "Debes adjuntar el archivo repuestos_json"}), 400
+    try:
+        datos = json.loads(archivo.read().decode("utf-8"))
+    except Exception:
+        return jsonify({"error": "El archivo no es un JSON válido"}), 400
+
+    db = get_db()
+    ts = now_iso()
+    usuario_migracion = "Migración histórica"
+
+    patente_a_orden = {}
+    for fila in db.execute(
+        """
+        SELECT o.id AS orden_id, e.identificador AS patente
+        FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
+        WHERE e.identificador != ''
+        """
+    ):
+        patente_a_orden.setdefault(fila["patente"].strip().upper(), fila["orden_id"])
+
+    resumen = {
+        "ordenes_procesadas": 0, "ordenes_sin_match": [], "ordenes_ya_migradas": 0,
+        "items_repuesto_creados": 0, "items_mano_obra_creados": 0,
+    }
+
+    for entrada in datos:
+        patente = (entrada.get("patente") or "").strip().upper()
+        orden_id = patente_a_orden.get(patente) if patente else None
+        if not orden_id:
+            if entrada.get("repuestos") or entrada.get("mano_obra"):
+                resumen["ordenes_sin_match"].append({"legacy_no": entrada.get("legacy_no"), "patente": patente})
+            continue
+
+        ya_migrada = db.execute(
+            "SELECT 1 FROM orden_items WHERE orden_id = ? AND usuario = ?",
+            (orden_id, usuario_migracion),
+        ).fetchone()
+        if ya_migrada:
+            resumen["ordenes_ya_migradas"] += 1
+            continue
+
+        resumen["ordenes_procesadas"] += 1
+
+        for r in entrada.get("repuestos") or []:
+            descripcion = " - ".join(
+                x.strip() for x in [(r.get("modelo") or ""), (r.get("descripcion") or "")] if x.strip()
+            ) or "(sin descripción)"
+            costo = 0.0
+            try:
+                costo = float(r.get("costo_unitario") or 0)
+            except (TypeError, ValueError):
+                costo = 0.0
+            db.execute(
+                """INSERT INTO orden_items (orden_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en)
+                   VALUES (?, 'repuesto', ?, 1, ?, ?, ?)""",
+                (orden_id, descripcion.upper(), costo, usuario_migracion, ts),
+            )
+            resumen["items_repuesto_creados"] += 1
+
+        for m in entrada.get("mano_obra") or []:
+            descripcion = " - ".join(
+                x.strip() for x in [(m.get("nombre_reparador") or ""), (m.get("detalle") or "")] if x.strip()
+            ) or "(mano de obra externa)"
+            try:
+                cantidad = float(m.get("cantidad") or 1) or 1
+            except (TypeError, ValueError):
+                cantidad = 1
+            try:
+                precio = float(m.get("precio") or 0)
+            except (TypeError, ValueError):
+                precio = 0.0
+            db.execute(
+                """INSERT INTO orden_items (orden_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en, detalle)
+                   VALUES (?, 'mano_obra', ?, ?, ?, ?, ?, 'Reparación externa (migración histórica)')""",
+                (orden_id, descripcion.upper(), cantidad, precio, usuario_migracion, ts),
+            )
+            resumen["items_mano_obra_creados"] += 1
+
+        db.commit()
+
+    return jsonify(resumen)
+
+
+@app.route("/api/admin/migracion/garantias-abiertas", methods=["POST"])
+@requiere_rol()
+def migracion_garantias_abiertas():
+    """Crea garantías (entidad 'garantias') a partir de las OT tipo
+    'Garantía' que en la base legacy siguen ABIERTAS. Se enlazan por RUT
+    del cliente (ya migrado) y, cuando hay patente, por el vehículo. Si el
+    texto original menciona la OT de origen (ej. 'GARANTÍA OT.2623') pero
+    esa orden todavía no está en este sistema (porque solo se migraron las
+    OT abiertas, no el historial cerrado completo), el número de OT legado
+    queda igual anotado en el diagnóstico para no perder el dato, aunque
+    'orden_origen_id' quede vacío.
+
+    Espera un archivo 'garantias_json': lista de objetos con legacy_no,
+    patente, cliente_rut, motivo, diagnostico, fecha_recepcion,
+    origen_legacy_no. Idempotente: si ya existe una garantía con el mismo
+    cliente + fecha_recepcion, se salta."""
+    archivo = request.files.get("garantias_json")
+    if not archivo or archivo.filename == "":
+        return jsonify({"error": "Debes adjuntar el archivo garantias_json"}), 400
+    try:
+        datos = json.loads(archivo.read().decode("utf-8"))
+    except Exception:
+        return jsonify({"error": "El archivo no es un JSON válido"}), 400
+
+    db = get_db()
+    ts = now_iso()
+
+    rut_a_cliente = {}
+    for fila in db.execute("SELECT id, rut FROM clientes WHERE rut != ''"):
+        clave = re.sub(r"[.\-]", "", fila["rut"] or "").upper()
+        if clave:
+            rut_a_cliente[clave] = fila["id"]
+
+    resumen = {"creadas": 0, "ya_existian": 0, "sin_cliente": [], "sin_equipo": []}
+
+    for g in datos:
+        rut_clave = re.sub(r"[.\-]", "", g.get("cliente_rut") or "").upper()
+        cliente_id = rut_a_cliente.get(rut_clave)
+        if not cliente_id:
+            resumen["sin_cliente"].append({"legacy_no": g.get("legacy_no"), "cliente_rut": g.get("cliente_rut")})
+            continue
+
+        patente = (g.get("patente") or "").strip().upper()
+        equipo_id = None
+        if patente:
+            fila_eq = db.execute(
+                "SELECT id FROM equipos WHERE cliente_id = ? AND identificador = ?", (cliente_id, patente)
+            ).fetchone()
+            equipo_id = fila_eq["id"] if fila_eq else None
+        if not equipo_id:
+            equipos_cliente = db.execute(
+                "SELECT id FROM equipos WHERE cliente_id = ?", (cliente_id,)
+            ).fetchall()
+            if len(equipos_cliente) == 1:
+                equipo_id = equipos_cliente[0]["id"]
+            elif not patente:
+                resumen["sin_equipo"].append({"legacy_no": g.get("legacy_no"), "cliente_rut": g.get("cliente_rut")})
+
+        fecha_raw = (g.get("fecha_recepcion") or "").strip()
+        fecha_recepcion = fecha_raw.replace(" ", "T") if fecha_raw else ts
+
+        ya_existe = db.execute(
+            "SELECT 1 FROM garantias WHERE cliente_id = ? AND fecha_recepcion = ?",
+            (cliente_id, fecha_recepcion),
+        ).fetchone()
+        if ya_existe:
+            resumen["ya_existian"] += 1
+            continue
+
+        diagnostico = (g.get("diagnostico") or "").strip()
+        origen_legacy_no = g.get("origen_legacy_no")
+        if origen_legacy_no:
+            diagnostico = (diagnostico + f" (OT original legado #{origen_legacy_no} — aún no migrada al sistema nuevo)").strip()
+
+        db.execute(
+            """INSERT INTO garantias (
+                cliente_id, equipo_id, orden_origen_id, motivo, diagnostico, estado,
+                fecha_recepcion, usuario, creado_en, actualizado_en
+            ) VALUES (?, ?, NULL, ?, ?, 'ingreso', ?, ?, ?, ?)""",
+            (
+                cliente_id, equipo_id,
+                (g.get("motivo") or "GARANTÍA").strip().upper(),
+                diagnostico.upper(),
+                fecha_recepcion, "Migración histórica", ts, ts,
+            ),
+        )
+        resumen["creadas"] += 1
+        db.commit()
+
+    return jsonify(resumen)
+
+
 init_db()
 iniciar_hilo_respaldos()
 iniciar_hilo_alertas_stock()

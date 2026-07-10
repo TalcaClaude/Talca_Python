@@ -26,8 +26,10 @@ from flask import Blueprint, jsonify, request, send_file
 from werkzeug.utils import secure_filename
 
 from core import (
+    ANTICIPO_PORCENTAJE_DEFECTO,
     COMPROBANTES_DIR,
     EXTENSIONES_COMPROBANTE_PERMITIDAS,
+    IVA_PORCENTAJE,
     _aplicar_entrada_stock,
     _autoancho,
     _crear_libro_excel,
@@ -45,6 +47,14 @@ from core import (
     requiere_rol,
     usuario_actual,
 )
+
+# Estados de una OT en los que ya se aprobó el presupuesto y el trabajo está
+# en curso, pero todavía no llega a 'listo'/'entregado' (ver
+# modulos/operativo.py: ESTADOS_QUE_CIERRAN_CXC). Mientras una orden esté en
+# uno de estos estados y no haya alcanzado el anticipo pactado
+# (ANTICIPO_PORCENTAJE_DEFECTO, hoy 50%), aparece en la pestaña "CxC por
+# abonos" de Finanzas — ver finanzas_listar_cxc_abonos más abajo.
+ESTADOS_CXC_ABONO = {"reparacion", "esperando_repuesto", "control_calidad"}
 
 bp = Blueprint("finanzas", __name__)
 
@@ -496,8 +506,22 @@ def caja_detalle_rendicion(rendicion_id):
 # solas (ver modulos/operativo.py: _generar_o_actualizar_cxc, y app.py:
 # _generar_cxp_de_factura); acá solo viven los endpoints de lectura y el
 # registro de pagos a proveedor. No hay endpoint para crear una CxC a mano
-# (siempre nace de una OT entregada) ni para editar su monto (queda
-# "congelado" al momento de la entrega, ver comentario en operativo.py).
+# (siempre nace de una OT lista o entregada) ni para editar su monto (queda
+# "congelado" en ese momento, ver comentario en operativo.py).
+#
+# El taller cobra en dos momentos: un anticipo (por defecto 50%,
+# ANTICIPO_PORCENTAJE_DEFECTO) apenas se aprueba el presupuesto y el auto
+# entra a reparación, y el resto al entregar el vehículo. Por eso Finanzas
+# separa la Cuentas por Cobrar en dos vistas:
+#   - "CxC por abonos" (finanzas_listar_cxc_abonos): OTs en reparación o más
+#     adelante (pero todavía no 'listo'/'entregado') que no han alcanzado el
+#     anticipo pactado. Es una consulta EN VIVO contra ordenes_trabajo — a
+#     diferencia de la CxC de abajo, todavía no existe una fila "congelada"
+#     en cuentas_por_cobrar en esta etapa.
+#   - "CxC OTs cerradas" (finanzas_listar_cxc, sin cambios de nombre en el
+#     código): la tabla cuentas_por_cobrar de siempre, que ahora se genera
+#     desde que la orden llega a 'listo' (no solo 'entregado') — ver
+#     ESTADOS_QUE_CIERRAN_CXC en operativo.py.
 # ---------------------------------------------------------------------------
 
 def _cxc_total_pagado(db, orden_id):
@@ -506,11 +530,21 @@ def _cxc_total_pagado(db, orden_id):
     ).fetchone()[0]
 
 
+def _orden_valor_total(orden_row):
+    """Mismo cálculo que _orden_dict/_generar_o_actualizar_cxc en
+    modulos/operativo.py (valor_neto + IVA si corresponde) — se repite acá
+    en vez de importarlo porque core.py no puede depender de operativo.py
+    y viceversa (ver comentario de imports arriba de este archivo)."""
+    valor_neto = orden_row["precio_referencial"] or 0
+    valor_iva_monto = round(valor_neto * IVA_PORCENTAJE, 2) if orden_row["precio_iva"] else 0.0
+    return round(valor_neto + valor_iva_monto, 2)
+
+
 @bp.route("/api/finanzas/cxc", methods=["GET"])
 def finanzas_listar_cxc():
-    """Lista las Cuentas por Cobrar (una por OT entregada con precio > 0),
-    con datos del cliente y la orden para mostrar en la tabla, y el saldo
-    pendiente calculado en vivo a partir de pagos_orden (ver
+    """Lista las Cuentas por Cobrar "cerradas" (una por OT que llegó a
+    'listo' o 'entregado' con precio > 0), con datos del cliente/equipo y
+    el saldo pendiente calculado en vivo a partir de pagos_orden (ver
     _recalcular_estado_cxc en modulos/operativo.py, que ya mantiene
     'estado' al día — acá solo se agrega el número exacto de saldo)."""
     db = get_db()
@@ -519,7 +553,7 @@ def finanzas_listar_cxc():
 
     sql = """
         SELECT cxc.*, c.nombre AS cliente_nombre, c.telefono AS cliente_telefono,
-               o.fecha_recepcion, o.fecha_entrega_real, o.mecanico
+               o.fecha_recepcion, o.fecha_entrega_real, o.mecanico, o.estado AS orden_estado
         FROM cuentas_por_cobrar cxc
         JOIN clientes c ON c.id = cxc.cliente_id
         JOIN ordenes_trabajo o ON o.id = cxc.orden_id
@@ -544,6 +578,56 @@ def finanzas_listar_cxc():
         cuentas = [c for c in cuentas if coincide_busqueda(q, c.get("cliente_nombre"), c.get("cliente_telefono"))]
 
     total_pendiente = round(sum(c["saldo"] for c in cuentas if c["estado"] != "pagada"), 2)
+    return jsonify({"cuentas": cuentas, "total": len(cuentas), "total_pendiente": total_pendiente})
+
+
+@bp.route("/api/finanzas/cxc/abonos", methods=["GET"])
+def finanzas_listar_cxc_abonos():
+    """Lista las OTs que ya tienen el presupuesto aprobado (están en
+    reparación o más adelante, ver ESTADOS_CXC_ABONO) y todavía no alcanzan
+    el anticipo pactado (ANTICIPO_PORCENTAJE_DEFECTO del valor total). En
+    cuanto lo alcanzan, salen de esta vista — el saldo restante se sigue
+    cobrando más adelante, cuando la orden llegue a 'listo'/'entregado' y
+    aparezca en finanzas_listar_cxc ("OTs cerradas") por el saldo total
+    real (que ya descuenta lo abonado acá, porque ambas vistas leen los
+    mismos pagos_orden)."""
+    db = get_db()
+    q = request.args.get("q", "").strip()
+    placeholders = ", ".join("?" for _ in ESTADOS_CXC_ABONO)
+    rows = db.execute(
+        f"""
+        SELECT o.*, c.nombre AS cliente_nombre, c.telefono AS cliente_telefono,
+               e.identificador AS equipo_identificador, e.marca AS equipo_marca, e.modelo AS equipo_modelo
+        FROM ordenes_trabajo o
+        JOIN clientes c ON c.id = o.cliente_id
+        LEFT JOIN equipos e ON e.id = o.equipo_id
+        WHERE o.estado IN ({placeholders})
+        ORDER BY o.fecha_recepcion ASC
+        """,
+        list(ESTADOS_CXC_ABONO),
+    ).fetchall()
+
+    cuentas = []
+    for r in rows:
+        d = dict(r)
+        valor_total = _orden_valor_total(d)
+        if valor_total <= 0:
+            continue
+        anticipo_esperado = round(valor_total * ANTICIPO_PORCENTAJE_DEFECTO / 100, 2)
+        total_pagado = _cxc_total_pagado(db, d["id"])
+        if total_pagado >= anticipo_esperado:
+            continue
+        d["orden_id"] = d["id"]
+        d["valor_total"] = valor_total
+        d["anticipo_esperado"] = anticipo_esperado
+        d["total_pagado"] = total_pagado
+        d["saldo_anticipo"] = round(anticipo_esperado - total_pagado, 2)
+        cuentas.append(d)
+
+    if q:
+        cuentas = [c for c in cuentas if coincide_busqueda(q, c.get("cliente_nombre"), c.get("cliente_telefono"))]
+
+    total_pendiente = round(sum(c["saldo_anticipo"] for c in cuentas), 2)
     return jsonify({"cuentas": cuentas, "total": len(cuentas), "total_pendiente": total_pendiente})
 
 

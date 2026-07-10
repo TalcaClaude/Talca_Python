@@ -799,6 +799,18 @@ body::before { content: none; }
 .badge-urgencia--critico { color: var(--danger); background: var(--danger-soft); }
 .badge-urgencia--proximo { color: var(--accent-2); background: var(--accent-soft); }
 
+.badge-origen {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: var(--surface-2, rgba(255,255,255,0.06));
+}
+
 .vacio-inline { color: var(--text-muted); font-size: 12.5px; }
 
 .fila-con-error { background: var(--danger-soft); }
@@ -1106,6 +1118,16 @@ body::before { content: none; }
 .tab.activo {
   color: var(--accent-2);
   border-bottom-color: var(--accent);
+}
+
+.sub-tabs {
+  margin-bottom: 14px;
+}
+
+.sub-tabs .tab {
+  font-size: 12px;
+  padding: 6px 4px;
+  margin-right: 14px;
 }
 
 .bodega-intro {

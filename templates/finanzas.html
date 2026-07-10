@@ -150,7 +150,14 @@
 
   <section class="vista" id="vista-cxc" style="display:none">
 
-  <p class="ayuda-inline">Se generan solas al entregar una orden de trabajo con precio cargado (nunca a mano) — el monto queda congelado en ese momento. El saldo se recalcula en vivo según los abonos registrados en cada OT.</p>
+  <nav class="tabs sub-tabs" id="cxc-subtabs">
+    <button class="tab activo" data-subvista="cerradas">OTs cerradas</button>
+    <button class="tab" data-subvista="abonos">Por abonos</button>
+  </nav>
+
+  <section class="vista" id="cxc-vista-cerradas">
+
+  <p class="ayuda-inline">Se generan solas al llegar una orden de trabajo a "listo" o "entregado" con precio cargado (nunca a mano) — el monto queda congelado en ese momento. El saldo se recalcula en vivo según los abonos registrados en cada OT. Haz click en una fila para ver el detalle y registrar un pago.</p>
 
   <section class="toolbar">
     <input type="text" id="cxc-buscar" placeholder="Buscar por cliente o teléfono…">
@@ -182,6 +189,40 @@
         <tr><td colspan="8" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="cxc-vista-abonos" style="display:none">
+
+  <p class="ayuda-inline">OTs que ya entraron a reparación (presupuesto aprobado) y todavía no alcanzan el anticipo pactado (50% del valor total). En cuanto lo alcanzan, salen de esta lista — el resto se cobra cuando la OT quede "lista" o "entregada" (ver pestaña "OTs cerradas"). Haz click en una fila para ver el detalle y registrar un abono.</p>
+
+  <section class="toolbar">
+    <input type="text" id="cxc-abonos-buscar" placeholder="Buscar por cliente o teléfono…">
+    <span style="flex:1"></span>
+    <span class="ayuda-inline">Total para completar anticipos: <strong id="cxc-abonos-total-pendiente" class="mono">$0</strong></span>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Cliente</th>
+          <th>OT</th>
+          <th>Equipo</th>
+          <th>Fecha recepción</th>
+          <th class="num">Valor total</th>
+          <th class="num">Anticipo esperado (50%)</th>
+          <th class="num">Pagado</th>
+          <th class="num">Falta para anticipo</th>
+        </tr>
+      </thead>
+      <tbody id="tbody-cxc-abonos">
+        <tr><td colspan="8" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
   </section>
 
   </section>
@@ -229,6 +270,9 @@
   <p class="ayuda-inline">Regístralas apenas se pacte la compra con el proveedor (contado, crédito a N días, o mixto). Quedan "pendientes de recepción": no se aplica stock ni se genera la Cuenta por Pagar hasta que alguien contraste esta factura contra lo que llegó físicamente y la apruebe — ver el aviso 📦 que aparece en cualquier pantalla mientras haya facturas por revisar.</p>
   <section class="toolbar">
     <span style="flex:1"></span>
+    <button class="btn btn-secundario" id="btn-cxp-carga-masiva">Carga masiva (Excel)</button>
+    <button class="btn btn-secundario" id="btn-cxp-escanear-foto">📷 Escanear foto</button>
+    <input type="file" id="input-cxp-escanear-foto" accept="image/jpeg,image/png,image/webp,image/gif" capture="environment" style="display:none">
     <button class="btn btn-primary" id="btn-nueva-factura-pendiente">+ Registrar factura de compra</button>
   </section>
   <section class="tabla-wrap">
@@ -240,11 +284,13 @@
           <th>Condición</th>
           <th class="num">Monto facturado</th>
           <th>Estado</th>
+          <th>Origen</th>
           <th>Registrada por</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="tbody-facturas-pendientes">
-        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="8" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -565,15 +611,18 @@
   </div>
 </div>
 
-<!-- Modal: Registrar factura de compra pendiente de recepción -->
+<!-- Modal: Registrar / editar factura de compra pendiente de recepción -->
 <div class="modal-overlay" id="modal-factura-pendiente">
   <div class="modal modal-ancho">
     <div class="modal-head">
-      <h2>Registrar factura de compra</h2>
+      <h2 id="pfr-titulo">Registrar factura de compra</h2>
       <button class="modal-close" data-close="modal-factura-pendiente">&times;</button>
     </div>
     <p class="ayuda-inline">Esto NO aplica stock ni genera la Cuenta por Pagar todavía — queda pendiente hasta que se apruebe la recepción contra lo que llegó físicamente.</p>
+    <p class="ayuda-inline" id="pfr-aviso-origen" style="display:none"></p>
+    <img id="pfr-foto-whatsapp" src="" alt="Foto original de WhatsApp" style="display:none; max-width:220px; border-radius:8px; border:1px solid var(--borde); margin-bottom:12px">
     <form id="form-factura-pendiente">
+      <input type="hidden" id="pfr-id">
       <div class="grid-3">
         <div class="campo">
           <label>N° de factura *</label>
@@ -594,36 +643,137 @@
       <button type="button" class="btn-link" id="pfr-agregar-linea">+ Agregar producto</button>
       <p class="fac-total-linea">Total factura: <strong id="pfr-total-vivo">$0</strong></p>
 
-      <h3 class="subtitulo">Condición de pago</h3>
-      <div class="grid-3">
-        <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="contado"> Al contado</label>
-        <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="credito" checked> A crédito</label>
-        <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="mixto"> Mixto</label>
-      </div>
-      <div class="grid-2" id="pfr-campos-mixto" style="display:none">
-        <div class="campo">
-          <label>% al contado</label>
-          <input type="number" id="pfr-porcentaje-contado" min="1" max="99" value="50">
+      <div id="pfr-seccion-condicion">
+        <h3 class="subtitulo">Condición de pago</h3>
+        <div class="grid-3">
+          <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="contado"> Al contado</label>
+          <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="credito" checked> A crédito</label>
+          <label class="toggle-critico"><input type="radio" name="pfr-condicion" value="mixto"> Mixto</label>
+        </div>
+        <div class="grid-2" id="pfr-campos-mixto" style="display:none">
+          <div class="campo">
+            <label>% al contado</label>
+            <input type="number" id="pfr-porcentaje-contado" min="1" max="99" value="50">
+          </div>
+        </div>
+        <div class="grid-2" id="pfr-campos-credito">
+          <div class="campo">
+            <label>Plazo de crédito (días)</label>
+            <input type="number" id="pfr-plazo-dias" min="1" value="30">
+          </div>
+          <div class="campo">
+            <label>&nbsp;</label>
+            <div class="pfr-plazos-rapidos">
+              <button type="button" class="btn btn-secundario" data-plazo="30">30 días</button>
+              <button type="button" class="btn btn-secundario" data-plazo="60">60 días</button>
+              <button type="button" class="btn btn-secundario" data-plazo="90">90 días</button>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="grid-2" id="pfr-campos-credito">
+      <p class="ayuda-inline" id="pfr-aviso-condicion-fija" style="display:none">La condición de pago ya se fijó al registrar esta factura y no se puede editar acá — solo el número, proveedor, fecha y productos.</p>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-factura-pendiente">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="pfr-btn-guardar">Registrar factura</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Carga masiva de facturas de compra (Excel o foto escaneada) -->
+<div class="modal-overlay" id="modal-cxp-carga-masiva">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="cmf-titulo">Carga masiva de facturas (Excel)</h2>
+      <button class="modal-close" data-close="modal-cxp-carga-masiva">&times;</button>
+    </div>
+
+    <div id="cmf-paso-subir">
+      <p class="bodega-intro">Sube un Excel con varias facturas y sus productos de una vez. Si no sabes el formato, descarga la plantilla — ya trae los IDs de tus productos actuales en una hoja aparte.</p>
+      <div class="modal-actions modal-actions--start">
+        <a class="btn btn-secundario" href="/api/facturas/carga-masiva/plantilla">Descargar plantilla</a>
+      </div>
+      <div class="campo">
+        <label>Archivo Excel (.xlsx)</label>
+        <input type="file" id="cmf-archivo" accept=".xlsx,.xlsm">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-cxp-carga-masiva">Cancelar</button>
+        <button type="button" class="btn btn-primary" id="btn-cmf-previsualizar">Previsualizar</button>
+      </div>
+    </div>
+
+    <div id="cmf-paso-preview" style="display:none">
+      <p class="ayuda" id="cmf-resumen"></p>
+      <div id="cmf-lista-facturas"></div>
+
+      <h3 class="subtitulo">Condición de pago (se aplica a todas las facturas válidas de esta carga)</h3>
+      <div class="grid-3">
+        <label class="toggle-critico"><input type="radio" name="cmf-condicion" value="contado"> Al contado</label>
+        <label class="toggle-critico"><input type="radio" name="cmf-condicion" value="credito" checked> A crédito</label>
+        <label class="toggle-critico"><input type="radio" name="cmf-condicion" value="mixto"> Mixto</label>
+      </div>
+      <div class="grid-2" id="cmf-campos-mixto" style="display:none">
+        <div class="campo">
+          <label>% al contado</label>
+          <input type="number" id="cmf-porcentaje-contado" min="1" max="99" value="50">
+        </div>
+      </div>
+      <div class="grid-2" id="cmf-campos-credito">
         <div class="campo">
           <label>Plazo de crédito (días)</label>
-          <input type="number" id="pfr-plazo-dias" min="1" value="30">
+          <input type="number" id="cmf-plazo-dias" min="1" value="30">
         </div>
         <div class="campo">
           <label>&nbsp;</label>
           <div class="pfr-plazos-rapidos">
-            <button type="button" class="btn btn-secundario" data-plazo="30">30 días</button>
-            <button type="button" class="btn btn-secundario" data-plazo="60">60 días</button>
-            <button type="button" class="btn btn-secundario" data-plazo="90">90 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo-cmf="30">30 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo-cmf="60">60 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo-cmf="90">90 días</button>
           </div>
         </div>
       </div>
 
       <div class="modal-actions">
-        <button type="button" class="btn btn-secundario" data-close="modal-factura-pendiente">Cancelar</button>
-        <button type="submit" class="btn btn-primary">Registrar factura</button>
+        <button type="button" class="btn btn-secundario" id="btn-cmf-volver">Volver a subir otro archivo</button>
+        <button type="button" class="btn btn-primary" id="btn-cmf-confirmar">Confirmar carga</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Modal: Detalle de una OT en Cuentas por Cobrar (OTs cerradas / por abonos), con pago inline -->
+<div class="modal-overlay" id="modal-cxc-ot-detalle">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="cxcd-titulo">Orden de trabajo</h2>
+      <button class="modal-close" data-close="modal-cxc-ot-detalle">&times;</button>
+    </div>
+    <input type="hidden" id="cxcd-orden-id">
+    <dl id="cxcd-ficha"></dl>
+    <h3 class="subtitulo">Registrar pago</h3>
+    <form id="form-cxcd-pago">
+      <div class="grid-2">
+        <div class="campo">
+          <label>Monto ($ CLP) *</label>
+          <input type="number" id="cxcd-monto" required min="1" step="1">
+        </div>
+        <div class="campo">
+          <label>Método de pago</label>
+          <select id="cxcd-metodo">
+            <option value="efectivo">Efectivo</option>
+            <option value="transferencia">Transferencia</option>
+            <option value="tarjeta">Tarjeta</option>
+            <option value="cheque">Cheque</option>
+            <option value="otro">Otro</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-cxc-ot-detalle">Cerrar</button>
+        <button type="submit" class="btn btn-primary">Registrar pago</button>
       </div>
     </form>
   </div>

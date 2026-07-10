@@ -153,17 +153,24 @@ class TestEliminarFacturaRevierteSinContaminarConsumo(unittest.TestCase):
         return resp.get_json()
 
     def _crear_factura_aplicada(self, numero, producto_id, cantidad=5, precio_unitario=1000):
+        # Desde la migración a "pendientes de recepción" ya no existe el
+        # registro rápido (POST /api/facturas) — se crea el pendiente y se
+        # aprueba de inmediato, que es el único camino que queda para que
+        # una factura termine aplicando stock.
         resp = self.client.post(
-            "/api/facturas",
+            "/api/facturas/pendientes-recepcion",
             json={
                 "numero": numero,
                 "fecha": datetime.now().strftime("%Y-%m-%d"),
                 "lineas": [{"producto_id": producto_id, "cantidad": cantidad, "precio_unitario": precio_unitario}],
-                "aplicar_stock": True,
+                "condicion_pago": "credito",
             },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
-        return resp.get_json()
+        pendiente = resp.get_json()
+        resp2 = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
+        return resp2.get_json()
 
     def test_reversion_por_eliminar_factura_queda_marcada_como_correccion_de_inventario(self):
         producto = self._crear_producto_http("Producto - reversión marca categoría", stock_disponible=0)
@@ -1611,16 +1618,23 @@ class TestEscanearFotoFactura(unittest.TestCase):
         self.assertFalse(factura_corregida["proveedor_nuevo"])
         self.assertTrue(factura_corregida["valida"])
 
-        resp_confirmar = self.client.post("/api/facturas/carga-masiva/confirmar", json={"token": token})
+        # Desde la migración a "pendientes de recepción", confirmar la
+        # carga masiva ya NO crea la factura real de inmediato — la deja
+        # pendiente de que Bodega la apruebe (mismo camino unificado que
+        # manual/Excel/WhatsApp, ver carga_masiva_confirmar).
+        resp_confirmar = self.client.post(
+            "/api/facturas/carga-masiva/confirmar", json={"token": token, "condicion_pago": "credito"}
+        )
         self.assertEqual(resp_confirmar.status_code, 200, resp_confirmar.get_data(as_text=True))
         confirmadas = resp_confirmar.get_json()
         self.assertIn("FOTO-002", confirmadas.get("creadas", []))
 
-        facturas = self.client.get("/api/facturas").get_json()["facturas"]
-        factura_creada = next(f for f in facturas if f["numero"] == "FOTO-002")
+        pendientes = self.client.get("/api/facturas/pendientes-recepcion?estado=pendiente").get_json()["pendientes"]
+        pendiente_creado = next(p for p in pendientes if p["numero"] == "FOTO-002")
+        self.assertEqual(pendiente_creado["origen"], "foto")
         # No debe haberse creado un proveedor nuevo — tiene que quedar
         # asociada al proveedor existente que se eligió en la corrección.
-        self.assertEqual(factura_creada["proveedor_id"], proveedor_existente_id)
+        self.assertEqual(pendiente_creado["proveedor_id"], proveedor_existente_id)
 
 
 class TestAgenteWhatsApp(unittest.TestCase):
@@ -2279,8 +2293,13 @@ class TestAgenteWhatsApp(unittest.TestCase):
         )
 
     def _contar_pendientes(self):
+        # Desde la migración, WhatsApp ya no escribe en su propia tabla —
+        # todo queda en facturas_finanzas_pendientes con origen='whatsapp'
+        # (ver _procesar_foto_factura_whatsapp).
         with taller_app.app.app_context():
-            return taller_app.get_db().execute("SELECT COUNT(*) AS n FROM facturas_whatsapp_pendientes").fetchone()["n"]
+            return taller_app.get_db().execute(
+                "SELECT COUNT(*) AS n FROM facturas_finanzas_pendientes WHERE origen = 'whatsapp'"
+            ).fetchone()["n"]
 
     def test_telefono_no_registrado_no_puede_mandar_facturas(self):
         antes = self._contar_pendientes()
@@ -2325,8 +2344,8 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertTrue(data["exito"])
         self.assertEqual(data["accion"], "factura_recibida")
 
-        pendientes = self.client.get("/api/facturas/whatsapp-pendientes?estado=pendiente").get_json()["pendientes"]
-        pendiente = next(p for p in pendientes if p["datos"]["numero"] == numero)
+        pendientes = self.client.get("/api/facturas/pendientes-recepcion?estado=pendiente").get_json()["pendientes"]
+        pendiente = next(p for p in pendientes if p["numero"] == numero and p["origen"] == "whatsapp")
         return pendiente["id"], producto_id, numero
 
     # -- Foto de un vehículo por WhatsApp: en vez de una factura, el
@@ -2406,45 +2425,37 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(stock_actual, 3)
         self.assertEqual(self.client.get(f"/api/facturas/numero/{numero}").status_code, 404)
 
-        pendiente = self.client.get(f"/api/facturas/whatsapp-pendientes/{pendiente_id}").get_json()
+        pendiente = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente_id}").get_json()
         self.assertEqual(pendiente["estado"], "pendiente")
-        self.assertEqual(pendiente["datos"]["numero"], numero)
-        self.assertEqual(pendiente["datos"]["lineas"][0]["producto_id"], producto_id)
+        self.assertEqual(pendiente["origen"], "whatsapp")
+        self.assertEqual(pendiente["numero"], numero)
+        self.assertEqual(pendiente["lineas"][0]["producto_id"], producto_id)
 
     def test_aprobar_pendiente_crea_la_factura_real_y_aplica_stock(self):
         pendiente_id, producto_id, numero = self._preparar_pendiente("100002")
 
-        grupo = {
-            "numero": numero,
-            "proveedor_nombre": "Repuestos Agente Test 100002",
-            "proveedor_nuevo": True,
-            "proveedor_id": None,
-            "fecha": "2026-07-09",
-            "lineas": [{"producto_id": producto_id, "cantidad": 4, "precio_unitario": 8000}],
-        }
-        resp = self.client.post(f"/api/facturas/whatsapp-pendientes/{pendiente_id}/aprobar", json={"grupo": grupo})
-        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        resp = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente_id}/aprobar", json={})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         data = resp.get_json()
-        self.assertEqual(data["lineas_aplicadas"], 1)
 
         # El stock ahora sí se movió, y la factura real quedó creada.
         stock_actual = self.client.get(f"/api/productos/{producto_id}").get_json()["stock_disponible"]
         self.assertEqual(stock_actual, 3 + 4)
         self.assertEqual(self.client.get(f"/api/facturas/numero/{numero}").status_code, 200)
 
-        pendiente_actualizado = self.client.get(f"/api/facturas/whatsapp-pendientes/{pendiente_id}").get_json()
+        pendiente_actualizado = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente_id}").get_json()
         self.assertEqual(pendiente_actualizado["estado"], "aprobada")
-        self.assertEqual(pendiente_actualizado["factura_id"], data["factura_id"])
+        self.assertEqual(pendiente_actualizado["factura_id"], data["id"])
 
         # No se puede volver a aprobar (ni rechazar) un pendiente ya procesado.
-        resp_repetido = self.client.post(f"/api/facturas/whatsapp-pendientes/{pendiente_id}/aprobar", json={"grupo": grupo})
+        resp_repetido = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente_id}/aprobar", json={})
         self.assertEqual(resp_repetido.status_code, 400)
 
     def test_rechazar_pendiente_no_crea_factura_ni_toca_stock(self):
         pendiente_id, producto_id, numero = self._preparar_pendiente("100003")
 
         resp = self.client.post(
-            f"/api/facturas/whatsapp-pendientes/{pendiente_id}/rechazar",
+            f"/api/facturas/pendientes-recepcion/{pendiente_id}/rechazar",
             json={"nota": "Foto duplicada, ya se cargó antes a mano."},
         )
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
@@ -2453,7 +2464,7 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(stock_actual, 3)
         self.assertEqual(self.client.get(f"/api/facturas/numero/{numero}").status_code, 404)
 
-        pendiente_actualizado = self.client.get(f"/api/facturas/whatsapp-pendientes/{pendiente_id}").get_json()
+        pendiente_actualizado = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente_id}").get_json()
         self.assertEqual(pendiente_actualizado["estado"], "rechazada")
         self.assertEqual(pendiente_actualizado["nota_rechazo"], "Foto duplicada, ya se cargó antes a mano.")
 
@@ -2608,17 +2619,23 @@ class TestCuentasPorPagar(unittest.TestCase):
         return resp.get_json()
 
     def _crear_factura(self, numero, producto_id, cantidad=5, precio_unitario=1000):
+        # Mismo camino que _crear_factura_aplicada en
+        # TestEliminarFacturaRevierteSinContaminarConsumo: ya no existe el
+        # registro rápido, se pasa por pendiente-de-recepción + aprobar.
         resp = self.client.post(
-            "/api/facturas",
+            "/api/facturas/pendientes-recepcion",
             json={
                 "numero": numero,
                 "fecha": datetime.now().strftime("%Y-%m-%d"),
                 "lineas": [{"producto_id": producto_id, "cantidad": cantidad, "precio_unitario": precio_unitario}],
-                "aplicar_stock": True,
+                "condicion_pago": "credito",
             },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
-        return resp.get_json()
+        pendiente = resp.get_json()
+        resp2 = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
+        return resp2.get_json()
 
     def _cxp_de_factura(self, factura_id):
         with taller_app.app.app_context():
@@ -2778,14 +2795,17 @@ class TestCuentasPorPagarManual(unittest.TestCase):
         producto = self.admin_client.post(
             "/api/productos", json={"nombre": "Producto - CxP manual anular factura", "stock_disponible": 0, "costo_compra": 1000},
         ).get_json()
-        factura = self.admin_client.post(
-            "/api/facturas",
+        pendiente = self.admin_client.post(
+            "/api/facturas/pendientes-recepcion",
             json={
                 "numero": "FACT-CXPM-001",
                 "fecha": datetime.now().strftime("%Y-%m-%d"),
                 "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
-                "aplicar_stock": True,
+                "condicion_pago": "credito",
             },
+        ).get_json()
+        factura = self.admin_client.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={}
         ).get_json()
         with taller_app.app.app_context():
             db = taller_app.get_db()

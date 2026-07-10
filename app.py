@@ -518,7 +518,9 @@ def init_db():
             creado_en TEXT NOT NULL,
             revisado_por TEXT DEFAULT '',
             revisado_en TEXT DEFAULT '',
-            nota_rechazo TEXT DEFAULT ''
+            nota_rechazo TEXT DEFAULT '',
+            origen TEXT NOT NULL DEFAULT 'manual',
+            foto_archivo TEXT DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS reservas (
@@ -1081,6 +1083,24 @@ def init_db():
         db.commit()
     if "activo" not in columnas_usuarios:
         db.execute("ALTER TABLE usuarios ADD COLUMN activo INTEGER NOT NULL DEFAULT 1")
+        db.commit()
+
+    # ---- Migración 15: se unifican TODOS los caminos de entrada de una
+    # factura de compra (manual, carga masiva por Excel, foto escaneada, y
+    # foto recibida por WhatsApp) en esta misma tabla
+    # facturas_finanzas_pendientes — antes cada camino aplicaba stock de
+    # inmediato y generaba su CxP sin pasar por la aprobación de Bodega
+    # (salvo WhatsApp, que tenía su propia tabla facturas_whatsapp_pendientes
+    # con su propio flujo de aprobación, separado de este). 'origen' deja
+    # registro de por dónde entró cada una (manual/excel/foto/whatsapp) y
+    # 'foto_archivo' guarda la foto original cuando corresponde (WhatsApp y
+    # escaneo por foto) — ver _crear_pendiente_recepcion.
+    columnas_ffp = [c[1] for c in db.execute("PRAGMA table_info(facturas_finanzas_pendientes)").fetchall()]
+    if "origen" not in columnas_ffp:
+        db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN origen TEXT NOT NULL DEFAULT 'manual'")
+        db.commit()
+    if "foto_archivo" not in columnas_ffp:
+        db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN foto_archivo TEXT DEFAULT ''")
         db.commit()
 
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
@@ -2872,69 +2892,12 @@ def obtener_factura_por_numero(numero):
     return jsonify(_factura_detalle(db, row))
 
 
-@app.route("/api/facturas", methods=["POST"])
-@requiere_rol("finanzas")
-def crear_factura():
-    data = request.get_json(force=True, silent=True) or {}
-    numero = (data.get("numero") or "").strip().upper()
-    proveedor_id = data.get("proveedor_id") or None
-    fecha = (data.get("fecha") or "").strip()
-    lineas_in = data.get("lineas") or []
-    aplicar_stock = data.get("aplicar_stock", True)
-    usuario = usuario_actual()  # siempre quien tiene la sesión iniciada, nunca lo que mande el cliente
-
-    if not numero:
-        return jsonify({"error": "El número de factura es obligatorio"}), 400
-    if not lineas_in:
-        return jsonify({"error": "Agrega al menos un producto a la factura"}), 400
-
-    db = get_db()
-    _iniciar_transaccion_stock(db)
-
-    if proveedor_id:
-        try:
-            proveedor_id = int(proveedor_id)
-        except (TypeError, ValueError):
-            return jsonify({"error": "Proveedor inválido"}), 400
-        existe_prov = db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone()
-        if not existe_prov:
-            return jsonify({"error": "El proveedor seleccionado no existe"}), 400
-
-    existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
-    if existe:
-        return jsonify({"error": f"Ya existe una factura registrada con el número '{numero}'"}), 400
-
-    lineas_validadas = []
-    productos_vistos = set()
-    for i, linea in enumerate(lineas_in, start=1):
-        try:
-            producto_id = int(linea.get("producto_id"))
-            cantidad = int(linea.get("cantidad"))
-            precio_unitario = float(linea.get("precio_unitario"))
-        except (TypeError, ValueError):
-            return jsonify({"error": f"Línea {i}: producto, cantidad y precio deben ser válidos"}), 400
-
-        if cantidad <= 0:
-            return jsonify({"error": f"Línea {i}: la cantidad debe ser mayor a 0"}), 400
-        if precio_unitario < 0:
-            return jsonify({"error": f"Línea {i}: el precio no puede ser negativo"}), 400
-
-        producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
-        if not producto:
-            return jsonify({"error": f"Línea {i}: el producto seleccionado no existe"}), 400
-
-        if producto_id in productos_vistos:
-            return jsonify({"error": f"Línea {i}: ese producto ya está agregado en otra línea de esta misma factura"}), 400
-        productos_vistos.add(producto_id)
-
-        lineas_validadas.append((producto, cantidad, precio_unitario))
-
-    factura_id = _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock)
-    db.commit()
-
-    nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
-    return jsonify(_factura_detalle(db, nueva)), 201
-
+# NOTA: el registro manual "rápido" de una factura (POST /api/facturas, con
+# aplicación de stock inmediata y sin pasar por aprobación de Bodega) se
+# eliminó — el taller pidió unificar todo bajo "pendientes de recepción"
+# (ver _crear_pendiente_recepcion / aprobar_factura_pendiente_recepcion más
+# abajo), que es el único camino de entrada ahora, para manual, Excel, foto
+# escaneada y WhatsApp por igual.
 
 # Cuentas por Pagar (CxP) — plazo por defecto para pagarle a un proveedor,
 # usado solo para calcular 'fecha_vencimiento' al generar la CxP de una
@@ -3021,10 +2984,11 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
                         condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None):
     """Inserta la factura y sus líneas, aplicando el ingreso de stock si
     corresponde, y generando su(s) Cuenta(s) por Pagar (ver
-    _generar_cxp_de_factura). Separado de crear_factura() para poder
-    reutilizarlo también desde la carga masiva vía Excel (Módulo de
-    compras), desde la aprobación de facturas recibidas por WhatsApp, y
-    desde la aprobación de recepción de facturas registradas por Finanzas."""
+    _generar_cxp_de_factura). Único llamador hoy:
+    aprobar_factura_pendiente_recepcion — manual, Excel, foto escaneada y
+    WhatsApp entran TODOS por 'pendientes de recepción' primero (ver
+    _crear_pendiente_recepcion) y esta función recién se ejecuta al
+    aprobar, sin importar el origen."""
     ts = now_iso()
     cur = db.execute(
         "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en, condicion_pago, porcentaje_contado, plazo_dias_credito) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -3062,76 +3026,12 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
     return factura_id
 
 
-def _aplicar_lineas_pendientes_factura(db, factura_id, usuario):
-    """Ingresa a stock todas las líneas pendientes (no aplicadas) de UNA
-    factura. Reutiliza la misma lógica de _registrar_factura, pero operando
-    sobre líneas ya existentes en vez de crearlas. Devuelve cuántas líneas
-    se aplicaron."""
-    factura = db.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
-    if factura is None:
-        raise ValueError("Factura no encontrada")
-
-    factura_row = {"id": factura["id"], "numero": factura["numero"]}
-    lineas_pendientes = db.execute(
-        "SELECT * FROM factura_lineas WHERE factura_id = ? AND aplicada = 0",
-        (factura_id,),
-    ).fetchall()
-
-    aplicadas = 0
-    for linea in lineas_pendientes:
-        producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
-        if producto is None:
-            continue  # producto borrado entretanto: se deja pendiente, no se puede ingresar
-        _aplicar_entrada_stock(
-            db, producto, linea["cantidad"], linea["precio_unitario"],
-            f"Ingreso manual (aplicado en lote) de la factura '{factura['numero']}'",
-            usuario, factura_row,
-        )
-        db.execute(
-            "UPDATE factura_lineas SET aplicada = 1, aplicada_en = ? WHERE id = ?",
-            (now_iso(), linea["id"]),
-        )
-        aplicadas += 1
-
-    return aplicadas
-
-
-@app.route("/api/facturas/aplicar-masivo", methods=["POST"])
-def aplicar_facturas_masivo():
-    """Ingresa a stock, en un solo paso, todas las líneas pendientes de
-    varias facturas seleccionadas (checkboxes en la tabla de Facturas)."""
-    data = request.get_json(force=True, silent=True) or {}
-    factura_ids = data.get("factura_ids") or []
-    if not isinstance(factura_ids, list) or not factura_ids:
-        return jsonify({"error": "Selecciona al menos una factura para aplicar"}), 400
-
-    usuario = usuario_actual()
-    db = get_db()
-    _iniciar_transaccion_stock(db)
-
-    facturas_procesadas = 0
-    lineas_aplicadas_total = 0
-    errores = []
-    for fid in factura_ids:
-        try:
-            fid = int(fid)
-        except (TypeError, ValueError):
-            errores.append({"factura_id": fid, "error": "id inválido"})
-            continue
-        try:
-            n = _aplicar_lineas_pendientes_factura(db, fid, usuario)
-            lineas_aplicadas_total += n
-            if n > 0:
-                facturas_procesadas += 1
-        except ValueError as e:
-            errores.append({"factura_id": fid, "error": str(e)})
-
-    db.commit()
-    return jsonify({
-        "facturas_procesadas": facturas_procesadas,
-        "lineas_aplicadas": lineas_aplicadas_total,
-        "errores": errores,
-    })
+# NOTA: "aplicar-masivo" (POST /api/facturas/aplicar-masivo, ingresar a
+# stock después líneas que se habían registrado sin aplicar,
+# aplicar_stock=False) se eliminó junto con el registro manual rápido — ya
+# no existe ningún camino que deje una factura registrada con líneas sin
+# aplicar (aprobar_factura_pendiente_recepcion siempre aplica lo
+# efectivamente recibido en el momento de aprobar).
 
 
 @app.route("/api/facturas/<int:factura_id>", methods=["DELETE"])
@@ -3744,7 +3644,7 @@ def carga_masiva_previsualizar():
         g["valida"] = len(g["errores"]) == 0
 
     token = uuid.uuid4().hex
-    CARGA_MASIVA_CACHE[token] = {"creado_en": time.time(), "usuario": usuario_actual(), "facturas": facturas_preview}
+    CARGA_MASIVA_CACHE[token] = {"creado_en": time.time(), "usuario": usuario_actual(), "facturas": facturas_preview, "origen": "excel"}
 
     return jsonify({
         "token": token,
@@ -4002,7 +3902,7 @@ def escanear_foto_factura():
     _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes)
 
     token = uuid.uuid4().hex
-    CARGA_MASIVA_CACHE[token] = {"creado_en": time.time(), "usuario": usuario_actual(), "facturas": [grupo]}
+    CARGA_MASIVA_CACHE[token] = {"creado_en": time.time(), "usuario": usuario_actual(), "facturas": [grupo], "origen": "foto"}
 
     return jsonify({
         "token": token,
@@ -4015,242 +3915,114 @@ def escanear_foto_factura():
 # ---------------------------------------------------------------------------
 # Facturas recibidas como foto por WhatsApp: un mecánico/encargado le manda
 # al agente la foto de una factura de compra, la IA la lee (misma función
-# _llamar_claude_vision_factura de arriba) y queda guardada en
-# facturas_whatsapp_pendientes en estado 'pendiente' — NUNCA se sube sola al
-# inventario. Alguien con sesión iniciada la revisa en "Facturas →
-# Pendientes de WhatsApp", corrige lo que haga falta (igual que la
-# previsualización de carga masiva) y recién ahí la aprueba o la rechaza.
+# _llamar_claude_vision_factura de arriba) y queda guardada como pendiente
+# de recepción — mismo camino unificado que Excel, foto escaneada desde el
+# navegador y carga manual (ver _crear_pendiente_recepcion) — NUNCA se sube
+# sola al inventario. Alguien con sesión iniciada la revisa en Finanzas →
+# Cuentas por Pagar, corrige lo que haga falta (PUT
+# /api/facturas/pendientes-recepcion/<id>, ver editar_factura_pendiente_recepcion)
+# y recién ahí la aprueba o la rechaza. Antes de esta migración, WhatsApp
+# tenía su propia tabla y flujo de aprobación separado
+# (facturas_whatsapp_pendientes) — se dejó de escribir ahí; la tabla sigue
+# existiendo solo por los registros históricos que ya tenía.
 # ---------------------------------------------------------------------------
 
 def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes, mime_type):
-    """Lee la foto con IA, arma el mismo 'grupo' de previsualización que usa
-    escanear_foto_factura() (proveedor resuelto, líneas matcheadas contra el
-    catálogo, validación de errores) y lo deja guardado como pendiente de
-    revisión humana. Devuelve un dict con el mensaje de confirmación para
+    """Lee la foto con IA, resuelve el proveedor y matchea las líneas contra
+    el catálogo, y deja todo guardado como pendiente de recepción (misma
+    tabla facturas_finanzas_pendientes que usan Excel/foto/manual) con
+    condición de pago 'credito' por defecto (Finanzas la puede corregir al
+    revisarla). Devuelve un dict con el mensaje de confirmación para
     responderle al mecánico por WhatsApp y el id del pendiente creado.
     Lanza RuntimeError (con mensaje explicable) si la IA no está disponible
-    o no pudo leer nada útil — el llamador se encarga de responder eso."""
+    o no pudo leer nada útil — el llamador se encarga de responder eso.
+
+    A diferencia de Excel/foto escaneada desde el navegador (que descartan
+    la factura completa si una línea no matchea), acá se guarda igual con
+    'producto_id': None en las líneas que no se pudieron resolver — una
+    foto de WhatsApp, sacada rápido, es más propensa a traer datos
+    incompletos, y preferimos guardar el resto en vez de perder la factura
+    entera (alguien la completa después con el PUT de edición antes de
+    aprobarla; ver aprobar_factura_pendiente_recepcion, que exige
+    producto_id en todas las líneas para aprobar)."""
     extraido = _llamar_claude_vision_factura(imagen_bytes, mime_type)
 
     numero = (extraido.get("numero_factura") or "").strip().upper()
-    numeros_existentes = {r["numero"] for r in db.execute("SELECT numero FROM facturas").fetchall()}
     proveedores_nuevos_vistos = {}
     prov_id, prov_nombre, es_nuevo = _carga_masiva_resolver_proveedor(
         db, extraido.get("proveedor_nombre"), extraido.get("proveedor_rut"), proveedores_nuevos_vistos
     )
 
-    grupo = {
-        "numero": numero,
-        "fecha": (extraido.get("fecha") or "").strip(),
-        "proveedor_nombre": prov_nombre,
-        "proveedor_rut": (extraido.get("proveedor_rut") or "").strip(),
-        "proveedor_nuevo": es_nuevo,
-        "proveedor_id": None if prov_id in (None, "NUEVO") else prov_id,
-        "lineas": [],
-        "errores": [],
-    }
-
-    for i, linea in enumerate(extraido.get("lineas") or [], start=1):
-        descripcion = (linea.get("descripcion") or "").strip()
-        producto = _buscar_producto_por_texto(db, descripcion)
-        try:
-            cantidad = int(linea.get("cantidad"))
-        except (TypeError, ValueError):
-            cantidad = None
-        try:
-            precio = float(linea.get("precio_unitario"))
-        except (TypeError, ValueError):
-            precio = None
-        grupo["lineas"].append({
-            "fila": i,
-            "producto_id": producto["id"] if producto else None,
-            "producto_nombre": row_to_dict(producto)["nombre"] if producto else None,
-            "cantidad": cantidad,
-            "precio_unitario": precio,
-            "errores": [],
-            "texto_original": descripcion,
-        })
-
-    _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes)
-    # A diferencia de la carga masiva por Excel, acá NO es un error bloqueante
-    # que falte el número de folio (la IA a veces no lo alcanza a leer bien
-    # en una foto de WhatsApp, sacada rápido y no siempre perfecta) — igual
-    # queda guardada como pendiente para que la persona lo complete a mano
-    # al revisarla, en vez de perderse el resto de los datos ya leídos.
-    grupo["errores"] = [e for e in grupo.get("errores", []) if "número" not in e.lower() and "folio" not in e.lower()]
-
-    nombre_archivo = f"{uuid.uuid4().hex}.jpg" if mime_type == "image/jpeg" else f"{uuid.uuid4().hex}.{mime_type.split('/')[-1]}"
-    with open(os.path.join(FACTURAS_WHATSAPP_DIR, nombre_archivo), "wb") as f:
-        f.write(imagen_bytes)
-
-    ts = now_iso()
-    cur = db.execute(
-        """
-        INSERT INTO facturas_whatsapp_pendientes
-            (telefono, mecanico_nombre, foto_archivo, datos_json, estado, creado_en)
-        VALUES (?, ?, ?, ?, 'pendiente', ?)
-        """,
-        (telefono, mecanico_nombre, nombre_archivo, json.dumps(grupo, ensure_ascii=False), ts),
-    )
-    db.commit()
-    pendiente_id = cur.lastrowid
-
-    partes = ["Recibí la foto de una factura"]
-    if grupo["numero"]:
-        partes.append(f"folio {grupo['numero']}")
-    if grupo["proveedor_nombre"]:
-        partes.append(f"de {grupo['proveedor_nombre']}")
-    resumen = " ".join(partes) + f", con {len(grupo['lineas'])} línea(s) detectada(s)."
-    if not grupo["numero"]:
-        resumen += " No alcancé a leer el número de folio — hay que completarlo a mano al revisarla."
-    mensaje = (
-        f"{resumen} Quedó guardada como pendiente #{pendiente_id} en Facturas → \"Pendientes de WhatsApp\" — "
-        f"alguien del taller tiene que revisarla y aprobarla ahí antes de que se sume al inventario."
-    )
-    return {"mensaje": mensaje, "pendiente_id": pendiente_id}
-
-
-def _factura_whatsapp_pendiente_dict(fila):
-    d = dict(fila)
-    try:
-        d["datos"] = json.loads(d.pop("datos_json") or "{}")
-    except (TypeError, ValueError):
-        d["datos"] = {}
-        d.pop("datos_json", None)
-    return d
-
-
-@app.route("/api/facturas/whatsapp-pendientes", methods=["GET"])
-def listar_facturas_whatsapp_pendientes():
-    db = get_db()
-    estado = request.args.get("estado", "pendiente").strip()
-    if estado:
-        filas = db.execute(
-            "SELECT * FROM facturas_whatsapp_pendientes WHERE estado = ? ORDER BY creado_en DESC", (estado,)
-        ).fetchall()
-    else:
-        filas = db.execute("SELECT * FROM facturas_whatsapp_pendientes ORDER BY creado_en DESC").fetchall()
-    return jsonify({"pendientes": [_factura_whatsapp_pendiente_dict(f) for f in filas]})
-
-
-@app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>", methods=["GET"])
-def obtener_factura_whatsapp_pendiente(pendiente_id):
-    db = get_db()
-    fila = db.execute("SELECT * FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
-    if fila is None:
-        return jsonify({"error": "No se encontró ese pendiente"}), 404
-    return jsonify(_factura_whatsapp_pendiente_dict(fila))
-
-
-@app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>/foto", methods=["GET"])
-def obtener_foto_factura_whatsapp_pendiente(pendiente_id):
-    db = get_db()
-    fila = db.execute("SELECT foto_archivo FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
-    if fila is None:
-        return jsonify({"error": "No se encontró ese pendiente"}), 404
-    ruta = os.path.join(FACTURAS_WHATSAPP_DIR, secure_filename(fila["foto_archivo"]))
-    if not os.path.exists(ruta):
-        return jsonify({"error": "La foto ya no está disponible en el servidor"}), 404
-    return send_file(ruta)
-
-
-@app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>/aprobar", methods=["POST"])
-@requiere_rol("bodega")
-def aprobar_factura_whatsapp_pendiente(pendiente_id):
-    """Aprueba un pendiente: usa el 'grupo' guardado (con las correcciones
-    que la persona haya hecho en el panel — número, proveedor, líneas) para
-    crear la factura real y aplicar el stock, exactamente igual que
-    carga_masiva_confirmar(). Solo se puede aprobar una vez."""
-    db = get_db()
-    fila = db.execute("SELECT * FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
-    if fila is None:
-        return jsonify({"error": "No se encontró ese pendiente"}), 404
-    if fila["estado"] != "pendiente":
-        return jsonify({"error": f"Este pendiente ya fue {fila['estado']}, no se puede volver a procesar."}), 400
-
-    data = request.get_json(force=True, silent=True) or {}
-    # El panel manda el grupo corregido (con lo que la persona haya
-    # ajustado en la previsualización); si no manda nada, se usa tal cual
-    # quedó guardado desde WhatsApp.
-    grupo = data.get("grupo") or json.loads(fila["datos_json"] or "{}")
-
-    numero = (grupo.get("numero") or "").strip().upper()
-    if not numero:
-        return jsonify({"error": "Falta el número de folio — complétalo antes de aprobar."}), 400
-    ya_existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
-    if ya_existe:
-        return jsonify({"error": f"Ya existe una factura con el número '{numero}'."}), 400
-
-    # Tiene que abrirse ANTES de cualquier INSERT (ej. el proveedor nuevo más
-    # abajo) — sqlite3 en Python abre una transacción implícita apenas hay un
-    # primer DML, y _iniciar_transaccion_stock() no puede volver a abrir una
-    # sobre esa (ver mismo orden en carga_masiva_confirmar()).
-    _iniciar_transaccion_stock(db)
-
-    usuario = usuario_actual()
-    proveedor_id = grupo.get("proveedor_id")
-    if grupo.get("proveedor_nuevo") and grupo.get("proveedor_nombre"):
-        existente = db.execute(
-            "SELECT id FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (grupo["proveedor_nombre"],)
-        ).fetchone()
+    proveedor_id = None if prov_id in (None, "NUEVO") else prov_id
+    if es_nuevo and prov_nombre:
+        existente = db.execute("SELECT id FROM proveedores WHERE UPPER(nombre) = UPPER(?)", (prov_nombre,)).fetchone()
         if existente:
             proveedor_id = existente["id"]
         else:
             cur = db.execute(
                 "INSERT INTO proveedores (nombre, rut, creado_en) VALUES (?, ?, ?)",
-                (grupo["proveedor_nombre"], formatear_rut(grupo.get("proveedor_rut") or ""), now_iso()),
+                (prov_nombre, formatear_rut((extraido.get("proveedor_rut") or "").strip()), now_iso()),
             )
             proveedor_id = cur.lastrowid
+            db.commit()
 
     lineas_validadas = []
-    for linea in grupo.get("lineas") or []:
-        producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea.get("producto_id"),)).fetchone()
-        if not producto or linea.get("cantidad") is None or linea.get("precio_unitario") is None:
-            continue
-        lineas_validadas.append((producto, linea["cantidad"], linea["precio_unitario"]))
+    for linea in extraido.get("lineas") or []:
+        descripcion = (linea.get("descripcion") or "").strip()
+        producto = _buscar_producto_por_texto(db, descripcion)
+        try:
+            cantidad = int(linea.get("cantidad"))
+        except (TypeError, ValueError):
+            cantidad = 0
+        try:
+            precio = float(linea.get("precio_unitario"))
+        except (TypeError, ValueError):
+            precio = 0.0
+        lineas_validadas.append({
+            "producto_id": producto["id"] if producto else None,
+            "producto_nombre": row_to_dict(producto)["nombre"] if producto else None,
+            "cantidad": cantidad,
+            "precio_unitario": precio,
+            "texto_original": descripcion,
+        })
 
     if not lineas_validadas:
-        return jsonify({"error": "No hay ninguna línea válida (con producto, cantidad y precio) para aprobar."}), 400
+        raise RuntimeError("no logré leer ninguna línea de producto en la foto")
 
-    factura_id = _registrar_factura(db, numero, proveedor_id, grupo.get("fecha") or "", lineas_validadas, usuario)
+    nombre_archivo = f"{uuid.uuid4().hex}.jpg" if mime_type == "image/jpeg" else f"{uuid.uuid4().hex}.{mime_type.split('/')[-1]}"
+    with open(os.path.join(FACTURAS_WHATSAPP_DIR, nombre_archivo), "wb") as f:
+        f.write(imagen_bytes)
 
-    ts = now_iso()
-    db.execute(
-        """
-        UPDATE facturas_whatsapp_pendientes
-        SET estado = 'aprobada', factura_id = ?, revisado_por = ?, revisado_en = ?
-        WHERE id = ?
-        """,
-        (factura_id, usuario, ts, pendiente_id),
+    nueva, error = _crear_pendiente_recepcion(
+        db, numero, proveedor_id, (extraido.get("fecha") or "").strip(), lineas_validadas,
+        condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=CXP_DIAS_VENCIMIENTO_DEFECTO,
+        creado_por=f"WhatsApp: {mecanico_nombre}", origen="whatsapp", foto_archivo=nombre_archivo,
+        exigir_numero=False,
     )
-    db.commit()
+    if error:
+        # Con exigir_numero=False esto solo puede pasar por número duplicado
+        # (factura ya existente o ya pendiente con el mismo folio) — se lo
+        # avisamos al mecánico en vez de perder la foto en un error genérico.
+        raise RuntimeError(error)
 
-    return jsonify({"ok": True, "factura_id": factura_id, "lineas_aplicadas": len(lineas_validadas)})
+    pendiente_id = nueva["id"]
+    sin_resolver = sum(1 for l in lineas_validadas if l["producto_id"] is None)
 
-
-@app.route("/api/facturas/whatsapp-pendientes/<int:pendiente_id>/rechazar", methods=["POST"])
-@requiere_rol("bodega")
-def rechazar_factura_whatsapp_pendiente(pendiente_id):
-    db = get_db()
-    fila = db.execute("SELECT * FROM facturas_whatsapp_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
-    if fila is None:
-        return jsonify({"error": "No se encontró ese pendiente"}), 404
-    if fila["estado"] != "pendiente":
-        return jsonify({"error": f"Este pendiente ya fue {fila['estado']}, no se puede volver a procesar."}), 400
-
-    data = request.get_json(force=True, silent=True) or {}
-    nota = (data.get("nota") or "").strip()
-    ts = now_iso()
-    db.execute(
-        """
-        UPDATE facturas_whatsapp_pendientes
-        SET estado = 'rechazada', revisado_por = ?, revisado_en = ?, nota_rechazo = ?
-        WHERE id = ?
-        """,
-        (usuario_actual(), ts, nota, pendiente_id),
+    partes = ["Recibí la foto de una factura"]
+    if numero:
+        partes.append(f"folio {numero}")
+    if prov_nombre:
+        partes.append(f"de {prov_nombre}")
+    resumen = " ".join(partes) + f", con {len(lineas_validadas)} línea(s) detectada(s)."
+    if not numero:
+        resumen += " No alcancé a leer el número de folio — hay que completarlo a mano al revisarla."
+    if sin_resolver:
+        resumen += f" {sin_resolver} línea(s) no matchearon con ningún producto del inventario."
+    mensaje = (
+        f"{resumen} Quedó guardada como pendiente de recepción #{pendiente_id} en Finanzas → Cuentas por Pagar — "
+        f"alguien del taller tiene que revisarla y aprobarla ahí antes de que se sume al inventario."
     )
-    db.commit()
-    return jsonify({"ok": True})
+    return {"mensaje": mensaje, "pendiente_id": pendiente_id}
 
 
 # ---------------------------------------------------------------------------
@@ -4322,6 +4094,99 @@ def detalle_factura_pendiente_recepcion(pendiente_id):
     return jsonify(_factura_pendiente_recepcion_dict(db, fila))
 
 
+def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
+                                 porcentaje_contado, plazo_dias_credito, creado_por, origen="manual",
+                                 foto_archivo="", exigir_numero=True):
+    """Inserta una fila en facturas_finanzas_pendientes — punto de entrada
+    ÚNICO para las cuatro formas de registrar una factura de compra (manual,
+    carga masiva por Excel, foto escaneada, foto de WhatsApp), sin importar
+    el origen. Antes de esta migración cada camino aplicaba stock y
+    generaba su CxP de inmediato (o, en el caso de WhatsApp, pasaba por su
+    propia tabla/flujo de aprobación separado) — ahora TODAS pasan por acá
+    y quedan 'pendiente' hasta que Bodega las apruebe (ver
+    aprobar_factura_pendiente_recepcion), sin excepción.
+
+    'exigir_numero'=False es solo para el origen 'whatsapp': una foto sacada
+    rápido puede no traer el folio legible, y preferimos guardar igual el
+    resto de los datos ya leídos (para que alguien lo complete a mano al
+    revisarla, ver PUT .../pendientes-recepcion/<id>) antes que perder la
+    factura completa por un dato faltante. Con numero vacío, tampoco tiene
+    sentido chequear duplicados por número.
+
+    Devuelve (fila_dict, None) si se creó, o (None, mensaje_de_error) si
+    algo no es válido — nunca lanza, así lo puede llamar tanto un endpoint
+    HTTP (que responde con el mensaje) como el pipeline del agente de
+    WhatsApp (que lo manda de vuelta como texto)."""
+    numero = (numero or "").strip().upper()
+    if exigir_numero and not numero:
+        return None, "El número de factura es obligatorio"
+    if not lineas_validadas:
+        return None, "Agrega al menos un producto a la factura"
+    if condicion_pago not in CONDICIONES_PAGO_VALIDAS:
+        return None, f"Condición de pago inválida. Usa una de: {', '.join(CONDICIONES_PAGO_VALIDAS)}"
+    if condicion_pago == "mixto" and not (0 < porcentaje_contado < 100):
+        return None, "Para una condición mixta, el porcentaje al contado debe estar entre 0 y 100 (sin incluirlos)"
+    if plazo_dias_credito <= 0 and condicion_pago in ("credito", "mixto"):
+        return None, "El plazo de crédito debe ser mayor a 0 días"
+
+    if numero:
+        existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
+        if existe:
+            return None, f"Ya existe una factura registrada con el número '{numero}'"
+        ya_pendiente = db.execute(
+            "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente'", (numero,)
+        ).fetchone()
+        if ya_pendiente:
+            return None, f"Ya hay una factura pendiente de recepción con el número '{numero}'"
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO facturas_finanzas_pendientes
+            (numero, proveedor_id, fecha, lineas_json, condicion_pago, porcentaje_contado,
+             plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?)
+        """,
+        (numero, proveedor_id, fecha, json.dumps(lineas_validadas), condicion_pago, porcentaje_contado,
+         plazo_dias_credito, creado_por, ts, origen, foto_archivo),
+    )
+    db.commit()
+    nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return nueva, None
+
+
+def _validar_lineas_pendiente(db, lineas_in):
+    """Valida y normaliza las líneas que manda el cliente para crear un
+    pendiente de recepción manual — separado de _crear_pendiente_recepcion
+    porque esa validación (producto existe, cantidad/precio válidos, sin
+    productos repetidos) solo tiene sentido cuando el usuario las tipeó a
+    mano; Excel/foto/WhatsApp arman sus 'lineas_validadas' con su propia
+    lógica de matching contra el catálogo (ver _carga_masiva_revalidar_grupo)
+    y pueden traer líneas sin producto_id todavía por resolver."""
+    lineas_validadas = []
+    productos_vistos = set()
+    for i, linea in enumerate(lineas_in, start=1):
+        try:
+            producto_id = int(linea.get("producto_id"))
+            cantidad = int(linea.get("cantidad"))
+            precio_unitario = float(linea.get("precio_unitario"))
+        except (TypeError, ValueError):
+            return None, f"Línea {i}: producto, cantidad y precio deben ser válidos"
+        if cantidad <= 0:
+            return None, f"Línea {i}: la cantidad debe ser mayor a 0"
+        if precio_unitario < 0:
+            return None, f"Línea {i}: el precio no puede ser negativo"
+        producto = db.execute("SELECT id, nombre FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        if not producto:
+            return None, f"Línea {i}: el producto seleccionado no existe"
+        if producto_id in productos_vistos:
+            return None, f"Línea {i}: ese producto ya está agregado en otra línea de esta misma factura"
+        productos_vistos.add(producto_id)
+        lineas_validadas.append({"producto_id": producto_id, "producto_nombre": producto["nombre"],
+                                  "cantidad": cantidad, "precio_unitario": precio_unitario})
+    return lineas_validadas, None
+
+
 @app.route("/api/facturas/pendientes-recepcion", methods=["POST"])
 @requiere_rol("finanzas")
 def crear_factura_pendiente_recepcion():
@@ -4340,27 +4205,10 @@ def crear_factura_pendiente_recepcion():
     except (TypeError, ValueError):
         return jsonify({"error": "El plazo de crédito debe ser un número de días"}), 400
 
-    if not numero:
-        return jsonify({"error": "El número de factura es obligatorio"}), 400
     if not lineas_in:
         return jsonify({"error": "Agrega al menos un producto a la factura"}), 400
-    if condicion_pago not in CONDICIONES_PAGO_VALIDAS:
-        return jsonify({"error": f"Condición de pago inválida. Usa una de: {', '.join(CONDICIONES_PAGO_VALIDAS)}"}), 400
-    if condicion_pago == "mixto" and not (0 < porcentaje_contado < 100):
-        return jsonify({"error": "Para una condición mixta, el porcentaje al contado debe estar entre 0 y 100 (sin incluirlos)"}), 400
-    if plazo_dias_credito <= 0 and condicion_pago in ("credito", "mixto"):
-        return jsonify({"error": "El plazo de crédito debe ser mayor a 0 días"}), 400
 
     db = get_db()
-    existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
-    if existe:
-        return jsonify({"error": f"Ya existe una factura registrada con el número '{numero}'"}), 400
-    ya_pendiente = db.execute(
-        "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente'", (numero,)
-    ).fetchone()
-    if ya_pendiente:
-        return jsonify({"error": f"Ya hay una factura pendiente de recepción con el número '{numero}'"}), 400
-
     if proveedor_id:
         try:
             proveedor_id = int(proveedor_id)
@@ -4369,42 +4217,85 @@ def crear_factura_pendiente_recepcion():
         if not db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone():
             return jsonify({"error": "El proveedor seleccionado no existe"}), 400
 
-    lineas_validadas = []
-    productos_vistos = set()
-    for i, linea in enumerate(lineas_in, start=1):
-        try:
-            producto_id = int(linea.get("producto_id"))
-            cantidad = int(linea.get("cantidad"))
-            precio_unitario = float(linea.get("precio_unitario"))
-        except (TypeError, ValueError):
-            return jsonify({"error": f"Línea {i}: producto, cantidad y precio deben ser válidos"}), 400
-        if cantidad <= 0:
-            return jsonify({"error": f"Línea {i}: la cantidad debe ser mayor a 0"}), 400
-        if precio_unitario < 0:
-            return jsonify({"error": f"Línea {i}: el precio no puede ser negativo"}), 400
-        producto = db.execute("SELECT id, nombre FROM productos WHERE id = ?", (producto_id,)).fetchone()
-        if not producto:
-            return jsonify({"error": f"Línea {i}: el producto seleccionado no existe"}), 400
-        if producto_id in productos_vistos:
-            return jsonify({"error": f"Línea {i}: ese producto ya está agregado en otra línea de esta misma factura"}), 400
-        productos_vistos.add(producto_id)
-        lineas_validadas.append({"producto_id": producto_id, "producto_nombre": producto["nombre"],
-                                  "cantidad": cantidad, "precio_unitario": precio_unitario})
+    lineas_validadas, error = _validar_lineas_pendiente(db, lineas_in)
+    if error:
+        return jsonify({"error": error}), 400
 
-    ts = now_iso()
-    cur = db.execute(
+    nueva, error = _crear_pendiente_recepcion(
+        db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
+        porcentaje_contado, plazo_dias_credito, usuario_actual(), origen="manual",
+    )
+    if error:
+        return jsonify({"error": error}), 400
+    return jsonify(_factura_pendiente_recepcion_dict(db, nueva)), 201
+
+
+@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>", methods=["PUT"])
+@requiere_rol("finanzas", "bodega")
+def editar_factura_pendiente_recepcion(pendiente_id):
+    """Corrige una factura pendiente de recepción ANTES de aprobarla o
+    rechazarla — pensado sobre todo para las que llegan por WhatsApp con
+    datos incompletos (folio no leído, producto que la IA no pudo
+    matchear contra el catálogo): finanzas o bodega puede completar el
+    número, el proveedor, o resolver una línea a un producto real antes de
+    que se pueda aprobar (aprobar_factura_pendiente_recepcion exige que
+    todas las líneas recibidas tengan un producto_id válido)."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if fila["estado"] != "pendiente":
+        return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede editar."}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    numero = (data.get("numero") if "numero" in data else fila["numero"]) or ""
+    numero = numero.strip().upper()
+    if not numero:
+        return jsonify({"error": "El número de factura es obligatorio"}), 400
+
+    proveedor_id = fila["proveedor_id"]
+    if "proveedor_id" in data:
+        proveedor_id = data.get("proveedor_id") or None
+        if proveedor_id:
+            try:
+                proveedor_id = int(proveedor_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Proveedor inválido"}), 400
+            if not db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone():
+                return jsonify({"error": "El proveedor seleccionado no existe"}), 400
+
+    fecha = data.get("fecha", fila["fecha"]) or ""
+
+    lineas_in = data.get("lineas")
+    if lineas_in is not None:
+        lineas_validadas, error = _validar_lineas_pendiente(db, lineas_in)
+        if error:
+            return jsonify({"error": error}), 400
+    else:
+        lineas_validadas = json.loads(fila["lineas_json"])
+
+    if numero != fila["numero"]:
+        existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
+        if existe:
+            return jsonify({"error": f"Ya existe una factura registrada con el número '{numero}'"}), 400
+        ya_pendiente = db.execute(
+            "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente' AND id != ?",
+            (numero, pendiente_id),
+        ).fetchone()
+        if ya_pendiente:
+            return jsonify({"error": f"Ya hay una factura pendiente de recepción con el número '{numero}'"}), 400
+
+    db.execute(
         """
-        INSERT INTO facturas_finanzas_pendientes
-            (numero, proveedor_id, fecha, lineas_json, condicion_pago, porcentaje_contado,
-             plazo_dias_credito, estado, creado_por, creado_en)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?)
+        UPDATE facturas_finanzas_pendientes
+        SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?
+        WHERE id = ?
         """,
-        (numero, proveedor_id, fecha, json.dumps(lineas_validadas), condicion_pago, porcentaje_contado,
-         plazo_dias_credito, usuario_actual(), ts),
+        (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
     )
     db.commit()
-    nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(_factura_pendiente_recepcion_dict(db, nueva)), 201
+    actualizada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    return jsonify(_factura_pendiente_recepcion_dict(db, actualizada))
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/aprobar", methods=["POST"])
@@ -4424,6 +4315,9 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
         return jsonify({"error": "No se encontró ese pendiente"}), 404
     if fila["estado"] != "pendiente":
         return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede volver a procesar."}), 400
+
+    if not (fila["numero"] or "").strip():
+        return jsonify({"error": "Esta factura todavía no tiene número de folio — complétalo (editar) antes de aprobarla."}), 400
 
     ya_existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (fila["numero"],)).fetchone()
     if ya_existe:
@@ -4454,9 +4348,12 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
         lineas_recibidas_registro.append({"producto_id": l["producto_id"], "cantidad_recibida": cantidad_recibida})
         if cantidad_recibida <= 0:
             continue
-        producto = db.execute("SELECT * FROM productos WHERE id = ?", (l["producto_id"],)).fetchone()
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (l["producto_id"],)).fetchone() if l["producto_id"] is not None else None
         if not producto:
-            return jsonify({"error": f"El producto '{l.get('producto_nombre', l['producto_id'])}' ya no existe en el inventario"}), 400
+            nombre = l.get("producto_nombre") or l.get("texto_original") or "(sin identificar)"
+            if l["producto_id"] is None:
+                return jsonify({"error": f"La línea '{nombre}' todavía no está asociada a un producto del inventario — corrígela (editar) antes de aprobar."}), 400
+            return jsonify({"error": f"El producto '{nombre}' ya no existe en el inventario"}), 400
         lineas_validadas.append((producto, cantidad_recibida, l["precio_unitario"]))
 
     if not lineas_validadas:
@@ -4508,9 +4405,38 @@ def rechazar_factura_pendiente_recepcion(pendiente_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/foto", methods=["GET"])
+def obtener_foto_factura_pendiente_recepcion(pendiente_id):
+    """Sirve la foto original de un pendiente de recepción — hoy solo la
+    tienen los que llegaron por WhatsApp (ver _procesar_foto_factura_whatsapp,
+    origen='whatsapp'); manual/Excel/foto-escaneada no guardan foto propia
+    porque esos datos ya se tipearon/matchearon en el momento."""
+    db = get_db()
+    fila = db.execute(
+        "SELECT foto_archivo FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)
+    ).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if not fila["foto_archivo"]:
+        return jsonify({"error": "Este pendiente no tiene una foto asociada"}), 404
+    ruta = os.path.join(FACTURAS_WHATSAPP_DIR, secure_filename(fila["foto_archivo"]))
+    if not os.path.exists(ruta):
+        return jsonify({"error": "La foto ya no está disponible en el servidor"}), 404
+    return send_file(ruta)
+
+
 @app.route("/api/facturas/carga-masiva/confirmar", methods=["POST"])
 @requiere_rol("finanzas")
 def carga_masiva_confirmar():
+    """Confirma la previsualización (Excel o foto escaneada, mismo caché —
+    ver 'origen' guardado al crearlo) y deja cada factura válida como
+    PENDIENTE DE RECEPCIÓN (nunca aplica stock ni genera CxP acá
+    directamente) — mismo flujo unificado que la carga manual, con la
+    condición de pago que se haya elegido en esta confirmación aplicada a
+    todas las facturas del lote (si el Excel/foto trae varias facturas de
+    proveedores distintos en una sola carga, todas quedan con la misma
+    condición; para condiciones distintas por factura, se registran en
+    cargas separadas)."""
     _carga_masiva_limpiar_cache()
     data = request.get_json(force=True, silent=True) or {}
     token = data.get("token")
@@ -4518,9 +4444,24 @@ def carga_masiva_confirmar():
     if not entrada:
         return jsonify({"error": "La previsualización expiró o no es válida. Vuelve a subir el archivo."}), 400
 
+    condicion_pago = (data.get("condicion_pago") or "credito").strip().lower()
+    try:
+        porcentaje_contado = float(data.get("porcentaje_contado") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El porcentaje al contado debe ser un número"}), 400
+    try:
+        plazo_dias_credito = int(data.get("plazo_dias_credito") or CXP_DIAS_VENCIMIENTO_DEFECTO)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El plazo de crédito debe ser un número de días"}), 400
+    if condicion_pago not in CONDICIONES_PAGO_VALIDAS:
+        return jsonify({"error": f"Condición de pago inválida. Usa una de: {', '.join(CONDICIONES_PAGO_VALIDAS)}"}), 400
+    if condicion_pago == "mixto" and not (0 < porcentaje_contado < 100):
+        return jsonify({"error": "Para una condición mixta, el porcentaje al contado debe estar entre 0 y 100 (sin incluirlos)"}), 400
+    if plazo_dias_credito <= 0 and condicion_pago in ("credito", "mixto"):
+        return jsonify({"error": "El plazo de crédito debe ser mayor a 0 días"}), 400
+
     db = get_db()
-    _iniciar_transaccion_stock(db)
-    usuario = usuario_actual()
+    origen = entrada.get("origen") or "excel"
     creadas, omitidas = [], []
 
     for grupo in entrada["facturas"]:
@@ -4531,7 +4472,10 @@ def carga_masiva_confirmar():
         # Revalidación rápida por si algo cambió desde la previsualización
         # (otra factura con el mismo número, un producto eliminado, etc.).
         ya_existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (grupo["numero"],)).fetchone()
-        if ya_existe:
+        ya_pendiente = db.execute(
+            "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente'", (grupo["numero"],)
+        ).fetchone()
+        if ya_existe or ya_pendiente:
             omitidas.append(grupo["numero"])
             continue
 
@@ -4552,20 +4496,28 @@ def carga_masiva_confirmar():
         lineas_validadas = []
         lineas_ok = True
         for linea in grupo["lineas"]:
-            producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
+            producto = db.execute("SELECT id, nombre FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
             if not producto or linea["cantidad"] is None or linea["precio_unitario"] is None:
                 lineas_ok = False
                 break
-            lineas_validadas.append((producto, linea["cantidad"], linea["precio_unitario"]))
+            lineas_validadas.append({
+                "producto_id": producto["id"], "producto_nombre": producto["nombre"],
+                "cantidad": linea["cantidad"], "precio_unitario": linea["precio_unitario"],
+            })
 
         if not lineas_ok or not lineas_validadas:
             omitidas.append(grupo["numero"])
             continue
 
-        _registrar_factura(db, grupo["numero"], proveedor_id, grupo.get("fecha") or "", lineas_validadas, usuario)
+        _nueva, error = _crear_pendiente_recepcion(
+            db, grupo["numero"], proveedor_id, grupo.get("fecha") or "", lineas_validadas,
+            condicion_pago, porcentaje_contado, plazo_dias_credito, usuario_actual(), origen=origen,
+        )
+        if error:
+            omitidas.append(grupo["numero"])
+            continue
         creadas.append(grupo["numero"])
 
-    db.commit()
     CARGA_MASIVA_CACHE.pop(token, None)
 
     return jsonify({"creadas": creadas, "omitidas": omitidas, "total_creadas": len(creadas)})

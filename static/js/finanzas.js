@@ -4,6 +4,14 @@ const state = {
   cajaPendientesSeleccionados: new Set(),
   cajaMovimientos: [],
   cajaMovimientoActivoId: null,
+  cxcCuentas: [],
+  cxcAbonosCuentas: [],
+  cxcOtActiva: null, // { ordenId, contexto: "cerradas" | "abonos" }
+  cmfToken: null,
+  cmfFacturas: [],
+  cmfProductos: [],
+  cmfProveedores: [],
+  facturasPendientes: [],
 };
 
 const ESTADO_CXX_LABEL = { pendiente: "Pendiente", parcial: "Parcial", pagada: "Pagada", anulada: "Anulada" };
@@ -110,9 +118,13 @@ function rangoFechasParams(idDesde, idHasta) {
 // Pestañas: Resumen / Caja Chica / Reportes
 // ---------------------------------------------------------------------------
 
-document.querySelectorAll(".tab").forEach(tabBtn => {
+// OJO: excluye los botones de #cxc-subtabs (también tienen clase "tab") —
+// si no, un click en "Por abonos"/"OTs cerradas" también dispara este
+// listener (dataset.vista queda undefined, así que caía al "else" de cada
+// línea y ocultaba TODAS las vistas, dejando la pantalla en blanco).
+document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
   tabBtn.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach(b => b.classList.remove("activo"));
+    document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(b => b.classList.remove("activo"));
     tabBtn.classList.add("activo");
     const vista = tabBtn.dataset.vista;
     document.getElementById("vista-resumen").style.display = vista === "resumen" ? "block" : "none";
@@ -130,8 +142,24 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "resumen") cargarResumenFinanzas();
     if (vista === "caja") cargarCaja();
-    if (vista === "cxc") cargarCxc();
+    if (vista === "cxc") { cargarCxc(); cargarCxcAbonos(); }
     if (vista === "cxp") { cargarCxp(); cargarFacturasPendientesRecepcion(); }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sub-pestañas de Cuentas por Cobrar: "OTs cerradas" (tabla de siempre,
+// cuentas_por_cobrar) y "Por abonos" (OTs en reparación que todavía no
+// alcanzan el anticipo pactado — ver /api/finanzas/cxc/abonos).
+// ---------------------------------------------------------------------------
+
+document.querySelectorAll("#cxc-subtabs .tab").forEach(tabBtn => {
+  tabBtn.addEventListener("click", () => {
+    document.querySelectorAll("#cxc-subtabs .tab").forEach(b => b.classList.remove("activo"));
+    tabBtn.classList.add("activo");
+    const sub = tabBtn.dataset.subvista;
+    document.getElementById("cxc-vista-cerradas").style.display = sub === "cerradas" ? "block" : "none";
+    document.getElementById("cxc-vista-abonos").style.display = sub === "abonos" ? "block" : "none";
   });
 });
 
@@ -626,6 +654,7 @@ async function cargarCxc() {
 
   try {
     const data = await api("/api/finanzas/cxc?" + params.toString());
+    state.cxcCuentas = data.cuentas;
     document.getElementById("cxc-total-pendiente").textContent = fmtMoney(data.total_pendiente);
 
     if (data.cuentas.length === 0) {
@@ -634,7 +663,7 @@ async function cargarCxc() {
     }
 
     tbody.innerHTML = data.cuentas.map(c => `
-      <tr>
+      <tr data-orden-id="${c.orden_id}" class="fila-clicable">
         <td>${escapeHtml(c.cliente_nombre)}</td>
         <td class="mono">#${c.orden_id}</td>
         <td class="mono">${c.fecha_entrega_real ? fmtFecha(c.fecha_entrega_real) : "—"}</td>
@@ -644,6 +673,9 @@ async function cargarCxc() {
         <td class="num mono">${fmtMoney(c.saldo)}</td>
         <td><span class="mov-tipo mov-tipo--${c.estado === "pagada" ? "entrada" : c.estado === "parcial" ? "salida" : "perdida"}">${ESTADO_CXX_LABEL[c.estado] || c.estado}</span></td>
       </tr>`).join("");
+    tbody.querySelectorAll("tr[data-orden-id]").forEach(tr => {
+      tr.addEventListener("click", () => abrirDetalleOtCxc(parseInt(tr.dataset.ordenId, 10), "cerradas"));
+    });
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar Cuentas por Cobrar: ${e.message}</td></tr>`;
   }
@@ -655,6 +687,131 @@ document.getElementById("cxc-buscar").addEventListener("input", () => {
   cxcBuscarTimeout = setTimeout(cargarCxc, 250);
 });
 document.getElementById("cxc-filtro-estado").addEventListener("change", cargarCxc);
+
+// ---------------------------------------------------------------------------
+// Cuentas por Cobrar "por abonos" — OTs que ya entraron a reparación y
+// todavía no alcanzan el anticipo pactado (ver /api/finanzas/cxc/abonos en
+// modulos/finanzas.py). Es una consulta en vivo, no una tabla congelada
+// como cuentas_por_cobrar: por eso no tiene filtro de estado ni columna de
+// estado, solo "cuánto falta para llegar al anticipo".
+// ---------------------------------------------------------------------------
+
+async function cargarCxcAbonos() {
+  const tbody = document.getElementById("tbody-cxc-abonos");
+  const params = new URLSearchParams();
+  const q = document.getElementById("cxc-abonos-buscar").value.trim();
+  if (q) params.set("q", q);
+
+  try {
+    const data = await api("/api/finanzas/cxc/abonos?" + params.toString());
+    state.cxcAbonosCuentas = data.cuentas;
+    document.getElementById("cxc-abonos-total-pendiente").textContent = fmtMoney(data.total_pendiente);
+
+    if (data.cuentas.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" class="vacio">No hay OTs en reparación que estén bajo el anticipo pactado. 👍</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = data.cuentas.map(c => {
+      const equipo = [c.equipo_marca, c.equipo_modelo, c.equipo_identificador ? `(${c.equipo_identificador})` : ""]
+        .filter(Boolean).join(" ") || "—";
+      return `
+      <tr data-orden-id="${c.orden_id}" class="fila-clicable">
+        <td>${escapeHtml(c.cliente_nombre)}</td>
+        <td class="mono">#${c.orden_id}</td>
+        <td>${escapeHtml(equipo)}</td>
+        <td class="mono">${c.fecha_recepcion ? fmtFecha(c.fecha_recepcion) : "—"}</td>
+        <td class="num mono">${fmtMoney(c.valor_total)}</td>
+        <td class="num mono">${fmtMoney(c.anticipo_esperado)}</td>
+        <td class="num mono">${fmtMoney(c.total_pagado)}</td>
+        <td class="num mono">${fmtMoney(c.saldo_anticipo)}</td>
+      </tr>`;
+    }).join("");
+    tbody.querySelectorAll("tr[data-orden-id]").forEach(tr => {
+      tr.addEventListener("click", () => abrirDetalleOtCxc(parseInt(tr.dataset.ordenId, 10), "abonos"));
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar CxC por abonos: ${e.message}</td></tr>`;
+  }
+}
+
+let cxcAbonosBuscarTimeout;
+document.getElementById("cxc-abonos-buscar").addEventListener("input", () => {
+  clearTimeout(cxcAbonosBuscarTimeout);
+  cxcAbonosBuscarTimeout = setTimeout(cargarCxcAbonos, 250);
+});
+
+// ---------------------------------------------------------------------------
+// Detalle de una OT desde Cuentas por Cobrar (cualquiera de las dos
+// sub-pestañas) — datos de cliente/equipo, plata (total/pagado/saldo, y el
+// anticipo esperado si viene del contexto "abonos"), y un mini-formulario
+// para registrar un pago sin tener que salir a Operativo. Reutiliza
+// GET /api/operativo/ordenes/<id> (mismo endpoint que la ficha completa de
+// la OT) y POST .../pagos.
+// ---------------------------------------------------------------------------
+
+async function abrirDetalleOtCxc(ordenId, contexto) {
+  state.cxcOtActiva = { ordenId, contexto };
+  document.getElementById("cxcd-titulo").textContent = `OT #${ordenId}`;
+  document.getElementById("cxcd-orden-id").value = ordenId;
+  document.getElementById("cxcd-ficha").innerHTML = "<dt>Cargando…</dt><dd></dd>";
+  document.getElementById("form-cxcd-pago").reset();
+  abrirModal("modal-cxc-ot-detalle");
+  try {
+    const o = await api(`/api/operativo/ordenes/${ordenId}`);
+    const equipo = o.equipo
+      ? [o.equipo.marca, o.equipo.modelo, o.equipo.identificador ? `(${o.equipo.identificador})` : ""].filter(Boolean).join(" ")
+      : "—";
+    let filas = `
+      <dt>Cliente</dt><dd>${escapeHtml(o.cliente ? o.cliente.nombre : "—")}</dd>
+      <dt>Teléfono</dt><dd>${escapeHtml(o.cliente ? o.cliente.telefono : "") || "—"}</dd>
+      <dt>Equipo</dt><dd>${escapeHtml(equipo)}</dd>
+      <dt>Estado de la OT</dt><dd>${escapeHtml(o.estado)}</dd>
+      <dt>Valor total</dt><dd class="mono">${fmtMoney(o.valor_total)}</dd>
+      <dt>Pagado</dt><dd class="mono">${fmtMoney(o.total_pagado)}</dd>
+      <dt>Saldo pendiente</dt><dd class="mono">${fmtMoney(o.total_por_pagar)}</dd>
+    `;
+    if (contexto === "abonos") {
+      const c = state.cxcAbonosCuentas.find(x => x.orden_id === ordenId);
+      if (c) {
+        filas += `
+          <dt>Anticipo esperado (50%)</dt><dd class="mono">${fmtMoney(c.anticipo_esperado)}</dd>
+          <dt>Falta para el anticipo</dt><dd class="mono">${fmtMoney(c.saldo_anticipo)}</dd>
+        `;
+      }
+    }
+    document.getElementById("cxcd-ficha").innerHTML = filas;
+    document.getElementById("cxcd-monto").value = o.total_por_pagar > 0 ? o.total_por_pagar : "";
+  } catch (e) {
+    document.getElementById("cxcd-ficha").innerHTML = `<dt>Error</dt><dd>${escapeHtml(e.message)}</dd>`;
+  }
+}
+
+document.getElementById("form-cxcd-pago").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ordenId = document.getElementById("cxcd-orden-id").value;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/pagos`, {
+      method: "POST",
+      body: JSON.stringify({
+        monto: Number(document.getElementById("cxcd-monto").value),
+        metodo_pago: document.getElementById("cxcd-metodo").value,
+      }),
+    });
+    toast("Pago registrado");
+    cerrarModal("modal-cxc-ot-detalle");
+    // No hace falta lógica especial acá: se vuelve a pedir el listado que
+    // estaba abierto y, si el pago hizo que la fila ya no califique (llegó
+    // al anticipo, o se saldó del todo), el backend simplemente deja de
+    // devolverla.
+    const contexto = state.cxcOtActiva ? state.cxcOtActiva.contexto : "cerradas";
+    if (contexto === "abonos") await cargarCxcAbonos();
+    else await cargarCxc();
+    await cargarResumenFinanzas();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Cuentas por Pagar (CxP) — se generan solas al registrar una factura de
@@ -828,27 +985,40 @@ document.getElementById("form-cxp-pago").addEventListener("submit", async (e) =>
 // ---------------------------------------------------------------------------
 
 const ESTADO_PFR_LABEL = { pendiente: "Pendiente de revisión", aprobada: "Aprobada", rechazada: "Rechazada" };
+const ORIGEN_PFR_LABEL = { manual: "Manual", excel: "Excel", foto: "Foto", whatsapp: "WhatsApp" };
 
 async function cargarFacturasPendientesRecepcion() {
   const tbody = document.getElementById("tbody-facturas-pendientes");
   try {
     const data = await api("/api/facturas/pendientes-recepcion");
+    state.facturasPendientes = data.pendientes;
     if (data.pendientes.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="6" class="vacio">Todavía no se ha registrado ninguna factura por este camino.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="vacio">Todavía no se ha registrado ninguna factura por este camino.</td></tr>`;
       return;
     }
     const etiquetaCondicion = { contado: "Contado", credito: "Crédito", mixto: "Mixto" };
-    tbody.innerHTML = data.pendientes.map(p => `
+    tbody.innerHTML = data.pendientes.map(p => {
+      const acciones = [
+        p.estado === "pendiente" ? `<button type="button" class="btn btn-secundario btn-chico" data-pfr-editar="${p.id}">Editar</button>` : "",
+        p.origen === "whatsapp" ? `<a class="btn btn-secundario btn-chico" href="/api/facturas/pendientes-recepcion/${p.id}/foto" target="_blank" rel="noopener">Ver foto</a>` : "",
+      ].filter(Boolean).join(" ");
+      return `
       <tr>
-        <td>${escapeHtml(p.numero)}</td>
+        <td>${escapeHtml(p.numero) || "—"}</td>
         <td>${escapeHtml(p.proveedor_nombre) || "—"}</td>
         <td>${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}${p.condicion_pago === "credito" ? ` (${p.plazo_dias_credito}d)` : ""}${p.condicion_pago === "mixto" ? ` (${p.porcentaje_contado}% contado)` : ""}</td>
         <td class="num mono">${fmtMoney(p.monto_total)}</td>
         <td><span class="mov-tipo mov-tipo--${p.estado === "aprobada" ? "entrada" : p.estado === "rechazada" ? "perdida" : "salida"}">${ESTADO_PFR_LABEL[p.estado] || p.estado}</span></td>
+        <td><span class="badge-origen">${ORIGEN_PFR_LABEL[p.origen] || p.origen || "—"}</span></td>
         <td>${escapeHtml(p.creado_por) || "—"}</td>
-      </tr>`).join("");
+        <td>${acciones}</td>
+      </tr>`;
+    }).join("");
+    tbody.querySelectorAll("[data-pfr-editar]").forEach(btn => {
+      btn.addEventListener("click", () => abrirEdicionFacturaPendiente(parseInt(btn.dataset.pfrEditar, 10)));
+    });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar: ${e.message}</td></tr>`;
   }
 }
 
@@ -862,7 +1032,7 @@ function actualizarTotalFacturaPendiente() {
   document.getElementById("pfr-total-vivo").textContent = fmtMoney(total);
 }
 
-function filaLineaFacturaPendiente(productos) {
+function filaLineaFacturaPendiente(productos, linea) {
   const div = document.createElement("div");
   div.className = "fac-linea-row";
   div.innerHTML = `
@@ -875,14 +1045,17 @@ function filaLineaFacturaPendiente(productos) {
     </div>
     <div class="campo">
       <label>Cantidad</label>
-      <input type="number" class="pfr-linea-cantidad" min="1" value="1">
+      <input type="number" class="pfr-linea-cantidad" min="1" value="${linea && linea.cantidad != null ? linea.cantidad : 1}">
     </div>
     <div class="campo">
       <label>Precio unit. ($ CLP)</label>
-      <input type="number" class="pfr-linea-precio" min="0" step="1" value="0">
+      <input type="number" class="pfr-linea-precio" min="0" step="1" value="${linea && linea.precio_unitario != null ? linea.precio_unitario : 0}">
     </div>
     <button type="button" class="fac-linea-quitar">Quitar</button>
   `;
+  if (linea && linea.producto_id) {
+    div.querySelector(".pfr-linea-producto-id").value = linea.producto_id;
+  }
   div.querySelector(".fac-linea-quitar").addEventListener("click", () => {
     div.remove();
     actualizarTotalFacturaPendiente();
@@ -893,18 +1066,31 @@ function filaLineaFacturaPendiente(productos) {
 }
 
 let pfrProductosCache = [];
+let pfrProveedoresCache = [];
+
+async function pfrCargarCatalogos() {
+  const [dataProductos, dataProveedores] = await Promise.all([api("/api/productos"), api("/api/proveedores")]);
+  pfrProductosCache = dataProductos.productos;
+  pfrProveedoresCache = dataProveedores.proveedores;
+  const select = document.getElementById("pfr-proveedor-id");
+  select.innerHTML = '<option value="">Sin proveedor</option>' +
+    pfrProveedoresCache.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join("");
+}
 
 document.getElementById("btn-nueva-factura-pendiente").addEventListener("click", async () => {
   document.getElementById("form-factura-pendiente").reset();
+  document.getElementById("pfr-id").value = "";
+  document.getElementById("pfr-titulo").textContent = "Registrar factura de compra";
+  document.getElementById("pfr-btn-guardar").textContent = "Registrar factura";
   document.getElementById("pfr-lineas").innerHTML = "";
   document.getElementById("pfr-campos-mixto").style.display = "none";
   document.getElementById("pfr-campos-credito").style.display = "block";
+  document.getElementById("pfr-seccion-condicion").style.display = "block";
+  document.getElementById("pfr-aviso-condicion-fija").style.display = "none";
+  document.getElementById("pfr-aviso-origen").style.display = "none";
+  document.getElementById("pfr-foto-whatsapp").style.display = "none";
   try {
-    const [dataProductos, dataProveedores] = await Promise.all([api("/api/productos"), api("/api/proveedores")]);
-    pfrProductosCache = dataProductos.productos;
-    const select = document.getElementById("pfr-proveedor-id");
-    select.innerHTML = '<option value="">Sin proveedor</option>' +
-      dataProveedores.proveedores.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join("");
+    await pfrCargarCatalogos();
   } catch (e) {
     toast(e.message, true);
     return;
@@ -913,6 +1099,50 @@ document.getElementById("btn-nueva-factura-pendiente").addEventListener("click",
   actualizarTotalFacturaPendiente();
   abrirModal("modal-factura-pendiente");
 });
+
+// ---- Editar un pendiente antes de aprobar/rechazar (clave para completar
+// folio/productos de los que llegaron por WhatsApp con datos incompletos) ----
+
+async function abrirEdicionFacturaPendiente(id) {
+  try {
+    const [p] = await Promise.all([api(`/api/facturas/pendientes-recepcion/${id}`), pfrCargarCatalogos()]);
+    document.getElementById("form-factura-pendiente").reset();
+    document.getElementById("pfr-id").value = p.id;
+    document.getElementById("pfr-titulo").textContent = `Editar factura pendiente #${p.id}`;
+    document.getElementById("pfr-btn-guardar").textContent = "Guardar cambios";
+    document.getElementById("pfr-numero").value = p.numero || "";
+    document.getElementById("pfr-proveedor-id").value = p.proveedor_id || "";
+    document.getElementById("pfr-fecha").value = (p.fecha || "").slice(0, 10);
+
+    const etiquetaCondicion = { contado: "Al contado", credito: `A crédito, ${p.plazo_dias_credito} días`, mixto: `Mixto — ${p.porcentaje_contado}% contado` };
+    document.getElementById("pfr-seccion-condicion").style.display = "none";
+    const avisoCondicion = document.getElementById("pfr-aviso-condicion-fija");
+    avisoCondicion.textContent = `Condición de pago ya pactada: ${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}. La condición de pago ya se fijó al registrar esta factura y no se puede editar acá — solo el número, proveedor, fecha y productos.`;
+    avisoCondicion.style.display = "block";
+
+    const avisoOrigen = document.getElementById("pfr-aviso-origen");
+    const fotoImg = document.getElementById("pfr-foto-whatsapp");
+    if (p.origen === "whatsapp") {
+      avisoOrigen.textContent = "Esta factura llegó por WhatsApp — revisa que el folio y cada producto queden bien identificados antes de aprobarla.";
+      avisoOrigen.style.display = "block";
+      fotoImg.src = `/api/facturas/pendientes-recepcion/${p.id}/foto`;
+      fotoImg.style.display = "block";
+    } else {
+      avisoOrigen.style.display = "none";
+      fotoImg.style.display = "none";
+    }
+
+    const cont = document.getElementById("pfr-lineas");
+    cont.innerHTML = "";
+    (p.lineas && p.lineas.length ? p.lineas : [{}]).forEach(linea => {
+      cont.appendChild(filaLineaFacturaPendiente(pfrProductosCache, linea));
+    });
+    actualizarTotalFacturaPendiente();
+    abrirModal("modal-factura-pendiente");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 document.getElementById("pfr-agregar-linea").addEventListener("click", () => {
   document.getElementById("pfr-lineas").appendChild(filaLineaFacturaPendiente(pfrProductosCache));
@@ -944,23 +1174,258 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
     toast("Selecciona un producto en cada línea (o quítala)", true);
     return;
   }
-  const condicion = document.querySelector('input[name="pfr-condicion"]:checked').value;
+
+  const id = document.getElementById("pfr-id").value;
 
   try {
-    await api("/api/facturas/pendientes-recepcion", {
+    if (id) {
+      await api(`/api/facturas/pendientes-recepcion/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          numero: document.getElementById("pfr-numero").value,
+          proveedor_id: document.getElementById("pfr-proveedor-id").value || null,
+          fecha: document.getElementById("pfr-fecha").value,
+          lineas,
+        }),
+      });
+      toast("Factura pendiente actualizada");
+    } else {
+      const condicion = document.querySelector('input[name="pfr-condicion"]:checked').value;
+      await api("/api/facturas/pendientes-recepcion", {
+        method: "POST",
+        body: JSON.stringify({
+          numero: document.getElementById("pfr-numero").value,
+          proveedor_id: document.getElementById("pfr-proveedor-id").value || null,
+          fecha: document.getElementById("pfr-fecha").value,
+          lineas,
+          condicion_pago: condicion,
+          porcentaje_contado: condicion === "mixto" ? Number(document.getElementById("pfr-porcentaje-contado").value) : (condicion === "contado" ? 100 : 0),
+          plazo_dias_credito: Number(document.getElementById("pfr-plazo-dias").value || 30),
+        }),
+      });
+      toast("Factura registrada — queda pendiente de aprobar la recepción");
+    }
+    cerrarModal("modal-factura-pendiente");
+    await cargarFacturasPendientesRecepcion();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Carga masiva de facturas de compra (Excel o foto escaneada) — deja cada
+// factura válida como pendiente de recepción, con la misma condición de
+// pago elegida para todo el lote (ver POST /api/facturas/carga-masiva/*
+// en app.py). Reutiliza el mismo token de previsualización para Excel y
+// para foto: la única diferencia es qué endpoint arma la previsualización.
+// ---------------------------------------------------------------------------
+
+function cmfMostrarPaso(paso) {
+  document.getElementById("cmf-paso-subir").style.display = paso === "subir" ? "block" : "none";
+  document.getElementById("cmf-paso-preview").style.display = paso === "preview" ? "block" : "none";
+}
+
+async function cmfCargarCatalogos() {
+  if (state.cmfProductos.length && state.cmfProveedores.length) return;
+  const [dataProductos, dataProveedores] = await Promise.all([api("/api/productos"), api("/api/proveedores")]);
+  state.cmfProductos = dataProductos.productos;
+  state.cmfProveedores = dataProveedores.proveedores;
+}
+
+function cmfAbrirPreview(data) {
+  state.cmfToken = data.token;
+  state.cmfFacturas = data.facturas;
+  cmfMostrarPaso("preview");
+  cmfRenderPreview(data.resumen);
+}
+
+function cmfRenderPreview(resumen) {
+  document.getElementById("cmf-resumen").textContent =
+    `${resumen.total_facturas} factura(s) leída(s) — ${resumen.validas} lista(s) para confirmar, ${resumen.con_errores} con errores por corregir.`;
+
+  document.getElementById("cmf-lista-facturas").innerHTML = state.cmfFacturas.map(f => {
+    const proveedorOpciones = '<option value="">— Sin proveedor —</option>' +
+      state.cmfProveedores.map(p => `<option value="${p.id}" ${p.id === f.proveedor_id ? "selected" : ""}>${escapeHtml(p.nombre)}</option>`).join("");
+    const erroresGenerales = (f.errores || []).filter(err => !(f.lineas || []).some(l => (l.errores || []).includes(err)));
+    return `
+      <div class="dash-panel" style="margin-bottom:16px" data-cmf-factura="${escapeHtml(f.numero)}">
+        <h3 class="dash-titulo">${escapeHtml(f.numero)} ${f.valida ? "✅" : "⚠️"}</h3>
+        ${erroresGenerales.length ? `<p class="ayuda-inline ayuda-inline--bloqueado">${erroresGenerales.map(escapeHtml).join(" · ")}</p>` : ""}
+        <div class="campo">
+          <label>Proveedor${f.proveedor_nuevo ? " (nuevo — se creará al confirmar)" : ""}</label>
+          <select class="cmf-factura-proveedor-id" data-cmf-factura="${escapeHtml(f.numero)}">${proveedorOpciones}</select>
+        </div>
+        <div class="tabla-wrap">
+          <table class="tabla">
+            <thead><tr><th>Producto</th><th class="num">Cantidad</th><th class="num">Precio unit.</th><th></th></tr></thead>
+            <tbody>
+              ${(f.lineas || []).map(l => `
+                <tr data-cmf-linea="${escapeHtml(f.numero)}|${l.fila}">
+                  <td>
+                    <select class="cmf-linea-producto-id">
+                      <option value="">Selecciona un producto…</option>
+                      ${state.cmfProductos.map(p => `<option value="${p.id}" ${p.id === l.producto_id ? "selected" : ""}>#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("")}
+                    </select>
+                    ${l.texto_original ? `<p class="ayuda-inline">Leído: "${escapeHtml(l.texto_original)}"</p>` : ""}
+                  </td>
+                  <td class="num"><input type="number" class="cmf-linea-cantidad" min="1" value="${l.cantidad ?? ""}" style="width:70px"></td>
+                  <td class="num"><input type="number" class="cmf-linea-precio" min="0" step="1" value="${l.precio_unitario ?? ""}" style="width:90px"></td>
+                  <td>
+                    ${(l.errores || []).length ? `<p class="ayuda-inline ayuda-inline--bloqueado">${l.errores.map(escapeHtml).join(" · ")}</p>` : ""}
+                    <button type="button" class="btn btn-secundario btn-chico cmf-linea-guardar">Guardar corrección</button>
+                  </td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  document.querySelectorAll("#cmf-lista-facturas .cmf-linea-guardar").forEach(btn => {
+    btn.addEventListener("click", () => cmfGuardarCorreccionLinea(btn.closest("tr[data-cmf-linea]")));
+  });
+  document.querySelectorAll("#cmf-lista-facturas .cmf-factura-proveedor-id").forEach(select => {
+    select.addEventListener("change", () => cmfGuardarCorreccionProveedor(select));
+  });
+}
+
+async function cmfGuardarCorreccionLinea(tr) {
+  const [numeroFactura, filaStr] = tr.dataset.cmfLinea.split("|");
+  const productoId = tr.querySelector(".cmf-linea-producto-id").value;
+  const cantidad = tr.querySelector(".cmf-linea-cantidad").value;
+  const precio = tr.querySelector(".cmf-linea-precio").value;
+  try {
+    const data = await api("/api/facturas/carga-masiva/corregir-linea", {
       method: "POST",
       body: JSON.stringify({
-        numero: document.getElementById("pfr-numero").value,
-        proveedor_id: document.getElementById("pfr-proveedor-id").value || null,
-        fecha: document.getElementById("pfr-fecha").value,
-        lineas,
-        condicion_pago: condicion,
-        porcentaje_contado: condicion === "mixto" ? Number(document.getElementById("pfr-porcentaje-contado").value) : (condicion === "contado" ? 100 : 0),
-        plazo_dias_credito: Number(document.getElementById("pfr-plazo-dias").value || 30),
+        token: state.cmfToken,
+        numero_factura: numeroFactura,
+        fila: parseInt(filaStr, 10),
+        producto_id: productoId || null,
+        cantidad: cantidad || null,
+        precio_unitario: precio || null,
       }),
     });
-    toast("Factura registrada — queda pendiente de aprobar la recepción");
-    cerrarModal("modal-factura-pendiente");
+    const idx = state.cmfFacturas.findIndex(f => f.numero === numeroFactura);
+    if (idx >= 0) state.cmfFacturas[idx] = data.factura;
+    cmfRenderPreview(data.resumen);
+    toast("Corrección guardada");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function cmfGuardarCorreccionProveedor(select) {
+  const numeroFactura = select.dataset.cmfFactura;
+  try {
+    const data = await api("/api/facturas/carga-masiva/corregir-proveedor", {
+      method: "POST",
+      body: JSON.stringify({ token: state.cmfToken, numero_factura: numeroFactura, proveedor_id: select.value || null }),
+    });
+    const idx = state.cmfFacturas.findIndex(f => f.numero === numeroFactura);
+    if (idx >= 0) state.cmfFacturas[idx] = data.factura;
+    cmfRenderPreview(data.resumen);
+    toast("Proveedor corregido");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-cxp-carga-masiva").addEventListener("click", async () => {
+  document.getElementById("cmf-archivo").value = "";
+  document.getElementById("cmf-titulo").textContent = "Carga masiva de facturas (Excel)";
+  state.cmfToken = null;
+  state.cmfFacturas = [];
+  cmfMostrarPaso("subir");
+  abrirModal("modal-cxp-carga-masiva");
+});
+
+document.getElementById("btn-cmf-volver").addEventListener("click", () => {
+  document.getElementById("cmf-archivo").value = "";
+  document.getElementById("cmf-titulo").textContent = "Carga masiva de facturas (Excel)";
+  cmfMostrarPaso("subir");
+});
+
+document.getElementById("btn-cmf-previsualizar").addEventListener("click", async () => {
+  const archivo = document.getElementById("cmf-archivo").files[0];
+  if (!archivo) {
+    toast("Selecciona un archivo Excel primero", true);
+    return;
+  }
+  const formData = new FormData();
+  formData.append("archivo", archivo);
+  try {
+    await cmfCargarCatalogos();
+    const res = await fetch("/api/facturas/carga-masiva/previsualizar", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "No se pudo previsualizar el archivo");
+    cmfAbrirPreview(data);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+document.getElementById("btn-cxp-escanear-foto").addEventListener("click", () => {
+  document.getElementById("input-cxp-escanear-foto").click();
+});
+
+document.getElementById("input-cxp-escanear-foto").addEventListener("change", async (e) => {
+  const archivo = e.target.files[0];
+  if (!archivo) return;
+  const formData = new FormData();
+  formData.append("foto", archivo);
+  document.getElementById("cmf-archivo").value = "";
+  state.cmfToken = null;
+  state.cmfFacturas = [];
+  cmfMostrarPaso("subir");
+  document.getElementById("cmf-titulo").textContent = "Factura escaneada — revisa antes de confirmar";
+  abrirModal("modal-cxp-carga-masiva");
+  try {
+    await cmfCargarCatalogos();
+    const res = await fetch("/api/facturas/escanear-foto", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "No se pudo leer la foto");
+    document.getElementById("btn-cmf-volver").textContent = "Escanear otra foto";
+    cmfAbrirPreview(data);
+  } catch (e) {
+    toast(e.message, true);
+    cerrarModal("modal-cxp-carga-masiva");
+  }
+  e.target.value = "";
+});
+
+document.querySelectorAll('input[name="cmf-condicion"]').forEach(radio => {
+  radio.addEventListener("change", () => {
+    const condicion = document.querySelector('input[name="cmf-condicion"]:checked').value;
+    document.getElementById("cmf-campos-mixto").style.display = condicion === "mixto" ? "grid" : "none";
+    document.getElementById("cmf-campos-credito").style.display = condicion === "contado" ? "none" : "grid";
+  });
+});
+
+document.querySelectorAll("[data-plazo-cmf]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.getElementById("cmf-plazo-dias").value = btn.dataset.plazoCmf;
+  });
+});
+
+document.getElementById("btn-cmf-confirmar").addEventListener("click", async () => {
+  if (!state.cmfToken) return;
+  const condicion = document.querySelector('input[name="cmf-condicion"]:checked').value;
+  try {
+    const data = await api("/api/facturas/carga-masiva/confirmar", {
+      method: "POST",
+      body: JSON.stringify({
+        token: state.cmfToken,
+        condicion_pago: condicion,
+        porcentaje_contado: condicion === "mixto" ? Number(document.getElementById("cmf-porcentaje-contado").value) : (condicion === "contado" ? 100 : 0),
+        plazo_dias_credito: Number(document.getElementById("cmf-plazo-dias").value || 30),
+      }),
+    });
+    toast(`${data.total_creadas} factura(s) quedaron pendientes de recepción` +
+      (data.omitidas.length ? ` — se omitieron ${data.omitidas.length} con errores (${data.omitidas.join(", ")})` : ""));
+    cerrarModal("modal-cxp-carga-masiva");
     await cargarFacturasPendientesRecepcion();
   } catch (e) {
     toast(e.message, true);

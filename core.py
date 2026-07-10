@@ -33,6 +33,19 @@ COMPROBANTES_DIR = os.path.join(os.path.dirname(DB_PATH), "comprobantes")
 os.makedirs(COMPROBANTES_DIR, exist_ok=True)
 EXTENSIONES_COMPROBANTE_PERMITIDAS = {".jpg", ".jpeg", ".png", ".pdf", ".webp", ".heic"}
 
+# IVA aplicado al valor cobrado al cliente por una OT (ver modulos/operativo.py
+# y modulos/finanzas.py, ambos lo usan para calcular el total de una orden —
+# vive acá para que los dos módulos calculen el mismo número sin uno
+# importar del otro, que rompería la regla de "core.py no depende de nada").
+IVA_PORCENTAJE = 0.19
+
+# Porcentaje de anticipo que el taller pide al aprobar el presupuesto de una
+# OT (ver modulos/finanzas.py: CxC "por abonos"). Es un criterio del
+# negocio, no legal — el taller decidió cobrar 50% al aprobar el trabajo y
+# el otro 50% al entregar el vehículo, con excepciones que se manejan
+# registrando los pagos a mano sin que el sistema distinga el caso especial.
+ANTICIPO_PORCENTAJE_DEFECTO = 50
+
 
 # ---------------------------------------------------------------------------
 # Cálculo automático del stock mínimo (punto de reorden) — constantes

@@ -27,6 +27,7 @@ from datetime import datetime
 from flask import Blueprint, jsonify, render_template, request
 
 from core import (
+    IVA_PORCENTAJE,
     _aplicar_entrada_stock,
     _aplicar_salida_stock,
     _autoancho,
@@ -85,7 +86,8 @@ TIPOS_PRESUPUESTO_ITEM_LABEL = {
 ESTADOS_PRESUPUESTO = ["pendiente", "enviado", "aprobado", "rechazado"]
 RESULTADOS_QC_ITEM = ["ok", "falla", "na"]  # resultado de cada punto del checklist
 RESULTADOS_QC = ["pendiente", "aprobado", "rechazado"]  # veredicto general de la orden
-IVA_PORCENTAJE = 0.19
+# IVA_PORCENTAJE se importa de core.py (ver arriba) — compartido con
+# modulos/finanzas.py para que ambos calculen el mismo total de una OT.
 
 # Cuentas por Cobrar (CxC) — plazo por defecto para pagar una OT entregada,
 # usado solo para calcular 'fecha_vencimiento' al generar la CxC (ver
@@ -94,6 +96,15 @@ IVA_PORCENTAJE = 0.19
 # de cliente como "vencida" en los reportes — se puede ajustar acá si el
 # taller define otro plazo estándar más adelante.
 CXC_DIAS_VENCIMIENTO_DEFECTO = 30
+
+# Estados que disparan la generación de la CxC "cerrada" (ver
+# _generar_o_actualizar_cxc). Antes solo era 'entregado'; ahora también
+# 'listo' — el taller pidió que la vista "CxC OTs cerradas" (Finanzas)
+# muestre el auto desde que queda listo para retirar, no recién cuando ya
+# se entregó físicamente. Es idempotente (ver _generar_o_actualizar_cxc),
+# así que si una orden pasa primero por 'listo' y luego por 'entregado' no
+# se genera ni se pisa una segunda vez.
+ESTADOS_QUE_CIERRAN_CXC = {"listo", "entregado"}
 
 
 def _item_subtotal(item):
@@ -885,15 +896,16 @@ def _orden_dict(db, row):
 # ---------------------------------------------------------------------------
 
 def _generar_o_actualizar_cxc(db, orden_row):
-    """Genera la Cuenta por Cobrar de una OT la PRIMERA vez que pasa a
-    'entregado' — el monto queda 'congelado' con el valor_neto + IVA de ese
-    momento (después de entregada, la OT ya no debería seguir sumando
-    ítems). Es idempotente: si la orden vuelve a pasar por 'entregado' más
-    de una vez (ej. se revirtió el estado a mano y se volvió a entregar),
-    NO genera una segunda CxC ni pisa el monto ya emitido — eso evitaría
-    que un vaivén de estados infle por accidente la deuda del cliente.
-    Una OT sin precio cargado (valor_total = 0) no genera CxC: no tiene
-    sentido una cuenta por cobrar de $0."""
+    """Genera la Cuenta por Cobrar de una OT la PRIMERA vez que pasa por
+    alguno de ESTADOS_QUE_CIERRAN_CXC ('listo' o 'entregado') — el monto
+    queda 'congelado' con el valor_neto + IVA de ese momento (una vez
+    lista, la OT ya no debería seguir sumando ítems). Es idempotente: si
+    la orden pasa por 'listo' y después por 'entregado' (el camino
+    normal), o vuelve a pasar por cualquiera de los dos más de una vez
+    (ej. se revirtió el estado a mano), NO genera una segunda CxC ni pisa
+    el monto ya emitido — eso evitaría que un vaivén de estados infle por
+    accidente la deuda del cliente. Una OT sin precio cargado (valor_total
+    = 0) no genera CxC: no tiene sentido una cuenta por cobrar de $0."""
     orden_id = orden_row["id"]
     ya_existe = db.execute("SELECT id FROM cuentas_por_cobrar WHERE orden_id = ?", (orden_id,)).fetchone()
     if ya_existe:
@@ -1311,7 +1323,7 @@ def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
-    if actualizada["estado"] == "entregado":
+    if actualizada["estado"] in ESTADOS_QUE_CIERRAN_CXC:
         _generar_o_actualizar_cxc(db, actualizada)
         db.commit()
     return _orden_dict(db, actualizada), None
@@ -1501,7 +1513,7 @@ def editar_orden(orden_id):
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
-    if actualizada["estado"] == "entregado":
+    if actualizada["estado"] in ESTADOS_QUE_CIERRAN_CXC:
         _generar_o_actualizar_cxc(db, actualizada)
         db.commit()
     return jsonify(_orden_dict(db, actualizada))

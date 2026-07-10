@@ -262,6 +262,40 @@ async function cargarDashboardOperativo() {
   } catch (e) {
     toast(e.message, true);
   }
+  cargarGraficosDashboardOperativo();
+}
+
+async function cargarGraficosDashboardOperativo() {
+  try {
+    const data = await api("/api/operativo/dashboard/graficos");
+
+    document.getElementById("op-chart-tendencia").innerHTML = buildLineChart(
+      data.tendencia_mensual.map(d => ({ mes: d.mes, valor: d.cantidad }))
+    );
+
+    const estadosConDatos = data.distribucion_estado.filter(d => d.cantidad > 0);
+    document.getElementById("op-chart-estados").innerHTML = buildBarChartV(
+      estadosConDatos.map(d => ({ label: d.label, valor: d.cantidad }))
+    );
+
+    document.getElementById("op-chart-marcas").innerHTML = buildBarChartH(
+      data.top_marcas.map(d => ({ label: d.marca, valor: d.cantidad }))
+    );
+
+    document.getElementById("op-chart-clientes").innerHTML = buildBarChartH(
+      data.ranking_clientes.map(d => ({ label: d.nombre, valor: d.monto, extra: fmtMoney(d.monto) })),
+      { padL: 140 }
+    );
+
+    document.getElementById("op-chart-garantias").innerHTML = buildLineChart(
+      data.tasa_garantias_mensual.map(d => ({ mes: d.mes, valor: d.pct })),
+      { color: "var(--danger)" }
+    );
+  } catch (e) {
+    // Los gráficos son un complemento -- si fallan, no tapamos los KPIs
+    // de arriba (que sí son críticos) con un toast de error.
+    console.error("Error cargando gráficos del dashboard:", e);
+  }
 }
 
 // ---------------------------------------------------------------------------

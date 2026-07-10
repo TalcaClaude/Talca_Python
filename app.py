@@ -1393,27 +1393,27 @@ def resetear_password_usuario_admin(usuario_id):
 
 @app.route("/")
 def inicio():
-    return render_template("inicio.html")
+    return render_template("inicio.html", modulo_activo="panel")
 
 
 @app.route("/logistica")
 def vista_logistica():
-    return render_template("index.html")
+    return render_template("index.html", modulo_activo="logistica")
 
 
 @app.route("/operativo")
 def vista_operativo():
-    return render_template("operativo.html")
+    return render_template("operativo.html", modulo_activo="operativo")
 
 
 @app.route("/finanzas")
 def vista_finanzas():
-    return render_template("finanzas.html")
+    return render_template("finanzas.html", modulo_activo="finanzas")
 
 
 @app.route("/agente-ia")
 def vista_agente_ia():
-    return render_template("agente_ia.html")
+    return render_template("agente_ia.html", modulo_activo="agente")
 
 
 @app.route("/administracion")
@@ -7229,7 +7229,11 @@ def reportes_resumen():
 # necesita (get_db, _aplicar_entrada_stock, los helpers de reportes, etc.)
 # ya están definidas arriba — así se evita un import circular.
 # ---------------------------------------------------------------------------
-from modulos.finanzas import bp as bp_finanzas  # noqa: E402
+from modulos.finanzas import (  # noqa: E402
+    bp as bp_finanzas,
+    _cxc_pendiente_y_vencido,
+    _cxp_pendiente_y_vencido,
+)
 app.register_blueprint(bp_finanzas)
 
 from modulos.operativo import (  # noqa: E402
@@ -7261,6 +7265,104 @@ TRANSICIONES_AGENTE = {
     estado: (set(ESTADOS_ORDEN) - {estado} if estado not in ESTADOS_CERRADOS else set())
     for estado in ESTADOS_ORDEN
 }
+
+
+# ---------------------------------------------------------------------------
+# Panel del dueño: KPIs y gráficos cruzados entre Operativo y Finanzas para
+# la pantalla de inicio. No pertenece a ningún blueprint porque cruza datos
+# de ambos módulos (a diferencia de los dashboards propios de cada uno, que
+# sí viven en su blueprint).
+# ---------------------------------------------------------------------------
+
+def _ingresos_mes(db, prefijo_mes):
+    fila = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE substr(fecha, 1, 7) = ?",
+        (prefijo_mes,),
+    ).fetchone()
+    return fila[0] or 0
+
+
+def _gastos_mes(db, prefijo_mes):
+    fila = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND substr(fecha, 1, 7) = ?",
+        (prefijo_mes,),
+    ).fetchone()
+    return fila[0] or 0
+
+
+@app.route("/api/panel-dueno", methods=["GET"])
+def panel_dueno():
+    db = get_db()
+    hoy = datetime.now()
+
+    def _prefijo(dt):
+        return f"{dt.year:04d}-{dt.month:02d}"
+
+    prefijo_actual = _prefijo(hoy)
+    # mes anterior, sin depender de que el mes actual tenga 28-31 días
+    anterior = (hoy.replace(day=1) - timedelta(days=1))
+    prefijo_anterior = _prefijo(anterior)
+
+    ingresos_mes = _ingresos_mes(db, prefijo_actual)
+    ingresos_mes_anterior = _ingresos_mes(db, prefijo_anterior)
+    var_pct = ((ingresos_mes / ingresos_mes_anterior) - 1) * 100 if ingresos_mes_anterior else None
+
+    # Proyección simple de fin de mes: regla de tres sobre los días
+    # transcurridos del mes actual. No es un modelo estadístico -- es
+    # exactamente lo que un dueño calcularía a mano mirando el ritmo actual.
+    dias_transcurridos = hoy.day
+    ultimo_dia_mes = (hoy.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    dias_totales_mes = ultimo_dia_mes.day
+    proyeccion_fin_mes = round(ingresos_mes / dias_transcurridos * dias_totales_mes, 2) if dias_transcurridos else 0
+
+    gastos_mes = _gastos_mes(db, prefijo_actual)
+    margen_bruto_mes = round(ingresos_mes - gastos_mes, 2)
+
+    placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
+    ot_abiertas = db.execute(
+        f"SELECT COUNT(*) FROM ordenes_trabajo WHERE estado NOT IN ({placeholders_cerrados})",
+        list(ESTADOS_CERRADOS),
+    ).fetchone()[0]
+
+    # Capacidad de referencia: promedio de OT entregadas por semana en las
+    # últimas 8 semanas -- sirve para comparar contra las OT abiertas ahora
+    # y ver si se está acumulando atraso frente al ritmo habitual de cierre.
+    hace_8_semanas = (hoy - timedelta(weeks=8)).strftime("%Y-%m-%d")
+    cerradas_8sem = db.execute(
+        "SELECT COUNT(*) FROM ordenes_trabajo WHERE estado = 'entregado' AND fecha_entrega_real >= ?",
+        (hace_8_semanas,),
+    ).fetchone()[0]
+    capacidad_semanal = round(cerradas_8sem / 8, 1)
+
+    # Tendencia mensual de ingresos (pagos recibidos) -- los últimos 12
+    # meses calendario, incluyendo meses sin pagos (quedan en 0, no se
+    # saltan, para que el gráfico no distorsione la escala de tiempo).
+    tendencia = []
+    meses_cursor = []
+    m = hoy.replace(day=1)
+    for _ in range(12):
+        meses_cursor.append(m)
+        m = (m - timedelta(days=1)).replace(day=1)
+    meses_cursor.reverse()
+    for m in meses_cursor:
+        pref = _prefijo(m)
+        tendencia.append({"mes": pref, "ingresos": _ingresos_mes(db, pref)})
+
+    cxc_pendiente, cxc_vencido = _cxc_pendiente_y_vencido(db)
+    cxp_pendiente, cxp_vencido = _cxp_pendiente_y_vencido(db)
+
+    return jsonify({
+        "ingresos_mes": round(ingresos_mes, 2),
+        "ingresos_mes_anterior": round(ingresos_mes_anterior, 2),
+        "var_pct_mes": round(var_pct, 1) if var_pct is not None else None,
+        "proyeccion_fin_mes": proyeccion_fin_mes,
+        "margen_bruto_mes": margen_bruto_mes,
+        "ot_abiertas": ot_abiertas,
+        "capacidad_semanal_promedio": capacidad_semanal,
+        "cxc_pendiente": cxc_pendiente,
+        "cxp_pendiente": cxp_pendiente,
+        "tendencia_mensual": tendencia,
+    })
 
 
 # ---------------------------------------------------------------------------

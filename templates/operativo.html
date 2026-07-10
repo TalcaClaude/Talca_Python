@@ -9,6 +9,9 @@
 <link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
 </head>
 <body>
+<div class="shell">
+{% include "_sidebar.html" %}
+<div class="shell-main">
 
 <div class="app">
 
@@ -91,6 +94,40 @@
       <span class="summary-value" id="op-s-costo-garantias-pct">—</span>
     </div>
   </section>
+
+  <div class="chart-grid">
+    <div class="chart-card">
+      <h3>OT ingresadas por mes</h3>
+      <p class="chart-sub">Últimos 12 meses — por fecha de recepción</p>
+      <div id="op-chart-tendencia">Cargando…</div>
+    </div>
+    <div class="chart-card">
+      <h3>OT por estado</h3>
+      <p class="chart-sub">Foto de hoy</p>
+      <div id="op-chart-estados">Cargando…</div>
+    </div>
+  </div>
+
+  <div class="chart-grid">
+    <div class="chart-card">
+      <h3>Top marcas</h3>
+      <p class="chart-sub">Por cantidad de OT histórica</p>
+      <div id="op-chart-marcas">Cargando…</div>
+    </div>
+    <div class="chart-card">
+      <h3>Clientes por monto</h3>
+      <p class="chart-sub">Top 8 histórico, por monto referencial</p>
+      <div id="op-chart-clientes">Cargando…</div>
+    </div>
+  </div>
+
+  <div class="chart-grid chart-grid--par">
+    <div class="chart-card">
+      <h3>Tasa de garantías mensual</h3>
+      <p class="chart-sub">Garantías creadas / OT entregadas ese mes</p>
+      <div id="op-chart-garantias">Cargando…</div>
+    </div>
+  </div>
 
   </section>
 
@@ -1251,7 +1288,10 @@
 
 {% include "_alerta_facturas_pendientes.html" %}
 
+<script src="/static/js/charts.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/operativo.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
+</div>
+</div>
 </body>
 </html>

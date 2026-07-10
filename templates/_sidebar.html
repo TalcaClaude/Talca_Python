@@ -1,0 +1,92 @@
+<!--
+  Barra lateral fija, presente en todas las plantillas autenticadas.
+  `modulo_activo` (pasado por cada vista en app.py) determina qué módulo
+  aparece expandido; `vista_activa` (opcional) resalta la pestaña actual
+  dentro de ese módulo. Los enlaces de submenú usan los mismos `data-vista`
+  que ya manejan los .js de cada módulo, así que al llegar con ?v=xxx el
+  script de cada página puede abrir directamente esa pestaña si quiere.
+-->
+<nav class="sidebar">
+  <div class="sidebar-brand">
+    <h1>Inventario<span>Taller</span></h1>
+    <p>Panel del dueño</p>
+  </div>
+
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'panel' else '' }}">
+    <a class="sidebar-modulo-header" href="/" style="text-decoration:none; display:flex;">
+      <span class="sidebar-modulo-tag">00</span>
+      <span class="sidebar-modulo-nombre">Panel del dueño</span>
+    </a>
+  </div>
+
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'logistica' else '' }}">
+    <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
+      <span class="sidebar-modulo-tag">01</span>
+      <span class="sidebar-modulo-nombre">Logística</span>
+      <span class="sidebar-chevron">⌄</span>
+    </button>
+    <div class="sidebar-submenu">
+      <a class="sidebar-subitem" href="/logistica#inventario">Inventario</a>
+      <a class="sidebar-subitem" href="/logistica#facturas-pendientes">Facturas pendientes</a>
+      <a class="sidebar-subitem" href="/logistica#proveedores">Proveedores</a>
+      <a class="sidebar-subitem" href="/logistica#movimientos">Movimientos</a>
+      <a class="sidebar-subitem" href="/logistica#reportes">Reportes</a>
+    </div>
+  </div>
+
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'operativo' else '' }}">
+    <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
+      <span class="sidebar-modulo-tag">02</span>
+      <span class="sidebar-modulo-nombre">Operativo</span>
+      <span class="sidebar-chevron">⌄</span>
+    </button>
+    <div class="sidebar-submenu">
+      <a class="sidebar-subitem" data-vista-link="dashboard" href="/operativo#dashboard">Dashboard</a>
+      <a class="sidebar-subitem" data-vista-link="ordenes" href="/operativo#ordenes">Órdenes de trabajo</a>
+      <a class="sidebar-subitem" data-vista-link="garantias" href="/operativo#garantias">Garantías</a>
+      <a class="sidebar-subitem" data-vista-link="clientes" href="/operativo#clientes">Clientes</a>
+      <a class="sidebar-subitem" data-vista-link="reportes" href="/operativo#reportes">Reportes</a>
+    </div>
+  </div>
+
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'finanzas' else '' }}">
+    <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
+      <span class="sidebar-modulo-tag">03</span>
+      <span class="sidebar-modulo-nombre">Finanzas</span>
+      <span class="sidebar-chevron">⌄</span>
+    </button>
+    <div class="sidebar-submenu">
+      <a class="sidebar-subitem" data-vista-link="resumen" href="/finanzas#resumen">Resumen</a>
+      <a class="sidebar-subitem" data-vista-link="cxc" href="/finanzas#cxc">Cuentas por cobrar</a>
+      <a class="sidebar-subitem" data-vista-link="cxp" href="/finanzas#cxp">Cuentas por pagar</a>
+      <a class="sidebar-subitem" data-vista-link="facturas" href="/finanzas#facturas">Facturas</a>
+      <a class="sidebar-subitem" data-vista-link="caja" href="/finanzas#caja">Caja chica</a>
+    </div>
+  </div>
+
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'agente' else '' }}">
+    <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
+      <span class="sidebar-modulo-tag">04</span>
+      <span class="sidebar-modulo-nombre">Agente IA</span>
+      <span class="sidebar-chevron">⌄</span>
+    </button>
+    <div class="sidebar-submenu">
+      <a class="sidebar-subitem" href="/agente-ia#mecanicos">Mecánicos</a>
+      <a class="sidebar-subitem" href="/agente-ia#conversaciones">Conversaciones</a>
+      <a class="sidebar-subitem" href="/agente-ia#auditoria">Auditoría</a>
+    </div>
+  </div>
+</nav>
+
+<script>
+  // Expandir/colapsar módulos en la barra lateral. El módulo del módulo
+  // actual ya viene expandido desde el server (clase "activo" puesta por
+  // Jinja arriba); esto solo permite abrir/cerrar los demás para mirar sus
+  // pestañas sin tener que navegar hacia allá.
+  document.querySelectorAll('[data-modulo-toggle]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var modulo = btn.closest('.sidebar-modulo');
+      modulo.classList.toggle('activo');
+    });
+  });
+</script>

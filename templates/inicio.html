@@ -3,138 +3,90 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Inventario Taller — Módulos</title>
+<title>Inventario Taller — Panel del dueño</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
-<style>
-  body { min-height: 100vh; }
-  .inicio-topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    max-width: 1180px;
-    margin: 0 auto;
-    padding: 28px 24px 0;
-  }
-  .inicio-wrap {
-    max-width: 1180px;
-    margin: 0 auto;
-    padding: 60px 24px 80px;
-    text-align: center;
-  }
-  .inicio-wrap h1 {
-    font-family: var(--font-display);
-    text-transform: uppercase;
-    font-size: 28px;
-    margin: 0 0 8px;
-  }
-  .inicio-wrap p.subt {
-    color: var(--text-muted);
-    margin: 0 0 48px;
-    font-size: 14.5px;
-  }
-  .modulos-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 20px;
-    text-align: left;
-  }
-  .modulo-card {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 28px 24px;
-    text-decoration: none;
-    color: var(--text);
-    display: block;
-    transition: border-color 0.15s, transform 0.15s;
-  }
-  .modulo-card:hover { border-color: var(--accent); transform: translateY(-2px); }
-  .modulo-card .modulo-tag {
-    display: inline-block;
-    background: var(--accent-soft);
-    color: var(--accent-2);
-    font-family: var(--font-mono);
-    font-size: 12px;
-    padding: 2px 8px;
-    border-radius: 4px;
-    margin-bottom: 14px;
-  }
-  .modulo-card h2 {
-    font-family: var(--font-display);
-    text-transform: uppercase;
-    font-size: 18px;
-    margin: 0 0 8px;
-  }
-  .modulo-card p {
-    color: var(--text-muted);
-    font-size: 13.5px;
-    margin: 0;
-    line-height: 1.5;
-  }
-  .modulo-card.proximamente {
-    cursor: default;
-    opacity: 0.55;
-  }
-  .modulo-card.proximamente:hover { border-color: var(--line); transform: none; }
-  .modulo-card.proximamente .modulo-tag { background: var(--panel-2); color: var(--text-muted); }
-</style>
 </head>
 <body>
+<div class="shell">
+{% include "_sidebar.html" %}
+<div class="shell-main">
 
-<div class="inicio-topbar">
-  <span class="sesion-usuario">{{ session.get("nombre", "") }}</span>
-  <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-tag">00</span>
+      <div class="brand-text">
+        <h1>Inventario<span>Taller</span></h1>
+        <p class="brand-sub">Panel del dueño</p>
+      </div>
+    </div>
+    <div class="topbar-acciones">
+      <span class="sesion-usuario" id="sesion-usuario">{{ session.get("nombre", "") }}</span>
+      {% if session.get("rol") == "admin" %}
+      <a href="/administracion" class="btn btn-secundario">Administración</a>
+      {% endif %}
+      <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+    </div>
+  </header>
+
+  <p class="ayuda-inline">Resumen del taller cruzando Operativo y Finanzas. Usa la barra lateral para entrar a un módulo específico.</p>
+
+  <section class="summary" id="pd-summary">
+    <div class="summary-card">
+      <span class="summary-label">Ingresos este mes</span>
+      <span class="summary-value" id="pd-ingresos-mes">—</span>
+      <span class="kpi-delta" id="pd-var-mes"></span>
+    </div>
+    <div class="summary-card summary-card--positivo">
+      <span class="summary-label">Proyección fin de mes</span>
+      <span class="summary-value" id="pd-proyeccion">—</span>
+      <span class="summary-sub">a este ritmo de facturación</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">Margen bruto (mes)</span>
+      <span class="summary-value" id="pd-margen">—</span>
+      <span class="summary-sub">ingresos − gastos de Caja Chica</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">OT abiertas ahora</span>
+      <span class="summary-value" id="pd-ot-abiertas">—</span>
+      <span class="summary-sub" id="pd-capacidad"></span>
+    </div>
+  </section>
+
+  <section class="summary" id="pd-summary-cxcxp">
+    <div class="summary-card">
+      <span class="summary-label">Por cobrar (hoy)</span>
+      <span class="summary-value" id="pd-cxc">—</span>
+    </div>
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">Por pagar (hoy)</span>
+      <span class="summary-value" id="pd-cxp">—</span>
+    </div>
+  </section>
+
+  <div class="chart-grid chart-grid--par">
+    <div class="chart-card">
+      <h3>Ingresos mensuales</h3>
+      <p class="chart-sub">Últimos 12 meses — pagos recibidos de clientes</p>
+      <div id="pd-chart-tendencia">Cargando…</div>
+    </div>
+  </div>
+
+  <p class="ayuda-inline">Este historial se arma con los pagos registrados en el sistema desde ahora — va a crecer mes a mes a medida que se use el sistema nuevo.</p>
+
 </div>
 
-<div class="inicio-wrap">
-  <h1>Inventario<span style="color:var(--accent)">Taller</span></h1>
-  <p class="subt">Elige el módulo al que quieres entrar.</p>
-
-  <div class="modulos-grid">
-    <a class="modulo-card" href="/logistica">
-      <span class="modulo-tag">01</span>
-      <h2>Logística</h2>
-      <p>Inventario, bodega, facturas, proveedores, movimientos, mermas, rotación, planificación y reportes.</p>
-    </a>
-
-    <a class="modulo-card" href="/operativo">
-      <span class="modulo-tag">02</span>
-      <h2>Operativo</h2>
-      <p>Órdenes de trabajo, clientes y equipos del taller.</p>
-    </a>
-
-    <a class="modulo-card" href="/finanzas">
-      <span class="modulo-tag">03</span>
-      <h2>Finanzas</h2>
-      <p>Resumen de ingresos, gastos y saldo, y Caja Chica.</p>
-    </a>
-
-    <a class="modulo-card" href="/agente-ia">
-      <span class="modulo-tag">04</span>
-      <h2>Agente IA</h2>
-      <p>Mecánicos registrados, agente de WhatsApp (texto y voz) y auditoría de mensajes.</p>
-    </a>
-
-    <div class="modulo-card proximamente">
-      <span class="modulo-tag">05</span>
-      <h2>RRHH</h2>
-      <p>Ficha de empleados, vacaciones y liquidaciones de sueldo. Próximamente.</p>
-    </div>
-
-    {% if session.get("rol") == "admin" %}
-    <a class="modulo-card" href="/administracion">
-      <span class="modulo-tag">06</span>
-      <h2>Administración</h2>
-      <p>Usuarios, roles y permisos del sistema.</p>
-    </a>
-    {% endif %}
-  </div>
+</div>
 </div>
 
 {% include "_alerta_facturas_pendientes.html" %}
 
+<script src="/static/js/charts.js?v={{ ASSET_VERSION }}"></script>
+<script src="/static/js/panel_dueno.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
 </body>
 </html>

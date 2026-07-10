@@ -22,7 +22,7 @@ movimientos (los repuestos de una orden las referencian).
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, render_template, request
 
@@ -1111,6 +1111,93 @@ def dashboard_operativo():
         "tasa_aprobacion_presupuestos": tasa_aprobacion_presupuestos,
         "costo_garantias_mes": round(costo_garantias_mes, 2),
         "costo_garantias_pct_ingresos_mes": costo_garantias_pct_ingresos_mes,
+    })
+
+
+@bp.route("/api/operativo/dashboard/graficos", methods=["GET"])
+def dashboard_operativo_graficos():
+    """Datos para los gráficos del dashboard de Operativo (separado del
+    endpoint de KPIs de arriba porque son consultas más pesadas y no todas
+    las pantallas que usan los KPIs necesitan también los gráficos):
+      - tendencia_mensual: OT recibidas y su valor referencial, últimos 12
+        meses calendario, por fecha_recepcion.
+      - distribucion_estado: cuántas OT hay hoy en cada estado del flujo.
+      - top_marcas: las marcas de vehículo con más OT (histórico).
+      - ranking_clientes: los clientes con más monto referencial acumulado.
+      - tasa_garantias_mensual: garantías creadas / OT entregadas, por mes.
+    """
+    db = get_db()
+    hoy = datetime.now()
+
+    cursor_mes = hoy.replace(day=1)
+    meses = []
+    m = cursor_mes
+    for _ in range(12):
+        meses.append(m)
+        m = (m - timedelta(days=1)).replace(day=1)
+    meses.reverse()
+
+    tendencia = []
+    for m in meses:
+        pref = f"{m.year:04d}-{m.month:02d}"
+        fila = db.execute(
+            "SELECT COUNT(*), COALESCE(SUM(precio_referencial), 0) FROM ordenes_trabajo "
+            "WHERE substr(fecha_recepcion, 1, 7) = ?",
+            (pref,),
+        ).fetchone()
+        tendencia.append({"mes": pref, "cantidad": fila[0], "monto": fila[1]})
+
+    distribucion_estado = [
+        {"estado": e, "label": ESTADOS_LABEL.get(e, e), "cantidad": db.execute(
+            "SELECT COUNT(*) FROM ordenes_trabajo WHERE estado = ?", (e,)
+        ).fetchone()[0]}
+        for e in ESTADOS_ORDEN
+    ]
+
+    top_marcas = [
+        {"marca": r["marca"], "cantidad": r["cantidad"]}
+        for r in db.execute(
+            """
+            SELECT e.marca AS marca, COUNT(*) AS cantidad
+            FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
+            WHERE e.marca != ''
+            GROUP BY e.marca ORDER BY cantidad DESC LIMIT 8
+            """
+        ).fetchall()
+    ]
+
+    ranking_clientes = [
+        {"nombre": r["nombre"], "cantidad": r["cantidad"], "monto": r["monto"]}
+        for r in db.execute(
+            """
+            SELECT c.nombre AS nombre, COUNT(*) AS cantidad,
+                   COALESCE(SUM(o.precio_referencial), 0) AS monto
+            FROM ordenes_trabajo o JOIN clientes c ON c.id = o.cliente_id
+            GROUP BY c.id ORDER BY monto DESC LIMIT 8
+            """
+        ).fetchall()
+    ]
+
+    tasa_garantias = []
+    for m in meses:
+        pref = f"{m.year:04d}-{m.month:02d}"
+        entregadas = db.execute(
+            "SELECT COUNT(*) FROM ordenes_trabajo WHERE estado = 'entregado' AND substr(fecha_entrega_real, 1, 7) = ?",
+            (pref,),
+        ).fetchone()[0]
+        garantias_creadas = db.execute(
+            "SELECT COUNT(*) FROM garantias WHERE substr(creado_en, 1, 7) = ?",
+            (pref,),
+        ).fetchone()[0]
+        pct = round(garantias_creadas / entregadas * 100, 1) if entregadas else 0
+        tasa_garantias.append({"mes": pref, "pct": pct})
+
+    return jsonify({
+        "tendencia_mensual": tendencia,
+        "distribucion_estado": distribucion_estado,
+        "top_marcas": top_marcas,
+        "ranking_clientes": ranking_clientes,
+        "tasa_garantias_mensual": tasa_garantias,
     })
 
 

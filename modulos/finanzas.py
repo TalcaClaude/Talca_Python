@@ -20,7 +20,7 @@ cualquier módulo nuevo debe importar de ahí, igual que este).
 
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request, send_file
 from werkzeug.utils import secure_filename
@@ -147,6 +147,90 @@ def finanzas_resumen():
         desde = datetime.now().strftime("%Y-%m") + "-01"
     resumen = _resumen_financiero(desde, hasta)
     return jsonify({"desde": desde, "hasta": hasta, **resumen})
+
+
+@bp.route("/api/finanzas/resumen/graficos", methods=["GET"])
+def finanzas_resumen_graficos():
+    """Datos para los gráficos del dashboard de Finanzas:
+      - tendencia_mensual: ingresos (pagos_orden) vs gastos (caja_movimientos
+        tipo gasto), últimos 12 meses calendario.
+      - gasto_por_proveedor: top proveedores por gasto acumulado en Caja
+        Chica (campo de texto libre 'proveedor', no siempre coincide 1:1
+        con la tabla proveedores porque históricamente se escribía a mano).
+      - cxc_aging: cuentas por cobrar pendientes, agrupadas por antigüedad
+        del vencimiento (al día / 1-30 / 31-60 / 61-90 / +90 días).
+    """
+    db = get_db()
+    hoy = datetime.now()
+
+    cursor_mes = hoy.replace(day=1)
+    meses = []
+    m = cursor_mes
+    for _ in range(12):
+        meses.append(m)
+        m = (m - timedelta(days=1)).replace(day=1)
+    meses.reverse()
+
+    tendencia = []
+    for m in meses:
+        pref = f"{m.year:04d}-{m.month:02d}"
+        ingresos = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE substr(fecha, 1, 7) = ?", (pref,)
+        ).fetchone()[0]
+        gastos = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND substr(fecha, 1, 7) = ?",
+            (pref,),
+        ).fetchone()[0]
+        tendencia.append({"mes": pref, "ingresos": ingresos, "gastos": gastos})
+
+    gasto_por_proveedor = [
+        {"proveedor": r["proveedor"] or "(sin especificar)", "monto": r["monto"]}
+        for r in db.execute(
+            """
+            SELECT COALESCE(NULLIF(proveedor, ''), '(sin especificar)') AS proveedor, SUM(monto) AS monto
+            FROM caja_movimientos WHERE tipo = 'gasto'
+            GROUP BY proveedor ORDER BY monto DESC LIMIT 8
+            """
+        ).fetchall()
+    ]
+
+    buckets = [
+        {"label": "Al día", "min": None, "max": 0, "monto": 0.0},
+        {"label": "1-30 días", "min": 1, "max": 30, "monto": 0.0},
+        {"label": "31-60 días", "min": 31, "max": 60, "monto": 0.0},
+        {"label": "61-90 días", "min": 61, "max": 90, "monto": 0.0},
+        {"label": "+90 días", "min": 91, "max": None, "monto": 0.0},
+    ]
+    for f in db.execute(
+        "SELECT id, orden_id, monto_total, fecha_vencimiento FROM cuentas_por_cobrar WHERE estado != 'pagada'"
+    ).fetchall():
+        pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE orden_id = ?", (f["orden_id"],)
+        ).fetchone()[0]
+        saldo = f["monto_total"] - pagado
+        if saldo <= 0:
+            continue
+        dias = 0
+        if f["fecha_vencimiento"]:
+            try:
+                dias = (datetime.now() - datetime.fromisoformat(f["fecha_vencimiento"][:10])).days
+            except ValueError:
+                dias = 0
+        for b in buckets:
+            if (b["min"] is None or dias >= b["min"]) and (b["max"] is None or dias <= b["max"]):
+                b["monto"] += saldo
+                break
+
+    for b in buckets:
+        b["monto"] = round(b["monto"], 2)
+        del b["min"]
+        del b["max"]
+
+    return jsonify({
+        "tendencia_mensual": tendencia,
+        "gasto_por_proveedor": gasto_por_proveedor,
+        "cxc_aging": buckets,
+    })
 
 
 @bp.route("/api/caja/movimientos", methods=["GET"])

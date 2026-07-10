@@ -9,6 +9,9 @@
 <link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
 </head>
 <body>
+<div class="shell">
+{% include "_sidebar.html" %}
+<div class="shell-main">
 
 <div class="app">
 
@@ -78,6 +81,27 @@
       <span class="summary-sub" id="fin-s-cxp-vencido"></span>
     </div>
   </section>
+
+  <div class="chart-grid">
+    <div class="chart-card">
+      <h3>Ingresos vs. gastos</h3>
+      <p class="chart-sub">Últimos 12 meses</p>
+      <div id="fin-chart-tendencia">Cargando…</div>
+    </div>
+    <div class="chart-card">
+      <h3>Antigüedad de Cuentas por Cobrar</h3>
+      <p class="chart-sub">Saldo pendiente por tramo de vencimiento</p>
+      <div id="fin-chart-aging">Cargando…</div>
+    </div>
+  </div>
+
+  <div class="chart-grid chart-grid--par">
+    <div class="chart-card">
+      <h3>Gasto por proveedor</h3>
+      <p class="chart-sub">Top 8 — Caja Chica, histórico</p>
+      <div id="fin-chart-proveedores">Cargando…</div>
+    </div>
+  </div>
 
   </section>
 
@@ -835,7 +859,10 @@
 
 {% include "_alerta_facturas_pendientes.html" %}
 
+<script src="/static/js/charts.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/finanzas.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
+</div>
+</div>
 </body>
 </html>

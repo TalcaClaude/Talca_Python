@@ -222,6 +222,31 @@ async function cargarResumenFinanzas() {
   } catch (e) {
     toast(e.message, true);
   }
+  cargarGraficosResumenFinanzas();
+}
+
+async function cargarGraficosResumenFinanzas() {
+  try {
+    const data = await api("/api/finanzas/resumen/graficos");
+
+    document.getElementById("fin-chart-tendencia").innerHTML = buildLineChartDoble(
+      data.tendencia_mensual.map(d => ({ mes: d.mes, a: d.ingresos, b: d.gastos })),
+      "Ingresos", "Gastos",
+      { colorA: "var(--success)", colorB: "var(--danger)" }
+    );
+
+    document.getElementById("fin-chart-aging").innerHTML = buildBarChartH(
+      data.cxc_aging.map(d => ({ label: d.label, valor: d.monto, extra: fmtMoney(d.monto) })),
+      { padL: 90, color: "var(--accent-2)" }
+    );
+
+    document.getElementById("fin-chart-proveedores").innerHTML = buildBarChartH(
+      data.gasto_por_proveedor.map(d => ({ label: d.proveedor, valor: d.monto, extra: fmtMoney(d.monto) })),
+      { padL: 150 }
+    );
+  } catch (e) {
+    console.error("Error cargando gráficos de Finanzas:", e);
+  }
 }
 
 document.getElementById("fin-resumen-desde").addEventListener("change", cargarResumenFinanzas);

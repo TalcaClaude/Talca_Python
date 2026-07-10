@@ -9,6 +9,9 @@
 <link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
 </head>
 <body>
+<div class="shell">
+{% include "_sidebar.html" %}
+<div class="shell-main">
 
 <div class="app">
 
@@ -187,5 +190,7 @@
 
 <script src="/static/js/agente_ia.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
+</div>
+</div>
 </body>
 </html>

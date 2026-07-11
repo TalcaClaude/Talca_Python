@@ -148,7 +148,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "movimientos") cargarMovimientos();
     if (vista === "mermas") cargarMermas();
     if (vista === "rotacion") cargarRotacion();
-    if (vista === "planificacion") { cargarPlanificacion(); cargarRepuestosOtAbiertas(); }
+    if (vista === "planificacion") { cargarPlanificacion(); cargarRepuestosTipicosModelos(); }
     if (vista === "reportes") cargarResumenReportes();
     if (vista === "usuarios") cargarUsuarios();
   });
@@ -1556,32 +1556,31 @@ async function cargarDashboard() {
     `;
 
     cargarGraficosDashboardLogistica();
-    cargarRepuestosOtAbiertasDashboard();
+    cargarRepuestosTipicosModelosDashboard();
   } catch (e) {
     toast(e.message, true);
   }
 }
 
-// Resumen chico (top 5) de los repuestos que hacen falta en las OTs
-// abiertas AHORA MISMO (no todo el historial migrado — solo autos que
-// siguen en el taller), para que se note en el Dashboard que esa data
-// existe y sirve. El detalle completo con buscador está en la pestaña
-// Planificación (cargarRepuestosOtAbiertas), este solo da un vistazo
-// rápido con link directo.
-async function cargarRepuestosOtAbiertasDashboard() {
-  const cont = document.getElementById("dash-repuestos-ot-abiertas");
+// Resumen chico (top 3 modelos) de "Repuestos típicos por modelo" para el
+// Dashboard — el detalle completo está en la pestaña Planificación
+// (cargarRepuestosTipicosModelos), este solo da un vistazo rápido con link
+// directo. Ver ese endpoint (app.py: logistica_repuestos_tipicos_modelos)
+// para la explicación completa de cómo se arma la sugerencia.
+async function cargarRepuestosTipicosModelosDashboard() {
+  const cont = document.getElementById("dash-repuestos-tipicos-modelos");
   try {
-    const d = await api("/api/logistica/repuestos-ots-abiertas?limite=5");
-    if (!d.resultados.length) {
-      cont.innerHTML = `<p class="vacio">Ninguna OT abierta tiene repuestos migrados pendientes.</p>`;
+    const d = await api("/api/logistica/repuestos-tipicos-modelos");
+    if (!d.modelos.length) {
+      cont.innerHTML = `<p class="vacio">Ningún modelo frecuente tiene OTs abiertas ahora mismo.</p>`;
       return;
     }
-    cont.innerHTML = d.resultados.map(r => `
+    cont.innerHTML = d.modelos.slice(0, 3).map(m => `
         <div class="dash-item">
-          <span class="dash-item-nombre">${escapeHtml(r.descripcion)}</span>
-          <span class="dash-item-valor">${r.veces_usado} OT(s)</span>
+          <span class="dash-item-nombre">${escapeHtml(m.marca)} ${escapeHtml(m.modelo)}</span>
+          <span class="dash-item-valor">${m.ots_abiertas.length} OT(s) abierta(s)</span>
         </div>`).join("")
-      + `<p class="bodega-intro" style="margin-top:8px">${d.total_ots_abiertas_con_repuestos.toLocaleString("es-CL")} OT(s) abiertas con repuestos pendientes. <a href="/logistica#planificacion">Ver detalle completo →</a></p>`;
+      + `<p class="bodega-intro" style="margin-top:8px">${d.modelos.length} modelo(s) frecuente(s) con OTs abiertas. <a href="/logistica#planificacion">Ver detalle completo →</a></p>`;
   } catch (e) {
     cont.innerHTML = `<p class="vacio">No se pudo cargar.</p>`;
   }
@@ -1730,42 +1729,65 @@ async function cargarPlanificacion() {
   }
 }
 
-// Repuestos migrados que hacen falta en las OTs ABIERTAS ahora mismo (ver
-// /api/logistica/repuestos-ots-abiertas en app.py) — a propósito NO
-// incluye autos ya entregados/cancelados ni el resto del historial de 3
-// años, solo lo que está pendiente en trabajos en curso. Solo informativo,
-// no toca stock ni se mezcla con el cálculo automático de arriba (que sí
-// puede seguir confiando 100% en movimientos reales).
-async function cargarRepuestosOtAbiertas() {
-  const tbody = document.getElementById("tbody-repuestos-ot-abiertas");
-  const intro = document.getElementById("repuestos-ot-abiertas-intro");
-  const q = (document.getElementById("repuestos-ot-abiertas-buscar").value || "").trim();
-  tbody.innerHTML = `<tr><td colspan="6" class="vacio">Cargando…</td></tr>`;
+// Repuestos típicos por modelo, para las OTs ABIERTAS ahora mismo (ver
+// /api/logistica/repuestos-tipicos-modelos en app.py). Por cada uno de los
+// 10 modelos con más historial que tenga algún auto abierto hoy, cruza qué
+// repuestos aparecen seguido en las OTs YA CERRADAS de ese modelo (menos
+// los genéricos tipo aceite/bencina) con el stock actual, para armar un
+// checklist "esto suele hacerle falta a este modelo, revisa si tienes
+// stock". Solo informativo, no toca stock ni se mezcla con el cálculo
+// automático de Planificación (que sigue confiando 100% en movimientos
+// reales).
+async function cargarRepuestosTipicosModelos() {
+  const cont = document.getElementById("repuestos-tipicos-modelos-cont");
+  cont.innerHTML = `<p class="vacio">Cargando…</p>`;
   try {
-    const url = q ? `/api/logistica/repuestos-ots-abiertas?q=${encodeURIComponent(q)}&limite=300` : `/api/logistica/repuestos-ots-abiertas?limite=100`;
-    const d = await api(url);
-    intro.textContent = q
-      ? `${d.resultados.length} resultado(s) para "${q}" — repuestos migrados que aparecen en OTs abiertas hoy.`
-      : `Repuestos cargados en órdenes de trabajo que siguen ABIERTAS ahora mismo (no autos ya entregados) — quedaron migrados con su descripción de texto libre, sin vincular a un producto del catálogo, así que NO están incluidos en el cálculo automático de arriba. Es solo informativo, para ver qué hace falta comprar para terminar los trabajos en curso. ${d.total_ots_abiertas_con_repuestos.toLocaleString("es-CL")} OT(s) abiertas tienen repuestos migrados pendientes.`;
-
-    tbody.innerHTML = d.resultados.length
-      ? d.resultados.map(r => {
-          const sugerido = r.producto_sugerido
-            ? `#${r.producto_sugerido.id} — ${escapeHtml(r.producto_sugerido.nombre)} (${escapeHtml(r.producto_sugerido.codigo_interno)}) · stock ${r.producto_sugerido.stock_disponible}, mínimo ${r.producto_sugerido.stock_minimo}`
-            : `<span class="vacio-inline">Sin coincidencia en catálogo</span>`;
-          const ots = r.ordenes.map(o => `OT #${o.orden_id}${o.cliente_nombre ? ` (${escapeHtml(o.cliente_nombre)})` : ""}`).join(", ")
-            + (r.ordenes_total > r.ordenes.length ? ` +${r.ordenes_total - r.ordenes.length} más` : "");
-          return `
-            <tr>
-              <td>${escapeHtml(r.descripcion)}</td>
-              <td class="num">${r.veces_usado}</td>
-              <td class="num">${r.cantidad_total}</td>
-              <td class="num">${fmtMoney(r.costo_promedio)}</td>
-              <td>${ots}</td>
-              <td>${sugerido}</td>
-            </tr>`;
-        }).join("")
-      : `<tr><td colspan="6" class="vacio">${q ? "Sin resultados para esa búsqueda." : "Ninguna OT abierta tiene repuestos migrados pendientes."}</td></tr>`;
+    const d = await api("/api/logistica/repuestos-tipicos-modelos");
+    if (!d.modelos.length) {
+      cont.innerHTML = `<p class="vacio">Ninguno de los 10 modelos con más historial tiene OTs abiertas ahora mismo.</p>`;
+      return;
+    }
+    cont.innerHTML = d.modelos.map(m => {
+      const ots = m.ots_abiertas.map(o => `OT #${o.orden_id}${o.cliente_nombre ? ` (${escapeHtml(o.cliente_nombre)})` : ""}`).join(", ");
+      const filasRepuestos = m.repuestos_tipicos.length
+        ? m.repuestos_tipicos.map(r => {
+            let estado;
+            if (!r.producto_sugerido) {
+              estado = `<span class="vacio-inline">Sin coincidencia en catálogo</span>`;
+            } else if (r.producto_sugerido.stock_disponible <= r.producto_sugerido.stock_minimo) {
+              estado = `<span class="badge-urgencia badge-urgencia--critico">Stock bajo: ${r.producto_sugerido.stock_disponible} / mín. ${r.producto_sugerido.stock_minimo}</span>`;
+            } else {
+              estado = `<span class="badge-urgencia badge-urgencia--proximo">En stock: ${r.producto_sugerido.stock_disponible}</span>`;
+            }
+            const nombreProducto = r.producto_sugerido ? ` — ${escapeHtml(r.producto_sugerido.nombre)} (${escapeHtml(r.producto_sugerido.codigo_interno)})` : "";
+            return `
+              <tr>
+                <td>${escapeHtml(r.descripcion)}${nombreProducto}</td>
+                <td class="num">${r.en_ots_cerradas}</td>
+                <td class="num">${fmtMoney(r.costo_promedio)}</td>
+                <td>${estado}</td>
+              </tr>`;
+          }).join("")
+        : `<tr><td colspan="4" class="vacio">Sin suficiente historial de repuestos específicos para este modelo.</td></tr>`;
+      return `
+        <div class="dash-panel" style="margin-bottom:16px">
+          <h4 style="margin:0 0 6px">${escapeHtml(m.marca)} ${escapeHtml(m.modelo)} <span class="badge-origen">${m.total_autos_historico} autos en el historial</span></h4>
+          <p class="bodega-intro">OT(s) abierta(s) ahora: ${ots}</p>
+          <div class="tabla-wrap">
+            <table class="tabla">
+              <thead>
+                <tr>
+                  <th>Repuesto típico</th>
+                  <th class="num">En cuántas OTs cerradas</th>
+                  <th class="num">Costo promedio</th>
+                  <th>Stock actual</th>
+                </tr>
+              </thead>
+              <tbody>${filasRepuestos}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }).join("");
   } catch (e) {
     toast(e.message, true);
   }
@@ -2490,11 +2512,6 @@ document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
 document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
 document.getElementById("planificacion-periodo").addEventListener("change", cargarPlanificacion);
 
-let repuestosOtAbiertasBuscarTimeout;
-document.getElementById("repuestos-ot-abiertas-buscar").addEventListener("input", () => {
-  clearTimeout(repuestosOtAbiertasBuscarTimeout);
-  repuestosOtAbiertasBuscarTimeout = setTimeout(cargarRepuestosOtAbiertas, 300);
-});
 
 document.getElementById("btn-planificacion-recalcular").addEventListener("click", async () => {
   const btn = document.getElementById("btn-planificacion-recalcular");

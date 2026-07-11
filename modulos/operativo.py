@@ -311,6 +311,7 @@ def init_operativo_db(db):
         CREATE INDEX IF NOT EXISTS idx_ordenes_estado ON ordenes_trabajo (estado);
         CREATE INDEX IF NOT EXISTS idx_orden_items_orden_id ON orden_items (orden_id);
         CREATE INDEX IF NOT EXISTS idx_orden_items_producto_id ON orden_items (producto_id);
+        CREATE INDEX IF NOT EXISTS idx_orden_items_usuario_tipo ON orden_items (usuario, tipo);
         """
     )
     db.commit()

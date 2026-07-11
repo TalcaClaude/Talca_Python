@@ -6747,141 +6747,200 @@ def planificacion():
 
 
 # ---------------------------------------------------------------------------
-# API: Repuestos pendientes en OTs abiertas (migrados desde TalleresTC)
+# API: Repuestos típicos por modelo, para las OTs abiertas ahora mismo
 # ---------------------------------------------------------------------------
 #
-# La migración (ver migracion_repuestos_ot_abiertas y
-# migracion_ordenes_historicas más abajo) cargó repuestos usados en OTs
-# como orden_items con producto_id = NULL a propósito — vincularlos a un
-# producto real del catálogo actual y dejar que _aplicar_salida_stock
-# corriera sobre ellos habría descontado HOY stock por consumo que ya pasó
-# (o que ni siquiera ha pasado, en el caso de las OTs que siguen abiertas),
-# además de que la descripción migrada es texto libre del sistema viejo, no
-# un match confiable 1:1 con un producto. Por eso esos ítems quedaron "de
-# solo lectura": no alimentaban Planificación ni el dashboard.
+# Reemplaza al reporte anterior (que listaba, plano, todos los repuestos
+# migrados de las OTs abiertas). Este es más confiable porque en vez de
+# mostrar "lo que quedó cargado" nomás, cruza el modelo del auto de cada OT
+# abierta con el patrón histórico de consumo de OTs YA CERRADAS de ese
+# mismo modelo — como haría un mecánico con experiencia: "a las Explorer
+# les suele tocar tal cosa, revisemos si a esta también".
 #
-# A diferencia de un reporte histórico de todo lo migrado (que mezcla autos
-# que ya se fueron hace 3 años con los que están en el taller ahora mismo),
-# esto filtra a SOLO las órdenes que siguen abiertas hoy (no entregadas ni
-# canceladas) — son los repuestos que de verdad hacen falta para terminar
-# trabajos en curso, útil para decidir qué comprar ya. Sigue siendo un
-# REPORTE nomás (nunca escribe nada, nunca toca stock ni genera
-# movimientos); intenta sugerir a qué producto del catálogo actual podría
-# corresponder cada descripción (por coincidencia de código interno o
-# nombre dentro del texto), pero la decisión queda en manos de la persona.
-def _repuestos_ots_abiertas_agrupado(db, q=""):
-    # ESTADOS_CERRADOS (entregado/cancelado) se importa de modulos.operativo
-    # más abajo en este archivo — mismo criterio de "abierta" que usa el
-    # resto del sistema, no un hardcode aparte.
+# Sigue siendo puramente informativo (nunca escribe nada, nunca toca stock
+# ni genera movimientos): el patrón histórico se arma en cada request desde
+# orden_items/ordenes_trabajo/equipos, no queda guardado en ninguna tabla
+# nueva.
+#
+# Dos filtros clave para que la sugerencia sea confiable y no ruido:
+#   1) Solo se consideran los 10 modelos con más volumen histórico — con
+#      pocos casos cualquier patrón es puro ruido estadístico.
+#   2) Se descartan los repuestos "universales" (aceite, bencina, diésel...)
+#      que aparecen parejo en casi cualquier modelo — si no se filtran,
+#      la lista de "repuestos típicos" se vería igual para cualquier auto y
+#      no aportaría nada específico. Se mide qué tan repartido está un
+#      repuesto entre TODOS los modelos con historial: si aparece en más de
+#      UMBRAL_UNIVERSALIDAD de ellos, se considera genérico y se excluye.
+UMBRAL_UNIVERSALIDAD_REPUESTO = 0.35
+
+
+def _normalizar_modelo_auto(modelo):
+    """'X-TRAIL' y 'XTRAIL' son el mismo auto escrito distinto a mano — se
+    normaliza sacando todo lo que no sea letra/número para agruparlos."""
+    return re.sub(r"[^A-Z0-9]", "", (modelo or "").upper())
+
+
+def _top_modelos_por_volumen(db, n=10):
+    filas = db.execute("SELECT id, marca, modelo FROM equipos WHERE modelo != ''").fetchall()
+    grupos = {}
+    for f in filas:
+        modelo_norm = _normalizar_modelo_auto(f["modelo"])
+        if not modelo_norm:
+            continue
+        clave = ((f["marca"] or "").strip().upper(), modelo_norm)
+        g = grupos.setdefault(clave, {"marca": clave[0], "modelo_norm": clave[1], "equipo_ids": [], "conteo_display": {}})
+        g["equipo_ids"].append(f["id"])
+        disp = (f["modelo"] or "").strip().upper()
+        g["conteo_display"][disp] = g["conteo_display"].get(disp, 0) + 1
+
+    lista = list(grupos.values())
+    for g in lista:
+        g["modelo_display"] = max(g["conteo_display"], key=g["conteo_display"].get)
+        g["total_autos"] = len(g["equipo_ids"])
+        del g["conteo_display"]
+    lista.sort(key=lambda g: g["total_autos"], reverse=True)
+    return lista[:n]
+
+
+def _universalidad_repuestos(db):
+    """Para cada descripción de repuesto, en cuántos modelos DISTINTOS
+    aparece (sobre el total de modelos con historial) — la base para
+    detectar y excluir los genéricos."""
+    filas = db.execute(
+        """
+        SELECT oi.descripcion, e.marca, e.modelo
+        FROM orden_items oi
+        JOIN ordenes_trabajo o ON o.id = oi.orden_id
+        JOIN equipos e ON e.id = o.equipo_id
+        WHERE oi.tipo = 'repuesto' AND e.modelo != ''
+        """
+    ).fetchall()
+    modelos_por_descripcion = {}
+    todos_modelos = set()
+    for f in filas:
+        modelo_norm = _normalizar_modelo_auto(f["modelo"])
+        if not modelo_norm:
+            continue
+        clave_modelo = ((f["marca"] or "").strip().upper(), modelo_norm)
+        todos_modelos.add(clave_modelo)
+        desc = (f["descripcion"] or "").strip().upper()
+        if not desc:
+            continue
+        modelos_por_descripcion.setdefault(desc, set()).add(clave_modelo)
+    return modelos_por_descripcion, (len(todos_modelos) or 1)
+
+
+def _sugerir_producto_por_descripcion(descripcion, productos_idx):
+    for p in productos_idx:
+        if p["codigo_interno"] and len(p["codigo_interno"]) >= 3 and p["codigo_interno"] in descripcion:
+            return p["id"]
+    for p in productos_idx:
+        if p["nombre"] and len(p["nombre"]) >= 4 and p["nombre"] in descripcion:
+            return p["id"]
+    return None
+
+
+def _repuestos_tipicos_modelo(db, equipo_ids, modelos_por_descripcion, total_modelos, top_n=6):
+    """Repuestos que más se repiten en OTs YA CERRADAS de este grupo de
+    autos (mismo modelo normalizado), sacando los genéricos."""
+    if not equipo_ids:
+        return []
+    placeholders_equipos = ", ".join("?" for _ in equipo_ids)
     placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
     filas = db.execute(
         f"""
-        SELECT oi.descripcion, oi.cantidad, oi.costo_unitario,
-               o.id AS orden_id, c.nombre AS cliente_nombre
+        SELECT oi.descripcion, oi.costo_unitario, o.id AS orden_id
         FROM orden_items oi
         JOIN ordenes_trabajo o ON o.id = oi.orden_id
-        LEFT JOIN clientes c ON c.id = o.cliente_id
-        WHERE oi.tipo = 'repuesto' AND oi.usuario = 'Migración histórica'
-          AND o.estado NOT IN ({placeholders_cerrados})
+        WHERE oi.tipo = 'repuesto' AND o.equipo_id IN ({placeholders_equipos})
+          AND o.estado IN ({placeholders_cerrados})
         """,
-        list(ESTADOS_CERRADOS),
+        list(equipo_ids) + list(ESTADOS_CERRADOS),
     ).fetchall()
 
-    # Una misma OT puede tener el mismo repuesto en varias líneas (ej. varios
-    # litros de aceite cargados de a 1 en 1) — "veces_usado" tiene que
-    # contar en CUÁNTAS OTS DISTINTAS aparece, no cuántas líneas hay en
-    # total, o un solo auto con 99 líneas de aceite se vería como si lo
-    # necesitaran 99 autos distintos.
     agrupado = {}
     for f in filas:
-        clave = (f["descripcion"] or "").strip().upper()
-        if not clave:
+        desc = (f["descripcion"] or "").strip().upper()
+        if not desc:
             continue
-        acc = agrupado.setdefault(clave, {
-            "descripcion": clave, "cantidad_total": 0.0,
-            "costo_total": 0.0, "n_lineas": 0, "ordenes_por_id": {},
+        acc = agrupado.setdefault(desc, {"descripcion": desc, "ordenes": set(), "costo_total": 0.0, "n": 0})
+        acc["ordenes"].add(f["orden_id"])
+        acc["costo_total"] += f["costo_unitario"] or 0
+        acc["n"] += 1
+
+    resultado = []
+    for desc, acc in agrupado.items():
+        n_modelos = len(modelos_por_descripcion.get(desc, ()))
+        if (n_modelos / total_modelos) > UMBRAL_UNIVERSALIDAD_REPUESTO:
+            continue  # genérico (aparece parejo en muchos modelos), no distingue a este
+        resultado.append({
+            "descripcion": desc,
+            "en_ots_cerradas": len(acc["ordenes"]),
+            "costo_promedio": round(acc["costo_total"] / acc["n"]) if acc["n"] else 0,
         })
-        acc["n_lineas"] += 1
-        acc["cantidad_total"] += f["cantidad"] or 0
-        acc["costo_total"] += (f["costo_unitario"] or 0) * (f["cantidad"] or 0)
-        acc["ordenes_por_id"].setdefault(f["orden_id"], {"orden_id": f["orden_id"], "cliente_nombre": f["cliente_nombre"] or ""})
+    resultado.sort(key=lambda r: r["en_ots_cerradas"], reverse=True)
+    return resultado[:top_n]
 
-    for acc in agrupado.values():
-        acc["ordenes"] = list(acc.pop("ordenes_por_id").values())
-        acc["veces_usado"] = len(acc["ordenes"])
 
-    resultado = list(agrupado.values())
-    if q:
-        q_up = q.strip().upper()
-        resultado = [r for r in resultado if q_up in r["descripcion"]]
+@app.route("/api/logistica/repuestos-tipicos-modelos", methods=["GET"])
+def logistica_repuestos_tipicos_modelos():
+    db = get_db()
+    placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
 
+    top_modelos = _top_modelos_por_volumen(db, n=10)
+    modelos_por_descripcion, total_modelos = _universalidad_repuestos(db)
     productos_idx = [
         {"id": p["id"], "nombre": (p["nombre"] or "").upper(), "codigo_interno": (p["codigo_interno"] or "").upper()}
         for p in db.execute("SELECT id, nombre, codigo_interno FROM productos").fetchall()
     ]
 
-    def _sugerir_producto(descripcion):
-        for p in productos_idx:
-            if p["codigo_interno"] and len(p["codigo_interno"]) >= 3 and p["codigo_interno"] in descripcion:
-                return p["id"]
-        for p in productos_idx:
-            if p["nombre"] and len(p["nombre"]) >= 4 and p["nombre"] in descripcion:
-                return p["id"]
-        return None
+    resultado = []
+    for g in top_modelos:
+        equipo_ids = g["equipo_ids"]
+        placeholders_equipos = ", ".join("?" for _ in equipo_ids)
+        ots_abiertas = [dict(o) for o in db.execute(
+            f"""
+            SELECT o.id AS orden_id, c.nombre AS cliente_nombre
+            FROM ordenes_trabajo o
+            LEFT JOIN clientes c ON c.id = o.cliente_id
+            WHERE o.equipo_id IN ({placeholders_equipos}) AND o.estado NOT IN ({placeholders_cerrados})
+            """,
+            equipo_ids + list(ESTADOS_CERRADOS),
+        ).fetchall()]
+        if not ots_abiertas:
+            # Solo interesan los modelos que tienen algún auto en el taller
+            # AHORA MISMO — un modelo con harto historial pero sin ninguna
+            # OT abierta hoy no aporta nada accionable en este reporte.
+            continue
 
-    for r in resultado:
-        r["costo_promedio"] = round(r["costo_total"] / r["veces_usado"]) if r["veces_usado"] else 0
-        r["producto_id_sugerido"] = _sugerir_producto(r["descripcion"])
-        # Se limita la lista de OTs que se manda al front a las primeras 8
-        # (no hace falta mandar las 101 si un repuesto rarísimo apareciera
-        # en todas) — "ordenes_total" guarda el conteo real para que la
-        # interfaz pueda avisar "+N más" sin perder el dato.
-        r["ordenes_total"] = len(r["ordenes"])
-        r["ordenes"] = r["ordenes"][:8]
+        repuestos = _repuestos_tipicos_modelo(db, equipo_ids, modelos_por_descripcion, total_modelos)
+        ids_sugeridos = set()
+        for r in repuestos:
+            r["producto_id_sugerido"] = _sugerir_producto_por_descripcion(r["descripcion"], productos_idx)
+            if r["producto_id_sugerido"]:
+                ids_sugeridos.add(r["producto_id_sugerido"])
 
-    resultado.sort(key=lambda r: r["veces_usado"], reverse=True)
-    return resultado
+        productos_detalle = {}
+        if ids_sugeridos:
+            marcas = ",".join("?" * len(ids_sugeridos))
+            for p in db.execute(
+                f"SELECT id, nombre, codigo_interno, stock_disponible, stock_minimo FROM productos WHERE id IN ({marcas})",
+                tuple(ids_sugeridos),
+            ).fetchall():
+                productos_detalle[p["id"]] = dict(p)
+        for r in repuestos:
+            r["producto_sugerido"] = productos_detalle.get(r.pop("producto_id_sugerido"))
 
+        resultado.append({
+            "marca": g["marca"],
+            "modelo": g["modelo_display"],
+            "total_autos_historico": g["total_autos"],
+            "ots_abiertas": ots_abiertas,
+            "repuestos_tipicos": repuestos,
+        })
 
-@app.route("/api/logistica/repuestos-ots-abiertas", methods=["GET"])
-def logistica_repuestos_ots_abiertas():
-    db = get_db()
-    q = request.args.get("q", "").strip()
-    try:
-        limite = int(request.args.get("limite", 100))
-    except (TypeError, ValueError):
-        limite = 100
-    limite = max(1, min(limite, 500))
-
-    agrupado = _repuestos_ots_abiertas_agrupado(db, q=q)
-    total_descripciones = len(agrupado)
-    total_ots_abiertas_con_repuestos = len({
-        o["orden_id"] for r in agrupado for o in r["ordenes"]
-    })
-    pagina = agrupado[:limite]
-
-    # Se resuelve el detalle del producto sugerido (nombre, código, stock
-    # actual) solo para la página que se va a mostrar, no para todas las
-    # filas agrupadas — no hace falta traer más de lo que se va a pintar.
-    ids_sugeridos = {r["producto_id_sugerido"] for r in pagina if r["producto_id_sugerido"]}
-    productos_detalle = {}
-    if ids_sugeridos:
-        marcas = ",".join("?" * len(ids_sugeridos))
-        for p in db.execute(
-            f"SELECT id, nombre, codigo_interno, stock_disponible, stock_minimo FROM productos WHERE id IN ({marcas})",
-            tuple(ids_sugeridos),
-        ).fetchall():
-            productos_detalle[p["id"]] = dict(p)
-
-    for r in pagina:
-        r["producto_sugerido"] = productos_detalle.get(r["producto_id_sugerido"])
-
-    return jsonify({
-        "total_descripciones_unicas": total_descripciones,
-        "total_ots_abiertas_con_repuestos": total_ots_abiertas_con_repuestos,
-        "resultados": pagina,
-        "truncado": total_descripciones > len(pagina),
-    })
+    resultado.sort(key=lambda m: len(m["ots_abiertas"]), reverse=True)
+    return jsonify({"modelos": resultado})
 
 
 # ---------------------------------------------------------------------------

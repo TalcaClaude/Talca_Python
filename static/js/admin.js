@@ -222,6 +222,34 @@ document.getElementById("btn-limpiar-cxc-huerfanas").addEventListener("click", a
   }
 });
 
+document.getElementById("btn-migracion-garantias-items").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-migracion-garantias-items");
+  const resultado = document.getElementById("resultado-migracion-garantias-items");
+  const input = document.getElementById("migracion-garantias-items-archivo");
+  if (!input.files.length) {
+    toast("Primero elige el archivo garantias_items_extraidos.json", true);
+    return;
+  }
+  btn.disabled = true;
+  resultado.textContent = "Migrando…";
+  try {
+    const formData = new FormData();
+    formData.append("garantias_items_json", input.files[0]);
+    const res = await fetch("/api/admin/migracion/garantias-items", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Error inesperado");
+    resultado.textContent =
+      `Garantías procesadas: ${data.garantias_procesadas} · ítems de repuesto: ${data.items_repuesto_creados} · ítems de mano de obra: ${data.items_mano_obra_creados} · ya migradas antes: ${data.garantias_ya_migradas}`
+      + (data.garantias_sin_match.length ? ` · sin match: ${data.garantias_sin_match.length} (revisar RUT/fecha)` : "");
+    toast("Migración de ítems de garantías completada");
+  } catch (e) {
+    resultado.textContent = "";
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------

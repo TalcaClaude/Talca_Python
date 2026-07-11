@@ -59,6 +59,15 @@
     <p class="ayuda-inline" id="resultado-limpiar-cxc" style="margin-top:10px;"></p>
   </section>
 
+  <section class="chart-card" style="margin-top:22px;">
+    <h3>Migración: repuestos/mano de obra de garantías</h3>
+    <p class="chart-sub">Carga el archivo <code>garantias_items_extraidos.json</code> (extraído del sistema anterior) para agregar los repuestos y mano de obra históricos a las garantías que ya están migradas. Solo agrega ítems informativos — no toca stock ni el catálogo. Es seguro correrla más de una vez: las garantías que ya tengan estos ítems se saltan.</p>
+    <input type="file" id="migracion-garantias-items-archivo" accept="application/json" style="margin-bottom:10px">
+    <br>
+    <button class="btn btn-secundario" id="btn-migracion-garantias-items">Migrar ítems de garantías</button>
+    <p class="ayuda-inline" id="resultado-migracion-garantias-items" style="margin-top:10px;"></p>
+  </section>
+
 </div>
 
 <!-- Modal: Nuevo usuario -->

@@ -6762,16 +6762,36 @@ def planificacion():
 # orden_items/ordenes_trabajo/equipos, no queda guardado en ninguna tabla
 # nueva.
 #
-# Dos filtros clave para que la sugerencia sea confiable y no ruido:
+# Tres filtros clave para que la sugerencia sea confiable y no ruido:
 #   1) Solo se consideran los 10 modelos con más volumen histórico — con
 #      pocos casos cualquier patrón es puro ruido estadístico.
-#   2) Se descartan los repuestos "universales" (aceite, bencina, diésel...)
-#      que aparecen parejo en casi cualquier modelo — si no se filtran,
-#      la lista de "repuestos típicos" se vería igual para cualquier auto y
-#      no aportaría nada específico. Se mide qué tan repartido está un
-#      repuesto entre TODOS los modelos con historial: si aparece en más de
-#      UMBRAL_UNIVERSALIDAD de ellos, se considera genérico y se excluye.
+#   2) Se descartan los repuestos "universales" que aparecen parejo en casi
+#      cualquier modelo — si no se filtran, la lista de "repuestos
+#      típicos" se vería igual para cualquier auto y no aportaría nada
+#      específico. Se mide qué tan repartido está un repuesto entre TODOS
+#      los modelos con historial: si aparece en más de UMBRAL_UNIVERSALIDAD
+#      de ellos, se considera genérico y se excluye.
+#   3) Se descartan además, por texto, los gastos operacionales que en el
+#      sistema legado quedaron cargados como "repuesto" sin serlo de
+#      verdad (bencina, diésel, peajes, estacionamiento, lavado) — no son
+#      autopartes ligadas a un modelo, son costos de logística/traslado que
+#      pueden aparecer parejo o no según la muestra, así que el filtro
+#      estadístico del punto 2 no los pesca siempre (con poca data, un
+#      gasto así puede parecer "típico" de un modelo por pura casualidad).
+#      Se identifican por prefijo porque en la data real ese patrón separa
+#      bien la compra de combustible/peaje (arranca con la palabra) de una
+#      reparación real que la menciona de pasada (ej. "REPARACIÓN DE BOMBA
+#      DE BENCINA", que si es un repuesto/trabajo real y no se quiere
+#      perder).
+PREFIJOS_GASTO_OPERACIONAL = (
+    "BENCINA", "DIESEL", "PETROLEO", "GASOLINA", "COMBUSTIBLE",
+    "PEAJE", "ESTACIONAMIENTO", "LAVADO",
+)
 UMBRAL_UNIVERSALIDAD_REPUESTO = 0.35
+
+
+def _es_gasto_operacional(descripcion):
+    return descripcion.startswith(PREFIJOS_GASTO_OPERACIONAL)
 
 
 def _normalizar_modelo_auto(modelo):
@@ -6861,7 +6881,7 @@ def _repuestos_tipicos_modelo(db, equipo_ids, modelos_por_descripcion, total_mod
     agrupado = {}
     for f in filas:
         desc = (f["descripcion"] or "").strip().upper()
-        if not desc:
+        if not desc or _es_gasto_operacional(desc):
             continue
         acc = agrupado.setdefault(desc, {"descripcion": desc, "ordenes": set(), "costo_total": 0.0, "n": 0})
         acc["ordenes"].add(f["orden_id"])
@@ -8028,6 +8048,116 @@ def migracion_garantias_abiertas():
             ),
         )
         resumen["creadas"] += 1
+        db.commit()
+
+    return jsonify(resumen)
+
+
+@app.route("/api/admin/migracion/garantias-items", methods=["POST"])
+@requiere_rol()
+def migracion_garantias_items():
+    """Carga los repuestos y mano de obra externa históricos (de la base
+    legacy TalleresTC) hacia garantías YA MIGRADAS (ver
+    migracion_garantias_abiertas) — no crea garantías nuevas, solo agrega
+    garantia_items a las que ya existen en el sistema.
+
+    Como 'garantias' no guarda el legacy_no (se creó matcheando por
+    cliente + fecha_recepcion, ver migracion_garantias_abiertas), este
+    endpoint usa el mismo criterio para encontrar la garantía correcta:
+    RUT del cliente + fecha_recepcion exacta.
+
+    Espera un archivo 'garantias_items_json' con una lista de objetos:
+    [{legacy_no, cliente_rut, fecha_recepcion,
+      repuestos: [{modelo, descripcion, costo_unitario}],
+      mano_obra: [{nombre_reparador, detalle, precio}]}, ...]
+
+    Igual que la migración de repuestos de OTs abiertas: los ítems quedan
+    con producto_id = NULL a propósito (no se tocan ni catálogo ni stock).
+    Es seguro correrla más de una vez: si la garantía ya tiene ítems
+    cargados por esta migración (usuario = 'Migración histórica'), se
+    salta para no duplicar."""
+    archivo = request.files.get("garantias_items_json")
+    if not archivo or archivo.filename == "":
+        return jsonify({"error": "Debes adjuntar el archivo garantias_items_json"}), 400
+    try:
+        datos = json.loads(archivo.read().decode("utf-8"))
+    except Exception:
+        return jsonify({"error": "El archivo no es un JSON válido"}), 400
+
+    db = get_db()
+    ts = now_iso()
+    usuario_migracion = "Migración histórica"
+
+    rut_a_cliente = {}
+    for fila in db.execute("SELECT id, rut FROM clientes WHERE rut != ''"):
+        clave = re.sub(r"[.\-]", "", fila["rut"] or "").upper()
+        if clave:
+            rut_a_cliente[clave] = fila["id"]
+
+    resumen = {
+        "garantias_procesadas": 0, "garantias_sin_match": [], "garantias_ya_migradas": 0,
+        "items_repuesto_creados": 0, "items_mano_obra_creados": 0,
+    }
+
+    for entrada in datos:
+        rut_clave = re.sub(r"[.\-]", "", entrada.get("cliente_rut") or "").upper()
+        cliente_id = rut_a_cliente.get(rut_clave)
+        fecha_raw = (entrada.get("fecha_recepcion") or "").strip()
+        fecha_recepcion = fecha_raw.replace(" ", "T") if fecha_raw else ""
+
+        garantia = None
+        if cliente_id and fecha_recepcion:
+            garantia = db.execute(
+                "SELECT id FROM garantias WHERE cliente_id = ? AND fecha_recepcion = ?",
+                (cliente_id, fecha_recepcion),
+            ).fetchone()
+        if not garantia:
+            resumen["garantias_sin_match"].append({
+                "legacy_no": entrada.get("legacy_no"), "cliente_rut": entrada.get("cliente_rut"),
+            })
+            continue
+        garantia_id = garantia["id"]
+
+        ya_migrada = db.execute(
+            "SELECT 1 FROM garantia_items WHERE garantia_id = ? AND usuario = ?",
+            (garantia_id, usuario_migracion),
+        ).fetchone()
+        if ya_migrada:
+            resumen["garantias_ya_migradas"] += 1
+            continue
+
+        resumen["garantias_procesadas"] += 1
+
+        for r in entrada.get("repuestos") or []:
+            descripcion = " - ".join(
+                x.strip() for x in [(r.get("modelo") or ""), (r.get("descripcion") or "")] if x.strip()
+            ) or "(sin descripción)"
+            try:
+                costo = float(r.get("costo_unitario") or 0)
+            except (TypeError, ValueError):
+                costo = 0.0
+            db.execute(
+                """INSERT INTO garantia_items (garantia_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en)
+                   VALUES (?, 'repuesto', ?, 1, ?, ?, ?)""",
+                (garantia_id, descripcion.upper(), costo, usuario_migracion, ts),
+            )
+            resumen["items_repuesto_creados"] += 1
+
+        for m in entrada.get("mano_obra") or []:
+            descripcion = " - ".join(
+                x.strip() for x in [(m.get("nombre_reparador") or ""), (m.get("detalle") or "")] if x.strip()
+            ) or "(mano de obra externa)"
+            try:
+                precio = float(m.get("precio") or 0)
+            except (TypeError, ValueError):
+                precio = 0.0
+            db.execute(
+                """INSERT INTO garantia_items (garantia_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en, detalle)
+                   VALUES (?, 'mano_obra', ?, 1, ?, ?, ?, 'Reparación externa (migración histórica)')""",
+                (garantia_id, descripcion.upper(), precio, usuario_migracion, ts),
+            )
+            resumen["items_mano_obra_creados"] += 1
+
         db.commit()
 
     return jsonify(resumen)

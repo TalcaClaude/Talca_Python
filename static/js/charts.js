@@ -112,6 +112,77 @@ function buildLineChartDoble(datos, labelA, labelB, opts = {}) {
 }
 
 /**
+ * Gráfico de línea con tendencia real + proyección a futuro (regresión
+ * simple calculada en el backend, ver panel_dueno() en app.py). El tramo
+ * real se dibuja igual que buildLineChart (línea sólida + área); el tramo
+ * proyectado continúa la misma línea pero punteada y en un tono más claro,
+ * para que nunca se confunda un dato real con una estimación -- siempre
+ * con su propia entrada en la leyenda, nunca solo por el color.
+ * reales: [{mes, valor}], proyectados: [{mes, valor}] (continúa desde el
+ * último punto real).
+ */
+function buildLineChartProyeccion(reales, proyectados, opts = {}) {
+  const w = opts.w || 700, h = opts.h || 220;
+  const color = opts.color || "var(--accent)";
+  const colorProy = opts.colorProyeccion || "var(--text-muted)";
+  const padL = 46, padR = 16, padT = 16, padB = 26;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+  if (!reales.length) return `<p class="ayuda-inline">Sin datos suficientes todavía.</p>`;
+  const todos = reales.concat(proyectados);
+  const n = todos.length;
+  const vmax = Math.max(...todos.map(d => d.valor), 1) * 1.15;
+  const pts = todos.map((d, i) => {
+    const x = padL + (n > 1 ? plotW * i / (n - 1) : plotW / 2);
+    const y = padT + plotH - (plotH * d.valor / vmax);
+    return [x, y];
+  });
+  const nReales = reales.length;
+  const ptsReales = pts.slice(0, nReales);
+  const ptsProy = pts.slice(nReales - 1); // incluye el último punto real como enlace
+  const pathReal = "M " + ptsReales.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" L ");
+  const area = pathReal + ` L ${ptsReales[ptsReales.length - 1][0].toFixed(1)},${padT + plotH} L ${ptsReales[0][0].toFixed(1)},${padT + plotH} Z`;
+  const pathProy = ptsProy.length > 1
+    ? "M " + ptsProy.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" L ")
+    : "";
+  let grid = "";
+  for (let gi = 0; gi < 4; gi++) {
+    const gy = padT + plotH * gi / 3;
+    const gval = vmax * (1 - gi / 3);
+    grid += `<line x1="${padL}" y1="${gy.toFixed(1)}" x2="${w - padR}" y2="${gy.toFixed(1)}" stroke="var(--line)" stroke-width="1"/>`;
+    grid += `<text x="${padL - 8}" y="${(gy + 4).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--text-muted)">${chartFmtCompacto(gval)}</text>`;
+  }
+  let labels = "";
+  todos.forEach((d, i) => {
+    if (n > 8 && i % 2 !== 0 && i !== n - 1) return;
+    const x = padL + (n > 1 ? plotW * i / (n - 1) : plotW / 2);
+    const mm = d.mes.split("-")[1];
+    labels += `<text x="${x.toFixed(1)}" y="${h - 8}" text-anchor="middle" font-size="10" fill="var(--text-muted)">${MESES_LABEL_CORTO[mm] || d.mes}</text>`;
+  });
+  const gradId = "grad" + Math.random().toString(36).slice(2, 9);
+  const lastReal = ptsReales[ptsReales.length - 1];
+  const lastProy = ptsProy.length > 1 ? ptsProy[ptsProy.length - 1] : null;
+  return `<div>
+    <svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" role="img" aria-label="Gráfico de línea con proyección">
+      <defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.28"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+      </linearGradient></defs>
+      ${grid}
+      <path d="${area}" fill="url(#${gradId})"/>
+      <path d="${pathReal}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      ${pathProy ? `<path d="${pathProy}" fill="none" stroke="${colorProy}" stroke-width="2.5" stroke-dasharray="5 5" stroke-linecap="round" stroke-linejoin="round"/>` : ""}
+      <circle cx="${lastReal[0].toFixed(1)}" cy="${lastReal[1].toFixed(1)}" r="3.5" fill="${color}"/>
+      ${lastProy ? `<circle cx="${lastProy[0].toFixed(1)}" cy="${lastProy[1].toFixed(1)}" r="3.5" fill="${colorProy}"/>` : ""}
+      ${labels}
+    </svg>
+    ${proyectados.length ? `<div class="chart-leyenda">
+      <span><i style="background:${color}"></i>Real</span>
+      <span><i style="background:${colorProy}"></i>Proyección (próximos meses)</span>
+    </div>` : ""}
+  </div>`;
+}
+
+/**
  * Barras horizontales para rankings (marcas, clientes, proveedores...).
  * datos: [{label: "Ford", valor: 310, extra: "opcional"}]
  */

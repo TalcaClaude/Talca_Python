@@ -7333,6 +7333,33 @@ def panel_dueno():
         pref = _prefijo(m)
         tendencia.append({"mes": pref, "ingresos": _ingresos_mes(db, pref)})
 
+    # Proyección simple de los próximos 3 meses: regresión lineal (mínimos
+    # cuadrados) sobre los 12 meses de tendencia real de arriba. No pretende
+    # ser un modelo estadístico sofisticado -- es la misma idea que
+    # proyeccion_fin_mes (una recta que sigue el ritmo reciente), pero
+    # mirando varios meses hacia atrás en vez de solo los días del mes
+    # actual, para no sobrerreaccionar a un mes puntualmente bueno o malo.
+    # El mes en curso (todavía incompleto) se excluye del ajuste para no
+    # sesgar la pendiente hacia abajo.
+    meses_completos = tendencia[:-1] if len(tendencia) > 1 else tendencia
+    proyeccion_mensual = []
+    if len(meses_completos) >= 3:
+        xs = list(range(len(meses_completos)))
+        ys = [p["ingresos"] for p in meses_completos]
+        n_pts = len(xs)
+        media_x = sum(xs) / n_pts
+        media_y = sum(ys) / n_pts
+        num = sum((xs[i] - media_x) * (ys[i] - media_y) for i in range(n_pts))
+        den = sum((xs[i] - media_x) ** 2 for i in range(n_pts))
+        pendiente = (num / den) if den else 0
+        intercepto = media_y - pendiente * media_x
+        m_futuro = hoy.replace(day=1)
+        for paso in range(1, 4):
+            m_futuro = (m_futuro.replace(day=28) + timedelta(days=4)).replace(day=1)
+            x_futuro = n_pts - 1 + paso
+            valor = max(0, round(pendiente * x_futuro + intercepto, 2))
+            proyeccion_mensual.append({"mes": _prefijo(m_futuro), "ingresos_proyectados": valor})
+
     cxc_pendiente, cxc_vencido = _cxc_pendiente_y_vencido(db)
     cxp_pendiente, cxp_vencido = _cxp_pendiente_y_vencido(db)
 
@@ -7347,6 +7374,7 @@ def panel_dueno():
         "cxc_pendiente": cxc_pendiente,
         "cxp_pendiente": cxp_pendiente,
         "tendencia_mensual": tendencia,
+        "proyeccion_mensual": proyeccion_mensual,
     })
 
 
@@ -7719,6 +7747,275 @@ def migracion_garantias_abiertas():
         resumen["creadas"] += 1
         db.commit()
 
+    return jsonify(resumen)
+
+
+# ---------------------------------------------------------------------------
+# Migración histórica completa (OTs cerradas, últimos 3 años) — a diferencia
+# de las migraciones anteriores (que reciben el JSON por upload desde el
+# navegador porque son chiquitas), acá el volumen es demasiado grande para
+# transportarlo por fetch()+FormData sin toparse con timeouts del lado del
+# navegador. Los archivos ya vienen incluidos en el deploy (carpeta data/,
+# generados una sola vez desde la base legacy TalleresTC) y estos endpoints
+# simplemente los leen del disco y los procesan. Se disparan a mano desde el
+# navegador (autenticado, rol admin), nunca automáticamente en el arranque.
+# ---------------------------------------------------------------------------
+
+def _cargar_json_data(nombre_archivo):
+    ruta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", nombre_archivo)
+    with open(ruta, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.route("/api/admin/migracion/backfill-legacy-no", methods=["POST"])
+@requiere_rol()
+def migracion_backfill_legacy_no():
+    """Rellena ordenes_trabajo.legacy_ot_no en las 101 OT abiertas ya
+    migradas (emparejando por patente), usando data/migracion_legacy_no_abiertas.json.
+    Solo toca filas que todavía tienen legacy_ot_no NULL — es seguro correrla
+    más de una vez. Este número es la clave que después usan los endpoints de
+    pagos e historial para encontrar la orden correcta sin depender de la
+    patente (que puede repetirse si el mismo auto vuelve más adelante)."""
+    try:
+        mapa = _cargar_json_data("migracion_legacy_no_abiertas.json")
+    except FileNotFoundError:
+        return jsonify({"error": "No se encontró data/migracion_legacy_no_abiertas.json en el deploy"}), 400
+
+    db = get_db()
+    resumen = {"actualizadas": 0, "ya_tenian": 0, "sin_match": []}
+    for fila in mapa:
+        patente = (fila.get("patente") or "").strip().upper()
+        legacy_no = fila.get("legacy_no")
+        if not patente or legacy_no is None:
+            continue
+        orden = db.execute(
+            """SELECT o.id, o.legacy_ot_no FROM ordenes_trabajo o
+               JOIN equipos e ON e.id = o.equipo_id
+               WHERE e.identificador = ? LIMIT 1""",
+            (patente,),
+        ).fetchone()
+        if not orden:
+            resumen["sin_match"].append({"patente": patente, "legacy_no": legacy_no})
+            continue
+        if orden["legacy_ot_no"] is not None:
+            resumen["ya_tenian"] += 1
+            continue
+        db.execute("UPDATE ordenes_trabajo SET legacy_ot_no = ? WHERE id = ?", (legacy_no, orden["id"]))
+        resumen["actualizadas"] += 1
+    db.commit()
+    return jsonify(resumen)
+
+
+@app.route("/api/admin/migracion/pagos-ot-abiertas", methods=["POST"])
+@requiere_rol()
+def migracion_pagos_ot_abiertas():
+    """Carga los abonos/pagos históricos (tabla legacy pago_ot) de las 101 OT
+    abiertas ya migradas, usando data/migracion_pagos_ot_abiertas.json.
+    Requiere haber corrido antes /api/admin/migracion/backfill-legacy-no.
+    Idempotente por orden (usuario = 'Migración histórica' en pagos_orden)."""
+    try:
+        datos = _cargar_json_data("migracion_pagos_ot_abiertas.json")
+    except FileNotFoundError:
+        return jsonify({"error": "No se encontró data/migracion_pagos_ot_abiertas.json en el deploy"}), 400
+
+    db = get_db()
+    ts = now_iso()
+    usuario_migracion = "Migración histórica"
+    resumen = {"ordenes_procesadas": 0, "ordenes_sin_match": [], "ordenes_ya_migradas": 0, "pagos_creados": 0}
+
+    for entrada in datos:
+        legacy_no = entrada.get("legacy_no")
+        orden = db.execute(
+            "SELECT id FROM ordenes_trabajo WHERE legacy_ot_no = ?", (legacy_no,)
+        ).fetchone()
+        if not orden:
+            resumen["ordenes_sin_match"].append({"legacy_no": legacy_no, "patente": entrada.get("patente")})
+            continue
+        orden_id = orden["id"]
+        ya_migrada = db.execute(
+            "SELECT 1 FROM pagos_orden WHERE orden_id = ? AND usuario = ?",
+            (orden_id, usuario_migracion),
+        ).fetchone()
+        if ya_migrada:
+            resumen["ordenes_ya_migradas"] += 1
+            continue
+        resumen["ordenes_procesadas"] += 1
+        for p in entrada.get("pagos") or []:
+            db.execute(
+                """INSERT INTO pagos_orden (orden_id, metodo_pago, monto, fecha, usuario, creado_en)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (orden_id, p.get("metodo_pago") or "otro", float(p.get("monto") or 0), p.get("fecha"), usuario_migracion, ts),
+            )
+            resumen["pagos_creados"] += 1
+        db.commit()
+
+    return jsonify(resumen)
+
+
+@app.route("/api/admin/migracion/ordenes-historicas", methods=["POST"])
+@requiere_rol()
+def migracion_ordenes_historicas():
+    """Migra las OT CERRADAS de los últimos 3 años (base legacy TalleresTC)
+    como historial completo: cliente, equipo, orden (estado 'entregado'),
+    repuestos, mano de obra externa y pagos — todo en un solo paso, replicando
+    lo que ya existe en el sistema viejo. Usa data/migracion_historica_ordenes.json
+    (generado una sola vez desde la base legacy).
+
+    Por el volumen (~3.000 órdenes, ~48.000 filas entre ítems y pagos) se
+    procesa en lotes vía los parámetros de query ?offset=&limite= para no
+    arriesgar un timeout del proxy en una sola request; se llama repetidas
+    veces avanzando el offset hasta que 'siguiente_offset' sea null.
+    Idempotente por legacy_ot_no: si la orden ya existe, se salta completa."""
+    try:
+        datos = _cargar_json_data("migracion_historica_ordenes.json")
+    except FileNotFoundError:
+        return jsonify({"error": "No se encontró data/migracion_historica_ordenes.json en el deploy"}), 400
+
+    try:
+        offset = int(request.args.get("offset", 0))
+        limite = int(request.args.get("limite", 300))
+    except (TypeError, ValueError):
+        return jsonify({"error": "offset/limite inválidos"}), 400
+
+    lote = datos[offset:offset + limite]
+    db = get_db()
+    ts = now_iso()
+    usuario_migracion = "Migración histórica"
+
+    rut_a_cliente_id = {}
+    for fila in db.execute("SELECT id, rut FROM clientes WHERE rut != ''"):
+        clave = re.sub(r"[.\-]", "", fila["rut"] or "").upper()
+        if clave:
+            rut_a_cliente_id[clave] = fila["id"]
+
+    patente_a_equipo = {}
+    for fila in db.execute("SELECT id, cliente_id, identificador FROM equipos WHERE identificador != ''"):
+        patente_a_equipo.setdefault(fila["identificador"].strip().upper(), {"equipo_id": fila["id"], "cliente_id": fila["cliente_id"]})
+
+    resumen = {
+        "rango": {"offset": offset, "limite": limite, "total_archivo": len(datos)},
+        "ordenes_creadas": 0, "ordenes_ya_existian": 0, "ordenes_sin_rut": 0,
+        "items_repuesto_creados": 0, "items_mano_obra_creados": 0, "pagos_creados": 0,
+        "clientes_creados": 0, "equipos_creados": 0,
+    }
+
+    for o in lote:
+        legacy_no = o.get("legacy_no")
+        ya_existe = db.execute("SELECT 1 FROM ordenes_trabajo WHERE legacy_ot_no = ?", (legacy_no,)).fetchone()
+        if ya_existe:
+            resumen["ordenes_ya_existian"] += 1
+            continue
+
+        rut_clave = re.sub(r"[.\-]", "", o.get("cliente_rut") or "").upper()
+        if not rut_clave:
+            resumen["ordenes_sin_rut"] += 1
+            continue
+
+        cliente_id = rut_a_cliente_id.get(rut_clave)
+        if cliente_id is None:
+            cur = db.execute(
+                "INSERT INTO clientes (nombre, telefono, email, rut, direccion, notas, creado_en) VALUES (?, ?, '', ?, '', '', ?)",
+                (
+                    (o.get("cliente_nombre") or "").strip().upper() or "SIN NOMBRE",
+                    (o.get("cliente_telefono") or "").strip(),
+                    formatear_rut(o.get("cliente_rut") or ""),
+                    ts,
+                ),
+            )
+            cliente_id = cur.lastrowid
+            rut_a_cliente_id[rut_clave] = cliente_id
+            resumen["clientes_creados"] += 1
+
+        patente = (o.get("patente") or "").strip().upper()
+        equipo_id = None
+        if patente:
+            info = patente_a_equipo.get(patente)
+            if info and info["cliente_id"] == cliente_id:
+                equipo_id = info["equipo_id"]
+            elif not info:
+                cur = db.execute(
+                    "INSERT INTO equipos (cliente_id, identificador, marca, modelo, notas, creado_en) VALUES (?, ?, ?, ?, '', ?)",
+                    (cliente_id, patente, (o.get("marca") or "").strip().upper(), (o.get("modelo") or "").strip().upper(), ts),
+                )
+                equipo_id = cur.lastrowid
+                patente_a_equipo[patente] = {"equipo_id": equipo_id, "cliente_id": cliente_id}
+                resumen["equipos_creados"] += 1
+            # si la patente ya existe pero de OTRO cliente (auto vendido/traspasado
+            # entre clientes del taller a lo largo de los años), se deja sin
+            # equipo_id antes que enlazarlo al dueño incorrecto -- el dato de
+            # patente/marca/modelo igual queda visible en descripcion_problema.
+
+        precio_val = o.get("precio")
+        try:
+            precio_val = float(precio_val) if precio_val not in (None, "") else None
+        except (TypeError, ValueError):
+            precio_val = None
+
+        fecha_recepcion = (o.get("fecha_recepcion") or "").strip().replace(" ", "T") or (o.get("fecha_cierre") or ts)
+        fecha_cierre = (o.get("fecha_cierre") or "").strip() or None
+        descripcion = (o.get("requerimiento") or "").strip().upper()
+        if patente and not equipo_id:
+            descripcion = f"[VEHÍCULO {patente} {o.get('marca', '')} {o.get('modelo', '')}] {descripcion}".strip()
+
+        cur = db.execute(
+            """INSERT INTO ordenes_trabajo (
+                cliente_id, equipo_id, estado, descripcion_problema, mecanico,
+                fecha_recepcion, fecha_entrega_real, usuario, creado_en, actualizado_en,
+                precio_referencial, precio_iva, legacy_ot_no
+            ) VALUES (?, ?, 'entregado', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                cliente_id, equipo_id, descripcion, (o.get("mecanico") or "").strip(),
+                fecha_recepcion, fecha_cierre, usuario_migracion, ts, ts,
+                precio_val, 1 if o.get("coniva") else 0, legacy_no,
+            ),
+        )
+        orden_id = cur.lastrowid
+        resumen["ordenes_creadas"] += 1
+
+        for r in o.get("repuestos") or []:
+            descripcion_item = " - ".join(
+                x.strip() for x in [(r.get("modelo") or ""), (r.get("descripcion") or "")] if x and x.strip()
+            ) or "(sin descripción)"
+            try:
+                costo = float(r.get("costo_unitario") or 0)
+            except (TypeError, ValueError):
+                costo = 0.0
+            db.execute(
+                """INSERT INTO orden_items (orden_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en)
+                   VALUES (?, 'repuesto', ?, 1, ?, ?, ?)""",
+                (orden_id, descripcion_item.upper(), costo, usuario_migracion, ts),
+            )
+            resumen["items_repuesto_creados"] += 1
+
+        for m in o.get("mano_obra") or []:
+            descripcion_item = " - ".join(
+                x.strip() for x in [(m.get("nombre_reparador") or ""), (m.get("detalle") or "")] if x and x.strip()
+            ) or "(mano de obra externa)"
+            try:
+                cantidad = float(m.get("cantidad") or 1) or 1
+            except (TypeError, ValueError):
+                cantidad = 1
+            try:
+                precio_item = float(m.get("precio") or 0)
+            except (TypeError, ValueError):
+                precio_item = 0.0
+            db.execute(
+                """INSERT INTO orden_items (orden_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en, detalle)
+                   VALUES (?, 'mano_obra', ?, ?, ?, ?, ?, 'Reparación externa (migración histórica)')""",
+                (orden_id, descripcion_item.upper(), cantidad, precio_item, usuario_migracion, ts),
+            )
+            resumen["items_mano_obra_creados"] += 1
+
+        for p in o.get("pagos") or []:
+            db.execute(
+                """INSERT INTO pagos_orden (orden_id, metodo_pago, monto, fecha, usuario, creado_en)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (orden_id, p.get("metodo_pago") or "otro", float(p.get("monto") or 0), p.get("fecha"), usuario_migracion, ts),
+            )
+            resumen["pagos_creados"] += 1
+
+    db.commit()
+    resumen["siguiente_offset"] = offset + limite if offset + limite < len(datos) else None
     return jsonify(resumen)
 
 

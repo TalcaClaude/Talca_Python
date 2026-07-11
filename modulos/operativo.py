@@ -375,10 +375,19 @@ def init_operativo_db(db):
         "qc_resultado": "TEXT DEFAULT ''",
         "qc_inspector": "TEXT DEFAULT ''",
         "qc_observaciones": "TEXT DEFAULT ''",
+        # Migración histórica: número de OT en la base legacy TalleresTC.
+        # Sirve como clave de idempotencia (no volver a crear/duplicar la
+        # misma OT si el endpoint de migración se corre más de una vez) y
+        # como enlace permanente hacia el sistema antiguo -- ej. para que
+        # una garantía o un pago histórico que menciona "OT #7891" pueda
+        # encontrar la orden correspondiente ya migrada.
+        "legacy_ot_no": "INTEGER",
     }
     for columna, definicion in columnas_nuevas_orden.items():
         if columna not in columnas_orden:
             db.execute(f"ALTER TABLE ordenes_trabajo ADD COLUMN {columna} {definicion}")
+    db.commit()
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ordenes_legacy_ot_no ON ordenes_trabajo (legacy_ot_no)")
     db.commit()
 
     db.executescript(

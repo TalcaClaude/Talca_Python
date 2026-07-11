@@ -39,8 +39,9 @@ async function cargarPanelDueno() {
     document.getElementById("pd-cxc").textContent = pdFmtMoney(d.cxc_pendiente);
     document.getElementById("pd-cxp").textContent = pdFmtMoney(d.cxp_pendiente);
 
-    document.getElementById("pd-chart-tendencia").innerHTML = buildLineChart(
-      d.tendencia_mensual.map(m => ({ mes: m.mes, valor: m.ingresos }))
+    document.getElementById("pd-chart-tendencia").innerHTML = buildLineChartProyeccion(
+      d.tendencia_mensual.map(m => ({ mes: m.mes, valor: m.ingresos })),
+      (d.proyeccion_mensual || []).map(m => ({ mes: m.mes, valor: m.ingresos_proyectados }))
     );
   } catch (e) {
     console.error("Error cargando el panel del dueño:", e);

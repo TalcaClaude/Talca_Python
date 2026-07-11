@@ -7767,6 +7767,30 @@ def _cargar_json_data(nombre_archivo):
         return json.load(f)
 
 
+@app.route("/api/admin/migracion/diagnostico-archivos", methods=["GET"])
+@requiere_rol()
+def migracion_diagnostico_archivos():
+    """Diagnóstico de un solo uso: confirma si los archivos de la migración
+    histórica (data/migracion_*.json) efectivamente llegaron al filesystem
+    del contenedor desplegado -- se agregó porque el primer intento de
+    correr la migración dio 'archivo no encontrado' pese a que el commit sí
+    los incluía, para descartar si es un problema del build (ej. un
+    Dockerfile que copia archivos explícitos y se olvidó de data/) en vez de
+    tener que adivinarlo a ciegas."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(base_dir, "data")
+    info = {"base_dir": base_dir, "base_dir_listado": sorted(os.listdir(base_dir))}
+    if os.path.isdir(data_dir):
+        info["data_dir_existe"] = True
+        info["data_dir_listado"] = []
+        for nombre in sorted(os.listdir(data_dir)):
+            ruta = os.path.join(data_dir, nombre)
+            info["data_dir_listado"].append({"nombre": nombre, "tamano_kb": round(os.path.getsize(ruta) / 1024, 1)})
+    else:
+        info["data_dir_existe"] = False
+    return jsonify(info)
+
+
 @app.route("/api/admin/migracion/backfill-legacy-no", methods=["POST"])
 @requiere_rol()
 def migracion_backfill_legacy_no():

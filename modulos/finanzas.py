@@ -159,6 +159,10 @@ def finanzas_resumen_graficos():
         con la tabla proveedores porque históricamente se escribía a mano).
       - cxc_aging: cuentas por cobrar pendientes, agrupadas por antigüedad
         del vencimiento (al día / 1-30 / 31-60 / 61-90 / +90 días).
+      - cxp_aging: lo mismo pero para cuentas por pagar (a proveedores) --
+        mismos tramos, mismo criterio (saldo pendiente por antigüedad de
+        vencimiento), usando cxp_pagos en vez de pagos_orden para calcular
+        el saldo.
     """
     db = get_db()
     hoy = datetime.now()
@@ -226,10 +230,43 @@ def finanzas_resumen_graficos():
         del b["min"]
         del b["max"]
 
+    buckets_cxp = [
+        {"label": "Al día", "min": None, "max": 0, "monto": 0.0},
+        {"label": "1-30 días", "min": 1, "max": 30, "monto": 0.0},
+        {"label": "31-60 días", "min": 31, "max": 60, "monto": 0.0},
+        {"label": "61-90 días", "min": 61, "max": 90, "monto": 0.0},
+        {"label": "+90 días", "min": 91, "max": None, "monto": 0.0},
+    ]
+    for f in db.execute(
+        "SELECT id, monto_total, fecha_vencimiento FROM cuentas_por_pagar WHERE estado NOT IN ('pagada', 'anulada')"
+    ).fetchall():
+        pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (f["id"],)
+        ).fetchone()[0]
+        saldo = f["monto_total"] - pagado
+        if saldo <= 0:
+            continue
+        dias = 0
+        if f["fecha_vencimiento"]:
+            try:
+                dias = (datetime.now() - datetime.fromisoformat(f["fecha_vencimiento"][:10])).days
+            except ValueError:
+                dias = 0
+        for b in buckets_cxp:
+            if (b["min"] is None or dias >= b["min"]) and (b["max"] is None or dias <= b["max"]):
+                b["monto"] += saldo
+                break
+
+    for b in buckets_cxp:
+        b["monto"] = round(b["monto"], 2)
+        del b["min"]
+        del b["max"]
+
     return jsonify({
         "tendencia_mensual": tendencia,
         "gasto_por_proveedor": gasto_por_proveedor,
         "cxc_aging": buckets,
+        "cxp_aging": buckets_cxp,
     })
 
 

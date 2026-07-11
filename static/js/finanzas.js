@@ -252,6 +252,11 @@ async function cargarGraficosResumenFinanzas() {
       { padL: 90, color: "var(--accent-2)" }
     );
 
+    document.getElementById("fin-chart-aging-cxp").innerHTML = buildBarChartH(
+      data.cxp_aging.map(d => ({ label: d.label, valor: d.monto, extra: fmtMoney(d.monto) })),
+      { padL: 90, color: "var(--danger)" }
+    );
+
     document.getElementById("fin-chart-proveedores").innerHTML = buildBarChartH(
       data.gasto_por_proveedor.map(d => ({ label: d.proveedor, valor: d.monto, extra: fmtMoney(d.monto) })),
       { padL: 150 }
@@ -1047,7 +1052,7 @@ document.getElementById("form-cxp-pago").addEventListener("submit", async (e) =>
 // estado).
 // ---------------------------------------------------------------------------
 
-const ESTADO_PFR_LABEL = { pendiente: "Pendiente de revisión", aprobada: "Aprobada", rechazada: "Rechazada" };
+const ESTADO_PFR_LABEL = { pendiente: "Pendiente de revisión", aprobada: "Aprobada", rechazada: "Rechazada", eliminada: "Eliminada" };
 const ORIGEN_PFR_LABEL = { manual: "Manual", excel: "Excel", foto: "Foto", whatsapp: "WhatsApp" };
 
 async function cargarFacturasPendientesRecepcion() {
@@ -1071,7 +1076,7 @@ async function cargarFacturasPendientesRecepcion() {
         <td>${escapeHtml(p.proveedor_nombre) || "—"}</td>
         <td>${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}${p.condicion_pago === "credito" ? ` (${p.plazo_dias_credito}d)` : ""}${p.condicion_pago === "mixto" ? ` (${p.porcentaje_contado}% contado)` : ""}</td>
         <td class="num mono">${fmtMoney(p.monto_total)}</td>
-        <td><span class="mov-tipo mov-tipo--${p.estado === "aprobada" ? "entrada" : p.estado === "rechazada" ? "perdida" : "salida"}">${ESTADO_PFR_LABEL[p.estado] || p.estado}</span></td>
+        <td><span class="mov-tipo mov-tipo--${p.estado === "aprobada" ? "entrada" : (p.estado === "rechazada" || p.estado === "eliminada") ? "perdida" : "salida"}">${ESTADO_PFR_LABEL[p.estado] || p.estado}</span></td>
         <td><span class="badge-origen">${ORIGEN_PFR_LABEL[p.origen] || p.origen || "—"}</span></td>
         <td>${escapeHtml(p.creado_por) || "—"}</td>
         <td>${acciones}</td>

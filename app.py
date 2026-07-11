@@ -3041,6 +3041,20 @@ def eliminar_factura(factura_id):
         "UPDATE facturas_whatsapp_pendientes SET factura_id = NULL WHERE factura_id = ?",
         (factura_id,),
     )
+    # La factura "real" que se está borrando casi siempre nació de un
+    # registro en facturas_finanzas_pendientes (estado 'aprobada', ver
+    # aprobar_factura_pendiente_recepcion) — esa columna sí tiene
+    # ON DELETE SET NULL, así que al borrar la factura el vínculo se
+    # rompe solo, PERO el registro pendiente se queda con estado
+    # 'aprobada' y sus propios datos (monto, líneas) copiados desde antes
+    # de aprobar, por lo que seguía apareciendo en la pantalla de
+    # Facturas como si nada hubiera pasado (factura "fantasma"). Se marca
+    # 'eliminada' explícitamente para que la lista refleje que ya no
+    # existe, sin perder el historial de quién la registró/aprobó.
+    db.execute(
+        "UPDATE facturas_finanzas_pendientes SET estado = 'eliminada' WHERE factura_id = ? AND estado = 'aprobada'",
+        (factura_id,),
+    )
     db.execute("DELETE FROM facturas WHERE id = ?", (factura_id,))
     db.commit()
     return jsonify({"ok": True, "revertido": bool(lineas_aplicadas)})

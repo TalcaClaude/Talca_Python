@@ -44,6 +44,43 @@ body {
 
 body::before { content: none; }
 
+/* ---------- Scrollbars a juego con el tema oscuro ----------
+   Por defecto el navegador dibuja su propia barra de scroll (gris clara
+   sobre fondo blanco), que desentona fuerte con el tema oscuro — se nota
+   sobre todo en paneles con scroll propio como el kanban de Órdenes de
+   trabajo o las tablas anchas. Se deja una barra delgada, oscura y con
+   esquinas redondeadas en vez de ocultarla del todo, para no perder la
+   posibilidad de arrastrarla con el mouse (el scroll con rueda/trackpad/
+   teclado sigue funcionando igual en cualquiera de los dos casos). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--line);
+  border-radius: 8px;
+  border: 2px solid var(--bg);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--accent);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 .app {
   max-width: 1180px;
   margin: 0 auto;

@@ -6747,6 +6747,144 @@ def planificacion():
 
 
 # ---------------------------------------------------------------------------
+# API: Repuestos pendientes en OTs abiertas (migrados desde TalleresTC)
+# ---------------------------------------------------------------------------
+#
+# La migración (ver migracion_repuestos_ot_abiertas y
+# migracion_ordenes_historicas más abajo) cargó repuestos usados en OTs
+# como orden_items con producto_id = NULL a propósito — vincularlos a un
+# producto real del catálogo actual y dejar que _aplicar_salida_stock
+# corriera sobre ellos habría descontado HOY stock por consumo que ya pasó
+# (o que ni siquiera ha pasado, en el caso de las OTs que siguen abiertas),
+# además de que la descripción migrada es texto libre del sistema viejo, no
+# un match confiable 1:1 con un producto. Por eso esos ítems quedaron "de
+# solo lectura": no alimentaban Planificación ni el dashboard.
+#
+# A diferencia de un reporte histórico de todo lo migrado (que mezcla autos
+# que ya se fueron hace 3 años con los que están en el taller ahora mismo),
+# esto filtra a SOLO las órdenes que siguen abiertas hoy (no entregadas ni
+# canceladas) — son los repuestos que de verdad hacen falta para terminar
+# trabajos en curso, útil para decidir qué comprar ya. Sigue siendo un
+# REPORTE nomás (nunca escribe nada, nunca toca stock ni genera
+# movimientos); intenta sugerir a qué producto del catálogo actual podría
+# corresponder cada descripción (por coincidencia de código interno o
+# nombre dentro del texto), pero la decisión queda en manos de la persona.
+def _repuestos_ots_abiertas_agrupado(db, q=""):
+    # ESTADOS_CERRADOS (entregado/cancelado) se importa de modulos.operativo
+    # más abajo en este archivo — mismo criterio de "abierta" que usa el
+    # resto del sistema, no un hardcode aparte.
+    placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
+    filas = db.execute(
+        f"""
+        SELECT oi.descripcion, oi.cantidad, oi.costo_unitario,
+               o.id AS orden_id, c.nombre AS cliente_nombre
+        FROM orden_items oi
+        JOIN ordenes_trabajo o ON o.id = oi.orden_id
+        LEFT JOIN clientes c ON c.id = o.cliente_id
+        WHERE oi.tipo = 'repuesto' AND oi.usuario = 'Migración histórica'
+          AND o.estado NOT IN ({placeholders_cerrados})
+        """,
+        list(ESTADOS_CERRADOS),
+    ).fetchall()
+
+    # Una misma OT puede tener el mismo repuesto en varias líneas (ej. varios
+    # litros de aceite cargados de a 1 en 1) — "veces_usado" tiene que
+    # contar en CUÁNTAS OTS DISTINTAS aparece, no cuántas líneas hay en
+    # total, o un solo auto con 99 líneas de aceite se vería como si lo
+    # necesitaran 99 autos distintos.
+    agrupado = {}
+    for f in filas:
+        clave = (f["descripcion"] or "").strip().upper()
+        if not clave:
+            continue
+        acc = agrupado.setdefault(clave, {
+            "descripcion": clave, "cantidad_total": 0.0,
+            "costo_total": 0.0, "n_lineas": 0, "ordenes_por_id": {},
+        })
+        acc["n_lineas"] += 1
+        acc["cantidad_total"] += f["cantidad"] or 0
+        acc["costo_total"] += (f["costo_unitario"] or 0) * (f["cantidad"] or 0)
+        acc["ordenes_por_id"].setdefault(f["orden_id"], {"orden_id": f["orden_id"], "cliente_nombre": f["cliente_nombre"] or ""})
+
+    for acc in agrupado.values():
+        acc["ordenes"] = list(acc.pop("ordenes_por_id").values())
+        acc["veces_usado"] = len(acc["ordenes"])
+
+    resultado = list(agrupado.values())
+    if q:
+        q_up = q.strip().upper()
+        resultado = [r for r in resultado if q_up in r["descripcion"]]
+
+    productos_idx = [
+        {"id": p["id"], "nombre": (p["nombre"] or "").upper(), "codigo_interno": (p["codigo_interno"] or "").upper()}
+        for p in db.execute("SELECT id, nombre, codigo_interno FROM productos").fetchall()
+    ]
+
+    def _sugerir_producto(descripcion):
+        for p in productos_idx:
+            if p["codigo_interno"] and len(p["codigo_interno"]) >= 3 and p["codigo_interno"] in descripcion:
+                return p["id"]
+        for p in productos_idx:
+            if p["nombre"] and len(p["nombre"]) >= 4 and p["nombre"] in descripcion:
+                return p["id"]
+        return None
+
+    for r in resultado:
+        r["costo_promedio"] = round(r["costo_total"] / r["veces_usado"]) if r["veces_usado"] else 0
+        r["producto_id_sugerido"] = _sugerir_producto(r["descripcion"])
+        # Se limita la lista de OTs que se manda al front a las primeras 8
+        # (no hace falta mandar las 101 si un repuesto rarísimo apareciera
+        # en todas) — "ordenes_total" guarda el conteo real para que la
+        # interfaz pueda avisar "+N más" sin perder el dato.
+        r["ordenes_total"] = len(r["ordenes"])
+        r["ordenes"] = r["ordenes"][:8]
+
+    resultado.sort(key=lambda r: r["veces_usado"], reverse=True)
+    return resultado
+
+
+@app.route("/api/logistica/repuestos-ots-abiertas", methods=["GET"])
+def logistica_repuestos_ots_abiertas():
+    db = get_db()
+    q = request.args.get("q", "").strip()
+    try:
+        limite = int(request.args.get("limite", 100))
+    except (TypeError, ValueError):
+        limite = 100
+    limite = max(1, min(limite, 500))
+
+    agrupado = _repuestos_ots_abiertas_agrupado(db, q=q)
+    total_descripciones = len(agrupado)
+    total_ots_abiertas_con_repuestos = len({
+        o["orden_id"] for r in agrupado for o in r["ordenes"]
+    })
+    pagina = agrupado[:limite]
+
+    # Se resuelve el detalle del producto sugerido (nombre, código, stock
+    # actual) solo para la página que se va a mostrar, no para todas las
+    # filas agrupadas — no hace falta traer más de lo que se va a pintar.
+    ids_sugeridos = {r["producto_id_sugerido"] for r in pagina if r["producto_id_sugerido"]}
+    productos_detalle = {}
+    if ids_sugeridos:
+        marcas = ",".join("?" * len(ids_sugeridos))
+        for p in db.execute(
+            f"SELECT id, nombre, codigo_interno, stock_disponible, stock_minimo FROM productos WHERE id IN ({marcas})",
+            tuple(ids_sugeridos),
+        ).fetchall():
+            productos_detalle[p["id"]] = dict(p)
+
+    for r in pagina:
+        r["producto_sugerido"] = productos_detalle.get(r["producto_id_sugerido"])
+
+    return jsonify({
+        "total_descripciones_unicas": total_descripciones,
+        "total_ots_abiertas_con_repuestos": total_ots_abiertas_con_repuestos,
+        "resultados": pagina,
+        "truncado": total_descripciones > len(pagina),
+    })
+
+
+# ---------------------------------------------------------------------------
 # API: Reportes y Exportaciones (Módulo 11)
 # ---------------------------------------------------------------------------
 

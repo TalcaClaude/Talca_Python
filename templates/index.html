@@ -101,6 +101,11 @@
       <div class="dash-lista" id="dash-sin-movimiento"><p class="vacio">Cargando…</p></div>
     </div>
 
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Repuestos pendientes (OTs abiertas)</h3>
+      <div class="dash-lista" id="dash-repuestos-ot-abiertas"><p class="vacio">Cargando…</p></div>
+    </div>
+
     <div class="dash-panel dash-panel--ancho">
       <h3 class="dash-titulo">Estado general de la bodega</h3>
       <div class="dash-bodega-resumen" id="dash-bodega-resumen"><p class="vacio">Cargando…</p></div>
@@ -429,6 +434,29 @@
           </thead>
           <tbody id="tbody-planificacion-exceso">
             <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="dash-panel dash-panel--ancho">
+      <h3 class="dash-titulo">Repuestos pendientes en OTs abiertas ahora mismo</h3>
+      <p class="bodega-intro" id="repuestos-ot-abiertas-intro">Cargando…</p>
+      <input type="text" id="repuestos-ot-abiertas-buscar" placeholder="Buscar por descripción del repuesto…" style="margin-bottom:10px">
+      <div class="tabla-wrap">
+        <table class="tabla">
+          <thead>
+            <tr>
+              <th>Descripción (del sistema anterior)</th>
+              <th class="num">En cuántas OTs abiertas</th>
+              <th class="num">Cantidad total</th>
+              <th class="num">Costo promedio</th>
+              <th>OTs que lo necesitan</th>
+              <th>Posible producto en catálogo</th>
+            </tr>
+          </thead>
+          <tbody id="tbody-repuestos-ot-abiertas">
+            <tr><td colspan="6" class="vacio">Cargando…</td></tr>
           </tbody>
         </table>
       </div>

@@ -148,7 +148,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     if (vista === "movimientos") cargarMovimientos();
     if (vista === "mermas") cargarMermas();
     if (vista === "rotacion") cargarRotacion();
-    if (vista === "planificacion") cargarPlanificacion();
+    if (vista === "planificacion") { cargarPlanificacion(); cargarRepuestosOtAbiertas(); }
     if (vista === "reportes") cargarResumenReportes();
     if (vista === "usuarios") cargarUsuarios();
   });
@@ -1556,8 +1556,34 @@ async function cargarDashboard() {
     `;
 
     cargarGraficosDashboardLogistica();
+    cargarRepuestosOtAbiertasDashboard();
   } catch (e) {
     toast(e.message, true);
+  }
+}
+
+// Resumen chico (top 5) de los repuestos que hacen falta en las OTs
+// abiertas AHORA MISMO (no todo el historial migrado — solo autos que
+// siguen en el taller), para que se note en el Dashboard que esa data
+// existe y sirve. El detalle completo con buscador está en la pestaña
+// Planificación (cargarRepuestosOtAbiertas), este solo da un vistazo
+// rápido con link directo.
+async function cargarRepuestosOtAbiertasDashboard() {
+  const cont = document.getElementById("dash-repuestos-ot-abiertas");
+  try {
+    const d = await api("/api/logistica/repuestos-ots-abiertas?limite=5");
+    if (!d.resultados.length) {
+      cont.innerHTML = `<p class="vacio">Ninguna OT abierta tiene repuestos migrados pendientes.</p>`;
+      return;
+    }
+    cont.innerHTML = d.resultados.map(r => `
+        <div class="dash-item">
+          <span class="dash-item-nombre">${escapeHtml(r.descripcion)}</span>
+          <span class="dash-item-valor">${r.veces_usado} OT(s)</span>
+        </div>`).join("")
+      + `<p class="bodega-intro" style="margin-top:8px">${d.total_ots_abiertas_con_repuestos.toLocaleString("es-CL")} OT(s) abiertas con repuestos pendientes. <a href="/logistica#planificacion">Ver detalle completo →</a></p>`;
+  } catch (e) {
+    cont.innerHTML = `<p class="vacio">No se pudo cargar.</p>`;
   }
 }
 
@@ -1699,6 +1725,47 @@ async function cargarPlanificacion() {
             </tr>`;
         }).join("")
       : `<tr><td colspan="5" class="vacio">No se detectó exceso de stock en el período elegido.</td></tr>`;
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// Repuestos migrados que hacen falta en las OTs ABIERTAS ahora mismo (ver
+// /api/logistica/repuestos-ots-abiertas en app.py) — a propósito NO
+// incluye autos ya entregados/cancelados ni el resto del historial de 3
+// años, solo lo que está pendiente en trabajos en curso. Solo informativo,
+// no toca stock ni se mezcla con el cálculo automático de arriba (que sí
+// puede seguir confiando 100% en movimientos reales).
+async function cargarRepuestosOtAbiertas() {
+  const tbody = document.getElementById("tbody-repuestos-ot-abiertas");
+  const intro = document.getElementById("repuestos-ot-abiertas-intro");
+  const q = (document.getElementById("repuestos-ot-abiertas-buscar").value || "").trim();
+  tbody.innerHTML = `<tr><td colspan="6" class="vacio">Cargando…</td></tr>`;
+  try {
+    const url = q ? `/api/logistica/repuestos-ots-abiertas?q=${encodeURIComponent(q)}&limite=300` : `/api/logistica/repuestos-ots-abiertas?limite=100`;
+    const d = await api(url);
+    intro.textContent = q
+      ? `${d.resultados.length} resultado(s) para "${q}" — repuestos migrados que aparecen en OTs abiertas hoy.`
+      : `Repuestos cargados en órdenes de trabajo que siguen ABIERTAS ahora mismo (no autos ya entregados) — quedaron migrados con su descripción de texto libre, sin vincular a un producto del catálogo, así que NO están incluidos en el cálculo automático de arriba. Es solo informativo, para ver qué hace falta comprar para terminar los trabajos en curso. ${d.total_ots_abiertas_con_repuestos.toLocaleString("es-CL")} OT(s) abiertas tienen repuestos migrados pendientes.`;
+
+    tbody.innerHTML = d.resultados.length
+      ? d.resultados.map(r => {
+          const sugerido = r.producto_sugerido
+            ? `#${r.producto_sugerido.id} — ${escapeHtml(r.producto_sugerido.nombre)} (${escapeHtml(r.producto_sugerido.codigo_interno)}) · stock ${r.producto_sugerido.stock_disponible}, mínimo ${r.producto_sugerido.stock_minimo}`
+            : `<span class="vacio-inline">Sin coincidencia en catálogo</span>`;
+          const ots = r.ordenes.map(o => `OT #${o.orden_id}${o.cliente_nombre ? ` (${escapeHtml(o.cliente_nombre)})` : ""}`).join(", ")
+            + (r.ordenes_total > r.ordenes.length ? ` +${r.ordenes_total - r.ordenes.length} más` : "");
+          return `
+            <tr>
+              <td>${escapeHtml(r.descripcion)}</td>
+              <td class="num">${r.veces_usado}</td>
+              <td class="num">${r.cantidad_total}</td>
+              <td class="num">${fmtMoney(r.costo_promedio)}</td>
+              <td>${ots}</td>
+              <td>${sugerido}</td>
+            </tr>`;
+        }).join("")
+      : `<tr><td colspan="6" class="vacio">${q ? "Sin resultados para esa búsqueda." : "Ninguna OT abierta tiene repuestos migrados pendientes."}</td></tr>`;
   } catch (e) {
     toast(e.message, true);
   }
@@ -2422,6 +2489,12 @@ document.getElementById("mov-limpiar-filtros").addEventListener("click", () => {
 
 document.getElementById("rotacion-periodo").addEventListener("change", cargarRotacion);
 document.getElementById("planificacion-periodo").addEventListener("change", cargarPlanificacion);
+
+let repuestosOtAbiertasBuscarTimeout;
+document.getElementById("repuestos-ot-abiertas-buscar").addEventListener("input", () => {
+  clearTimeout(repuestosOtAbiertasBuscarTimeout);
+  repuestosOtAbiertasBuscarTimeout = setTimeout(cargarRepuestosOtAbiertas, 300);
+});
 
 document.getElementById("btn-planificacion-recalcular").addEventListener("click", async () => {
   const btn = document.getElementById("btn-planificacion-recalcular");

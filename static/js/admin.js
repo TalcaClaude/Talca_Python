@@ -190,6 +190,39 @@ document.getElementById("btn-resetear-password").addEventListener("click", async
 });
 
 // ---------------------------------------------------------------------------
+// Mantenimiento: limpiar CxC huérfanas (ver /api/admin/cxc/limpiar-huerfanas
+// en modulos/operativo.py) — se puede correr las veces que sea, es un no-op
+// si ya no queda nada por limpiar.
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-limpiar-cxc-huerfanas").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-limpiar-cxc-huerfanas");
+  const resultado = document.getElementById("resultado-limpiar-cxc");
+  btn.disabled = true;
+  resultado.textContent = "Revisando…";
+  try {
+    const data = await api("/api/admin/cxc/limpiar-huerfanas", { method: "POST" });
+    if (data.cantidad_eliminadas === 0) {
+      resultado.textContent = "No había ninguna CxC huérfana para limpiar.";
+    } else {
+      const detalle = data.eliminadas
+        .map(e => `OT #${e.orden_id} (${e.estado_actual}): $${Math.round(e.monto).toLocaleString("es-CL")}`)
+        .join(" · ");
+      resultado.textContent = `Se eliminaron ${data.cantidad_eliminadas} cuenta(s) por cobrar: ${detalle}`;
+    }
+    if (data.conservadas_con_pago && data.conservadas_con_pago.length) {
+      resultado.textContent += ` — Ojo: ${data.conservadas_con_pago.length} más tenían un pago registrado y NO se tocaron (revisar a mano).`;
+    }
+    toast("Limpieza de CxC completada");
+  } catch (e) {
+    resultado.textContent = "";
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 

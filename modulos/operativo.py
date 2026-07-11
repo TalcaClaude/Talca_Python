@@ -46,6 +46,7 @@ from core import (
     formatear_rut,
     get_db,
     now_iso,
+    requiere_rol,
     sumar_dias_iso,
     usuario_actual,
 )
@@ -999,6 +1000,50 @@ def _manejar_transicion_cxc(db, estado_antes, orden_row_despues):
         ).fetchone()[0]
         if total_pagado <= 0:
             db.execute("DELETE FROM cuentas_por_cobrar WHERE id = ?", (cxc["id"],))
+
+
+@bp.route("/api/admin/cxc/limpiar-huerfanas", methods=["POST"])
+@requiere_rol()
+def limpiar_cxc_huerfanas():
+    """Limpieza de una sola vez (idempotente, se puede correr las veces que
+    sea) para las CxC que quedaron "pegadas" de ANTES de que existiera
+    _manejar_transicion_cxc: esa función solo actúa en el momento en que una
+    OT cambia de estado, así que una orden que ya había salido de
+    listo/entregado hacia atrás mientras corría el código viejo se quedó con
+    una CxC vigente aunque el auto ya no esté listo para retirar. Este
+    endpoint aplica retroactivamente el mismo criterio: borra la CxC de
+    cualquier orden que HOY no esté en listo/entregado, siempre que no tenga
+    ningún pago registrado en su contra (mismo resguardo que
+    _manejar_transicion_cxc: si ya se cobró algo, no se toca)."""
+    db = get_db()
+    huerfanas = db.execute(
+        """
+        SELECT cxc.id AS cxc_id, cxc.orden_id AS orden_id, cxc.monto_total AS monto,
+               o.estado AS estado_actual
+        FROM cuentas_por_cobrar cxc
+        JOIN ordenes_trabajo o ON o.id = cxc.orden_id
+        WHERE o.estado NOT IN ('listo', 'entregado')
+        """
+    ).fetchall()
+
+    eliminadas = []
+    conservadas_con_pago = []
+    for fila in huerfanas:
+        total_pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE orden_id = ?", (fila["orden_id"],)
+        ).fetchone()[0]
+        if total_pagado > 0:
+            conservadas_con_pago.append({"orden_id": fila["orden_id"], "monto": fila["monto"], "total_pagado": total_pagado})
+            continue
+        db.execute("DELETE FROM cuentas_por_cobrar WHERE id = ?", (fila["cxc_id"],))
+        eliminadas.append({"orden_id": fila["orden_id"], "monto": fila["monto"], "estado_actual": fila["estado_actual"]})
+    db.commit()
+
+    return jsonify({
+        "eliminadas": eliminadas,
+        "cantidad_eliminadas": len(eliminadas),
+        "conservadas_con_pago": conservadas_con_pago,
+    })
 
 
 @bp.route("/api/operativo/dashboard", methods=["GET"])

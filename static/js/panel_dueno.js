@@ -17,12 +17,16 @@ async function pdApi(path) {
   return data;
 }
 
+const PD_RANGO_LABEL = { "12": "12 meses", "24": "24 meses", "36": "36 meses", "historico": "todo el historial" };
+
 async function cargarPanelDueno() {
   try {
-    const d = await pdApi("/api/panel-dueno");
+    const rango = document.getElementById("pd-filtro-rango").value || "12";
+    const d = await pdApi(`/api/panel-dueno?rango=${encodeURIComponent(rango)}`);
 
     document.getElementById("pd-ingresos-mes").textContent = pdFmtMoney(d.ingresos_mes);
     const elVar = document.getElementById("pd-var-mes");
+    elVar.classList.remove("kpi-delta--up", "kpi-delta--down");
     if (d.var_pct_mes === null) {
       elVar.textContent = "sin datos del mes anterior";
     } else {
@@ -39,13 +43,21 @@ async function cargarPanelDueno() {
     document.getElementById("pd-cxc").textContent = pdFmtMoney(d.cxc_pendiente);
     document.getElementById("pd-cxp").textContent = pdFmtMoney(d.cxp_pendiente);
 
+    document.getElementById("pd-chart-tendencia-sub").textContent =
+      `Pagos recibidos de clientes — ${PD_RANGO_LABEL[d.rango_aplicado] || "12 meses"}`;
     document.getElementById("pd-chart-tendencia").innerHTML = buildLineChartProyeccion(
       d.tendencia_mensual.map(m => ({ mes: m.mes, valor: m.ingresos })),
       (d.proyeccion_mensual || []).map(m => ({ mes: m.mes, valor: m.ingresos_proyectados }))
+    );
+
+    document.getElementById("pd-chart-clientes").innerHTML = buildBarChartH(
+      (d.ranking_clientes_historico || []).map(c => ({ label: c.nombre, valor: c.monto, extra: pdFmtMoney(c.monto) })),
+      { padL: 140 }
     );
   } catch (e) {
     console.error("Error cargando el panel del dueño:", e);
   }
 }
 
+document.getElementById("pd-filtro-rango").addEventListener("change", cargarPanelDueno);
 cargarPanelDueno();

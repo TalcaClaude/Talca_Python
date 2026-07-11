@@ -8,7 +8,33 @@ const state = {
   opProductos: [],
   opGarantias: [],
   catalogoVehiculos: null, // { marcas: [...], modelos: {marca: [...]} } — catálogo de referencia (no depende del historial de OTs)
+  opMesTablero: null, // mes elegido para el tablero de OTs (null = mes en curso, "todos" = historial completo)
+  opMesDashboard: null, // mismo criterio, para los gráficos del dashboard
 };
+
+const OP_MESES_NOMBRE = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+];
+
+// Arma las <option> de un selector de mes: mes actual + N meses anteriores +
+// "Todo el historial" -- usado tanto en el tablero de OTs como en el
+// dashboard de Operativo (ver <select id="op-filtro-mes"> y
+// id="op-dash-filtro-mes"> en operativo.html), siempre con el mismo criterio
+// que pidió el taller: Operativo es la vista mes a mes, no el histórico
+// completo (eso vive en Panel Principal).
+function opcionesSelectorMes(meses = 24) {
+  const hoy = new Date();
+  let html = "";
+  for (let i = 0; i < meses; i++) {
+    const d = new Date(hoy.getFullYear(), hoy.getMonth() - i, 1);
+    const valor = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const etiqueta = i === 0 ? `${OP_MESES_NOMBRE[d.getMonth()]} ${d.getFullYear()} (actual)` : `${OP_MESES_NOMBRE[d.getMonth()]} ${d.getFullYear()}`;
+    html += `<option value="${valor}">${etiqueta}</option>`;
+  }
+  html += `<option value="todos">Todo el historial</option>`;
+  return html;
+}
 
 // Actualización en vivo del tablero de OT: mientras la pestaña "Órdenes de
 // Trabajo" esté abierta, se refresca sola cada pocos segundos — para ver,
@@ -279,7 +305,8 @@ async function cargarDashboardOperativo() {
 
 async function cargarGraficosDashboardOperativo() {
   try {
-    const data = await api("/api/operativo/dashboard/graficos");
+    const mesQS = state.opMesDashboard ? `?mes=${encodeURIComponent(state.opMesDashboard)}` : "";
+    const data = await api(`/api/operativo/dashboard/graficos${mesQS}`);
 
     document.getElementById("op-chart-tendencia").innerHTML = buildLineChart(
       data.tendencia_mensual.map(d => ({ mes: d.mes, valor: d.cantidad }))
@@ -332,8 +359,9 @@ const OP_ESTADOS_LABEL = {
 
 async function cargarOperativo(silencioso = false) {
   try {
+    const mesQS = state.opMesTablero ? `?mes=${encodeURIComponent(state.opMesTablero)}` : "";
     const [dataOrdenes, dataClientes, dataProductos] = await Promise.all([
-      api("/api/operativo/ordenes"),
+      api(`/api/operativo/ordenes${mesQS}`),
       api("/api/operativo/clientes"),
       api("/api/productos"),
     ]);
@@ -694,6 +722,21 @@ document.querySelectorAll("#op-kanban .op-columna").forEach(columna => {
 
 document.getElementById("op-buscar").addEventListener("input", renderTableroOperativo);
 document.getElementById("op-filtro-estado").addEventListener("change", renderTableroOperativo);
+
+// ---- Selectores de mes (tablero de OTs y dashboard) ----
+const selectMesTablero = document.getElementById("op-filtro-mes");
+selectMesTablero.innerHTML = opcionesSelectorMes();
+selectMesTablero.addEventListener("change", () => {
+  state.opMesTablero = selectMesTablero.value;
+  cargarOperativo();
+});
+
+const selectMesDashboard = document.getElementById("op-dash-filtro-mes");
+selectMesDashboard.innerHTML = opcionesSelectorMes();
+selectMesDashboard.addEventListener("change", () => {
+  state.opMesDashboard = selectMesDashboard.value;
+  cargarGraficosDashboardOperativo();
+});
 
 // ---- Clientes ----
 
@@ -1168,7 +1211,10 @@ document.getElementById("btn-op-nueva-orden").addEventListener("click", async ()
   document.getElementById("opon-estanque").value = 0;
   document.getElementById("opon-estanque-valor").textContent = "0 / 8";
   if (state.opOrdenes.length === 0) {
-    const dataOrdenes = await api("/api/operativo/ordenes");
+    // acá se usa para poblar autocompletados (ej. buscar cliente por
+    // historial), no para pintar el tablero -- por eso se pide el
+    // historial completo y no se acota al mes en curso.
+    const dataOrdenes = await api("/api/operativo/ordenes?mes=todos");
     state.opOrdenes = dataOrdenes.ordenes;
   }
   poblarDatalistsOperativo();

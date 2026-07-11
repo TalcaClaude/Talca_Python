@@ -1129,11 +1129,17 @@ def dashboard_operativo_graficos():
     endpoint de KPIs de arriba porque son consultas más pesadas y no todas
     las pantallas que usan los KPIs necesitan también los gráficos):
       - tendencia_mensual: OT recibidas y su valor referencial, últimos 12
-        meses calendario, por fecha_recepcion.
-      - distribucion_estado: cuántas OT hay hoy en cada estado del flujo.
-      - top_marcas: las marcas de vehículo con más OT (histórico).
-      - ranking_clientes: los clientes con más monto referencial acumulado.
-      - tasa_garantias_mensual: garantías creadas / OT entregadas, por mes.
+        meses calendario, por fecha_recepcion (siempre rolling 12 meses,
+        no se ve afectado por ?mes -- para eso está Panel Principal).
+      - distribucion_estado: cuántas OT hay HOY en cada estado del flujo
+        (foto del momento, no depende del mes).
+      - top_marcas / top_modelos / ranking_clientes: acotados al mes
+        elegido con ?mes=YYYY-MM (por defecto el mes en curso) -- Operativo
+        es la vista del día a día; el ranking histórico de clientes vive en
+        Panel Principal. Se puede pedir ?mes=todos para ver el histórico acá
+        también si hace falta.
+      - tasa_garantias_mensual: garantías creadas / OT entregadas, por mes
+        (rolling 12 meses, igual que tendencia_mensual).
     """
     db = get_db()
     hoy = datetime.now()
@@ -1163,15 +1169,23 @@ def dashboard_operativo_graficos():
         for e in ESTADOS_ORDEN
     ]
 
+    mes_filtro = (request.args.get("mes") or "").strip() or f"{hoy.year:04d}-{hoy.month:02d}"
+    filtro_mes_sql = ""
+    filtro_mes_params = []
+    if mes_filtro != "todos":
+        filtro_mes_sql = " AND substr(o.fecha_recepcion, 1, 7) = ?"
+        filtro_mes_params = [mes_filtro]
+
     top_marcas = [
         {"marca": r["marca"], "cantidad": r["cantidad"]}
         for r in db.execute(
-            """
+            f"""
             SELECT e.marca AS marca, COUNT(*) AS cantidad
             FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
-            WHERE e.marca != ''
+            WHERE e.marca != ''{filtro_mes_sql}
             GROUP BY e.marca ORDER BY cantidad DESC LIMIT 8
-            """
+            """,
+            filtro_mes_params,
         ).fetchall()
     ]
 
@@ -1180,24 +1194,27 @@ def dashboard_operativo_graficos():
     top_modelos = [
         {"modelo": f"{r['marca']} {r['modelo']}".strip(), "cantidad": r["cantidad"]}
         for r in db.execute(
-            """
+            f"""
             SELECT e.marca AS marca, e.modelo AS modelo, COUNT(*) AS cantidad
             FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
-            WHERE e.modelo != ''
+            WHERE e.modelo != ''{filtro_mes_sql}
             GROUP BY e.marca, e.modelo ORDER BY cantidad DESC LIMIT 8
-            """
+            """,
+            filtro_mes_params,
         ).fetchall()
     ]
 
     ranking_clientes = [
         {"nombre": r["nombre"], "cantidad": r["cantidad"], "monto": r["monto"]}
         for r in db.execute(
-            """
+            f"""
             SELECT c.nombre AS nombre, COUNT(*) AS cantidad,
                    COALESCE(SUM(o.precio_referencial), 0) AS monto
             FROM ordenes_trabajo o JOIN clientes c ON c.id = o.cliente_id
+            WHERE 1=1{filtro_mes_sql}
             GROUP BY c.id ORDER BY monto DESC LIMIT 8
-            """
+            """,
+            filtro_mes_params,
         ).fetchall()
     ]
 
@@ -1222,6 +1239,7 @@ def dashboard_operativo_graficos():
         "top_modelos": top_modelos,
         "ranking_clientes": ranking_clientes,
         "tasa_garantias_mensual": tasa_garantias,
+        "mes_filtrado": mes_filtro,
     })
 
 
@@ -1278,15 +1296,37 @@ def api_seguimiento_publico():
 
 @bp.route("/api/operativo/ordenes", methods=["GET"])
 def listar_ordenes():
+    """Con la migración histórica (~3.000 OT cerradas) el listado sin filtro
+    dejaría de ser útil para el día a día -- Operativo es para el mes a mes,
+    el historial completo vive en Panel Principal (gráficos agregados) y se
+    puede consultar acá igual filtrando por cliente/equipo o pidiendo
+    explícitamente ?mes=todos. Reglas:
+      - Las OT ABIERTAS (no en ESTADOS_CERRADOS) siempre se listan todas,
+        sin importar el mes -- son trabajo activo, no historial.
+      - Las OT CERRADAS se filtran por el mes de fecha_entrega_real. Por
+        defecto es el mes en curso; se puede pedir otro con ?mes=YYYY-MM, o
+        ?mes=todos para traer el historial completo cerrado (ej. al buscar
+        por cliente_id/equipo_id, donde tiene sentido ver todo su historial).
+      - Si viene cliente_id o equipo_id explícito, el filtro de mes NO se
+        aplica por defecto (se asume que quieres el historial de ESE cliente
+        o vehículo, no solo el mes en curso) -- pero sigue pudiéndose forzar
+        con ?mes= si se quiere acotar igual.
+    """
     db = get_db()
     estado = (request.args.get("estado") or "").strip()
     cliente_id = request.args.get("cliente_id")
     equipo_id = request.args.get("equipo_id")
+    mes = (request.args.get("mes") or "").strip()
+
+    if estado and estado not in ESTADOS_ORDEN:
+        return jsonify({"error": f"Estado inválido. Usa uno de: {', '.join(ESTADOS_ORDEN)}"}), 400
+
+    if not mes and not cliente_id and not equipo_id:
+        mes = f"{datetime.now().year:04d}-{datetime.now().month:02d}"
+
     sql = "SELECT * FROM ordenes_trabajo WHERE 1=1"
     params = []
     if estado:
-        if estado not in ESTADOS_ORDEN:
-            return jsonify({"error": f"Estado inválido. Usa uno de: {', '.join(ESTADOS_ORDEN)}"}), 400
         sql += " AND estado = ?"
         params.append(estado)
     if cliente_id:
@@ -1295,9 +1335,14 @@ def listar_ordenes():
     if equipo_id:
         sql += " AND equipo_id = ?"
         params.append(equipo_id)
+    if mes and mes != "todos":
+        placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
+        sql += f" AND (estado NOT IN ({placeholders_cerrados}) OR substr(fecha_entrega_real, 1, 7) = ?)"
+        params.extend(ESTADOS_CERRADOS)
+        params.append(mes)
     sql += " ORDER BY creado_en DESC"
     rows = db.execute(sql, params).fetchall()
-    return jsonify({"ordenes": [_orden_dict(db, r) for r in rows], "total": len(rows)})
+    return jsonify({"ordenes": [_orden_dict(db, r) for r in rows], "total": len(rows), "mes_filtrado": mes or "todos"})
 
 
 def _orden_dict_detalle(db, row):

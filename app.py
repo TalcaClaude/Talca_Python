@@ -7319,13 +7319,33 @@ def panel_dueno():
     ).fetchone()[0]
     capacidad_semanal = round(cerradas_8sem / 8, 1)
 
-    # Tendencia mensual de ingresos (pagos recibidos) -- los últimos 12
-    # meses calendario, incluyendo meses sin pagos (quedan en 0, no se
-    # saltan, para que el gráfico no distorsione la escala de tiempo).
+    # Tendencia mensual de ingresos (pagos recibidos) -- ventana elegible con
+    # ?rango=12|24|36|historico (por defecto 12), a diferencia de Operativo
+    # (que es mes a mes) Panel Principal es la vista de largo plazo para
+    # decisiones estratégicas, así que el rango es configurable. 'historico'
+    # arranca desde el primer pago que exista en el sistema (migrado o no),
+    # incluyendo meses sin pagos en 0 para no distorsionar la escala.
+    rango_param = (request.args.get("rango") or "12").strip()
+    if rango_param == "historico":
+        primer_pago = db.execute("SELECT MIN(fecha) FROM pagos_orden WHERE fecha != ''").fetchone()[0]
+        if primer_pago:
+            anio_ini, mes_ini = int(primer_pago[0:4]), int(primer_pago[5:7])
+            n_meses = (hoy.year - anio_ini) * 12 + (hoy.month - mes_ini) + 1
+            n_meses = max(1, min(n_meses, 240))  # tope de cordura: 20 años
+        else:
+            n_meses = 12
+    else:
+        try:
+            n_meses = int(rango_param)
+        except (TypeError, ValueError):
+            n_meses = 12
+        if n_meses not in (12, 24, 36):
+            n_meses = 12
+
     tendencia = []
     meses_cursor = []
     m = hoy.replace(day=1)
-    for _ in range(12):
+    for _ in range(n_meses):
         meses_cursor.append(m)
         m = (m - timedelta(days=1)).replace(day=1)
     meses_cursor.reverse()
@@ -7363,6 +7383,22 @@ def panel_dueno():
     cxc_pendiente, cxc_vencido = _cxc_pendiente_y_vencido(db)
     cxp_pendiente, cxp_vencido = _cxp_pendiente_y_vencido(db)
 
+    # Ranking histórico de clientes (todo el tiempo, sin acotar por mes) --
+    # la versión mensual de este mismo gráfico vive en Operativo
+    # (/api/operativo/dashboard/graficos); acá es a propósito de largo plazo,
+    # para identificar clientes recurrentes/valiosos más allá de un mes puntual.
+    ranking_clientes_historico = [
+        {"nombre": r["nombre"], "cantidad": r["cantidad"], "monto": r["monto"]}
+        for r in db.execute(
+            """
+            SELECT c.nombre AS nombre, COUNT(*) AS cantidad,
+                   COALESCE(SUM(o.precio_referencial), 0) AS monto
+            FROM ordenes_trabajo o JOIN clientes c ON c.id = o.cliente_id
+            GROUP BY c.id ORDER BY monto DESC LIMIT 8
+            """
+        ).fetchall()
+    ]
+
     return jsonify({
         "ingresos_mes": round(ingresos_mes, 2),
         "ingresos_mes_anterior": round(ingresos_mes_anterior, 2),
@@ -7375,6 +7411,8 @@ def panel_dueno():
         "cxp_pendiente": cxp_pendiente,
         "tendencia_mensual": tendencia,
         "proyeccion_mensual": proyeccion_mensual,
+        "rango_aplicado": rango_param if rango_param in ("historico",) or n_meses in (12, 24, 36) else "12",
+        "ranking_clientes_historico": ranking_clientes_historico,
     })
 
 

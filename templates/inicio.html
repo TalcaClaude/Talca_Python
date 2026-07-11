@@ -68,11 +68,31 @@
     </div>
   </section>
 
+  <section class="toolbar" style="margin-bottom:8px;">
+    <label for="pd-filtro-rango" style="align-self:center;color:var(--text-muted);font-size:13px;">Ver los últimos:</label>
+    <select id="pd-filtro-rango">
+      <option value="12">12 meses</option>
+      <option value="24">24 meses</option>
+      <option value="36">36 meses</option>
+      <option value="historico">Histórico (desde el primer pago)</option>
+    </select>
+    <span style="flex:1"></span>
+    <span class="chart-sub" style="align-self:center;">Panel Principal es la vista de largo plazo — el día a día está en cada módulo.</span>
+  </section>
+
   <div class="chart-grid chart-grid--par">
     <div class="chart-card">
       <h3>Ingresos mensuales</h3>
-      <p class="chart-sub">Últimos 12 meses — pagos recibidos de clientes</p>
+      <p class="chart-sub" id="pd-chart-tendencia-sub">Pagos recibidos de clientes</p>
       <div id="pd-chart-tendencia">Cargando…</div>
+    </div>
+  </div>
+
+  <div class="chart-grid">
+    <div class="chart-card">
+      <h3>Clientes por monto (histórico)</h3>
+      <p class="chart-sub">Top 8 de todo el tiempo, por monto referencial — la versión del mes está en Operativo</p>
+      <div id="pd-chart-clientes">Cargando…</div>
     </div>
   </div>
 

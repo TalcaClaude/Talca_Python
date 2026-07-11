@@ -95,6 +95,13 @@
     </div>
   </section>
 
+  <div class="toolbar" style="margin-bottom:8px;">
+    <label for="op-dash-filtro-mes" style="align-self:center;color:var(--text-muted);font-size:13px;">Mes de los gráficos de abajo:</label>
+    <select id="op-dash-filtro-mes"></select>
+    <span style="flex:1"></span>
+    <span class="chart-sub" style="align-self:center;">Operativo es la vista mes a mes — el histórico completo está en Panel Principal.</span>
+  </div>
+
   <div class="chart-grid">
     <div class="chart-card">
       <h3>OT ingresadas por mes</h3>
@@ -111,12 +118,12 @@
   <div class="chart-grid">
     <div class="chart-card">
       <h3>Top marcas</h3>
-      <p class="chart-sub">Por cantidad de OT histórica</p>
+      <p class="chart-sub">Por cantidad de OT del mes elegido arriba</p>
       <div id="op-chart-marcas">Cargando…</div>
     </div>
     <div class="chart-card">
       <h3>Modelos más atendidos</h3>
-      <p class="chart-sub">Marca + modelo, top 8 histórico</p>
+      <p class="chart-sub">Marca + modelo, top 8 del mes elegido arriba</p>
       <div id="op-chart-modelos">Cargando…</div>
     </div>
   </div>
@@ -124,7 +131,7 @@
   <div class="chart-grid">
     <div class="chart-card">
       <h3>Clientes por monto</h3>
-      <p class="chart-sub">Top 8 histórico, por monto referencial</p>
+      <p class="chart-sub">Top 8 del mes elegido arriba, por monto referencial — la versión histórica está en Panel Principal</p>
       <div id="op-chart-clientes">Cargando…</div>
     </div>
   </div>
@@ -156,6 +163,8 @@
       <option value="entregado">Entregado</option>
       <option value="cancelado">Cancelado</option>
     </select>
+    <label for="op-filtro-mes" style="align-self:center;color:var(--text-muted);font-size:13px;">Mes (OTs cerradas):</label>
+    <select id="op-filtro-mes" title="Las OT abiertas siempre se muestran todas; este filtro solo acota las cerradas/entregadas."></select>
     <span style="flex:1"></span>
     <button class="btn btn-primary" id="btn-op-nueva-orden">+ Nueva orden</button>
   </section>

@@ -74,15 +74,6 @@
       <span class="sidebar-modulo-nombre">Agente IA</span>
     </a>
   </div>
-
-  {% if session.get("rol") == "admin" %}
-  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'administracion' else '' }}">
-    <a class="sidebar-modulo-header" href="/administracion" style="text-decoration:none; display:flex;">
-      <span class="sidebar-modulo-tag">05</span>
-      <span class="sidebar-modulo-nombre">Administración</span>
-    </a>
-  </div>
-  {% endif %}
 </nav>
 
 <script>

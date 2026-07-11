@@ -26,6 +26,9 @@
     <div class="topbar-acciones">
       <span class="sesion-usuario" id="sesion-usuario"></span>
       <a href="/" class="btn btn-secundario">← Módulos</a>
+      {% if rol_usuario == "admin" %}
+      <a href="/administracion" class="btn btn-secundario">Administración</a>
+      {% endif %}
       <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
     </div>
   </header>

@@ -122,6 +122,22 @@ def _inyectar_asset_version():
     return {"ASSET_VERSION": ASSET_VERSION}
 
 
+@app.context_processor
+def _inyectar_rol_usuario():
+    # Las plantillas venían chequeando session.get("rol") == "admin"
+    # directo, pero core.usuario_rol() (la misma función que protege
+    # /administracion del lado del servidor) en realidad devuelve
+    # session.get("rol") or "admin" — o sea, trata como admin a
+    # cualquier sesión que no tenga "rol" guardado (sesiones viejas de
+    # antes de que existiera el sistema de roles). Esa diferencia hacía
+    # que /administracion SÍ dejara entrar a esas cuentas pero el botón
+    # para llegar ahí nunca apareciera en ninguna pantalla — quedaba
+    # "escondido" aunque el usuario sí tuviera permiso. Se expone acá la
+    # misma función para que las plantillas usen exactamente la misma
+    # regla que ya se aplica en el servidor.
+    return {"rol_usuario": usuario_rol() if session.get("user_id") else None}
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taller")
 
@@ -661,6 +677,24 @@ def init_db():
             usuario TEXT DEFAULT '',
             creado_en TEXT NOT NULL
         );
+        """
+    )
+    db.commit()
+
+    # Índices para CxC/CxP — quedaron sin crear cuando se agregaron estas
+    # tablas (solo orden_id en cuentas_por_cobrar tenía índice automático
+    # por ser UNIQUE); a medida que crece el historial de facturas/pagos,
+    # los joins y filtros por cliente/proveedor/estado que usan el
+    # dashboard, el gráfico de antigüedad y los listados de Finanzas
+    # empiezan a hacer table scan completo sin esto.
+    db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_cxc_cliente_id ON cuentas_por_cobrar (cliente_id);
+        CREATE INDEX IF NOT EXISTS idx_cxc_estado ON cuentas_por_cobrar (estado);
+        CREATE INDEX IF NOT EXISTS idx_cxp_proveedor_id ON cuentas_por_pagar (proveedor_id);
+        CREATE INDEX IF NOT EXISTS idx_cxp_factura_id ON cuentas_por_pagar (factura_id);
+        CREATE INDEX IF NOT EXISTS idx_cxp_estado ON cuentas_por_pagar (estado);
+        CREATE INDEX IF NOT EXISTS idx_cxp_pagos_cxp_id ON cxp_pagos (cxp_id);
         """
     )
     db.commit()

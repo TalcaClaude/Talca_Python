@@ -687,7 +687,40 @@ function renderTableroOperativo() {
       opArrastrandoTarjeta = false;
     });
   });
+
+  updateKanbanFades();
 }
+
+// El tablero (kanban) tiene más columnas de las que caben en una pantalla
+// normal, así que hace scroll horizontal — estas dos franjas con flecha
+// avisan de que hay más columnas para ese lado, para que no se sienta
+// "cortado" sin explicación. Solo se muestran cuando efectivamente hay
+// contenido oculto hacia ese lado (no son decorativas fijas).
+function updateKanbanFades() {
+  const kanban = document.getElementById("op-kanban");
+  const fadeIzq = document.getElementById("op-kanban-fade-izq");
+  const fadeDer = document.getElementById("op-kanban-fade-der");
+  if (!kanban || !fadeIzq || !fadeDer) return;
+  const rect = kanban.getBoundingClientRect();
+  [fadeIzq, fadeDer].forEach(el => {
+    el.style.top = `${rect.top}px`;
+    el.style.height = `${rect.height}px`;
+  });
+  fadeIzq.style.left = `${rect.left}px`;
+  fadeDer.style.left = `${rect.right - 56}px`;
+  const haySobranteIzq = kanban.scrollLeft > 4;
+  const haySobranteDer = kanban.scrollLeft + kanban.clientWidth < kanban.scrollWidth - 4;
+  fadeIzq.classList.toggle("op-kanban-fade--visible", haySobranteIzq);
+  fadeDer.classList.toggle("op-kanban-fade--visible", haySobranteDer);
+}
+
+(function conectarKanbanFades() {
+  const kanban = document.getElementById("op-kanban");
+  if (!kanban) return;
+  kanban.addEventListener("scroll", updateKanbanFades);
+  window.addEventListener("resize", updateKanbanFades);
+  window.addEventListener("scroll", updateKanbanFades, true);
+})();
 
 // ---- Kanban interactivo: arrastrar una OT de una columna a otra cambia su
 // estado. Los drop-zones son las columnas mismas (elementos fijos del HTML),

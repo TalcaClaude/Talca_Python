@@ -503,18 +503,70 @@ svg .chart-punto-hover {
 /* El tablero se "escapa" del ancho centrado de .app (max-width: 1180px)
    para aprovechar todo el ancho de la pantalla y que las columnas quepan
    lo más posible en una sola línea, sin scroll horizontal. */
+.op-kanban-wrap {
+  /* Antes esto se estiraba a 100vw con el hack de left:50%/margin:-50vw
+     para ganar ancho extra -- pero esa cuenta se hace contra el viewport
+     completo, y como esta pantalla tiene una barra lateral fija que corre
+     el contenido, el resultado quedaba desalineado (ver nota sobre
+     op-kanban-fade más abajo). Se saca el hack: el tablero usa el mismo
+     ancho que el resto del contenido (toolbar, tarjetas resumen, etc.),
+     que ya es bastante ancho, y así todas las coordenadas calzan. */
+  position: relative;
+}
+
 .op-kanban {
   display: flex;
   gap: 8px;
   overflow-x: auto;
   align-items: start;
-  position: relative;
-  left: 50%;
-  right: 50%;
-  width: 100vw;
-  margin-left: -50vw;
-  margin-right: -50vw;
-  padding: 0 16px;
+  scroll-behavior: smooth;
+}
+
+/* Indicador de que el tablero sigue para el lado — dos franjas con
+   degradado + flecha que solo se muestran cuando efectivamente hay más
+   columnas ocultas hacia ese lado (ver updateKanbanFades() en operativo.js).
+   No cambia el tablero en sí (sigue siendo una fila con scroll horizontal),
+   solo lo hace evidente para que no se sienta "cortado" sin explicación.
+   Van con position:fixed y coordenadas puestas por JS (no CSS puro) porque
+   #op-kanban se estira con el hack de vw de arriba, y ese hack calcula el
+   50% contra el viewport completo en vez de contra el layout real (que
+   tiene la barra lateral corriendo el contenido) — position:fixed medido
+   con getBoundingClientRect() es la única forma de que la franja quede
+   pegada exactamente al borde real del tablero, mismo patrón que usa el
+   tooltip de los gráficos (ver charts.js: chartTooltipMove). */
+.op-kanban-fade {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 56px;
+  height: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease-out;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+}
+
+.op-kanban-fade--visible {
+  opacity: 1;
+}
+
+.op-kanban-fade--izq {
+  justify-content: flex-start;
+  background: linear-gradient(90deg, var(--bg) 12%, transparent);
+}
+
+.op-kanban-fade--der {
+  justify-content: flex-end;
+  background: linear-gradient(270deg, var(--bg) 12%, transparent);
+}
+
+.op-kanban-fade span {
+  font-size: 22px;
+  line-height: 1;
+  color: var(--text-muted);
+  padding: 0 8px;
 }
 
 .op-columna {
@@ -522,7 +574,7 @@ svg .chart-punto-hover {
   border: 1px solid var(--line);
   border-radius: 8px;
   flex: 1 1 0;
-  min-width: 138px;
+  min-width: 168px;
   display: flex;
   flex-direction: column;
   max-height: calc(100vh - 260px);

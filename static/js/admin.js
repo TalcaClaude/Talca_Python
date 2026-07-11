@@ -258,6 +258,22 @@ document.getElementById("btn-migracion-garantias-items").addEventListener("click
   }
 });
 
+document.getElementById("btn-diagnostico-garantias").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-diagnostico-garantias");
+  const resultado = document.getElementById("resultado-diagnostico-garantias");
+  btn.disabled = true;
+  resultado.textContent = "Consultando…";
+  try {
+    const data = await api("/api/admin/migracion/diagnostico-garantias");
+    resultado.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    resultado.textContent = "";
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------

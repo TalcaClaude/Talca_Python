@@ -66,6 +66,10 @@
     <br>
     <button class="btn btn-secundario" id="btn-migracion-garantias-items">Migrar ítems de garantías</button>
     <p class="ayuda-inline" id="resultado-migracion-garantias-items" style="margin-top:10px;"></p>
+    <hr style="border-color: var(--linea); margin:16px 0;">
+    <p class="chart-sub">Diagnóstico de un solo uso: si la migración de arriba falla con "FOREIGN KEY constraint failed", este botón muestra el esquema real de las tablas y si hay alguna violación de integridad referencial concreta, para poder revisarlo sin acceder directo a la base.</p>
+    <button class="btn btn-secundario" id="btn-diagnostico-garantias">Diagnosticar tablas de garantías</button>
+    <pre class="ayuda-inline" id="resultado-diagnostico-garantias" style="margin-top:10px; white-space:pre-wrap; word-break:break-word;"></pre>
   </section>
 
 </div>

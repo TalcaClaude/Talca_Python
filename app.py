@@ -8190,6 +8190,43 @@ def migracion_garantias_items():
     return jsonify(resumen)
 
 
+@app.route("/api/admin/migracion/diagnostico-garantias", methods=["GET"])
+@requiere_rol()
+def migracion_diagnostico_garantias():
+    """Diagnóstico de un solo uso: la migración de ítems de garantías
+    (migracion_garantias_items) empezó a fallar en producción con
+    'FOREIGN KEY constraint failed' para las 9 garantías, todas a la vez
+    -- no un dato puntual corrupto, sino algo sistémico en cómo está la
+    relación garantias/garantia_items en esa base específica. Como no
+    hay acceso directo a la base de producción, este endpoint expone lo
+    necesario para diagnosticarlo desde el navegador: el esquema real de
+    ambas tablas, la definición de la llave foránea tal como SQLite la
+    ve, y un chequeo explícito (PRAGMA foreign_key_check) que lista
+    cualquier fila que efectivamente esté violando la integridad
+    referencial ahora mismo."""
+    db = get_db()
+    info = {
+        "garantias_table_info": [dict(r) for r in db.execute("PRAGMA table_info(garantias)")],
+        "garantia_items_table_info": [dict(r) for r in db.execute("PRAGMA table_info(garantia_items)")],
+        "garantia_items_foreign_key_list": [dict(r) for r in db.execute("PRAGMA foreign_key_list(garantia_items)")],
+        "foreign_key_check_garantia_items": [dict(r) for r in db.execute("PRAGMA foreign_key_check(garantia_items)")],
+        "total_garantias": db.execute("SELECT COUNT(*) AS n FROM garantias").fetchone()["n"],
+        "total_garantia_items": db.execute("SELECT COUNT(*) AS n FROM garantia_items").fetchone()["n"],
+        "tablas_legado": [
+            r["name"] for r in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_legado%'"
+            )
+        ],
+    }
+    # Muestra puntual: las mismas 9 garantías que reportó el error, para
+    # ver si su 'id' efectivamente existe y con qué tipo de dato.
+    muestra = []
+    for fila in db.execute("SELECT id, cliente_id, fecha_recepcion FROM garantias LIMIT 15"):
+        muestra.append(dict(fila))
+    info["muestra_garantias"] = muestra
+    return jsonify(info)
+
+
 # ---------------------------------------------------------------------------
 # Migración histórica completa (OTs cerradas, últimos 3 años) — a diferencia
 # de las migraciones anteriores (que reciben el JSON por upload desde el

@@ -966,6 +966,41 @@ def _recalcular_estado_cxc(db, orden_id):
         )
 
 
+def _manejar_transicion_cxc(db, estado_antes, orden_row_despues):
+    """Se llama en cada cambio de estado de una OT para mantener la CxC
+    sincronizada con si la orden está de verdad lista para cobrar:
+      - Si ENTRA a 'listo'/'entregado': genera la CxC (ver
+        _generar_o_actualizar_cxc, ya es idempotente si ya existía).
+      - Si SALE de 'listo'/'entregado' hacia atrás (ej. un auto que se
+        había marcado listo pero hay que reabrirlo a reparación por un
+        defecto encontrado después) Y esa CxC todavía no tiene ningún pago
+        registrado: se elimina. No tenía sentido dejar "pendiente de
+        cobro" un auto que en la práctica todavía no está listo para
+        retirar -- se vuelve a generar sola, con el monto recalculado a
+        ese momento (por si cambiaron los ítems durante el reproceso),
+        cuando la orden vuelva a llegar a 'listo' o 'entregado'.
+      - Si ya tiene algún pago encima (el cliente alcanzó a abonar antes
+        de que se reabriera la OT), NO se borra -- se conserva para no
+        perder el rastro de esa plata ya cobrada; solo se generará una
+        CxC nueva si no quedaba ninguna al reingresar a 'listo'/'entregado'
+        (_generar_o_actualizar_cxc ya es un no-op si sigue existiendo)."""
+    estado_despues = orden_row_despues["estado"]
+    if estado_despues in ESTADOS_QUE_CIERRAN_CXC:
+        _generar_o_actualizar_cxc(db, orden_row_despues)
+        return
+    if estado_antes in ESTADOS_QUE_CIERRAN_CXC and estado_despues not in ESTADOS_QUE_CIERRAN_CXC:
+        cxc = db.execute(
+            "SELECT id FROM cuentas_por_cobrar WHERE orden_id = ?", (orden_row_despues["id"],)
+        ).fetchone()
+        if cxc is None:
+            return
+        total_pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE orden_id = ?", (orden_row_despues["id"],)
+        ).fetchone()[0]
+        if total_pagado <= 0:
+            db.execute("DELETE FROM cuentas_por_cobrar WHERE id = ?", (cxc["id"],))
+
+
 @bp.route("/api/operativo/dashboard", methods=["GET"])
 def dashboard_operativo():
     """KPIs para el dashboard del módulo Operativo:
@@ -973,10 +1008,10 @@ def dashboard_operativo():
       - ots_cerradas_mes: órdenes entregadas cuya fecha_entrega_real cae en el mes calendario actual.
       - monto_cerradas_mes: valor cobrado (Neto + IVA si aplica) de esas órdenes cerradas este mes.
       - monto_por_cerrar: valor cobrado (Neto + IVA si aplica) de todas las órdenes abiertas.
-      - costo_ots_cerradas: costo real de los repuestos usados en TODAS las órdenes entregadas
-        (histórico, no solo el mes).
+      - costo_ots_cerradas: costo real de los repuestos usados en las órdenes entregadas del mes
+        actual (mismo criterio "mes en curso" que el resto del dashboard de Operativo).
       - costo_mano_obra_ots_cerradas: costo real de la mano de obra CON costo unitario cargado
-        (típicamente trabajo externo/subcontratado) en TODAS las órdenes entregadas (histórico) —
+        (típicamente trabajo externo/subcontratado) en las órdenes entregadas del mes actual —
         la mano de obra interna sin costo cargado no aporta acá.
       - costo_garantias: costo real de los repuestos/mano de obra usados en TODAS las garantías
         (histórico) — es dinero que sale sin que se le cobre al cliente.
@@ -1010,10 +1045,6 @@ def dashboard_operativo():
         (prefijo_mes,),
     ).fetchall()
     ids_cerradas_mes = [r["id"] for r in cerradas_mes]
-
-    ids_cerradas_todas = [
-        r["id"] for r in db.execute("SELECT id FROM ordenes_trabajo WHERE estado = 'entregado'").fetchall()
-    ]
 
     def _valor_total_orden(row):
         neto = row["precio_referencial"] or 0
@@ -1053,10 +1084,14 @@ def dashboard_operativo():
 
     monto_cerradas_mes = round(sum(_valor_total_orden(r) for r in cerradas_mes), 2)
     monto_por_cerrar = round(sum(_valor_total_orden(r) for r in abiertas), 2)
-    costo_ots_cerradas = round(_suma_costo_repuestos(ids_cerradas_todas), 2)
-    costo_mano_obra_ots_cerradas = round(_suma_costo_mano_obra(ids_cerradas_todas), 2)
     costo_repuestos_cerradas_mes = _suma_costo_repuestos(ids_cerradas_mes)
     costo_mano_obra_cerradas_mes = _suma_costo_mano_obra(ids_cerradas_mes)
+    # Antes eran históricas (todas las OTs entregadas alguna vez); se acotaron
+    # al mes en curso para que sigan el mismo criterio "día a día" que el
+    # resto de las tarjetas de este dashboard (ver nota del usuario: todo lo
+    # de Operativo debe ser mensual salvo CxC/CxP).
+    costo_ots_cerradas = round(costo_repuestos_cerradas_mes, 2)
+    costo_mano_obra_ots_cerradas = round(costo_mano_obra_cerradas_mes, 2)
     utilidad_mes = round(monto_cerradas_mes - costo_repuestos_cerradas_mes - costo_mano_obra_cerradas_mes, 2)
 
     costo_garantias = db.execute(
@@ -1479,9 +1514,8 @@ def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
-    if actualizada["estado"] in ESTADOS_QUE_CIERRAN_CXC:
-        _generar_o_actualizar_cxc(db, actualizada)
-        db.commit()
+    _manejar_transicion_cxc(db, row["estado"], actualizada)
+    db.commit()
     return _orden_dict(db, actualizada), None
 
 
@@ -1669,9 +1703,8 @@ def editar_orden(orden_id):
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
-    if actualizada["estado"] in ESTADOS_QUE_CIERRAN_CXC:
-        _generar_o_actualizar_cxc(db, actualizada)
-        db.commit()
+    _manejar_transicion_cxc(db, row["estado"], actualizada)
+    db.commit()
     return jsonify(_orden_dict(db, actualizada))
 
 

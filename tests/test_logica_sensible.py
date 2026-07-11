@@ -2531,18 +2531,15 @@ class TestCuentasPorCobrar(unittest.TestCase):
 
         self.assertIsNone(self._cxc_de_orden(orden["id"]))
 
-    def test_reentregar_una_orden_no_duplica_ni_pisa_el_monto_ya_congelado(self):
-        cliente = self._crear_cliente("Cliente CxC - vaiven")
+    def test_reentregar_una_orden_no_duplica_la_cxc_en_el_camino_normal(self):
+        cliente = self._crear_cliente("Cliente CxC - normal")
         orden = self._crear_orden(cliente["id"])
         self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 50000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "listo"})
         self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
 
-        # Se revierte a un estado abierto y se sube el precio, luego se
-        # vuelve a entregar: la CxC ya emitida no debe cambiar de monto.
-        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "reparacion"})
-        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 999999})
-        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
-
+        # El camino normal (listo -> entregado) es ambos estados "que
+        # cierran CxC" -- no debe generar una segunda fila.
         with taller_app.app.app_context():
             db = taller_app.get_db()
             total = db.execute(
@@ -2550,6 +2547,51 @@ class TestCuentasPorCobrar(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(total, 1)
         cxc = self._cxc_de_orden(orden["id"])
+        self.assertEqual(cxc["monto_total"], 50000)
+
+    def test_reabrir_una_orden_sin_pagos_elimina_la_cxc_y_se_regenera_con_el_monto_nuevo(self):
+        # El taller pidió explícitamente este comportamiento: si una OT que
+        # ya estaba "lista para cobrar" se devuelve a reparación (ej. se
+        # encontró una falla y hay que reabrirla) la CxC no debería seguir
+        # apareciendo como pendiente de cobro -- el auto en realidad no está
+        # listo. Debe reaparecer, con el monto recalculado, cuando la OT
+        # vuelva a llegar a 'listo'/'entregado'.
+        cliente = self._crear_cliente("Cliente CxC - reabierta sin pagos")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 50000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        self.assertIsNotNone(self._cxc_de_orden(orden["id"]))
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "reparacion"})
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            total = db.execute(
+                "SELECT COUNT(*) FROM cuentas_por_cobrar WHERE orden_id = ?", (orden["id"],)
+            ).fetchone()[0]
+        self.assertEqual(total, 0, "la CxC debería eliminarse al salir de listo/entregado sin pagos")
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 999999})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        cxc = self._cxc_de_orden(orden["id"])
+        self.assertIsNotNone(cxc)
+        self.assertEqual(cxc["monto_total"], 999999, "al reingresar debe recalcularse con el precio vigente")
+
+    def test_reabrir_una_orden_con_pagos_ya_registrados_conserva_la_cxc(self):
+        # Si el cliente ya alcanzó a abonar mientras la OT estaba
+        # lista/entregada, reabrirla no debe hacer desaparecer ese registro
+        # de cobro -- se perdería el rastro de la plata ya recibida.
+        cliente = self._crear_cliente("Cliente CxC - reabierta con pagos")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 50000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/pagos",
+            json={"metodo_pago": "efectivo", "monto": 20000},
+        )
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "reparacion"})
+        cxc = self._cxc_de_orden(orden["id"])
+        self.assertIsNotNone(cxc, "con un pago ya registrado, la CxC debe conservarse al reabrir")
         self.assertEqual(cxc["monto_total"], 50000)
 
     def test_estado_de_la_cxc_pasa_a_parcial_y_luego_a_pagada_con_los_abonos(self):

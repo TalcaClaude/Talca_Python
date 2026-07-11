@@ -169,7 +169,8 @@ function buildLineChart(datos, opts = {}) {
     const x0 = i === 0 ? padL : (pts[i - 1][0] + pts[i][0]) / 2;
     const x1 = i === n - 1 ? w - padR : (pts[i][0] + pts[i + 1][0]) / 2;
     const mm = d.mes.split("-")[1];
-    const tt = chartAttrJson({ t: `${MESES_LABEL_CORTO[mm] || d.mes} ${d.mes.split("-")[0]}`, r: [{ c: color, l: "Valor", v: fmtValor(d.valor) }] });
+    const filas = d.tt && d.tt.length ? d.tt.map(f => ({ c: f.c || color, l: f.l, v: f.v })) : [{ c: color, l: "Valor", v: fmtValor(d.valor) }];
+    const tt = chartAttrJson({ t: `${MESES_LABEL_CORTO[mm] || d.mes} ${d.mes.split("-")[0]}`, r: filas });
     hits += `<rect class="chart-hit" x="${x0.toFixed(1)}" y="${padT}" width="${(x1 - x0).toFixed(1)}" height="${plotH}" data-tt='${tt}'/>`;
     hits += `<circle class="chart-punto-hover" cx="${pts[i][0].toFixed(1)}" cy="${pts[i][1].toFixed(1)}" r="2.5" fill="${color}" opacity="0"/>`;
   });
@@ -335,7 +336,13 @@ function buildLineChartProyeccion(reales, proyectados, opts = {}) {
 
 /**
  * Barras horizontales para rankings (marcas, clientes, proveedores...).
- * datos: [{label: "Ford", valor: 310, extra: "opcional"}]
+ * datos: [{label: "Ford", valor: 310, extra: "opcional",
+ *          tt: [{l:"OTs", v:"12"}, ...] (opcional -- filas de tooltip a
+ *          medida; si no viene, el tooltip cae al default "Valor: <extra>"),
+ *          tendencia: "sube"|"baja"|"estable" (opcional -- dibuja una
+ *          flechita de color junto al valor de la derecha)}]
+ * El tooltip a medida existe para no repetir en el hover el mismo dato que
+ * ya se lee en la barra (ver dataviz: el hover debe aportar algo nuevo).
  */
 function buildBarChartH(datos, opts = {}) {
   const w = opts.w || 340;
@@ -346,15 +353,21 @@ function buildBarChartH(datos, opts = {}) {
   const plotW = w - padL - padR;
   if (!datos.length) return `<p class="ayuda-inline">Sin datos suficientes todavía.</p>`;
   const vmax = Math.max(...datos.map(d => d.valor), 1);
+  const TENDENCIA_FLECHA = { sube: "▲", baja: "▼", estable: "→" };
+  const TENDENCIA_COLOR = { sube: "var(--success)", baja: "var(--danger)", estable: "var(--text-muted)" };
   let bars = "";
   datos.forEach((d, i) => {
     const y = 5 + i * rowH;
     const barH = rowH * 0.55;
     const bw = plotW * d.valor / vmax;
-    const tt = chartAttrJson({ t: String(d.label), r: [{ c: color, l: "Valor", v: String(d.extra || d.valor) }] });
+    const filas = d.tt && d.tt.length ? d.tt.map(f => ({ c: f.c || null, l: f.l, v: f.v })) : [{ c: color, l: "Valor", v: String(d.extra || d.valor) }];
+    const tt = chartAttrJson({ t: String(d.label), r: filas });
+    const flecha = d.tendencia && TENDENCIA_FLECHA[d.tendencia]
+      ? `<tspan fill="${TENDENCIA_COLOR[d.tendencia]}">${TENDENCIA_FLECHA[d.tendencia]}</tspan> `
+      : "";
     bars += `<rect x="${padL}" y="${(y + (rowH - barH) / 2).toFixed(1)}" width="${bw.toFixed(1)}" height="${barH}" rx="3" fill="${color}" data-tt='${tt}'/>`;
     bars += `<text x="${padL - 8}" y="${(y + rowH / 2 + 4).toFixed(1)}" text-anchor="end" font-size="11.5" fill="var(--text-muted)">${escapeHtmlChart(d.label)}</text>`;
-    bars += `<text x="${(padL + bw + 6).toFixed(1)}" y="${(y + rowH / 2 + 4).toFixed(1)}" font-size="11.5" fill="var(--text)">${escapeHtmlChart(d.extra || String(d.valor))}</text>`;
+    bars += `<text x="${(padL + bw + 6).toFixed(1)}" y="${(y + rowH / 2 + 4).toFixed(1)}" font-size="11.5" fill="var(--text)">${flecha}${escapeHtmlChart(d.extra || String(d.valor))}</text>`;
   });
   return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" role="img" aria-label="Gráfico de barras">${bars}</svg>`;
 }

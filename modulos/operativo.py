@@ -1165,14 +1165,25 @@ def dashboard_operativo_graficos():
     las pantallas que usan los KPIs necesitan también los gráficos):
       - tendencia_mensual: OT recibidas y su valor referencial, últimos 12
         meses calendario, por fecha_recepcion (siempre rolling 12 meses,
-        no se ve afectado por ?mes -- para eso está Panel Principal).
-      - distribucion_estado: cuántas OT hay HOY en cada estado del flujo
-        (foto del momento, no depende del mes).
+        no se ve afectado por ?mes -- para eso está Panel Principal). Es una
+        CANTIDAD (nº de OT), no un monto en pesos -- ver tooltipValueFmt en
+        el frontend (cargarGraficosDashboardOperativo).
+      - distribucion_estado: cuántas OT hay en cada estado del flujo, con el
+        mismo criterio "mes en curso" que el resto de Operativo -- los
+        estados abiertos (todavía no entregado/cancelado) muestran SIEMPRE
+        el total completo sin importar el mes (una OT abierta no tiene
+        "mes", está abierta ahora); los estados cerrados (entregado,
+        cancelado) se acotan al mes elegido con ?mes=. Coherente con
+        listar_ordenes() más abajo, que usa exactamente este mismo criterio.
       - top_marcas / top_modelos / ranking_clientes: acotados al mes
         elegido con ?mes=YYYY-MM (por defecto el mes en curso) -- Operativo
         es la vista del día a día; el ranking histórico de clientes vive en
         Panel Principal. Se puede pedir ?mes=todos para ver el histórico acá
-        también si hace falta.
+        también si hace falta. Cada marca de top_marcas trae además sus 3
+        modelos más frecuentes (modelos_top) y cada modelo de top_modelos
+        trae la cantidad del mes anterior y el promedio de los últimos 12
+        meses, para poder mostrar una tendencia (sube/baja/estable) sin
+        duplicar en el tooltip el mismo dato que ya se ve en la barra.
       - tasa_garantias_mensual: garantías creadas / OT entregadas, por mes
         (rolling 12 meses, igual que tendencia_mensual).
     """
@@ -1197,13 +1208,6 @@ def dashboard_operativo_graficos():
         ).fetchone()
         tendencia.append({"mes": pref, "cantidad": fila[0], "monto": fila[1]})
 
-    distribucion_estado = [
-        {"estado": e, "label": ESTADOS_LABEL.get(e, e), "cantidad": db.execute(
-            "SELECT COUNT(*) FROM ordenes_trabajo WHERE estado = ?", (e,)
-        ).fetchone()[0]}
-        for e in ESTADOS_ORDEN
-    ]
-
     mes_filtro = (request.args.get("mes") or "").strip() or f"{hoy.year:04d}-{hoy.month:02d}"
     filtro_mes_sql = ""
     filtro_mes_params = []
@@ -1211,33 +1215,104 @@ def dashboard_operativo_graficos():
         filtro_mes_sql = " AND substr(o.fecha_recepcion, 1, 7) = ?"
         filtro_mes_params = [mes_filtro]
 
-    top_marcas = [
-        {"marca": r["marca"], "cantidad": r["cantidad"]}
-        for r in db.execute(
+    if mes_filtro == "todos":
+        distribucion_estado = [
+            {"estado": e, "label": ESTADOS_LABEL.get(e, e), "cantidad": db.execute(
+                "SELECT COUNT(*) FROM ordenes_trabajo WHERE estado = ?", (e,)
+            ).fetchone()[0]}
+            for e in ESTADOS_ORDEN
+        ]
+    else:
+        distribucion_estado = []
+        for e in ESTADOS_ORDEN:
+            if e in ESTADOS_CERRADOS:
+                cantidad = db.execute(
+                    "SELECT COUNT(*) FROM ordenes_trabajo WHERE estado = ? AND substr(fecha_entrega_real, 1, 7) = ?",
+                    (e, mes_filtro),
+                ).fetchone()[0]
+            else:
+                cantidad = db.execute(
+                    "SELECT COUNT(*) FROM ordenes_trabajo WHERE estado = ?", (e,)
+                ).fetchone()[0]
+            distribucion_estado.append({"estado": e, "label": ESTADOS_LABEL.get(e, e), "cantidad": cantidad})
+
+    top_marcas_rows = db.execute(
+        f"""
+        SELECT e.marca AS marca, COUNT(*) AS cantidad
+        FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
+        WHERE e.marca != ''{filtro_mes_sql}
+        GROUP BY e.marca ORDER BY cantidad DESC LIMIT 8
+        """,
+        filtro_mes_params,
+    ).fetchall()
+
+    def _modelos_top_de_marca(marca):
+        filas = db.execute(
             f"""
-            SELECT e.marca AS marca, COUNT(*) AS cantidad
+            SELECT e.modelo AS modelo, COUNT(*) AS cantidad
             FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
-            WHERE e.marca != ''{filtro_mes_sql}
-            GROUP BY e.marca ORDER BY cantidad DESC LIMIT 8
+            WHERE e.marca = ? AND e.modelo != ''{filtro_mes_sql}
+            GROUP BY e.modelo ORDER BY cantidad DESC LIMIT 3
             """,
-            filtro_mes_params,
+            [marca] + filtro_mes_params,
         ).fetchall()
+        return [{"modelo": f["modelo"], "cantidad": f["cantidad"]} for f in filas]
+
+    top_marcas = [
+        {"marca": r["marca"], "cantidad": r["cantidad"], "modelos_top": _modelos_top_de_marca(r["marca"])}
+        for r in top_marcas_rows
     ]
 
     # Modelos de auto que más se reparan (marca + modelo juntos, ej. "FORD
     # RANGER"), a diferencia de top_marcas que solo agrupa por marca.
-    top_modelos = [
-        {"modelo": f"{r['marca']} {r['modelo']}".strip(), "cantidad": r["cantidad"]}
-        for r in db.execute(
-            f"""
-            SELECT e.marca AS marca, e.modelo AS modelo, COUNT(*) AS cantidad
-            FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
-            WHERE e.modelo != ''{filtro_mes_sql}
-            GROUP BY e.marca, e.modelo ORDER BY cantidad DESC LIMIT 8
+    top_modelos_rows = db.execute(
+        f"""
+        SELECT e.marca AS marca, e.modelo AS modelo, COUNT(*) AS cantidad
+        FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
+        WHERE e.modelo != ''{filtro_mes_sql}
+        GROUP BY e.marca, e.modelo ORDER BY cantidad DESC LIMIT 8
+        """,
+        filtro_mes_params,
+    ).fetchall()
+
+    mes_anterior_dt = (cursor_mes - timedelta(days=1)).replace(day=1)
+    pref_mes_anterior = f"{mes_anterior_dt.year:04d}-{mes_anterior_dt.month:02d}"
+    hace_12_meses = meses[0]  # ya viene ordenado ascendente arriba
+
+    def _tendencia_modelo(marca, modelo):
+        cantidad_mes_anterior = db.execute(
+            """
+            SELECT COUNT(*) FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
+            WHERE e.marca = ? AND e.modelo = ? AND substr(o.fecha_recepcion, 1, 7) = ?
             """,
-            filtro_mes_params,
-        ).fetchall()
-    ]
+            (marca, modelo, pref_mes_anterior),
+        ).fetchone()[0]
+        total_12m = db.execute(
+            """
+            SELECT COUNT(*) FROM ordenes_trabajo o JOIN equipos e ON e.id = o.equipo_id
+            WHERE e.marca = ? AND e.modelo = ? AND o.fecha_recepcion >= ?
+            """,
+            (marca, modelo, hace_12_meses.strftime("%Y-%m-%d")),
+        ).fetchone()[0]
+        promedio_12m = round(total_12m / 12, 1)
+        return cantidad_mes_anterior, promedio_12m
+
+    top_modelos = []
+    for r in top_modelos_rows:
+        cantidad_mes_anterior, promedio_12m = _tendencia_modelo(r["marca"], r["modelo"])
+        if r["cantidad"] > cantidad_mes_anterior:
+            tendencia_dir = "sube"
+        elif r["cantidad"] < cantidad_mes_anterior:
+            tendencia_dir = "baja"
+        else:
+            tendencia_dir = "estable"
+        top_modelos.append({
+            "modelo": f"{r['marca']} {r['modelo']}".strip(),
+            "cantidad": r["cantidad"],
+            "cantidad_mes_anterior": cantidad_mes_anterior,
+            "promedio_12m": promedio_12m,
+            "tendencia": tendencia_dir,
+        })
 
     ranking_clientes = [
         {"nombre": r["nombre"], "cantidad": r["cantidad"], "monto": r["monto"]}
@@ -1265,7 +1340,7 @@ def dashboard_operativo_graficos():
             (pref,),
         ).fetchone()[0]
         pct = round(garantias_creadas / entregadas * 100, 1) if entregadas else 0
-        tasa_garantias.append({"mes": pref, "pct": pct})
+        tasa_garantias.append({"mes": pref, "pct": pct, "garantias_creadas": garantias_creadas, "entregadas": entregadas})
 
     return jsonify({
         "tendencia_mensual": tendencia,

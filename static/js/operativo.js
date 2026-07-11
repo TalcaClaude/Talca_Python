@@ -288,7 +288,7 @@ async function cargarDashboardOperativo() {
     document.getElementById("op-s-utilidad-mes").textContent = fmtMoney(data.utilidad_mes);
     document.getElementById("op-s-costo-ots-cerradas").textContent = fmtMoney(data.costo_ots_cerradas);
     document.getElementById("op-s-costo-mano-obra-cerradas").textContent = fmtMoney(data.costo_mano_obra_ots_cerradas || 0);
-    document.getElementById("op-s-costo-garantias").textContent = fmtMoney(data.costo_garantias);
+    document.getElementById("op-s-costo-garantias").textContent = fmtMoney(data.costo_garantias_mes);
     document.getElementById("op-s-garantias-abiertas").textContent = data.garantias_abiertas;
     document.getElementById("op-s-ticket-promedio").textContent = fmtMoney(data.ticket_promedio_mes);
     document.getElementById("op-s-tiempo-promedio").textContent =
@@ -308,8 +308,13 @@ async function cargarGraficosDashboardOperativo() {
     const mesQS = state.opMesDashboard ? `?mes=${encodeURIComponent(state.opMesDashboard)}` : "";
     const data = await api(`/api/operativo/dashboard/graficos${mesQS}`);
 
+    // "OT ingresadas por mes" es una CANTIDAD (nº de OT), no plata -- el
+    // tooltip por defecto de buildLineChart usa formato $ porque la mayoría
+    // de los gráficos de línea del sistema son montos; acá se pisa con un
+    // formateador propio para que no diga "$15" cuando son 15 órdenes.
     document.getElementById("op-chart-tendencia").innerHTML = buildLineChart(
-      data.tendencia_mensual.map(d => ({ mes: d.mes, valor: d.cantidad }))
+      data.tendencia_mensual.map(d => ({ mes: d.mes, valor: d.cantidad })),
+      { tooltipValueFmt: (v) => `${Math.round(v)} OT${Math.round(v) === 1 ? "" : "s"}` }
     );
 
     const estadosConDatos = data.distribucion_estado.filter(d => d.cantidad > 0);
@@ -317,21 +322,61 @@ async function cargarGraficosDashboardOperativo() {
       estadosConDatos.map(d => ({ label: d.label, valor: d.cantidad }))
     );
 
+    // Top marcas: el tooltip no repite la cantidad (ya se lee en la barra),
+    // muestra en cambio los 2-3 modelos de esa marca que más se repiten
+    // este mes -- un dato que hoy no se ve en ningún otro lado del dashboard.
     document.getElementById("op-chart-marcas").innerHTML = buildBarChartH(
-      data.top_marcas.map(d => ({ label: d.marca, valor: d.cantidad }))
+      data.top_marcas.map(d => ({
+        label: d.marca,
+        valor: d.cantidad,
+        tt: (d.modelos_top && d.modelos_top.length)
+          ? d.modelos_top.map(m => ({ l: m.modelo, v: `${m.cantidad} OT` }))
+          : [{ l: "Sin modelo registrado", v: "" }],
+      }))
     );
 
+    // Modelos más atendidos: flechita de tendencia (sube/baja/estable vs. el
+    // mes anterior) junto al número, y el tooltip muestra el mes anterior y
+    // el promedio de los últimos 12 meses -- para saber si es un modelo que
+    // está en auge o de salida, no solo cuántos se hicieron este mes.
     document.getElementById("op-chart-modelos").innerHTML = buildBarChartH(
-      data.top_modelos.map(d => ({ label: d.modelo, valor: d.cantidad }))
+      data.top_modelos.map(d => ({
+        label: d.modelo,
+        valor: d.cantidad,
+        tendencia: d.tendencia,
+        tt: [
+          { l: "Este mes", v: `${d.cantidad} OT` },
+          { l: "Mes anterior", v: `${d.cantidad_mes_anterior} OT` },
+          { l: "Promedio mensual (12m)", v: `${d.promedio_12m} OT` },
+        ],
+      }))
     );
 
+    // Clientes por monto: el tooltip no repite el monto (ya se ve al lado de
+    // la barra), muestra en cambio la cantidad de OTs y el ticket promedio.
     document.getElementById("op-chart-clientes").innerHTML = buildBarChartH(
-      data.ranking_clientes.map(d => ({ label: d.nombre, valor: d.monto, extra: fmtMoney(d.monto) })),
+      data.ranking_clientes.map(d => ({
+        label: d.nombre,
+        valor: d.monto,
+        extra: fmtMoney(d.monto),
+        tt: [
+          { l: "Cantidad de OTs", v: String(d.cantidad) },
+          { l: "Ticket promedio", v: fmtMoney(d.cantidad ? d.monto / d.cantidad : 0) },
+        ],
+      })),
       { padL: 140 }
     );
 
     document.getElementById("op-chart-garantias").innerHTML = buildLineChart(
-      data.tasa_garantias_mensual.map(d => ({ mes: d.mes, valor: d.pct })),
+      data.tasa_garantias_mensual.map(d => ({
+        mes: d.mes,
+        valor: d.pct,
+        tt: [
+          { l: "Tasa de garantías", v: `${d.pct}%` },
+          { l: "Garantías generadas", v: String(d.garantias_creadas) },
+          { l: "OT entregadas ese mes", v: String(d.entregadas) },
+        ],
+      })),
       { color: "var(--danger)" }
     );
   } catch (e) {
@@ -756,14 +801,14 @@ document.querySelectorAll("#op-kanban .op-columna").forEach(columna => {
 document.getElementById("op-buscar").addEventListener("input", renderTableroOperativo);
 document.getElementById("op-filtro-estado").addEventListener("change", renderTableroOperativo);
 
-// ---- Selectores de mes (tablero de OTs y dashboard) ----
-const selectMesTablero = document.getElementById("op-filtro-mes");
-selectMesTablero.innerHTML = opcionesSelectorMes();
-selectMesTablero.addEventListener("change", () => {
-  state.opMesTablero = selectMesTablero.value;
-  cargarOperativo();
-});
-
+// ---- Selector de mes (solo dashboard) ----
+// El tablero de Órdenes de Trabajo (kanban) ya NO tiene selector de mes: las
+// OT abiertas siempre se muestran todas sin importar el mes, y son la
+// inmensa mayoría de lo que se mira en esa pestaña día a día -- tener un
+// filtro de mes ahí solo generaba confusión ("¿por qué no veo esta OT?").
+// state.opMesTablero se deja en null (mes en curso para las cerradas/
+// entregadas, ver cargarOperativo) y no se puede cambiar desde la UI; si
+// se necesita revisar el histórico de cerradas, está el dashboard o Reportes.
 const selectMesDashboard = document.getElementById("op-dash-filtro-mes");
 selectMesDashboard.innerHTML = opcionesSelectorMes();
 selectMesDashboard.addEventListener("change", () => {
@@ -2368,6 +2413,7 @@ async function cargarGarantiasTab() {
 
 function renderTableroGarantias() {
   const filtroEstado = document.getElementById("gar-filtro-estado").value;
+  const busqueda = document.getElementById("gar-buscar").value.trim().toLowerCase();
 
   document.getElementById("gar-columna-rechazada").style.display = filtroEstado === "rechazada" ? "flex" : "none";
   document.querySelectorAll("#gar-kanban .op-columna").forEach(col => {
@@ -2379,10 +2425,17 @@ function renderTableroGarantias() {
     }
   });
 
+  const coincide = (g) => coincideBusqueda(
+    busqueda,
+    g.cliente ? g.cliente.nombre : "",
+    g.equipo ? `${g.equipo.marca} ${g.equipo.modelo} ${g.equipo.identificador || ""}` : "",
+    g.motivo || "",
+  );
+
   GAR_ESTADOS_TABLERO.forEach(estado => {
     const cont = document.getElementById(`gar-cards-${estado}`);
     const contador = document.getElementById(`gar-count-${estado}`);
-    const garantias = (state.opGarantias || []).filter(g => g.estado === estado);
+    const garantias = (state.opGarantias || []).filter(g => g.estado === estado && coincide(g));
     contador.textContent = garantias.length;
     if (garantias.length === 0) {
       cont.innerHTML = `<p class="vacio-inline">Sin garantías.</p>`;
@@ -2449,6 +2502,7 @@ document.querySelectorAll("#gar-kanban .op-columna").forEach(columna => {
 });
 
 document.getElementById("gar-filtro-estado").addEventListener("change", renderTableroGarantias);
+document.getElementById("gar-buscar").addEventListener("input", renderTableroGarantias);
 
 // ---- Nueva garantía ----
 

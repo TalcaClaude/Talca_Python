@@ -57,6 +57,10 @@
       <span class="summary-label">Monto CLP por cerrar</span>
       <span class="summary-value" id="op-s-monto-por-cerrar">—</span>
     </div>
+    <div class="summary-card">
+      <span class="summary-label">Ticket promedio (mes)</span>
+      <span class="summary-value" id="op-s-ticket-promedio">—</span>
+    </div>
     <div class="summary-card summary-card--positivo">
       <span class="summary-label">Utilidad estimada (mes)</span>
       <span class="summary-value" id="op-s-utilidad-mes">—</span>
@@ -69,29 +73,25 @@
       <span class="summary-label">Costo mano de obra externa OTs cerradas (mes)</span>
       <span class="summary-value" id="op-s-costo-mano-obra-cerradas">—</span>
     </div>
-    <div class="summary-card summary-card--warn">
-      <span class="summary-label">Costo garantías (histórico)</span>
-      <span class="summary-value" id="op-s-costo-garantias">—</span>
+    <div class="summary-card">
+      <span class="summary-label">Tiempo promedio en taller (mes)</span>
+      <span class="summary-value" id="op-s-tiempo-promedio">—</span>
     </div>
     <div class="summary-card summary-card--warn">
       <span class="summary-label">Garantías abiertas</span>
       <span class="summary-value" id="op-s-garantias-abiertas">—</span>
     </div>
-    <div class="summary-card">
-      <span class="summary-label">Ticket promedio (mes)</span>
-      <span class="summary-value" id="op-s-ticket-promedio">—</span>
-    </div>
-    <div class="summary-card">
-      <span class="summary-label">Tiempo promedio en taller (mes)</span>
-      <span class="summary-value" id="op-s-tiempo-promedio">—</span>
-    </div>
-    <div class="summary-card">
-      <span class="summary-label">Aprobación de presupuestos (histórico)</span>
-      <span class="summary-value" id="op-s-tasa-aprobacion">—</span>
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">Costo garantías (mes)</span>
+      <span class="summary-value" id="op-s-costo-garantias">—</span>
     </div>
     <div class="summary-card summary-card--warn">
       <span class="summary-label">Costo garantías / ingresos (mes)</span>
       <span class="summary-value" id="op-s-costo-garantias-pct">—</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">Aprobación de presupuestos (histórico)</span>
+      <span class="summary-value" id="op-s-tasa-aprobacion">—</span>
     </div>
   </section>
 
@@ -110,7 +110,7 @@
     </div>
     <div class="chart-card">
       <h3>OT por estado</h3>
-      <p class="chart-sub">Foto de hoy</p>
+      <p class="chart-sub">Abiertas: todas ahora mismo. Entregado/Cancelado: solo del mes elegido arriba.</p>
       <div id="op-chart-estados">Cargando…</div>
     </div>
   </div>
@@ -139,7 +139,7 @@
   <div class="chart-grid chart-grid--par">
     <div class="chart-card">
       <h3>Tasa de garantías mensual</h3>
-      <p class="chart-sub">Garantías creadas / OT entregadas ese mes</p>
+      <p class="chart-sub">% de las OT entregadas ese mes que terminaron generando una garantía — sube = se está reparando peor a la primera</p>
       <div id="op-chart-garantias">Cargando…</div>
     </div>
   </div>
@@ -163,8 +163,6 @@
       <option value="entregado">Entregado</option>
       <option value="cancelado">Cancelado</option>
     </select>
-    <label for="op-filtro-mes" style="align-self:center;color:var(--text-muted);font-size:13px;">Mes (OTs cerradas):</label>
-    <select id="op-filtro-mes" title="Las OT abiertas siempre se muestran todas; este filtro solo acota las cerradas/entregadas."></select>
     <span style="flex:1"></span>
     <button class="btn btn-primary" id="btn-op-nueva-orden">+ Nueva orden</button>
   </section>
@@ -250,6 +248,7 @@
   <section class="vista" id="vista-garantias" style="display:none">
 
   <section class="toolbar">
+    <input type="text" id="gar-buscar" placeholder="Buscar por cliente, equipo o motivo…">
     <select id="gar-filtro-estado">
       <option value="">Todos los estados (excepto rechazada)</option>
       <option value="ingreso">Ingreso</option>

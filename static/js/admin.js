@@ -240,8 +240,16 @@ document.getElementById("btn-migracion-garantias-items").addEventListener("click
     if (!res.ok) throw new Error(data.error || "Error inesperado");
     resultado.textContent =
       `Garantías procesadas: ${data.garantias_procesadas} · ítems de repuesto: ${data.items_repuesto_creados} · ítems de mano de obra: ${data.items_mano_obra_creados} · ya migradas antes: ${data.garantias_ya_migradas}`
-      + (data.garantias_sin_match.length ? ` · sin match: ${data.garantias_sin_match.length} (revisar RUT/fecha)` : "");
-    toast("Migración de ítems de garantías completada");
+      + (data.garantias_sin_match.length ? ` · sin match: ${data.garantias_sin_match.length} (revisar RUT/fecha)` : "")
+      + (data.garantias_con_error && data.garantias_con_error.length
+          ? ` · con error: ${data.garantias_con_error.length} (${data.garantias_con_error.map(e => `legacy_no ${e.legacy_no}: ${e.error}`).join(" | ")})`
+          : "");
+    toast(
+      data.garantias_con_error && data.garantias_con_error.length
+        ? "Migración terminada con algunos errores — revisa el detalle abajo"
+        : "Migración de ítems de garantías completada",
+      !!(data.garantias_con_error && data.garantias_con_error.length),
+    );
   } catch (e) {
     resultado.textContent = "";
     toast(e.message, true);

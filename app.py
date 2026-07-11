@@ -8096,7 +8096,7 @@ def migracion_garantias_items():
 
     resumen = {
         "garantias_procesadas": 0, "garantias_sin_match": [], "garantias_ya_migradas": 0,
-        "items_repuesto_creados": 0, "items_mano_obra_creados": 0,
+        "items_repuesto_creados": 0, "items_mano_obra_creados": 0, "garantias_con_error": [],
     }
 
     for entrada in datos:
@@ -8126,39 +8126,66 @@ def migracion_garantias_items():
             resumen["garantias_ya_migradas"] += 1
             continue
 
+        # Cada garantía se procesa en su propio "intento": si algo puntual
+        # de ESTA garantía falla (ej. un dato corrupto que dispara una
+        # violación de integridad referencial), no se quiere perder el
+        # resto del archivo completo con un error 500 genérico. Se
+        # deshace solo lo de esta garantía (las anteriores ya quedaron
+        # confirmadas con su propio commit) y se registra el detalle
+        # exacto del error para poder diagnosticarlo sin necesidad de
+        # acceder a la base de producción directamente.
+        try:
+            items_repuesto_entrada = 0
+            items_mano_obra_entrada = 0
+
+            for r in entrada.get("repuestos") or []:
+                descripcion = " - ".join(
+                    x.strip() for x in [(r.get("modelo") or ""), (r.get("descripcion") or "")] if x.strip()
+                ) or "(sin descripción)"
+                try:
+                    costo = float(r.get("costo_unitario") or 0)
+                except (TypeError, ValueError):
+                    costo = 0.0
+                db.execute(
+                    """INSERT INTO garantia_items (garantia_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en)
+                       VALUES (?, 'repuesto', ?, 1, ?, ?, ?)""",
+                    (garantia_id, descripcion.upper(), costo, usuario_migracion, ts),
+                )
+                items_repuesto_entrada += 1
+
+            for m in entrada.get("mano_obra") or []:
+                descripcion = " - ".join(
+                    x.strip() for x in [(m.get("nombre_reparador") or ""), (m.get("detalle") or "")] if x.strip()
+                ) or "(mano de obra externa)"
+                try:
+                    precio = float(m.get("precio") or 0)
+                except (TypeError, ValueError):
+                    precio = 0.0
+                db.execute(
+                    """INSERT INTO garantia_items (garantia_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en, detalle)
+                       VALUES (?, 'mano_obra', ?, 1, ?, ?, ?, 'Reparación externa (migración histórica)')""",
+                    (garantia_id, descripcion.upper(), precio, usuario_migracion, ts),
+                )
+                items_mano_obra_entrada += 1
+
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.error(
+                "Migración garantías: error en legacy_no=%s cliente_rut=%s garantia_id=%s: %s",
+                entrada.get("legacy_no"), entrada.get("cliente_rut"), garantia_id, e,
+            )
+            resumen["garantias_con_error"].append({
+                "legacy_no": entrada.get("legacy_no"),
+                "cliente_rut": entrada.get("cliente_rut"),
+                "garantia_id": garantia_id,
+                "error": str(e),
+            })
+            continue
+
         resumen["garantias_procesadas"] += 1
-
-        for r in entrada.get("repuestos") or []:
-            descripcion = " - ".join(
-                x.strip() for x in [(r.get("modelo") or ""), (r.get("descripcion") or "")] if x.strip()
-            ) or "(sin descripción)"
-            try:
-                costo = float(r.get("costo_unitario") or 0)
-            except (TypeError, ValueError):
-                costo = 0.0
-            db.execute(
-                """INSERT INTO garantia_items (garantia_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en)
-                   VALUES (?, 'repuesto', ?, 1, ?, ?, ?)""",
-                (garantia_id, descripcion.upper(), costo, usuario_migracion, ts),
-            )
-            resumen["items_repuesto_creados"] += 1
-
-        for m in entrada.get("mano_obra") or []:
-            descripcion = " - ".join(
-                x.strip() for x in [(m.get("nombre_reparador") or ""), (m.get("detalle") or "")] if x.strip()
-            ) or "(mano de obra externa)"
-            try:
-                precio = float(m.get("precio") or 0)
-            except (TypeError, ValueError):
-                precio = 0.0
-            db.execute(
-                """INSERT INTO garantia_items (garantia_id, tipo, descripcion, cantidad, costo_unitario, usuario, creado_en, detalle)
-                   VALUES (?, 'mano_obra', ?, 1, ?, ?, ?, 'Reparación externa (migración histórica)')""",
-                (garantia_id, descripcion.upper(), precio, usuario_migracion, ts),
-            )
-            resumen["items_mano_obra_creados"] += 1
-
-        db.commit()
+        resumen["items_repuesto_creados"] += items_repuesto_entrada
+        resumen["items_mano_obra_creados"] += items_mano_obra_entrada
 
     return jsonify(resumen)
 

@@ -102,6 +102,162 @@ def _iniciar_transaccion_stock(db):
     db.execute("BEGIN IMMEDIATE")
 
 
+def _reconstruir_tabla_legada_si_hace_falta(db, tabla, sql_create_nueva, columnas_objetivo, mapeos_legado=None):
+    """
+    Sanea una tabla que puede venir de una versión mucho más vieja del
+    proyecto, con columnas legadas que ya no usamos (a veces con NOT NULL
+    y sin default, lo que hace fallar cualquier INSERT que no las llene).
+
+    Vive en core.py (y no en modulos/operativo.py, donde se escribió
+    originalmente) porque más de un módulo la necesita -- primero
+    garantias/garantia_items en Operativo, después convertidores_torque/
+    convertidor_items en su propio módulo -- y ningún módulo puede
+    importar de otro sin arriesgar un ciclo (ver el comentario al inicio
+    de este archivo).
+
+    Ya nos pasó dos veces con 'garantias': primero le faltaba
+    'cliente_id', después apareció una columna 'orden_id' NOT NULL de una
+    versión anterior a que existiera 'orden_origen_id'. En vez de seguir
+    agregando parches columna por columna cada vez que aparece una
+    diferencia nueva, esta función reconstruye la tabla completa con el
+    esquema actual, preservando todos los datos existentes:
+
+      1. Si la tabla no existe todavía, no hace nada (el CREATE TABLE
+         IF NOT EXISTS normal se encarga de crearla limpia).
+      2. Si ya existe y coincide con el esquema objetivo (no le falta
+         ninguna columna nuestra ni tiene columnas NOT NULL sin default
+         que no conocemos), tampoco hace nada — evita reconstruir en
+         cada arranque sin necesidad.
+      3. Si detecta un desajuste, renombra la tabla vieja a
+         '<tabla>_legado' (nunca se borra, por si hay que revisar o
+         recuperar algo a mano), crea la tabla nueva con el esquema
+         correcto, y copia los datos existentes columna por columna
+         -usando 'mapeos_legado' para traducir nombres viejos a los
+         actuales (ej. {"orden_id": "orden_origen_id"})-, incluyendo el
+         'id' para no romper referencias de otras tablas.
+    """
+    info = db.execute(f"PRAGMA table_info({tabla})").fetchall()
+    if not info:
+        return False  # todavía no existe; la crea el CREATE TABLE normal
+
+    nombres_actuales = {c[1] for c in info}
+    columnas_problema = [
+        c[1] for c in info
+        if c[3] == 1 and c[4] is None and c[1] not in columnas_objetivo
+    ]
+    faltan_columnas = [c for c in columnas_objetivo if c not in nombres_actuales]
+    if not columnas_problema and not faltan_columnas:
+        return False
+
+    mapeos_legado = mapeos_legado or {}
+    tabla_legado = f"{tabla}_legado"
+    if db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (tabla_legado,)
+    ).fetchone():
+        tabla_legado = f"{tabla}_legado_{int(datetime.now().timestamp())}"
+
+    # Datos históricos pueden tener referencias que ya no apuntan a nada
+    # (ej. un cliente/OT muy viejo que se insertó antes de que existiera
+    # esta restricción, o de una época donde la app no aplicaba
+    # "PRAGMA foreign_keys"). No queremos que el arranque de la app se
+    # caiga -ni perder esas filas- solo porque una fila vieja no cumple
+    # con una integridad referencial que nunca se le exigió al crearla.
+    # Se desactiva la validación de llaves foráneas únicamente durante
+    # esta copia puntual (hay que hacerlo fuera de una transacción activa,
+    # por eso el commit() antes y después).
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+
+    db.execute(f"ALTER TABLE {tabla} RENAME TO {tabla_legado}")
+    db.executescript(sql_create_nueva)
+
+    insert_cols, select_cols = [], []
+    for col in columnas_objetivo:
+        origen = None
+        if col in nombres_actuales:
+            origen = col
+        else:
+            for legado, destino in mapeos_legado.items():
+                if destino == col and legado in nombres_actuales:
+                    origen = legado
+                    break
+        if origen is not None:
+            insert_cols.append(col)
+            select_cols.append(origen)
+
+    if insert_cols:
+        db.execute(
+            f"INSERT INTO {tabla} ({', '.join(insert_cols)}) "
+            f"SELECT {', '.join(select_cols)} FROM {tabla_legado}"
+        )
+    db.commit()
+    db.execute("PRAGMA foreign_keys = ON")
+    db.commit()
+    return True
+
+
+def _reparar_fk_hacia_tabla_renombrada(db, tabla, sql_create_nueva, columnas_objetivo):
+    """Repara una tabla cuya llave foránea quedó apuntando a
+    '<algo>_legado' en vez de a la tabla activa real (ej. garantia_items
+    apuntando a 'garantias_legado' en vez de 'garantias').
+
+    Cómo pasa esto: cuando _reconstruir_tabla_legada_si_hace_falta
+    renombra una tabla padre (ej. 'garantias' -> 'garantias_legado') para
+    reconstruirla con el esquema correcto, SQLite reescribe
+    automáticamente -como parte del comportamiento normal de ALTER TABLE
+    RENAME- el texto de la llave foránea de CUALQUIER tabla hija que la
+    referenciaba, dejándola apuntando al nombre nuevo ('garantias_legado')
+    en vez de seguir apuntando al nombre 'garantias' (que un instante
+    después vuelve a existir, ahora con el esquema correcto y los datos
+    reales). El resultado: la tabla hija queda validando sus llaves
+    foráneas contra la tabla vieja -que ya no recibe filas nuevas- en vez
+    de la tabla activa. El síntoma es que CUALQUIER INSERT nuevo en la
+    tabla hija falla con 'FOREIGN KEY constraint failed' aunque el id
+    referenciado sí exista, porque SQLite está comparando contra la tabla
+    equivocada. (Así se manifestó en producción para garantia_items ->
+    garantias: fallaban el 100% de los registros, no uno puntual, porque
+    el problema no era ningún dato -- era la definición de la tabla.)
+
+    Se detecta revisando PRAGMA foreign_key_list: si alguna referencia
+    apunta a un nombre de tabla que termina en '_legado' (o una variante
+    con timestamp tipo '_legado_1234567890'), se reconstruye la tabla
+    hija completa (mismo mecanismo que _reconstruir_tabla_legada_si_hace_falta:
+    renombrar, recrear con el esquema correcto -que ya vuelve a
+    referenciar el nombre correcto porque así está escrito en
+    sql_create_nueva-, copiar los datos). Es seguro correr esto en cada
+    arranque: si ninguna llave foránea está en ese estado, no hace nada."""
+    info = db.execute(f"PRAGMA table_info({tabla})").fetchall()
+    if not info:
+        return False  # todavía no existe; no hay nada que reparar
+
+    fks = db.execute(f"PRAGMA foreign_key_list({tabla})").fetchall()
+    if not any(re.search(r"_legado(_\d+)?$", fk["table"] or "") for fk in fks):
+        return False
+
+    nombres_actuales = {c[1] for c in info}
+    tabla_legado = f"{tabla}_legado_fk"
+    if db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (tabla_legado,)
+    ).fetchone():
+        tabla_legado = f"{tabla}_legado_fk_{int(datetime.now().timestamp())}"
+
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    db.execute(f"ALTER TABLE {tabla} RENAME TO {tabla_legado}")
+    db.executescript(sql_create_nueva)
+
+    cols = [c for c in columnas_objetivo if c in nombres_actuales]
+    if cols:
+        db.execute(
+            f"INSERT INTO {tabla} ({', '.join(cols)}) "
+            f"SELECT {', '.join(cols)} FROM {tabla_legado}"
+        )
+    db.commit()
+    db.execute("PRAGMA foreign_keys = ON")
+    db.commit()
+    return True
+
+
 def close_db(exception=None):
     db = g.pop("db", None)
     if db is not None:

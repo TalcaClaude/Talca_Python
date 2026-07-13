@@ -22,6 +22,7 @@ movimientos (los repuestos de una orden las referencian).
 """
 
 import json
+import re
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, render_template, request
@@ -76,6 +77,9 @@ ESTADOS_POSTERIORES_A_APROBACION = {
 PASOS_SEGUIMIENTO_PUBLICO = [e for e in ESTADOS_ORDEN if e != "cancelado"]
 
 TIPOS_ITEM = ["repuesto", "mano_obra"]
+# Solo válido para ítems de orden_items (OT de un auto), no para
+# garantia_items ni convertidor_items -- ver _agregar_item_orden_convertidor.
+TIPOS_ITEM_ORDEN = TIPOS_ITEM + ["convertidor_torque"]
 
 # ---- Fase 3.5: constantes de los sub-flujos ampliados ----
 PRIORIDADES_ORDEN = ["baja", "media", "alta", "urgente"]
@@ -146,6 +150,49 @@ ESTADOS_GARANTIA_LABEL = {
     "ingreso": "Ingreso", "diagnostico": "Diagnóstico", "reparacion": "Reparación",
     "prueba": "Prueba", "revision": "Revisión", "listo": "Listo",
     "entregado": "Entregado", "rechazada": "Rechazada",
+}
+
+# Convertidores de torque: un convertidor es, en la práctica, "una OT
+# aparte" (tiene su propio flujo de reparación con ítems/repuestos), pero
+# con una diferencia clave respecto a garantías/OT normales: una vez que
+# queda 'listo', esa UNIDAD FÍSICA específica se puede instalar como
+# repuesto dentro de la OT de un auto (ver orden_items.convertidor_id más
+# abajo y agregar_item_orden). Tres orígenes posibles, confirmados con el
+# taller:
+#   - 'cliente_directo': el cliente trae solo el convertidor a reparar
+#     (sin traer el auto completo).
+#   - 'stock_taller': el taller repara convertidores por su cuenta para
+#     tener stock listo, sin cliente asociado todavía.
+#   - 'desde_ot_auto': surge de la reparación de la caja automática de un
+#     auto que ya tiene su propia OT (el convertidor es una pieza de esa
+#     caja) — orden_origen_id queda apuntando a esa OT.
+ORIGENES_CONVERTIDOR = ["cliente_directo", "stock_taller", "desde_ot_auto"]
+ORIGENES_CONVERTIDOR_LABEL = {
+    "cliente_directo": "Cliente trae el convertidor",
+    "stock_taller": "Stock del taller",
+    "desde_ot_auto": "Desde la caja de un auto (OT existente)",
+}
+
+# Flujo: ingreso -> diagnostico -> reparacion -> control_calidad -> listo.
+# Desde 'listo' hay dos salidas: se instala en la OT de un auto (pasa
+# automáticamente a 'instalado', ver agregar_item_orden) o se entrega
+# directo al cliente sin instalar acá (pasa a 'entregado' manualmente,
+# ej. el cliente se lo lleva para instalarlo en otro taller).
+# 'cancelado' está disponible como salida manual desde cualquier paso
+# (igual que 'rechazada' en garantías).
+ESTADOS_CONVERTIDOR = [
+    "ingreso", "diagnostico", "reparacion", "control_calidad", "listo",
+    "instalado", "entregado", "cancelado",
+]
+ESTADOS_CONVERTIDOR_CERRADOS = {"instalado", "entregado", "cancelado"}
+# Único estado desde el que un convertidor se puede vincular como repuesto
+# a la OT de un auto -- ver agregar_item_orden(). Evita instalar una
+# unidad cuya propia reparación todavía no terminó.
+ESTADO_CONVERTIDOR_DISPONIBLE = "listo"
+ESTADOS_CONVERTIDOR_LABEL = {
+    "ingreso": "Ingreso", "diagnostico": "Diagnóstico", "reparacion": "Reparación",
+    "control_calidad": "Control de calidad", "listo": "Listo para instalar",
+    "instalado": "Instalado en un auto", "entregado": "Entregado", "cancelado": "Cancelado",
 }
 
 # Campos "simples" (sin efectos secundarios) que se pueden actualizar desde
@@ -246,6 +293,68 @@ def _reconstruir_tabla_legada_si_hace_falta(db, tabla, sql_create_nueva, columna
         db.execute(
             f"INSERT INTO {tabla} ({', '.join(insert_cols)}) "
             f"SELECT {', '.join(select_cols)} FROM {tabla_legado}"
+        )
+    db.commit()
+    db.execute("PRAGMA foreign_keys = ON")
+    db.commit()
+    return True
+
+
+def _reparar_fk_hacia_tabla_renombrada(db, tabla, sql_create_nueva, columnas_objetivo):
+    """Repara una tabla cuya llave foránea quedó apuntando a
+    '<algo>_legado' en vez de a la tabla activa real (ej. garantia_items
+    apuntando a 'garantias_legado' en vez de 'garantias').
+
+    Cómo pasa esto: cuando _reconstruir_tabla_legada_si_hace_falta
+    renombra una tabla padre (ej. 'garantias' -> 'garantias_legado') para
+    reconstruirla con el esquema correcto, SQLite reescribe
+    automáticamente -como parte del comportamiento normal de ALTER TABLE
+    RENAME- el texto de la llave foránea de CUALQUIER tabla hija que la
+    referenciaba, dejándola apuntando al nombre nuevo ('garantias_legado')
+    en vez de seguir apuntando al nombre 'garantias' (que un instante
+    después vuelve a existir, ahora con el esquema correcto y los datos
+    reales). El resultado: la tabla hija queda validando sus llaves
+    foráneas contra la tabla vieja -que ya no recibe filas nuevas- en vez
+    de la tabla activa. El síntoma es que CUALQUIER INSERT nuevo en la
+    tabla hija falla con 'FOREIGN KEY constraint failed' aunque el id
+    referenciado sí exista, porque SQLite está comparando contra la tabla
+    equivocada. (Así se manifestó en producción para garantia_items ->
+    garantias: fallaban el 100% de los registros, no uno puntual, porque
+    el problema no era ningún dato -- era la definición de la tabla.)
+
+    Se detecta revisando PRAGMA foreign_key_list: si alguna referencia
+    apunta a un nombre de tabla que termina en '_legado' (o una variante
+    con timestamp tipo '_legado_1234567890'), se reconstruye la tabla
+    hija completa (mismo mecanismo que _reconstruir_tabla_legada_si_hace_falta:
+    renombrar, recrear con el esquema correcto -que ya vuelve a
+    referenciar el nombre correcto porque así está escrito en
+    sql_create_nueva-, copiar los datos). Es seguro correr esto en cada
+    arranque: si ninguna llave foránea está en ese estado, no hace nada."""
+    info = db.execute(f"PRAGMA table_info({tabla})").fetchall()
+    if not info:
+        return False  # todavía no existe; no hay nada que reparar
+
+    fks = db.execute(f"PRAGMA foreign_key_list({tabla})").fetchall()
+    if not any(re.search(r"_legado(_\d+)?$", fk["table"] or "") for fk in fks):
+        return False
+
+    nombres_actuales = {c[1] for c in info}
+    tabla_legado = f"{tabla}_legado_fk"
+    if db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (tabla_legado,)
+    ).fetchone():
+        tabla_legado = f"{tabla}_legado_fk_{int(datetime.now().timestamp())}"
+
+    db.commit()
+    db.execute("PRAGMA foreign_keys = OFF")
+    db.execute(f"ALTER TABLE {tabla} RENAME TO {tabla_legado}")
+    db.executescript(sql_create_nueva)
+
+    cols = [c for c in columnas_objetivo if c in nombres_actuales]
+    if cols:
+        db.execute(
+            f"INSERT INTO {tabla} ({', '.join(cols)}) "
+            f"SELECT {', '.join(cols)} FROM {tabla_legado}"
         )
     db.commit()
     db.execute("PRAGMA foreign_keys = ON")
@@ -562,6 +671,160 @@ def init_operativo_db(db):
         if "aplica_iva" not in columnas_item:
             db.execute(f"ALTER TABLE {tabla} ADD COLUMN aplica_iva INTEGER NOT NULL DEFAULT 0")
             db.commit()
+
+    # Repara garantia_items si su llave foránea garantia_id quedó
+    # apuntando a 'garantias_legado' en vez de 'garantias' (ver
+    # _reparar_fk_hacia_tabla_renombrada arriba para el detalle completo
+    # de por qué pasa esto -- se confirmó en producción el 11/07/2026:
+    # el 100% de los INSERT nuevos fallaban con 'FOREIGN KEY constraint
+    # failed' porque la reconstrucción anterior de 'garantias' dejó a
+    # garantia_items apuntando a la tabla vieja). Se corre en cada
+    # arranque; si la llave ya está bien, no hace nada.
+    _reparar_fk_hacia_tabla_renombrada(
+        db,
+        "garantia_items",
+        """
+        CREATE TABLE IF NOT EXISTS garantia_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            garantia_id INTEGER NOT NULL REFERENCES garantias(id) ON DELETE CASCADE,
+            tipo TEXT NOT NULL,
+            producto_id INTEGER REFERENCES productos(id),
+            descripcion TEXT DEFAULT '',
+            cantidad REAL NOT NULL DEFAULT 1,
+            costo_unitario REAL NOT NULL DEFAULT 0,
+            movimiento_id INTEGER REFERENCES movimientos(id),
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            detalle TEXT DEFAULT '',
+            aplica_iva INTEGER NOT NULL DEFAULT 0
+        );
+        """,
+        [
+            "id", "garantia_id", "tipo", "producto_id", "descripcion",
+            "cantidad", "costo_unitario", "movimiento_id", "usuario",
+            "creado_en", "detalle", "aplica_iva",
+        ],
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_garantia_items_garantia_id ON garantia_items (garantia_id)")
+    db.commit()
+
+    # -----------------------------------------------------------------
+    # Convertidores de torque: mismo patrón que garantías (entidad
+    # independiente con su propio flujo e ítems propios), con un enganche
+    # adicional hacia orden_items -- ver ESTADOS_CONVERTIDOR más arriba
+    # para el detalle completo del flujo y los 3 orígenes posibles.
+    # -----------------------------------------------------------------
+    sql_convertidores_actual = """
+        CREATE TABLE IF NOT EXISTS convertidores_torque (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            origen_tipo TEXT NOT NULL DEFAULT 'stock_taller',
+            cliente_id INTEGER REFERENCES clientes(id),
+            equipo_id INTEGER REFERENCES equipos(id),
+            orden_origen_id INTEGER REFERENCES ordenes_trabajo(id),
+            marca TEXT DEFAULT '',
+            modelo TEXT DEFAULT '',
+            numero_serie TEXT DEFAULT '',
+            motivo TEXT DEFAULT '',
+            diagnostico TEXT DEFAULT '',
+            responsable TEXT DEFAULT '',
+            estado TEXT NOT NULL DEFAULT 'ingreso',
+            precio_venta REAL,
+            fecha_recepcion TEXT,
+            fecha_cierre TEXT,
+            usuario TEXT DEFAULT '',
+            creado_en TEXT,
+            actualizado_en TEXT
+        );
+    """
+    db.executescript(sql_convertidores_actual)
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS convertidor_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            convertidor_id INTEGER NOT NULL REFERENCES convertidores_torque(id) ON DELETE CASCADE,
+            tipo TEXT NOT NULL,
+            producto_id INTEGER REFERENCES productos(id),
+            descripcion TEXT DEFAULT '',
+            cantidad REAL NOT NULL DEFAULT 1,
+            costo_unitario REAL NOT NULL DEFAULT 0,
+            movimiento_id INTEGER REFERENCES movimientos(id),
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            detalle TEXT DEFAULT '',
+            aplica_iva INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+    db.commit()
+
+    # Si esta tabla alguna vez queda con un esquema legado (mismo mecanismo
+    # preventivo que ya se usa para garantias/garantia_items), se
+    # reconstruye preservando los datos.
+    _reconstruir_tabla_legada_si_hace_falta(
+        db,
+        "convertidores_torque",
+        sql_convertidores_actual,
+        [
+            "id", "origen_tipo", "cliente_id", "equipo_id", "orden_origen_id",
+            "marca", "modelo", "numero_serie", "motivo", "diagnostico",
+            "responsable", "estado", "precio_venta", "fecha_recepcion",
+            "fecha_cierre", "usuario", "creado_en", "actualizado_en",
+        ],
+    )
+    db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_convertidores_cliente_id ON convertidores_torque (cliente_id);
+        CREATE INDEX IF NOT EXISTS idx_convertidores_equipo_id ON convertidores_torque (equipo_id);
+        CREATE INDEX IF NOT EXISTS idx_convertidores_estado ON convertidores_torque (estado);
+        CREATE INDEX IF NOT EXISTS idx_convertidor_items_convertidor_id ON convertidor_items (convertidor_id);
+        """
+    )
+    db.commit()
+
+    # Repara convertidor_items si su llave foránea quedó apuntando a una
+    # tabla '_legado' (mismo problema que ya se vio con garantia_items ->
+    # garantias, ver _reparar_fk_hacia_tabla_renombrada). Se corre en cada
+    # arranque de forma preventiva, aunque a la fecha de creación de este
+    # módulo todavía no había ocurrido para esta tabla en particular.
+    _reparar_fk_hacia_tabla_renombrada(
+        db,
+        "convertidor_items",
+        """
+        CREATE TABLE IF NOT EXISTS convertidor_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            convertidor_id INTEGER NOT NULL REFERENCES convertidores_torque(id) ON DELETE CASCADE,
+            tipo TEXT NOT NULL,
+            producto_id INTEGER REFERENCES productos(id),
+            descripcion TEXT DEFAULT '',
+            cantidad REAL NOT NULL DEFAULT 1,
+            costo_unitario REAL NOT NULL DEFAULT 0,
+            movimiento_id INTEGER REFERENCES movimientos(id),
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            detalle TEXT DEFAULT '',
+            aplica_iva INTEGER NOT NULL DEFAULT 0
+        );
+        """,
+        [
+            "id", "convertidor_id", "tipo", "producto_id", "descripcion",
+            "cantidad", "costo_unitario", "movimiento_id", "usuario",
+            "creado_en", "detalle", "aplica_iva",
+        ],
+    )
+    db.commit()
+
+    # orden_items.convertidor_id: enganche opcional para cuando el ítem
+    # agregado a la OT de un auto ES una unidad específica de convertidor
+    # de torque ya reparada (tipo='convertidor_torque'), en vez de un
+    # producto normal del inventario -- ver agregar_item_orden().
+    columnas_orden_items = [c[1] for c in db.execute("PRAGMA table_info(orden_items)").fetchall()]
+    if "convertidor_id" not in columnas_orden_items:
+        db.execute(
+            "ALTER TABLE orden_items ADD COLUMN convertidor_id INTEGER REFERENCES convertidores_torque(id)"
+        )
+        db.commit()
+    db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_convertidor_id ON orden_items (convertidor_id)")
+    db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -1925,6 +2188,88 @@ def eliminar_pago_orden(orden_id, pago_id):
 # Ítems de la orden (repuestos y mano de obra)
 # ---------------------------------------------------------------------------
 
+def _convertidor_costo_total(db, convertidor_id):
+    """Suma de los ítems propios del convertidor (lo que costó repararlo),
+    igual criterio de IVA que _item_subtotal. Es el costo que se usa por
+    defecto al instalarlo como repuesto en la OT de un auto, salvo que el
+    convertidor tenga un 'precio_venta' explícito seteado."""
+    fila = db.execute(
+        f"""SELECT COALESCE(SUM(
+                cantidad * costo_unitario *
+                (CASE WHEN aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)
+            ), 0) AS total
+            FROM convertidor_items WHERE convertidor_id = ?""",
+        (convertidor_id,),
+    ).fetchone()
+    return round(fila["total"], 2)
+
+
+def _agregar_item_orden_convertidor(db, orden, orden_id, data):
+    """Vincula una unidad específica de convertidor de torque (ya
+    reparada, estado 'listo') como repuesto dentro de la OT de un auto.
+    A diferencia de un repuesto normal, NO descuenta stock de 'productos'
+    -- el convertidor no vive en el inventario genérico, es su propia
+    entidad rastreada en convertidores_torque. Lo que sí hace es marcar
+    esa unidad como 'instalado' para que no se pueda volver a usar en
+    otra OT."""
+    try:
+        convertidor_id = int(data.get("convertidor_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Debes indicar qué convertidor de torque instalar"}), 400
+
+    convertidor = db.execute(
+        "SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)
+    ).fetchone()
+    if convertidor is None:
+        return jsonify({"error": "El convertidor indicado no existe"}), 400
+    if convertidor["estado"] != ESTADO_CONVERTIDOR_DISPONIBLE:
+        return jsonify({
+            "error": f"Este convertidor está en estado '{ESTADOS_CONVERTIDOR_LABEL.get(convertidor['estado'], convertidor['estado'])}', "
+                     f"solo se puede instalar uno que esté '{ESTADOS_CONVERTIDOR_LABEL[ESTADO_CONVERTIDOR_DISPONIBLE]}'."
+        }), 409
+
+    usuario = usuario_actual()
+    ts = now_iso()
+    descripcion = (data.get("descripcion") or "").strip().upper()
+    if not descripcion:
+        partes = ["CONVERTIDOR DE TORQUE"]
+        if convertidor["marca"]:
+            partes.append(convertidor["marca"])
+        if convertidor["modelo"]:
+            partes.append(convertidor["modelo"])
+        if convertidor["numero_serie"]:
+            partes.append(f"N/S {convertidor['numero_serie']}")
+        descripcion = " ".join(partes).upper()
+
+    costo_unitario = convertidor["precio_venta"]
+    if costo_unitario in (None, ""):
+        costo_unitario = _convertidor_costo_total(db, convertidor_id)
+
+    cur = db.execute(
+        """
+        INSERT INTO orden_items (
+            orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
+            movimiento_id, usuario, creado_en, detalle, aplica_iva, convertidor_id
+        ) VALUES (?, 'convertidor_torque', NULL, ?, 1, ?, NULL, ?, ?, '', 0, ?)
+        """,
+        (orden_id, descripcion, costo_unitario, usuario, ts, convertidor_id),
+    )
+
+    db.execute(
+        """UPDATE convertidores_torque
+           SET estado = 'instalado', actualizado_en = ?,
+               orden_origen_id = COALESCE(orden_origen_id, ?)
+           WHERE id = ?""",
+        (ts, orden_id, convertidor_id),
+    )
+    db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
+    db.commit()
+
+    nuevo_item = dict(db.execute("SELECT * FROM orden_items WHERE id = ?", (cur.lastrowid,)).fetchone())
+    nuevo_item["subtotal"] = _item_subtotal(nuevo_item)
+    return jsonify(nuevo_item), 201
+
+
 @bp.route("/api/operativo/ordenes/<int:orden_id>/items", methods=["POST"])
 def agregar_item_orden(orden_id):
     db = get_db()
@@ -1937,8 +2282,13 @@ def agregar_item_orden(orden_id):
 
     data = request.get_json(force=True, silent=True) or {}
     tipo = (data.get("tipo") or "").strip().lower()
-    if tipo not in TIPOS_ITEM:
-        return jsonify({"error": f"Tipo de ítem inválido. Usa uno de: {', '.join(TIPOS_ITEM)}"}), 400
+    # 'convertidor_torque' solo es válido acá (ítems de la OT de un auto),
+    # no en garantía_items -- ver TIPOS_ITEM_ORDEN más arriba.
+    if tipo not in TIPOS_ITEM_ORDEN:
+        return jsonify({"error": f"Tipo de ítem inválido. Usa uno de: {', '.join(TIPOS_ITEM_ORDEN)}"}), 400
+
+    if tipo == "convertidor_torque":
+        return _agregar_item_orden_convertidor(db, orden, orden_id, data)
 
     try:
         cantidad = float(data.get("cantidad"))
@@ -2038,6 +2388,15 @@ def eliminar_item_orden(orden_id, item_id):
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE ORDEN #{orden_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
             )
+
+    if item["tipo"] == "convertidor_torque" and item["convertidor_id"]:
+        # No hay stock que devolver (el convertidor no vive en 'productos'),
+        # pero sí hay que liberar la unidad: vuelve a 'listo' para que se
+        # pueda instalar en otra OT si esto fue un error de carga.
+        db.execute(
+            "UPDATE convertidores_torque SET estado = ?, actualizado_en = ? WHERE id = ? AND estado = 'instalado'",
+            (ESTADO_CONVERTIDOR_DISPONIBLE, now_iso(), item["convertidor_id"]),
+        )
 
     db.execute("DELETE FROM orden_items WHERE id = ?", (item_id,))
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (now_iso(), orden_id))
@@ -3023,6 +3382,347 @@ def eliminar_item_garantia(garantia_id, item_id):
 
     db.execute("DELETE FROM garantia_items WHERE id = ?", (item_id,))
     db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (now_iso(), garantia_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Convertidores de torque — mismo patrón que garantías (entidad propia con
+# su propio flujo e ítems), con el enganche extra hacia orden_items para
+# cuando una unidad ya reparada se instala en la OT de un auto (ver
+# ESTADOS_CONVERTIDOR, _agregar_item_orden_convertidor más arriba).
+# ---------------------------------------------------------------------------
+
+def _convertidor_dict(db, row):
+    d = dict(row)
+    cliente = None
+    if d["cliente_id"]:
+        cliente = db.execute("SELECT id, nombre, telefono FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+    d["cliente"] = dict(cliente) if cliente else None
+    equipo = None
+    if d["equipo_id"]:
+        equipo = db.execute(
+            "SELECT id, identificador, marca, modelo FROM equipos WHERE id = ?", (d["equipo_id"],)
+        ).fetchone()
+    d["equipo"] = dict(equipo) if equipo else None
+    items = db.execute(
+        "SELECT * FROM convertidor_items WHERE convertidor_id = ? ORDER BY creado_en ASC", (d["id"],)
+    ).fetchall()
+    d["items"] = [dict(i) for i in items]
+    for it in d["items"]:
+        it["subtotal"] = _item_subtotal(it)
+    d["total_reparacion"] = sum(i["subtotal"] for i in d["items"])
+    # Ítem de orden_items (si ya está instalado) donde quedó registrado —
+    # útil para que el detalle del convertidor muestre "instalado en OT #X".
+    instalacion = db.execute(
+        "SELECT orden_id FROM orden_items WHERE convertidor_id = ? ORDER BY id DESC LIMIT 1", (d["id"],)
+    ).fetchone()
+    d["instalado_en_orden_id"] = instalacion["orden_id"] if instalacion else None
+    return d
+
+
+@bp.route("/api/operativo/convertidores", methods=["POST"])
+def crear_convertidor():
+    db = get_db()
+    data = request.get_json(force=True, silent=True) or {}
+
+    origen_tipo = (data.get("origen_tipo") or "").strip().lower()
+    if origen_tipo not in ORIGENES_CONVERTIDOR:
+        return jsonify({"error": f"Origen inválido. Usa uno de: {', '.join(ORIGENES_CONVERTIDOR)}"}), 400
+
+    cliente_id = None
+    equipo_id = None
+    orden_origen_id = None
+
+    if origen_tipo == "cliente_directo":
+        # El cliente trae solo la pieza -- exige cliente, el equipo es
+        # opcional (puede que ni siquiera se sepa a qué auto pertenecía).
+        try:
+            cliente_id = int(data.get("cliente_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Debes indicar el cliente que trae el convertidor"}), 400
+        if db.execute("SELECT id FROM clientes WHERE id = ?", (cliente_id,)).fetchone() is None:
+            return jsonify({"error": "El cliente indicado no existe"}), 400
+        if data.get("equipo_id") not in (None, ""):
+            try:
+                equipo_id = int(data.get("equipo_id"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "Equipo inválido"}), 400
+            if db.execute("SELECT id FROM equipos WHERE id = ? AND cliente_id = ?", (equipo_id, cliente_id)).fetchone() is None:
+                return jsonify({"error": "Ese equipo no existe o no pertenece a este cliente"}), 400
+
+    elif origen_tipo == "desde_ot_auto":
+        # Surge de la caja de un auto que ya tiene su propia OT -- se
+        # completan cliente_id/equipo_id automáticamente desde esa OT, no
+        # hace falta que el usuario los repita a mano.
+        try:
+            orden_origen_id = int(data.get("orden_origen_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Debes indicar la OT del auto de la que sale este convertidor"}), 400
+        orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_origen_id,)).fetchone()
+        if orden is None:
+            return jsonify({"error": "La OT indicada no existe"}), 400
+        cliente_id = orden["cliente_id"]
+        equipo_id = orden["equipo_id"]
+
+    # 'stock_taller': sin cliente ni equipo, se repara por cuenta del taller.
+
+    ts = now_iso()
+    cur = db.execute(
+        """
+        INSERT INTO convertidores_torque (
+            origen_tipo, cliente_id, equipo_id, orden_origen_id, marca, modelo,
+            numero_serie, motivo, diagnostico, responsable, estado, precio_venta,
+            fecha_recepcion, usuario, creado_en, actualizado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ingreso', ?, ?, ?, ?, ?)
+        """,
+        (
+            origen_tipo, cliente_id, equipo_id, orden_origen_id,
+            (data.get("marca") or "").strip().upper(),
+            (data.get("modelo") or "").strip().upper(),
+            (data.get("numero_serie") or "").strip().upper(),
+            (data.get("motivo") or "").strip().upper(),
+            (data.get("diagnostico") or "").strip().upper(),
+            (data.get("responsable") or "").strip().upper(),
+            float(data["precio_venta"]) if data.get("precio_venta") not in (None, "") else None,
+            ts, usuario_actual(), ts, ts,
+        ),
+    )
+    db.commit()
+    nuevo = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(_convertidor_dict(db, nuevo)), 201
+
+
+@bp.route("/api/operativo/convertidores", methods=["GET"])
+def listar_convertidores():
+    db = get_db()
+    estado = (request.args.get("estado") or "").strip()
+    sql = "SELECT * FROM convertidores_torque WHERE 1=1"
+    params = []
+    if estado:
+        sql += " AND estado = ?"
+        params.append(estado)
+    sql += " ORDER BY creado_en DESC"
+    rows = db.execute(sql, params).fetchall()
+    return jsonify({"convertidores": [_convertidor_dict(db, r) for r in rows], "total": len(rows)})
+
+
+@bp.route("/api/operativo/convertidores/disponibles", methods=["GET"])
+def convertidores_disponibles():
+    """Para el selector de 'agregar repuesto' en la OT de un auto: solo
+    las unidades cuya propia reparación ya terminó (estado 'listo')."""
+    db = get_db()
+    rows = db.execute(
+        "SELECT * FROM convertidores_torque WHERE estado = ? ORDER BY actualizado_en DESC",
+        (ESTADO_CONVERTIDOR_DISPONIBLE,),
+    ).fetchall()
+    resultado = []
+    for r in rows:
+        d = dict(r)
+        d["costo_total"] = d["precio_venta"] if d["precio_venta"] not in (None, "") else _convertidor_costo_total(db, d["id"])
+        resultado.append(d)
+    return jsonify({"convertidores": resultado})
+
+
+@bp.route("/api/operativo/convertidores/<int:convertidor_id>", methods=["GET"])
+def obtener_convertidor(convertidor_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Convertidor no encontrado"}), 404
+    return jsonify(_convertidor_dict(db, row))
+
+
+@bp.route("/api/operativo/convertidores/<int:convertidor_id>", methods=["PUT"])
+def editar_convertidor(convertidor_id):
+    db = get_db()
+    row = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Convertidor no encontrado"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+
+    estado = row["estado"]
+    if "estado" in data:
+        estado = (data.get("estado") or "").strip().lower()
+        if estado not in ESTADOS_CONVERTIDOR:
+            return jsonify({"error": f"Estado inválido. Usa uno de: {', '.join(ESTADOS_CONVERTIDOR)}"}), 400
+        # 'instalado' solo lo puede setear el sistema (al vincularlo como
+        # repuesto en la OT de un auto, ver _agregar_item_orden_convertidor)
+        # -- no tiene sentido que alguien lo marque a mano sin que quede
+        # vinculado a ningún ítem real.
+        if estado == "instalado" and row["estado"] != "instalado":
+            return jsonify({
+                "error": "El estado 'instalado' se asigna automáticamente al agregar este convertidor "
+                         "como repuesto en la OT de un auto -- no se puede setear a mano."
+            }), 400
+
+    precio_venta = row["precio_venta"]
+    if "precio_venta" in data:
+        precio_venta = float(data["precio_venta"]) if data.get("precio_venta") not in (None, "") else None
+
+    fecha_cierre = row["fecha_cierre"]
+    if estado in ESTADOS_CONVERTIDOR_CERRADOS and not fecha_cierre:
+        fecha_cierre = now_iso()
+    elif estado not in ESTADOS_CONVERTIDOR_CERRADOS:
+        fecha_cierre = None
+
+    db.execute(
+        """
+        UPDATE convertidores_torque SET marca = ?, modelo = ?, numero_serie = ?,
+            motivo = ?, diagnostico = ?, responsable = ?, estado = ?,
+            precio_venta = ?, fecha_cierre = ?, actualizado_en = ?
+        WHERE id = ?
+        """,
+        (
+            (data.get("marca", row["marca"]) or "").strip().upper(),
+            (data.get("modelo", row["modelo"]) or "").strip().upper(),
+            (data.get("numero_serie", row["numero_serie"]) or "").strip().upper(),
+            (data.get("motivo", row["motivo"]) or "").strip().upper(),
+            (data.get("diagnostico", row["diagnostico"]) or "").strip().upper(),
+            (data.get("responsable", row["responsable"]) or "").strip().upper(),
+            estado, precio_venta, fecha_cierre, now_iso(), convertidor_id,
+        ),
+    )
+    db.commit()
+    actualizado = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
+    return jsonify(_convertidor_dict(db, actualizado))
+
+
+@bp.route("/api/operativo/convertidores/<int:convertidor_id>", methods=["DELETE"])
+def eliminar_convertidor(convertidor_id):
+    db = get_db()
+    _iniciar_transaccion_stock(db)
+    convertidor = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
+    if convertidor is None:
+        return jsonify({"error": "Convertidor no encontrado"}), 404
+    if convertidor["estado"] == "instalado":
+        return jsonify({
+            "error": "Este convertidor ya está instalado en la OT de un auto -- elimina primero ese ítem "
+                     "desde la orden correspondiente si de verdad quieres deshacerlo."
+        }), 409
+
+    items_repuesto = db.execute(
+        "SELECT * FROM convertidor_items WHERE convertidor_id = ? AND tipo = 'repuesto' AND producto_id IS NOT NULL",
+        (convertidor_id,),
+    ).fetchall()
+    for item in items_repuesto:
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (item["producto_id"],)).fetchone()
+        if producto is not None:
+            _aplicar_entrada_stock(
+                db, producto, int(round(item["cantidad"])), item["costo_unitario"],
+                motivo=f"DEVOLUCIÓN AL ELIMINAR CONVERTIDOR #{convertidor_id}",
+                usuario=usuario_actual(), factura=None, categoria="Devolución",
+            )
+
+    db.execute("DELETE FROM convertidores_torque WHERE id = ?", (convertidor_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/operativo/convertidores/<int:convertidor_id>/items", methods=["POST"])
+def agregar_item_convertidor(convertidor_id):
+    db = get_db()
+    _iniciar_transaccion_stock(db)
+    convertidor = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
+    if convertidor is None:
+        return jsonify({"error": "Convertidor no encontrado"}), 404
+    if convertidor["estado"] in ESTADOS_CONVERTIDOR_CERRADOS:
+        return jsonify({"error": f"El convertidor está '{convertidor['estado']}' y no admite más ítems."}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    tipo = (data.get("tipo") or "").strip().lower()
+    if tipo not in TIPOS_ITEM:
+        return jsonify({"error": f"Tipo de ítem inválido. Usa uno de: {', '.join(TIPOS_ITEM)}"}), 400
+    try:
+        cantidad = float(data.get("cantidad"))
+        if cantidad <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "La cantidad debe ser un número mayor a 0"}), 400
+
+    usuario = usuario_actual()
+    ts = now_iso()
+    producto_id = None
+    movimiento_id = None
+    descripcion = (data.get("descripcion") or "").strip().upper()
+
+    if tipo == "repuesto":
+        try:
+            producto_id = int(data.get("producto_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Debes indicar el repuesto (producto) a usar"}), 400
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        if producto is None:
+            return jsonify({"error": "El producto indicado no existe"}), 400
+        costo_unitario = producto["costo_compra"]
+        if data.get("costo_unitario") not in (None, ""):
+            try:
+                costo_unitario = float(data.get("costo_unitario"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+        cantidad_stock = int(round(cantidad))
+        try:
+            _aplicar_salida_stock(
+                db, producto, cantidad_stock,
+                motivo=f"CONVERTIDOR DE TORQUE #{convertidor_id}" + (f" - {descripcion}" if descripcion else ""),
+                usuario=usuario, categoria="Consumo interno",
+            )
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        movimiento_id = db.execute(
+            "SELECT id FROM movimientos WHERE producto_id = ? ORDER BY id DESC LIMIT 1", (producto_id,)
+        ).fetchone()[0]
+        if not descripcion:
+            descripcion = producto["nombre"]
+    detalle = ""
+    aplica_iva = 0
+    if tipo == "mano_obra":
+        if not descripcion:
+            return jsonify({"error": "Describe la mano de obra realizada"}), 400
+        try:
+            costo_unitario = float(data.get("costo_unitario") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+        detalle = (data.get("detalle") or "").strip().upper()
+        aplica_iva = 1 if data.get("aplica_iva") else 0
+
+    cur = db.execute(
+        """
+        INSERT INTO convertidor_items (
+            convertidor_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
+            movimiento_id, usuario, creado_en, detalle, aplica_iva
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (convertidor_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva),
+    )
+    db.execute("UPDATE convertidores_torque SET actualizado_en = ? WHERE id = ?", (ts, convertidor_id))
+    db.commit()
+    nuevo_item = dict(db.execute("SELECT * FROM convertidor_items WHERE id = ?", (cur.lastrowid,)).fetchone())
+    nuevo_item["subtotal"] = _item_subtotal(nuevo_item)
+    return jsonify(nuevo_item), 201
+
+
+@bp.route("/api/operativo/convertidores/<int:convertidor_id>/items/<int:item_id>", methods=["DELETE"])
+def eliminar_item_convertidor(convertidor_id, item_id):
+    db = get_db()
+    _iniciar_transaccion_stock(db)
+    item = db.execute(
+        "SELECT * FROM convertidor_items WHERE id = ? AND convertidor_id = ?", (item_id, convertidor_id)
+    ).fetchone()
+    if item is None:
+        return jsonify({"error": "Ítem no encontrado en este convertidor"}), 404
+
+    if item["tipo"] == "repuesto" and item["producto_id"]:
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (item["producto_id"],)).fetchone()
+        if producto is not None:
+            _aplicar_entrada_stock(
+                db, producto, int(round(item["cantidad"])), item["costo_unitario"],
+                motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE CONVERTIDOR #{convertidor_id}",
+                usuario=usuario_actual(), factura=None, categoria="Devolución",
+            )
+
+    db.execute("DELETE FROM convertidor_items WHERE id = ?", (item_id,))
+    db.execute("UPDATE convertidores_torque SET actualizado_en = ? WHERE id = ?", (now_iso(), convertidor_id))
     db.commit()
     return jsonify({"ok": True})
 

@@ -48,15 +48,27 @@
       <a class="sidebar-subitem" data-vista-link="dashboard" href="/operativo#dashboard">Dashboard</a>
       <a class="sidebar-subitem" data-vista-link="ordenes" href="/operativo#ordenes">Órdenes de trabajo</a>
       <a class="sidebar-subitem" data-vista-link="garantias" href="/operativo#garantias">Garantías</a>
-      <a class="sidebar-subitem" data-vista-link="convertidores" href="/operativo#convertidores">Convertidores de torque</a>
       <a class="sidebar-subitem" data-vista-link="clientes" href="/operativo#clientes">Clientes</a>
       <a class="sidebar-subitem" data-vista-link="reportes" href="/operativo#reportes">Reportes</a>
     </div>
   </div>
 
-  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'finanzas' else '' }}">
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'convertidores' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">03</span>
+      <span class="sidebar-modulo-nombre">Convertidores de Torque</span>
+      <span class="sidebar-chevron">⌄</span>
+    </button>
+    <div class="sidebar-submenu">
+      <a class="sidebar-subitem" data-vista-link="dashboard" href="/convertidores#dashboard">Dashboard</a>
+      <a class="sidebar-subitem" data-vista-link="convertidores" href="/convertidores#convertidores">Convertidores</a>
+      <a class="sidebar-subitem" data-vista-link="reportes" href="/convertidores#reportes">Reportes</a>
+    </div>
+  </div>
+
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'finanzas' else '' }}">
+    <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
+      <span class="sidebar-modulo-tag">04</span>
       <span class="sidebar-modulo-nombre">Finanzas</span>
       <span class="sidebar-chevron">⌄</span>
     </button>
@@ -71,7 +83,7 @@
 
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'agente' else '' }}">
     <a class="sidebar-modulo-header" href="/agente-ia" style="text-decoration:none; display:flex;">
-      <span class="sidebar-modulo-tag">04</span>
+      <span class="sidebar-modulo-tag">05</span>
       <span class="sidebar-modulo-nombre">Agente IA</span>
     </a>
   </div>

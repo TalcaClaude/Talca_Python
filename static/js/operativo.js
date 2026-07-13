@@ -7,7 +7,6 @@ const state = {
   opRecepcionEquipoActual: null,
   opProductos: [],
   opGarantias: [],
-  opConvertidores: [],
   catalogoVehiculos: null, // { marcas: [...], modelos: {marca: [...]} } — catálogo de referencia (no depende del historial de OTs)
   opMesTablero: null, // mes elegido para el tablero de OTs (null = mes en curso, "todos" = historial completo)
   opMesDashboard: null, // mismo criterio, para los gráficos del dashboard
@@ -242,14 +241,12 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("vista-ordenes").style.display = vista === "ordenes" ? "block" : "none";
     document.getElementById("vista-clientes").style.display = vista === "clientes" ? "block" : "none";
     document.getElementById("vista-garantias").style.display = vista === "garantias" ? "block" : "none";
-    document.getElementById("vista-convertidores").style.display = vista === "convertidores" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
       dashboard: "Operativo — Dashboard",
       ordenes: "Operativo — Órdenes de Trabajo",
       clientes: "Operativo — Clientes",
       garantias: "Operativo — Garantías",
-      convertidores: "Operativo — Convertidores de Torque",
       reportes: "Operativo — Reportes",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -261,7 +258,6 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     }
     if (vista === "clientes") cargarClientesTab();
     if (vista === "garantias") cargarGarantiasTab();
-    if (vista === "convertidores") cargarConvertidoresTab();
     if (vista === "reportes") cargarResumenReportesOperativo();
   });
 });
@@ -770,6 +766,60 @@ function updateKanbanFades() {
   window.addEventListener("resize", updateKanbanFades);
   window.addEventListener("scroll", updateKanbanFades, true);
 })();
+
+// Auto-scroll del tablero mientras se arrastra una tarjeta: si el mouse pasa
+// por encima de las flechas de los bordes (misma franja de ~70px que usa
+// op-kanban-fade, ver arriba), el tablero se desplaza solo para ese lado,
+// para no tener que soltar la tarjeta en una columna intermedia solo para
+// poder seguir arrastrando hacia el otro extremo. Se conecta sobre el
+// contenedor con scroll (el propio #kanban), no sobre las columnas, porque
+// el dragover tiene que seguir disparándose sin importar en qué columna
+// esté la tarjeta en ese instante.
+function activarAutoScrollKanban(kanbanId) {
+  const kanban = document.getElementById(kanbanId);
+  if (!kanban) return;
+  const ZONA_PX = 70; // ancho de la franja donde se activa el auto-scroll
+  const VELOCIDAD_PX = 14; // px por tick (~60fps -> ~840px/s en el borde)
+  let direccion = 0; // -1 izq, 0 quieto, 1 der
+  let intervaloId = null;
+
+  function tick() {
+    if (direccion === 0) return;
+    const max = kanban.scrollWidth - kanban.clientWidth;
+    kanban.scrollLeft = Math.max(0, Math.min(max, kanban.scrollLeft + direccion * VELOCIDAD_PX));
+  }
+
+  function detener() {
+    direccion = 0;
+    if (intervaloId) {
+      clearInterval(intervaloId);
+      intervaloId = null;
+    }
+  }
+
+  kanban.addEventListener("dragover", (e) => {
+    const rect = kanban.getBoundingClientRect();
+    const x = e.clientX;
+    if (x < rect.left + ZONA_PX) direccion = -1;
+    else if (x > rect.right - ZONA_PX) direccion = 1;
+    else direccion = 0;
+
+    if (direccion !== 0 && !intervaloId) {
+      intervaloId = setInterval(tick, 16);
+    } else if (direccion === 0 && intervaloId) {
+      detener();
+    }
+  });
+  kanban.addEventListener("dragleave", (e) => {
+    // Solo detener si de verdad se salió del tablero, no al pasar entre
+    // tarjetas/columnas hijas dentro del mismo contenedor.
+    if (!kanban.contains(e.relatedTarget)) detener();
+  });
+  kanban.addEventListener("drop", detener);
+  document.addEventListener("dragend", detener);
+}
+activarAutoScrollKanban("op-kanban");
+activarAutoScrollKanban("gar-kanban");
 
 // ---- Kanban interactivo: arrastrar una OT de una columna a otra cambia su
 // estado. Los drop-zones son las columnas mismas (elementos fijos del HTML),
@@ -2010,7 +2060,7 @@ async function renderSelectConvertidoresDisponibles() {
   const select = document.getElementById("opoi-convertidor-id");
   const aviso = document.getElementById("opoi-convertidor-sin-stock");
   try {
-    const data = await api("/api/operativo/convertidores/disponibles");
+    const data = await api("/api/convertidores/disponibles");
     const disponibles = data.convertidores || [];
     select.innerHTML = '<option value="">Selecciona un convertidor…</option>' +
       disponibles.map(c => {
@@ -2127,7 +2177,7 @@ function renderItemsOrden(orden) {
     tbody.innerHTML = orden.items.map(it => `
       <tr>
         <td>${TIPO_ITEM_LABEL_OT[it.tipo] || it.tipo}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
-        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.convertidor_id ? `<br><a href="#" data-ver-convertidor="${it.convertidor_id}" class="ayuda-inline">Ver convertidor #${it.convertidor_id}</a>` : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.convertidor_id ? `<br><a href="/convertidores?ver=${it.convertidor_id}" class="ayuda-inline">Ver convertidor #${it.convertidor_id}</a>` : ""}</td>
         <td class="num">${it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
         <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
@@ -2138,14 +2188,6 @@ function renderItemsOrden(orden) {
   document.getElementById("opod-total").innerHTML = `<strong>${fmtMoney(orden.total)}</strong>`;
   tbody.querySelectorAll("[data-eliminar-item]").forEach(btn => {
     btn.addEventListener("click", () => eliminarItemOrden(parseInt(btn.dataset.eliminarItem, 10)));
-  });
-  tbody.querySelectorAll("[data-ver-convertidor]").forEach(a => {
-    a.addEventListener("click", (e) => {
-      e.preventDefault();
-      cerrarModal("modal-op-orden-detalle");
-      document.querySelector('.tab[data-vista="convertidores"]').click();
-      setTimeout(() => abrirDetalleConvertidor(parseInt(a.dataset.verConvertidor, 10)), 300);
-    });
   });
 }
 
@@ -2918,447 +2960,6 @@ async function eliminarItemGarantia(itemId) {
     toast("Ítem eliminado.");
     const garantia = await api(`/api/operativo/garantias/${garantiaId}`);
     renderItemsGarantia(garantia);
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Convertidores de torque — mismo patrón que garantías (tablero kanban +
-// modal de creación + modal de detalle con ítems), con la diferencia de
-// que 'instalado' es un estado que solo asigna el sistema (al agregarlo
-// como repuesto en la OT de un auto, ver la sección "OT: agregar item ->
-// convertidor de torque" más abajo).
-// ---------------------------------------------------------------------------
-
-const CONV_ESTADO_LABEL = {
-  ingreso: "Ingreso", diagnostico: "Diagnóstico", reparacion: "Reparación",
-  control_calidad: "Control de calidad", listo: "Listo para instalar",
-  instalado: "Instalado", entregado: "Entregado", cancelado: "Cancelado",
-};
-
-const CONV_ESTADOS_TABLERO = [
-  "ingreso", "diagnostico", "reparacion", "control_calidad", "listo",
-  "instalado", "entregado", "cancelado",
-];
-
-const CONV_ORIGEN_LABEL = {
-  cliente_directo: "Cliente trae el convertidor",
-  stock_taller: "Stock del taller",
-  desde_ot_auto: "Desde la caja de un auto",
-};
-
-async function cargarConvertidoresTab() {
-  try {
-    const data = await api("/api/operativo/convertidores");
-    state.opConvertidores = data.convertidores;
-    renderTableroConvertidores();
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-function renderTableroConvertidores() {
-  const filtroEstado = document.getElementById("conv-filtro-estado").value;
-  const busqueda = document.getElementById("conv-buscar").value.trim().toLowerCase();
-
-  document.getElementById("conv-columna-instalado").style.display = filtroEstado === "instalado" ? "flex" : "none";
-  document.getElementById("conv-columna-cancelado").style.display = filtroEstado === "cancelado" ? "flex" : "none";
-  document.querySelectorAll("#conv-kanban .op-columna").forEach(col => {
-    const est = col.dataset.estado;
-    if (filtroEstado) {
-      col.style.display = est === filtroEstado ? "flex" : "none";
-    } else {
-      col.style.display = (est === "instalado" || est === "cancelado") ? "none" : "flex";
-    }
-  });
-
-  const coincide = (c) => coincideBusqueda(
-    busqueda,
-    c.cliente ? c.cliente.nombre : "",
-    c.marca || "", c.modelo || "", c.numero_serie || "", c.motivo || "",
-  );
-
-  CONV_ESTADOS_TABLERO.forEach(estado => {
-    const cont = document.getElementById(`conv-cards-${estado}`);
-    const contador = document.getElementById(`conv-count-${estado}`);
-    const convertidores = (state.opConvertidores || []).filter(c => c.estado === estado && coincide(c));
-    contador.textContent = convertidores.length;
-    if (convertidores.length === 0) {
-      cont.innerHTML = `<p class="vacio-inline">Sin convertidores.</p>`;
-      return;
-    }
-    cont.innerHTML = convertidores.map(c => `
-      <div class="op-card" data-id="${c.id}" draggable="true">
-        <div class="op-card-top">
-          <span class="op-card-ot">Convertidor #${c.id}</span>
-        </div>
-        <div class="op-card-cliente">${escapeHtml(c.cliente ? c.cliente.nombre : CONV_ORIGEN_LABEL[c.origen_tipo] || "Sin cliente")}</div>
-        ${(c.marca || c.modelo) ? `<div class="op-card-equipo">${escapeHtml([c.marca, c.modelo].filter(Boolean).join(" · "))}${c.numero_serie ? ` — N/S ${escapeHtml(c.numero_serie)}` : ""}</div>` : ""}
-        <div class="op-card-descripcion">${escapeHtml(c.motivo || "")}</div>
-        <div class="op-card-meta">
-          <span>Ingreso: ${fmtFechaSolo((c.fecha_recepcion || "").slice(0, 10))}</span>
-          ${c.responsable ? `<span>${escapeHtml(c.responsable)}</span>` : ""}
-        </div>
-      </div>
-    `).join("");
-  });
-
-  document.querySelectorAll("#conv-kanban .op-card").forEach(card => {
-    card.addEventListener("click", () => abrirDetalleConvertidor(parseInt(card.dataset.id, 10)));
-    card.addEventListener("dragstart", (e) => {
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", card.dataset.id);
-      card.classList.add("dragging");
-      opArrastrandoTarjeta = true;
-    });
-    card.addEventListener("dragend", () => {
-      card.classList.remove("dragging");
-      opArrastrandoTarjeta = false;
-    });
-  });
-}
-
-document.querySelectorAll("#conv-kanban .op-columna").forEach(columna => {
-  columna.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    columna.classList.add("drag-over");
-  });
-  columna.addEventListener("dragleave", () => {
-    columna.classList.remove("drag-over");
-  });
-  columna.addEventListener("drop", async (e) => {
-    e.preventDefault();
-    columna.classList.remove("drag-over");
-    const convertidorId = parseInt(e.dataTransfer.getData("text/plain"), 10);
-    const nuevoEstado = columna.dataset.estado;
-    if (!convertidorId || !nuevoEstado) return;
-    const convertidor = (state.opConvertidores || []).find(c => c.id === convertidorId);
-    if (convertidor && convertidor.estado === nuevoEstado) return;
-    try {
-      await api(`/api/operativo/convertidores/${convertidorId}`, { method: "PUT", body: JSON.stringify({ estado: nuevoEstado }) });
-      toast(`Convertidor #${convertidorId} movido a "${CONV_ESTADO_LABEL[nuevoEstado] || nuevoEstado}".`);
-      await cargarConvertidoresTab();
-    } catch (err) {
-      toast(err.message, true);
-    }
-  });
-});
-
-document.getElementById("conv-filtro-estado").addEventListener("change", renderTableroConvertidores);
-document.getElementById("conv-buscar").addEventListener("input", renderTableroConvertidores);
-
-// ---- Nuevo convertidor ----
-
-function actualizarCamposOrigenConvertidor() {
-  const origen = document.getElementById("convn-origen-tipo").value;
-  document.getElementById("convn-campo-cliente").style.display = origen === "cliente_directo" ? "flex" : "none";
-  document.getElementById("convn-campo-equipo").style.display = origen === "cliente_directo" ? "flex" : "none";
-  document.getElementById("convn-campo-orden").style.display = origen === "desde_ot_auto" ? "flex" : "none";
-  document.getElementById("convn-cliente-id").required = origen === "cliente_directo";
-  document.getElementById("convn-orden-origen-id").required = origen === "desde_ot_auto";
-}
-
-function renderSelectOrdenesConvertidor() {
-  const select = document.getElementById("convn-orden-origen-id");
-  const abiertas = (state.opOrdenes || []).filter(o => !["entregado", "cancelado"].includes(o.estado));
-  select.innerHTML = '<option value="">Selecciona la OT…</option>' +
-    abiertas.map(o => `<option value="${o.id}">OT #${o.id} — ${escapeHtml(o.cliente ? o.cliente.nombre : "")} — ${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</option>`).join("");
-}
-
-async function abrirNuevoConvertidor() {
-  document.getElementById("form-op-convertidor-nuevo").reset();
-  if (state.opClientes.length === 0) {
-    const dataClientes = await api("/api/operativo/clientes");
-    state.opClientes = dataClientes.clientes;
-  }
-  renderSelectClientesOperativo("convn-cliente-id", "");
-  document.getElementById("convn-equipo-id").innerHTML = '<option value="">Sin vehículo asociado</option>';
-  renderSelectOrdenesConvertidor();
-  actualizarCamposOrigenConvertidor();
-  abrirModal("modal-op-convertidor-nuevo");
-}
-
-document.getElementById("btn-conv-nuevo").addEventListener("click", abrirNuevoConvertidor);
-document.getElementById("convn-origen-tipo").addEventListener("change", actualizarCamposOrigenConvertidor);
-
-document.getElementById("convn-cliente-id").addEventListener("change", async (e) => {
-  const clienteId = e.target.value;
-  const select = document.getElementById("convn-equipo-id");
-  if (!clienteId) {
-    select.innerHTML = '<option value="">Sin vehículo asociado</option>';
-    return;
-  }
-  const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${clienteId}`);
-  select.innerHTML = '<option value="">Sin vehículo asociado</option>' +
-    dataEquipos.equipos.map(eq => `<option value="${eq.id}">${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</option>`).join("");
-});
-
-document.getElementById("convn-nuevo-cliente").addEventListener("click", () => {
-  opClienteCallback = async (nuevo) => {
-    const data = await api("/api/operativo/clientes");
-    state.opClientes = data.clientes;
-    renderSelectClientesOperativo("convn-cliente-id", nuevo.id);
-    document.getElementById("convn-cliente-id").dispatchEvent(new Event("change"));
-  };
-  abrirNuevoClienteOperativo();
-});
-
-document.getElementById("form-op-convertidor-nuevo").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const origenTipo = document.getElementById("convn-origen-tipo").value;
-  const payload = {
-    origen_tipo: origenTipo,
-    marca: document.getElementById("convn-marca").value.trim(),
-    modelo: document.getElementById("convn-modelo").value.trim(),
-    numero_serie: document.getElementById("convn-numero-serie").value.trim(),
-    motivo: document.getElementById("convn-motivo").value.trim(),
-  };
-  if (origenTipo === "cliente_directo") {
-    payload.cliente_id = document.getElementById("convn-cliente-id").value;
-    payload.equipo_id = document.getElementById("convn-equipo-id").value || null;
-    if (!payload.cliente_id) {
-      toast("Selecciona el cliente que trae el convertidor.", true);
-      return;
-    }
-  } else if (origenTipo === "desde_ot_auto") {
-    payload.orden_origen_id = document.getElementById("convn-orden-origen-id").value;
-    if (!payload.orden_origen_id) {
-      toast("Selecciona la OT del auto.", true);
-      return;
-    }
-  }
-  try {
-    await api("/api/operativo/convertidores", { method: "POST", body: JSON.stringify(payload) });
-    toast("Convertidor creado.");
-    cerrarModal("modal-op-convertidor-nuevo");
-    await cargarConvertidoresTab();
-  } catch (e2) {
-    toast(e2.message, true);
-  }
-});
-
-// ---- Detalle de convertidor ----
-
-function renderItemsConvertidor(convertidor) {
-  const tbody = document.getElementById("tbody-conv-items");
-  if (convertidor.items.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>`;
-  } else {
-    tbody.innerHTML = convertidor.items.map(it => `
-      <tr>
-        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
-        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}</td>
-        <td class="num">${it.cantidad}</td>
-        <td class="num">${fmtMoney(it.costo_unitario)}</td>
-        <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
-        <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-conv-item="${it.id}">Eliminar</button></td>
-      </tr>
-    `).join("");
-  }
-  document.getElementById("convd-total").innerHTML = `<strong>${fmtMoney(convertidor.total_reparacion)}</strong>`;
-  tbody.querySelectorAll("[data-eliminar-conv-item]").forEach(btn => {
-    btn.addEventListener("click", () => eliminarItemConvertidor(parseInt(btn.dataset.eliminarConvItem, 10)));
-  });
-}
-
-async function abrirDetalleConvertidor(id) {
-  try {
-    const convertidor = await api(`/api/operativo/convertidores/${id}`);
-    document.getElementById("convd-id").value = id;
-    document.getElementById("convd-titulo").textContent = `Convertidor #${id}`;
-    const origenTxt = CONV_ORIGEN_LABEL[convertidor.origen_tipo] || convertidor.origen_tipo;
-    const clienteTxt = convertidor.cliente ? ` — ${convertidor.cliente.nombre}` : "";
-    const equipoTxt = convertidor.equipo ? ` (${[convertidor.equipo.marca, convertidor.equipo.modelo].filter(Boolean).join(" ")})` : "";
-    document.getElementById("convd-origen-info").textContent = `${origenTxt}${clienteTxt}${equipoTxt}`;
-    if (convertidor.instalado_en_orden_id) {
-      document.getElementById("convd-instalado-info").style.display = "";
-      document.getElementById("convd-instalado-info").textContent = `Instalado en la OT #${convertidor.instalado_en_orden_id}.`;
-    } else {
-      document.getElementById("convd-instalado-info").style.display = "none";
-    }
-    document.getElementById("convd-estado").value = convertidor.estado;
-    document.getElementById("convd-responsable").value = convertidor.responsable || "";
-    document.getElementById("convd-marca").value = convertidor.marca || "";
-    document.getElementById("convd-modelo").value = convertidor.modelo || "";
-    document.getElementById("convd-numero-serie").value = convertidor.numero_serie || "";
-    document.getElementById("convd-motivo").value = convertidor.motivo || "";
-    document.getElementById("convd-diagnostico").value = convertidor.diagnostico || "";
-    document.getElementById("convd-precio-venta").value = convertidor.precio_venta != null ? fmtMoney(convertidor.precio_venta).replace(/[^0-9]/g, "") : "";
-    renderItemsConvertidor(convertidor);
-
-    if (state.opProductos.length === 0) {
-      const dataProductos = await api("/api/productos");
-      state.opProductos = dataProductos.productos;
-    }
-    document.getElementById("convi-producto-buscar").value = "";
-    document.getElementById("convi-producto-id").value = "";
-    document.getElementById("convi-producto-resultados").style.display = "none";
-    document.getElementById("form-conv-item").reset();
-    document.getElementById("convi-tipo").dispatchEvent(new Event("change"));
-
-    abrirModal("modal-op-convertidor-detalle");
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-function renderResultadosConvi(texto) {
-  const resultados = document.getElementById("convi-producto-resultados");
-  const q = texto.trim();
-  if (!q) {
-    resultados.style.display = "none";
-    return;
-  }
-  const coincidencias = state.opProductos.filter(p =>
-    coincideBusqueda(q, p.nombre, p.descripcion, p.codigo_interno, p.id_sistema)
-  ).slice(0, 8);
-  if (coincidencias.length === 0) {
-    resultados.innerHTML = '<div class="autocomplete-sin-resultados">Sin productos que coincidan</div>';
-    resultados.style.display = "block";
-    return;
-  }
-  resultados.innerHTML = coincidencias.map(p => `
-    <div class="autocomplete-item" data-id="${p.id}">
-      #${escapeHtml(p.id_sistema)} — ${escapeHtml(p.nombre)}
-      <span class="autocomplete-item-meta">Stock: ${p.stock_disponible}</span>
-    </div>
-  `).join("");
-  resultados.style.display = "block";
-  resultados.querySelectorAll(".autocomplete-item").forEach(item => {
-    item.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      const p = state.opProductos.find(x => x.id === parseInt(item.dataset.id, 10));
-      if (p) agregarRepuestoConvertidorDesdeAutocomplete(p);
-    });
-  });
-}
-
-async function agregarRepuestoConvertidorDesdeAutocomplete(producto) {
-  const convertidorId = document.getElementById("convd-id").value;
-  const cantidad = document.getElementById("convi-cantidad").value || 1;
-  const textoBusqueda = document.getElementById("convi-producto-buscar").value;
-  try {
-    await api(`/api/operativo/convertidores/${convertidorId}/items`, {
-      method: "POST",
-      body: JSON.stringify({ tipo: "repuesto", producto_id: producto.id, cantidad }),
-    });
-    toast(`Agregado: ${producto.nombre}`);
-    const convertidor = await api(`/api/operativo/convertidores/${convertidorId}`);
-    renderItemsConvertidor(convertidor);
-    const dataProductos = await api("/api/productos");
-    state.opProductos = dataProductos.productos;
-    renderResultadosConvi(textoBusqueda);
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-document.getElementById("convi-producto-buscar").addEventListener("input", (e) => {
-  document.getElementById("convi-producto-id").value = "";
-  renderResultadosConvi(e.target.value);
-});
-document.getElementById("convi-producto-buscar").addEventListener("focus", (e) => {
-  if (e.target.value.trim()) renderResultadosConvi(e.target.value);
-});
-document.getElementById("convi-producto-buscar").addEventListener("blur", () => {
-  setTimeout(() => {
-    document.getElementById("convi-producto-resultados").style.display = "none";
-  }, 150);
-});
-
-document.getElementById("btn-convd-eliminar").addEventListener("click", async () => {
-  const id = document.getElementById("convd-id").value;
-  if (!id) return;
-  if (!confirm(`¿Eliminar el convertidor #${id} por completo? Esta acción no se puede deshacer. Se devolverá al inventario el stock de los repuestos que tenga cargados.`)) return;
-  try {
-    await api(`/api/operativo/convertidores/${id}`, { method: "DELETE" });
-    toast("Convertidor eliminado.");
-    cerrarModal("modal-op-convertidor-detalle");
-    await cargarConvertidoresTab();
-  } catch (e) {
-    toast(e.message, true);
-  }
-});
-
-document.getElementById("btn-convd-guardar").addEventListener("click", async () => {
-  const id = document.getElementById("convd-id").value;
-  const payload = {
-    estado: document.getElementById("convd-estado").value,
-    responsable: document.getElementById("convd-responsable").value.trim(),
-    marca: document.getElementById("convd-marca").value.trim(),
-    modelo: document.getElementById("convd-modelo").value.trim(),
-    numero_serie: document.getElementById("convd-numero-serie").value.trim(),
-    motivo: document.getElementById("convd-motivo").value.trim(),
-    diagnostico: document.getElementById("convd-diagnostico").value.trim(),
-    precio_venta: limpiarMonto(document.getElementById("convd-precio-venta").value) || null,
-  };
-  try {
-    await api(`/api/operativo/convertidores/${id}`, { method: "PUT", body: JSON.stringify(payload) });
-    toast("Convertidor actualizado.");
-    cargarConvertidoresTab();
-  } catch (e) {
-    toast(e.message, true);
-  }
-});
-
-document.getElementById("convi-tipo").addEventListener("change", (e) => {
-  const esRepuesto = e.target.value === "repuesto";
-  document.getElementById("convi-campo-producto").style.display = esRepuesto ? "flex" : "none";
-  document.getElementById("convi-campo-descripcion").style.display = esRepuesto ? "none" : "flex";
-  document.getElementById("convi-campo-costo").style.display = esRepuesto ? "none" : "flex";
-  document.getElementById("convi-fila-mo-extra").style.display = esRepuesto ? "none" : "flex";
-});
-
-document.getElementById("form-conv-item").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const tipo = document.getElementById("convi-tipo").value;
-  const convertidorId = document.getElementById("convd-id").value;
-  const payload = {
-    tipo,
-    cantidad: document.getElementById("convi-cantidad").value,
-  };
-  if (tipo === "repuesto") {
-    payload.producto_id = document.getElementById("convi-producto-id").value;
-    if (!payload.producto_id) {
-      toast("Busca el producto y haz clic en él para agregarlo.", true);
-      return;
-    }
-  } else {
-    payload.descripcion = document.getElementById("convi-descripcion").value.trim();
-    payload.costo_unitario = limpiarMonto(document.getElementById("convi-costo").value) || 0;
-    payload.detalle = document.getElementById("convi-mo-detalle").value.trim();
-    payload.aplica_iva = document.getElementById("convi-mo-iva").checked;
-    if (!payload.descripcion) {
-      toast("Describe la mano de obra realizada.", true);
-      return;
-    }
-  }
-  try {
-    await api(`/api/operativo/convertidores/${convertidorId}/items`, { method: "POST", body: JSON.stringify(payload) });
-    toast("Ítem agregado.");
-    const convertidor = await api(`/api/operativo/convertidores/${convertidorId}`);
-    renderItemsConvertidor(convertidor);
-    document.getElementById("form-conv-item").reset();
-    document.getElementById("convi-producto-buscar").value = "";
-    document.getElementById("convi-producto-id").value = "";
-    document.getElementById("convi-tipo").dispatchEvent(new Event("change"));
-    const dataProductos = await api("/api/productos");
-    state.opProductos = dataProductos.productos;
-  } catch (e2) {
-    toast(e2.message, true);
-  }
-});
-
-async function eliminarItemConvertidor(itemId) {
-  if (!confirm("¿Eliminar este ítem? Si era un repuesto, el stock consumido se devuelve al inventario.")) return;
-  const convertidorId = document.getElementById("convd-id").value;
-  try {
-    await api(`/api/operativo/convertidores/${convertidorId}/items/${itemId}`, { method: "DELETE" });
-    toast("Ítem eliminado.");
-    const convertidor = await api(`/api/operativo/convertidores/${convertidorId}`);
-    renderItemsConvertidor(convertidor);
   } catch (e) {
     toast(e.message, true);
   }

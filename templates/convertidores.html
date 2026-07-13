@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario Taller — Convertidores de Torque</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
+</head>
+<body>
+<div class="shell">
+{% include "_sidebar.html" %}
+<div class="shell-main">
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-tag">03</span>
+      <div class="brand-text">
+        <h1>Inventario<span>Taller</span></h1>
+        <p class="brand-sub" id="brand-sub">Convertidores de Torque — Dashboard</p>
+      </div>
+    </div>
+    <div class="topbar-acciones">
+      <span class="sesion-usuario" id="sesion-usuario"></span>
+      <a href="/" class="btn btn-secundario">← Módulos</a>
+      {% if rol_usuario == "admin" %}
+      <a href="/administracion" class="btn btn-secundario">Administración</a>
+      {% endif %}
+      <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab activo" data-vista="dashboard">Dashboard</button>
+    <button class="tab" data-vista="convertidores">Convertidores</button>
+    <button class="tab" data-vista="reportes">Reportes</button>
+  </nav>
+
+  <section class="vista" id="vista-dashboard">
+
+  <section class="summary" id="conv-summary">
+    <div class="summary-card">
+      <span class="summary-label">Convertidores activos</span>
+      <span class="summary-value" id="conv-s-abiertos">—</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">Valor en reparación (abiertos)</span>
+      <span class="summary-value" id="conv-s-valor">—</span>
+    </div>
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">De región pendientes de enviar</span>
+      <span class="summary-value" id="conv-s-regionales">—</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">Tiempo promedio de reparación (mes)</span>
+      <span class="summary-value" id="conv-s-tiempo">—</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">Total histórico</span>
+      <span class="summary-value" id="conv-s-total">—</span>
+    </div>
+  </section>
+
+  <div class="chart-grid">
+    <div class="chart-card">
+      <h3>Por estado</h3>
+      <p class="chart-sub">Todos los convertidores registrados, ahora mismo</p>
+      <div class="tabla-wrap">
+        <table class="tabla">
+          <thead><tr><th>Estado</th><th class="num">Cantidad</th></tr></thead>
+          <tbody id="conv-dash-tabla-estado"><tr><td colspan="2" class="vacio">Cargando…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="chart-card">
+      <h3>Por origen</h3>
+      <p class="chart-sub">Stock del taller / cliente externo / interno (caja de un auto)</p>
+      <div class="tabla-wrap">
+        <table class="tabla">
+          <thead><tr><th>Origen</th><th class="num">Cantidad</th></tr></thead>
+          <tbody id="conv-dash-tabla-origen"><tr><td colspan="2" class="vacio">Cargando…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  </section>
+
+  <section class="vista" id="vista-convertidores" style="display:none">
+
+  <section class="toolbar">
+    <input type="text" id="conv-buscar" placeholder="Buscar por cliente, marca, modelo o N° de serie…">
+    <select id="conv-filtro-estado">
+      <option value="">Todos los estados (excepto cancelado)</option>
+      <option value="ingreso">Ingreso</option>
+      <option value="diagnostico">Diagnóstico</option>
+      <option value="reparacion">Reparación</option>
+      <option value="control_calidad">Control de calidad</option>
+      <option value="listo">Listo para instalar</option>
+      <option value="instalado">Instalado en un auto</option>
+      <option value="entregado">Entregado</option>
+      <option value="cancelado">Cancelado</option>
+    </select>
+    <span style="flex:1"></span>
+    <button type="button" class="btn btn-primary" id="btn-conv-nuevo">+ Nuevo convertidor</button>
+  </section>
+
+  <section class="op-kanban" id="conv-kanban">
+    <div class="op-columna" data-estado="ingreso">
+      <h3>Ingreso <span class="op-columna-count" id="conv-count-ingreso">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-ingreso"></div>
+    </div>
+    <div class="op-columna" data-estado="diagnostico">
+      <h3>Diagnóstico <span class="op-columna-count" id="conv-count-diagnostico">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-diagnostico"></div>
+    </div>
+    <div class="op-columna" data-estado="reparacion">
+      <h3>Reparación <span class="op-columna-count" id="conv-count-reparacion">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-reparacion"></div>
+    </div>
+    <div class="op-columna" data-estado="control_calidad">
+      <h3>Control de calidad <span class="op-columna-count" id="conv-count-control_calidad">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-control_calidad"></div>
+    </div>
+    <div class="op-columna" data-estado="listo">
+      <h3>Listo para instalar <span class="op-columna-count" id="conv-count-listo">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-listo"></div>
+    </div>
+    <div class="op-columna" data-estado="instalado" id="conv-columna-instalado" style="display:none">
+      <h3>Instalado <span class="op-columna-count" id="conv-count-instalado">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-instalado"></div>
+    </div>
+    <div class="op-columna" data-estado="entregado">
+      <h3>Entregado <span class="op-columna-count" id="conv-count-entregado">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-entregado"></div>
+    </div>
+    <div class="op-columna" data-estado="cancelado" id="conv-columna-cancelado" style="display:none">
+      <h3>Cancelado <span class="op-columna-count" id="conv-count-cancelado">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-cancelado"></div>
+    </div>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-reportes" style="display:none">
+
+  <section class="dash-grid">
+
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Convertidores de torque</h3>
+      <p class="bodega-intro">Detalle de convertidores registrados, con resumen por origen — filtrable por rango de fecha de recepción. Deja las fechas vacías para exportar todo.</p>
+      <div class="reportes-rango">
+        <label>Desde <input type="date" id="rep-conv-desde"></label>
+        <label>Hasta <input type="date" id="rep-conv-hasta"></label>
+      </div>
+      <p class="reportes-contador" id="rep-contador-conv">Cargando…</p>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-rep-conv-excel">Descargar Excel</button>
+      </div>
+    </div>
+
+  </section>
+
+  </section>
+
+</div>
+
+<!-- Convertidores de torque: nuevo -->
+<div class="modal-overlay" id="modal-op-convertidor-nuevo">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Nuevo convertidor de torque</h2>
+      <button class="modal-close" data-close="modal-op-convertidor-nuevo">&times;</button>
+    </div>
+    <form id="form-op-convertidor-nuevo">
+      <div class="campo">
+        <label>Origen *</label>
+        <select id="convn-origen-tipo" required>
+          <option value="stock_taller">Stock del taller (sin cliente todavía)</option>
+          <option value="cliente_directo">El cliente trae el convertidor</option>
+          <option value="desde_ot_auto">Desde la caja de un auto (OT existente)</option>
+        </select>
+      </div>
+
+      <div class="campo" id="convn-campo-cliente" style="display:none">
+        <label>Cliente *</label>
+        <div class="campo-select-mas">
+          <select id="convn-cliente-id"><option value="">Selecciona un cliente…</option></select>
+          <button type="button" class="btn-link" id="convn-nuevo-cliente">+ Nuevo</button>
+        </div>
+      </div>
+      <div class="campo" id="convn-campo-equipo" style="display:none">
+        <label>Vehículo (opcional)</label>
+        <select id="convn-equipo-id"><option value="">Sin vehículo asociado</option></select>
+      </div>
+
+      <div class="campo" id="convn-campo-orden" style="display:none">
+        <label>OT del auto *</label>
+        <select id="convn-orden-origen-id" required><option value="">Selecciona la OT…</option></select>
+        <p class="ayuda-inline">El cliente y el vehículo se completan solos desde esa OT.</p>
+      </div>
+
+      <div class="campo" id="convn-campo-regional" style="display:none">
+        <label class="check-inline"><input type="checkbox" id="convn-es-regional"> Es de región</label>
+        <p class="ayuda-inline">Marca esto si el cliente es de fuera de la ciudad — hay que enviárselo de vuelta una vez reparado.</p>
+      </div>
+
+      <div class="grid-3">
+        <div class="campo">
+          <label>Marca</label>
+          <input type="text" id="convn-marca" placeholder="Ej: AISIN">
+        </div>
+        <div class="campo">
+          <label>Modelo</label>
+          <input type="text" id="convn-modelo" placeholder="Ej: TF-80SC">
+        </div>
+        <div class="campo">
+          <label>N° de serie</label>
+          <input type="text" id="convn-numero-serie">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Motivo *</label>
+        <textarea id="convn-motivo" rows="2" required placeholder="Ej: Ruido y patinaje entre marchas"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-op-convertidor-nuevo">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Crear convertidor</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Convertidores de torque: detalle -->
+<div class="modal-overlay" id="modal-op-convertidor-detalle">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2 id="convd-titulo">Convertidor</h2>
+      <button type="button" class="btn-link" id="btn-convd-eliminar" style="color: var(--danger)">Eliminar convertidor</button>
+      <button class="modal-close" data-close="modal-op-convertidor-detalle">&times;</button>
+    </div>
+    <input type="hidden" id="convd-id">
+    <p class="ayuda-inline" id="convd-origen-info"></p>
+    <p class="ayuda-inline" id="convd-instalado-info" style="display:none"></p>
+
+    <div class="grid-2">
+      <div class="campo">
+        <label>Estado</label>
+        <select id="convd-estado">
+          <option value="ingreso">Ingreso</option>
+          <option value="diagnostico">Diagnóstico</option>
+          <option value="reparacion">Reparación</option>
+          <option value="control_calidad">Control de calidad</option>
+          <option value="listo">Listo para instalar</option>
+          <option value="instalado">Instalado en un auto</option>
+          <option value="entregado">Entregado</option>
+          <option value="cancelado">Cancelado</option>
+        </select>
+        <p class="ayuda-inline">"Instalado" lo asigna el sistema solo, al agregar este convertidor como repuesto en la OT de un auto.</p>
+      </div>
+      <div class="campo">
+        <label>Responsable</label>
+        <input type="text" id="convd-responsable">
+      </div>
+    </div>
+    <div class="grid-3">
+      <div class="campo">
+        <label>Marca</label>
+        <input type="text" id="convd-marca">
+      </div>
+      <div class="campo">
+        <label>Modelo</label>
+        <input type="text" id="convd-modelo">
+      </div>
+      <div class="campo">
+        <label>N° de serie</label>
+        <input type="text" id="convd-numero-serie">
+      </div>
+    </div>
+    <div class="campo">
+      <label>Motivo</label>
+      <textarea id="convd-motivo" rows="2"></textarea>
+    </div>
+    <div class="campo">
+      <label>Diagnóstico</label>
+      <textarea id="convd-diagnostico" rows="2"></textarea>
+    </div>
+    <div class="campo">
+      <label>Precio de venta / instalación (opcional — si se deja vacío, se usa la suma de los ítems de abajo)</label>
+      <input type="text" inputmode="numeric" id="convd-precio-venta" class="input-monto">
+    </div>
+    <div class="campo" id="convd-campo-regional" style="display:none">
+      <label class="check-inline"><input type="checkbox" id="convd-es-regional"> Es de región</label>
+      <p class="ayuda-inline">Hay que enviárselo de vuelta al cliente una vez reparado.</p>
+    </div>
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-primary" id="btn-convd-guardar">Guardar cambios</button>
+    </div>
+
+    <h3 class="subtitulo">Ítems de la reparación (repuestos / mano de obra)</h3>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Tipo</th><th>Descripción</th><th class="num">Cantidad</th>
+            <th class="num">Costo unit.</th><th class="num">Subtotal</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="tbody-conv-items">
+          <tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="4" style="text-align:right"><strong>Total reparación</strong></td>
+            <td class="num" id="convd-total"><strong>—</strong></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <form id="form-conv-item">
+      <div class="grid-3">
+        <div class="campo">
+          <label>Tipo</label>
+          <select id="convi-tipo">
+            <option value="repuesto">Repuesto (consume stock)</option>
+            <option value="mano_obra">Mano de obra</option>
+          </select>
+        </div>
+        <div class="campo campo-autocomplete" id="convi-campo-producto">
+          <label>Producto</label>
+          <input type="text" id="convi-producto-buscar" placeholder="Busca por nombre, código o N°…" autocomplete="off">
+          <input type="hidden" id="convi-producto-id">
+          <div class="autocomplete-resultados" id="convi-producto-resultados" style="display:none"></div>
+        </div>
+        <div class="campo" id="convi-campo-descripcion" style="display:none">
+          <label>Descripción</label>
+          <input type="text" id="convi-descripcion">
+        </div>
+      </div>
+      <div class="grid-3">
+        <div class="campo">
+          <label>Cantidad</label>
+          <input type="number" id="convi-cantidad" min="0.01" step="0.01" value="1">
+        </div>
+        <div class="campo" id="convi-campo-costo" style="display:none">
+          <label>Costo unitario ($)</label>
+          <input type="text" inputmode="numeric" id="convi-costo" class="input-monto">
+        </div>
+        <div class="campo" style="justify-content:flex-end">
+          <button type="submit" class="btn btn-secundario">+ Agregar ítem</button>
+        </div>
+      </div>
+      <div class="grid-3" id="convi-fila-mo-extra" style="display:none">
+        <div class="campo">
+          <label>Detalle / realizado por (opcional)</label>
+          <input type="text" id="convi-mo-detalle">
+        </div>
+        <div class="campo">
+          <label>&nbsp;</label>
+          <label style="flex-direction:row; align-items:center; gap:8px; display:flex;">
+            <input type="checkbox" id="convi-mo-iva" style="width:auto"> Aplicar IVA (19%) a este trabajo
+          </label>
+        </div>
+      </div>
+    </form>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-op-convertidor-detalle">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cliente (reutilizado por "+ Nuevo" dentro del formulario de creación) -->
+<div class="modal-overlay" id="modal-op-cliente">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-op-cliente-titulo">Nuevo cliente</h2>
+      <button class="modal-close" data-close="modal-op-cliente">&times;</button>
+    </div>
+    <form id="form-op-cliente">
+      <input type="hidden" id="opc-id">
+      <div class="campo">
+        <label>Nombre *</label>
+        <input type="text" id="opc-nombre" required placeholder="Ej: Juan Pérez">
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Teléfono</label>
+          <input type="text" id="opc-telefono">
+        </div>
+        <div class="campo">
+          <label>Email</label>
+          <input type="email" id="opc-email">
+        </div>
+      </div>
+      <div class="campo">
+        <label>RUT</label>
+        <input type="text" id="opc-rut">
+      </div>
+      <div class="campo">
+        <label>Dirección</label>
+        <input type="text" id="opc-direccion" placeholder="Ej: Av. Siempre Viva 742, Santiago">
+      </div>
+      <div class="campo">
+        <label>Notas</label>
+        <textarea id="opc-notas" rows="2"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-op-cliente">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar cliente</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+{% include "_alerta_facturas_pendientes.html" %}
+
+<script src="/static/js/charts.js?v={{ ASSET_VERSION }}"></script>
+<script src="/static/js/convertidores.js?v={{ ASSET_VERSION }}"></script>
+<script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
+</div>
+</div>
+</body>
+</html>

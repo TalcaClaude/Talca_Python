@@ -7497,6 +7497,14 @@ from modulos.operativo import (  # noqa: E402
 )
 app.register_blueprint(bp_operativo)
 
+# Convertidores de Torque: módulo top-level aparte (ver
+# modulos/convertidores.py) -- init_convertidores_db() se llama desde
+# adentro de init_operativo_db() (necesita correr antes del ALTER TABLE
+# que agrega orden_items.convertidor_id), así que acá solo hace falta
+# registrar el blueprint, no llamar su init por separado.
+from modulos.convertidores import bp as bp_convertidores  # noqa: E402
+app.register_blueprint(bp_convertidores)
+
 # Transiciones de estado que el agente de WhatsApp tiene permitido aplicar
 # (ver _agente_procesar_mensaje más arriba). A pedido del taller, el agente
 # puede mover una OT desde CUALQUIER estado abierto hacia CUALQUIER otro

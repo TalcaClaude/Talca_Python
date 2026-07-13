@@ -700,6 +700,39 @@ svg .chart-punto-hover {
 }
 .op-card--urgente .op-card-cliente { color: var(--danger); }
 
+/* Convertidores de torque "de región": teñido naranjo aparte de la escala
+   de prioridad de arriba -- marca que, una vez reparado, hay que
+   despacharlo de vuelta al cliente (no es solo "listo para retirar en
+   el mesón"). */
+.op-card--regional {
+  background: rgba(230, 126, 34, 0.14);
+  border-color: rgba(230, 126, 34, 0.55);
+}
+
+.op-card-origen-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.op-card-origen-badge--cliente_directo { color: var(--accent-2); border-color: var(--accent-2); }
+.op-card-origen-badge--desde_ot_auto { color: var(--accent); border-color: var(--accent); }
+
+.badge-regional {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #e67e22;
+  border: 1px solid rgba(230, 126, 34, 0.55);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
 .op-card.dragging {
   opacity: 0.45;
   cursor: grabbing;
@@ -1048,7 +1081,13 @@ svg .chart-punto-hover {
   color: var(--text-muted);
   white-space: nowrap;
 }
-.check-inline input { width: auto; }
+/* Selector con más especificidad que ".campo input" (que fuerza
+   width:100% a cualquier input dentro de un .campo) -- sin esto, un
+   checkbox suelto dentro de un .campo (sin un input de texto al lado
+   compitiendo por el espacio, como si pasa en .campo-inline-check) se
+   estira casi al ancho completo de la fila en vez de quedar del
+   tamaño normal de un checkbox. */
+.check-inline input[type="checkbox"] { width: auto; flex: 0 0 auto; }
 
 .op-garantia-card {
   background: var(--panel-2);

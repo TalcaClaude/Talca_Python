@@ -96,9 +96,9 @@
     <select id="conv-filtro-estado">
       <option value="">Todos los estados (excepto cancelado)</option>
       <option value="ingreso">Ingreso</option>
-      <option value="diagnostico">Diagnóstico</option>
+      <option value="esperando_aprobacion">Esperando aprobación</option>
       <option value="reparacion">Reparación</option>
-      <option value="control_calidad">Control de calidad</option>
+      <option value="esperando_repuesto">Esperando repuesto</option>
       <option value="listo">Listo para instalar</option>
       <option value="instalado">Instalado en un auto</option>
       <option value="entregado">Entregado</option>
@@ -113,17 +113,17 @@
       <h3>Ingreso <span class="op-columna-count" id="conv-count-ingreso">0</span></h3>
       <div class="op-columna-cards" id="conv-cards-ingreso"></div>
     </div>
-    <div class="op-columna" data-estado="diagnostico">
-      <h3>Diagnóstico <span class="op-columna-count" id="conv-count-diagnostico">0</span></h3>
-      <div class="op-columna-cards" id="conv-cards-diagnostico"></div>
+    <div class="op-columna" data-estado="esperando_aprobacion">
+      <h3>Esperando aprobación <span class="op-columna-count" id="conv-count-esperando_aprobacion">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-esperando_aprobacion"></div>
     </div>
     <div class="op-columna" data-estado="reparacion">
       <h3>Reparación <span class="op-columna-count" id="conv-count-reparacion">0</span></h3>
       <div class="op-columna-cards" id="conv-cards-reparacion"></div>
     </div>
-    <div class="op-columna" data-estado="control_calidad">
-      <h3>Control de calidad <span class="op-columna-count" id="conv-count-control_calidad">0</span></h3>
-      <div class="op-columna-cards" id="conv-cards-control_calidad"></div>
+    <div class="op-columna" data-estado="esperando_repuesto">
+      <h3>Esperando repuesto <span class="op-columna-count" id="conv-count-esperando_repuesto">0</span></h3>
+      <div class="op-columna-cards" id="conv-cards-esperando_repuesto"></div>
     </div>
     <div class="op-columna" data-estado="listo">
       <h3>Listo para instalar <span class="op-columna-count" id="conv-count-listo">0</span></h3>
@@ -251,15 +251,15 @@
         <label>Estado</label>
         <select id="convd-estado">
           <option value="ingreso">Ingreso</option>
-          <option value="diagnostico">Diagnóstico</option>
+          <option value="esperando_aprobacion">Esperando aprobación</option>
           <option value="reparacion">Reparación</option>
-          <option value="control_calidad">Control de calidad</option>
+          <option value="esperando_repuesto">Esperando repuesto</option>
           <option value="listo">Listo para instalar</option>
           <option value="instalado">Instalado en un auto</option>
           <option value="entregado">Entregado</option>
           <option value="cancelado">Cancelado</option>
         </select>
-        <p class="ayuda-inline">"Instalado" lo asigna el sistema solo, al agregar este convertidor como repuesto en la OT de un auto.</p>
+        <p class="ayuda-inline">"Instalado" lo asigna el sistema solo, al agregar este convertidor como repuesto en la OT de un auto o de otro convertidor.</p>
       </div>
       <div class="campo">
         <label>Responsable</label>
@@ -328,6 +328,7 @@
           <select id="convi-tipo">
             <option value="repuesto">Repuesto (consume stock)</option>
             <option value="mano_obra">Mano de obra</option>
+            <option value="convertidor">Convertidor de stock (consume la unidad)</option>
           </select>
         </div>
         <div class="campo campo-autocomplete" id="convi-campo-producto">
@@ -340,9 +341,14 @@
           <label>Descripción</label>
           <input type="text" id="convi-descripcion">
         </div>
+        <div class="campo" id="convi-campo-convertidor-hijo" style="display:none">
+          <label>Convertidor de stock</label>
+          <select id="convi-convertidor-hijo-id"><option value="">Selecciona una unidad de stock…</option></select>
+          <p class="ayuda-inline">Solo aparecen unidades de STOCK "listas para instalar". Su costo se suma en vivo a este convertidor.</p>
+        </div>
       </div>
       <div class="grid-3">
-        <div class="campo">
+        <div class="campo" id="convi-campo-cantidad">
           <label>Cantidad</label>
           <input type="number" id="convi-cantidad" min="0.01" step="0.01" value="1">
         </div>

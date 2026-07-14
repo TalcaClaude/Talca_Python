@@ -23,12 +23,31 @@ Tres orígenes posibles para un convertidor, confirmados con el taller:
     "internos": al llegar a 'entregado' se cargan solos como costo en esa
     misma OT (ver _cargar_convertidor_interno_en_ot_origen).
 
-Flujo de estados: ingreso -> diagnostico -> reparacion -> control_calidad
--> listo. Desde 'listo' hay dos salidas: se instala en la OT de un auto
-(pasa automáticamente a 'instalado', ver agregar_convertidor_a_orden) o se
-entrega directo al cliente sin instalar acá (pasa a 'entregado'
-manualmente). 'cancelado' está disponible como salida manual desde
-cualquier paso.
+Flujo de estados: ingreso -> esperando_aprobacion -> reparacion ->
+esperando_repuesto -> listo. Desde 'listo' hay dos salidas: se instala en
+la OT de un auto o como repuesto de otro convertidor (pasa
+automáticamente a 'instalado', ver agregar_convertidor_a_orden /
+agregar_item_convertidor) o se entrega directo al cliente sin instalar
+acá (pasa a 'entregado' manualmente). 'cancelado' está disponible como
+salida manual desde cualquier paso. (Antes los pasos intermedios se
+llamaban 'diagnostico' y 'control_calidad' -- se renombraron a
+'esperando_aprobacion' y 'esperando_repuesto' porque describen mejor lo
+que de verdad frena la reparación la mayoría de las veces; init_convertidores_db
+migra los datos existentes al nombre nuevo.)
+
+Un convertidor puede llevar como "repuesto" a OTRO convertidor de stock:
+sirve para el caso de reparar un convertidor (el "madre", que puede ser
+interno, externo o de stock) usando piezas de una unidad de stock ya
+lista -- ver agregar_item_convertidor cuando tipo == 'convertidor'. La
+unidad de stock usada así queda 'instalado' (igual que si se hubiese
+instalado en la OT de un auto) y su costo se sigue en vivo dentro del
+total de reparación del convertidor madre (no queda "congelado" al
+momento de cargarla -- ver _convertidor_costo_estimado /
+_convertidor_costo_total). Como el costo del madre incluye el de sus
+convertidores-repuesto, y ese total es lo que se carga en la OT del auto
+cuando el madre es 'desde_ot_auto' y llega a 'entregado', el costo del
+repuesto interno termina reflejado solo, en cascada, en la orden de
+trabajo del auto.
 
 Este módulo solo importa piezas compartidas desde core.py, nunca desde
 app.py ni desde otros modulos/ -- operativo.py es el que importa de acá
@@ -60,7 +79,11 @@ from core import (
 
 bp = Blueprint("convertidores", __name__)
 
-TIPOS_ITEM = ["repuesto", "mano_obra"]
+# 'convertidor': otro convertidor de stock cargado como repuesto de este
+# (ver agregar_item_convertidor) -- no descuenta stock de 'productos', usa
+# convertidor_hijo_id en vez de producto_id, y su costo se calcula en vivo
+# (no queda fijo al momento de cargarlo, ver _convertidor_costo_estimado).
+TIPOS_ITEM = ["repuesto", "mano_obra", "convertidor"]
 
 ORIGENES_CONVERTIDOR = ["cliente_directo", "stock_taller", "desde_ot_auto"]
 ORIGENES_CONVERTIDOR_LABEL = {
@@ -69,18 +92,23 @@ ORIGENES_CONVERTIDOR_LABEL = {
     "desde_ot_auto": "Desde la caja de un auto (OT existente)",
 }
 
+# Renombrado desde ["ingreso", "diagnostico", "reparacion", "control_calidad",
+# "listo", "instalado", "entregado", "cancelado"] -- init_convertidores_db
+# migra los datos existentes (diagnostico -> esperando_aprobacion,
+# control_calidad -> esperando_repuesto) la primera vez que corre.
 ESTADOS_CONVERTIDOR = [
-    "ingreso", "diagnostico", "reparacion", "control_calidad", "listo",
+    "ingreso", "esperando_aprobacion", "reparacion", "esperando_repuesto", "listo",
     "instalado", "entregado", "cancelado",
 ]
 ESTADOS_CONVERTIDOR_CERRADOS = {"instalado", "entregado", "cancelado"}
 # Único estado desde el que un convertidor se puede vincular como repuesto
-# a la OT de un auto -- ver agregar_convertidor_a_orden(). Evita instalar
-# una unidad cuya propia reparación todavía no terminó.
+# a la OT de un auto o al reparar OTRO convertidor -- ver
+# agregar_convertidor_a_orden() / agregar_item_convertidor(). Evita
+# instalar una unidad cuya propia reparación todavía no terminó.
 ESTADO_CONVERTIDOR_DISPONIBLE = "listo"
 ESTADOS_CONVERTIDOR_LABEL = {
-    "ingreso": "Ingreso", "diagnostico": "Diagnóstico", "reparacion": "Reparación",
-    "control_calidad": "Control de calidad", "listo": "Listo para instalar",
+    "ingreso": "Ingreso", "esperando_aprobacion": "Esperando aprobación", "reparacion": "Reparación",
+    "esperando_repuesto": "Esperando repuesto", "listo": "Listo para instalar",
     "instalado": "Instalado en un auto", "entregado": "Entregado", "cancelado": "Cancelado",
 }
 
@@ -142,7 +170,8 @@ def init_convertidores_db(db):
             usuario TEXT DEFAULT '',
             creado_en TEXT NOT NULL,
             detalle TEXT DEFAULT '',
-            aplica_iva INTEGER NOT NULL DEFAULT 0
+            aplica_iva INTEGER NOT NULL DEFAULT 0,
+            convertidor_hijo_id INTEGER REFERENCES convertidores_torque(id)
         );
         """
     )
@@ -168,12 +197,31 @@ def init_convertidores_db(db):
     if "es_regional" not in columnas_convertidor:
         db.execute("ALTER TABLE convertidores_torque ADD COLUMN es_regional INTEGER NOT NULL DEFAULT 0")
         db.commit()
+
+    # Migración de nombres de estados (una sola vez, idempotente): los pasos
+    # intermedios se llamaban 'diagnostico' y 'control_calidad' -- se
+    # renombraron a 'esperando_aprobacion' y 'esperando_repuesto'. Los
+    # convertidores que ya estaban en esos pasos quedan en su equivalente
+    # nuevo, sin perder su lugar en el flujo.
+    db.execute("UPDATE convertidores_torque SET estado = 'esperando_aprobacion' WHERE estado = 'diagnostico'")
+    db.execute("UPDATE convertidores_torque SET estado = 'esperando_repuesto' WHERE estado = 'control_calidad'")
+    db.commit()
+
+    # 'convertidor_hijo_id' se agregó para poder cargar OTRO convertidor de
+    # stock como repuesto de este (ver agregar_item_convertidor) -- si la
+    # tabla ya existía sin esta columna, se agrega acá en caliente.
+    columnas_item = [c[1] for c in db.execute("PRAGMA table_info(convertidor_items)").fetchall()]
+    if "convertidor_hijo_id" not in columnas_item:
+        db.execute("ALTER TABLE convertidor_items ADD COLUMN convertidor_hijo_id INTEGER REFERENCES convertidores_torque(id)")
+        db.commit()
+
     db.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_convertidores_cliente_id ON convertidores_torque (cliente_id);
         CREATE INDEX IF NOT EXISTS idx_convertidores_equipo_id ON convertidores_torque (equipo_id);
         CREATE INDEX IF NOT EXISTS idx_convertidores_estado ON convertidores_torque (estado);
         CREATE INDEX IF NOT EXISTS idx_convertidor_items_convertidor_id ON convertidor_items (convertidor_id);
+        CREATE INDEX IF NOT EXISTS idx_convertidor_items_convertidor_hijo_id ON convertidor_items (convertidor_hijo_id);
         """
     )
     db.commit()
@@ -196,13 +244,14 @@ def init_convertidores_db(db):
             usuario TEXT DEFAULT '',
             creado_en TEXT NOT NULL,
             detalle TEXT DEFAULT '',
-            aplica_iva INTEGER NOT NULL DEFAULT 0
+            aplica_iva INTEGER NOT NULL DEFAULT 0,
+            convertidor_hijo_id INTEGER REFERENCES convertidores_torque(id)
         );
         """,
         [
             "id", "convertidor_id", "tipo", "producto_id", "descripcion",
             "cantidad", "costo_unitario", "movimiento_id", "usuario",
-            "creado_en", "detalle", "aplica_iva",
+            "creado_en", "detalle", "aplica_iva", "convertidor_hijo_id",
         ],
     )
     db.commit()
@@ -222,20 +271,68 @@ def vista_convertidores():
 # modulos/operativo.py, nunca al revés.
 # ---------------------------------------------------------------------------
 
-def _convertidor_costo_total(db, convertidor_id):
-    """Suma de los ítems propios del convertidor (lo que costó repararlo).
+def _convertidor_costo_total(db, convertidor_id, _visitados=None):
+    """Suma de los ítems propios del convertidor (lo que costó repararlo):
+    repuestos + mano de obra, más el costo ACTUAL de cualquier convertidor
+    de stock cargado como repuesto interno (ítem tipo 'convertidor', ver
+    agregar_item_convertidor). Ese costo se sigue en vivo -- no queda fijo
+    al momento de cargarlo -- así que si el convertidor de stock cambia
+    después (se le agregan más ítems, se le ajusta el precio_venta), el
+    total de este convertidor "madre" (y en cascada, el de la OT del auto
+    si corresponde) refleja el valor más reciente la próxima vez que se
+    consulte.
+
     Es el costo que se usa por defecto al instalarlo como repuesto en la
     OT de un auto, salvo que el convertidor tenga un 'precio_venta'
-    explícito seteado."""
+    explícito seteado (ver _convertidor_costo_estimado).
+
+    _visitados es una defensa contra un ciclo corrupto en los datos (no
+    debería poder darse: un convertidor solo se puede cargar como repuesto
+    de otro si está 'listo', y una vez cargado queda 'instalado', por lo
+    que no puede volver a cargarse en ningún otro lado -- pero es barato
+    prevenir un loop infinito igual)."""
+    if _visitados is None:
+        _visitados = set()
+    if convertidor_id in _visitados:
+        return 0
+    _visitados = _visitados | {convertidor_id}
+
     fila = db.execute(
         f"""SELECT COALESCE(SUM(
                 cantidad * costo_unitario *
                 (CASE WHEN aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)
             ), 0) AS total
-            FROM convertidor_items WHERE convertidor_id = ?""",
+            FROM convertidor_items WHERE convertidor_id = ? AND tipo != 'convertidor'""",
         (convertidor_id,),
     ).fetchone()
-    return round(fila["total"], 2)
+    total = fila["total"]
+
+    hijos = db.execute(
+        "SELECT convertidor_hijo_id FROM convertidor_items "
+        "WHERE convertidor_id = ? AND tipo = 'convertidor' AND convertidor_hijo_id IS NOT NULL",
+        (convertidor_id,),
+    ).fetchall()
+    for h in hijos:
+        total += _convertidor_costo_estimado(db, h["convertidor_hijo_id"], _visitados)
+
+    return round(total, 2)
+
+
+def _convertidor_costo_estimado(db, convertidor_id, _visitados=None):
+    """Costo "de venta/instalación" de un convertidor puntual: su
+    precio_venta si se cargó uno explícito, si no la suma de sus propios
+    ítems (_convertidor_costo_total, que a su vez sigue en vivo el costo
+    de cualquier convertidor-repuesto que tenga adentro). Mismo criterio
+    en los tres lugares que necesitan "cuánto vale este convertidor ahora
+    mismo": instalarlo en la OT de un auto, cargarlo automáticamente en su
+    OT de origen al llegar a 'entregado', y cargarlo como repuesto de
+    OTRO convertidor."""
+    fila = db.execute("SELECT precio_venta FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
+    if fila is None:
+        return 0
+    if fila["precio_venta"] not in (None, ""):
+        return fila["precio_venta"]
+    return _convertidor_costo_total(db, convertidor_id, _visitados)
 
 
 def agregar_convertidor_a_orden(db, orden, orden_id, data):
@@ -276,9 +373,7 @@ def agregar_convertidor_a_orden(db, orden, orden_id, data):
             partes.append(f"N/S {convertidor['numero_serie']}")
         descripcion = " ".join(partes).upper()
 
-    costo_unitario = convertidor["precio_venta"]
-    if costo_unitario in (None, ""):
-        costo_unitario = _convertidor_costo_total(db, convertidor_id)
+    costo_unitario = _convertidor_costo_estimado(db, convertidor_id)
 
     cur = db.execute(
         """
@@ -334,7 +429,16 @@ def _cargar_convertidor_interno_en_ot_origen(db, convertidor_id):
     if orden is None:
         return
 
-    usuario = usuario_actual()
+    # usuario_actual() necesita sesión (contexto de request) -- normal
+    # cuando esto se dispara desde editar_convertidor (un PUT real), pero
+    # reparar_cargas_internas_pendientes() lo llama al arrancar el
+    # servidor, fuera de cualquier request, así que ahí usuario_actual()
+    # explota con "Working outside of request context". Con try/except
+    # queda cubierto para los dos casos sin tener que cambiar la firma.
+    try:
+        usuario = usuario_actual()
+    except RuntimeError:
+        usuario = "Sistema"
     ts = now_iso()
     partes = ["CONVERTIDOR DE TORQUE (REPARACIÓN INTERNA)"]
     if convertidor["marca"]:
@@ -345,9 +449,7 @@ def _cargar_convertidor_interno_en_ot_origen(db, convertidor_id):
         partes.append(f"N/S {convertidor['numero_serie']}")
     descripcion = " ".join(partes).upper()
 
-    costo_unitario = convertidor["precio_venta"]
-    if costo_unitario in (None, ""):
-        costo_unitario = _convertidor_costo_total(db, convertidor_id)
+    costo_unitario = _convertidor_costo_estimado(db, convertidor_id)
 
     db.execute(
         """
@@ -362,15 +464,45 @@ def _cargar_convertidor_interno_en_ot_origen(db, convertidor_id):
     db.commit()
 
 
+def reparar_cargas_internas_pendientes(db):
+    """Reintenta el auto-cargo a la OT de origen para convertidores
+    'desde_ot_auto' que ya llegaron a 'entregado' pero se quedaron sin su
+    ítem correspondiente en orden_items -- típicamente porque el intento
+    original falló con 'FOREIGN KEY constraint failed' (ver
+    modulos/operativo.py:init_operativo_db(), donde se repara la FK de
+    orden_items.convertidor_id hacia convertidores_torque justo antes de
+    llamar a esta función). El cambio de estado a 'entregado' sí se
+    guarda aunque la carga falle -- por eso una unidad puede quedar
+    "entregada" en el tablero pero sin su costo reflejado en la OT del
+    auto, y como el auto-cargo solo se dispara en la TRANSICIÓN a
+    'entregado' (ver editar_convertidor), una unidad que ya está
+    'entregado' no lo vuelve a intentar sola.
+
+    Se llama desde modulos/operativo.py:init_operativo_db(), en cada
+    arranque, DESPUÉS de reparar esa FK -- es idempotente (usa el mismo
+    chequeo "ya_cargado" que la carga normal, dentro de
+    _cargar_convertidor_interno_en_ot_origen), así que no hace nada si ya
+    no queda ninguna unidad pendiente."""
+    pendientes = db.execute(
+        "SELECT id FROM convertidores_torque "
+        "WHERE origen_tipo = 'desde_ot_auto' AND estado = 'entregado' AND orden_origen_id IS NOT NULL"
+    ).fetchall()
+    for fila in pendientes:
+        _cargar_convertidor_interno_en_ot_origen(db, fila["id"])
+
+
 def revertir_convertidor_al_quitar_item(db, convertidor_id):
-    """Llamada desde modulos/operativo.py:eliminar_item_orden() cuando se
-    quita de la OT un ítem tipo 'convertidor_torque'. No hay stock que
+    """Libera una unidad de convertidor que había quedado 'instalado' al
+    usarla como repuesto -- de un auto o de OTRO convertidor. Se llama
+    desde dos lugares: modulos/operativo.py:eliminar_item_orden() (ítem
+    tipo 'convertidor_torque' de una OT) y eliminar_item_convertidor() acá
+    mismo (ítem tipo 'convertidor' de otro convertidor). No hay stock que
     devolver (el convertidor no vive en 'productos'), pero sí hay que
-    liberar la unidad: vuelve a 'listo' para que se pueda instalar en
-    otra OT si esto fue un error de carga. Solo aplica si estaba
-    'instalado' (el caso 'interno' que se auto-cargó al llegar a
-    'entregado' se queda en 'entregado' -- no tiene sentido "liberarlo"
-    porque nunca fue instalable en otra OT distinta a la suya propia)."""
+    liberar la unidad: vuelve a 'listo' para que se pueda volver a usar en
+    cualquiera de los dos casos. Solo aplica si estaba 'instalado' (el
+    caso 'interno' que se auto-cargó al llegar a 'entregado' se queda en
+    'entregado' -- no tiene sentido "liberarlo" porque nunca fue
+    instalable en otra OT distinta a la suya propia)."""
     db.execute(
         "UPDATE convertidores_torque SET estado = ?, actualizado_en = ? WHERE id = ? AND estado = 'instalado'",
         (ESTADO_CONVERTIDOR_DISPONIBLE, now_iso(), convertidor_id),
@@ -398,18 +530,43 @@ def _convertidor_dict(db, row):
     ).fetchall()
     d["items"] = [dict(i) for i in items]
     for it in d["items"]:
-        it["subtotal"] = _item_subtotal(it)
+        if it["tipo"] == "convertidor" and it.get("convertidor_hijo_id"):
+            # El costo de un convertidor cargado como repuesto de este se
+            # sigue EN VIVO (no queda fijo al momento de cargarlo, ver
+            # _convertidor_costo_estimado) -- se recalcula cada vez que se
+            # consulta el convertidor madre, así que costo_unitario/subtotal
+            # siempre reflejan el valor actual del convertidor-repuesto.
+            costo_vivo = _convertidor_costo_estimado(db, it["convertidor_hijo_id"])
+            it["costo_unitario"] = costo_vivo
+            it["subtotal"] = costo_vivo
+            hijo = db.execute(
+                "SELECT id, marca, modelo, numero_serie, estado FROM convertidores_torque WHERE id = ?",
+                (it["convertidor_hijo_id"],),
+            ).fetchone()
+            it["convertidor_hijo"] = dict(hijo) if hijo else None
+        else:
+            it["subtotal"] = _item_subtotal(it)
     d["total_reparacion"] = sum(i["subtotal"] for i in d["items"])
     # Precio a mostrar en la tarjeta del tablero: el precio de venta
     # explícito si se cargó uno, si no, la suma de los ítems propios
     # (mismo criterio que agregar_convertidor_a_orden al instalarlo).
     d["costo_estimado"] = d["precio_venta"] if d["precio_venta"] not in (None, "") else d["total_reparacion"]
-    # Ítem de orden_items (si ya está instalado) donde quedó registrado —
-    # útil para que el detalle del convertidor muestre "instalado en OT #X".
+    # Ítem de orden_items (si ya está instalado en la OT de un auto) donde
+    # quedó registrado — útil para que el detalle del convertidor muestre
+    # "instalado en OT #X".
     instalacion = db.execute(
         "SELECT orden_id FROM orden_items WHERE convertidor_id = ? ORDER BY id DESC LIMIT 1", (d["id"],)
     ).fetchone()
     d["instalado_en_orden_id"] = instalacion["orden_id"] if instalacion else None
+    # Mismo criterio pero para el otro camino posible: que esta unidad haya
+    # quedado cargada como repuesto DENTRO de otro convertidor (ver
+    # agregar_item_convertidor). Los dos campos son mutuamente excluyentes
+    # en la práctica (una unidad 'instalado' solo pudo consumirse por uno
+    # de los dos caminos).
+    uso_como_repuesto = db.execute(
+        "SELECT convertidor_id FROM convertidor_items WHERE convertidor_hijo_id = ? ORDER BY id DESC LIMIT 1", (d["id"],)
+    ).fetchone()
+    d["instalado_en_convertidor_id"] = uso_como_repuesto["convertidor_id"] if uso_como_repuesto else None
     return d
 
 
@@ -507,17 +664,34 @@ def listar_convertidores():
 
 @bp.route("/api/convertidores/disponibles", methods=["GET"])
 def convertidores_disponibles():
-    """Para el selector de 'agregar repuesto' en la OT de un auto: solo
-    las unidades cuya propia reparación ya terminó (estado 'listo')."""
+    """Para los dos selectores de 'agregar repuesto' que consumen esto:
+    la OT de un auto (modulos/operativo.py) y el ítem 'convertidor' de
+    OTRO convertidor (ver agregar_item_convertidor acá mismo). Siempre
+    solo las unidades cuya propia reparación ya terminó (estado 'listo').
+
+    ?origen=stock_taller filtra a solo unidades de stock -- lo usa el
+    selector de "cargar convertidor de stock como repuesto" de otro
+    convertidor, porque ahí no tiene sentido ofrecer una unidad que ya
+    tiene cliente/auto propio (cliente_directo/desde_ot_auto).
+    ?excluir_id=X saca esa unidad puntual de la lista -- para que un
+    convertidor no se pueda ofrecer a sí mismo como su propio repuesto."""
     db = get_db()
-    rows = db.execute(
-        "SELECT * FROM convertidores_torque WHERE estado = ? ORDER BY actualizado_en DESC",
-        (ESTADO_CONVERTIDOR_DISPONIBLE,),
-    ).fetchall()
+    origen = (request.args.get("origen") or "").strip()
+    excluir_id = request.args.get("excluir_id")
+    sql = "SELECT * FROM convertidores_torque WHERE estado = ?"
+    params = [ESTADO_CONVERTIDOR_DISPONIBLE]
+    if origen:
+        sql += " AND origen_tipo = ?"
+        params.append(origen)
+    if excluir_id:
+        sql += " AND id != ?"
+        params.append(excluir_id)
+    sql += " ORDER BY actualizado_en DESC"
+    rows = db.execute(sql, params).fetchall()
     resultado = []
     for r in rows:
         d = dict(r)
-        d["costo_total"] = d["precio_venta"] if d["precio_venta"] not in (None, "") else _convertidor_costo_total(db, d["id"])
+        d["costo_total"] = _convertidor_costo_estimado(db, d["id"])
         resultado.append(d)
     return jsonify({"convertidores": resultado})
 
@@ -621,11 +795,24 @@ def eliminar_convertidor(convertidor_id):
     ya_en_ot = db.execute(
         "SELECT orden_id FROM orden_items WHERE convertidor_id = ? LIMIT 1", (convertidor_id,)
     ).fetchone()
-    if convertidor["estado"] == "instalado" or ya_en_ot is not None:
-        return jsonify({
-            "error": "Este convertidor ya está cargado como ítem en la OT de un auto -- elimina primero ese "
-                     "ítem desde la orden correspondiente si de verdad quieres deshacerlo."
-        }), 409
+    # Una unidad 'instalado' quedó consumida por uno de dos caminos
+    # posibles -- la OT de un auto, o el ítem de OTRO convertidor -- ver
+    # cuál para dar un mensaje de error que apunte al lugar correcto.
+    ya_en_convertidor = db.execute(
+        "SELECT convertidor_id FROM convertidor_items WHERE convertidor_hijo_id = ? LIMIT 1", (convertidor_id,)
+    ).fetchone()
+    if convertidor["estado"] == "instalado" or ya_en_ot is not None or ya_en_convertidor is not None:
+        if ya_en_convertidor is not None:
+            mensaje = (
+                f"Este convertidor ya está cargado como repuesto del convertidor #{ya_en_convertidor['convertidor_id']} "
+                "-- elimina primero ese ítem si de verdad quieres deshacerlo."
+            )
+        else:
+            mensaje = (
+                "Este convertidor ya está cargado como ítem en la OT de un auto -- elimina primero ese "
+                "ítem desde la orden correspondiente si de verdad quieres deshacerlo."
+            )
+        return jsonify({"error": mensaje}), 409
 
     items_repuesto = db.execute(
         "SELECT * FROM convertidor_items WHERE convertidor_id = ? AND tipo = 'repuesto' AND producto_id IS NOT NULL",
@@ -639,6 +826,17 @@ def eliminar_convertidor(convertidor_id):
                 motivo=f"DEVOLUCIÓN AL ELIMINAR CONVERTIDOR #{convertidor_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
             )
+
+    # Si este convertidor tenía a su vez OTRO convertidor de stock cargado
+    # como su propio repuesto, hay que liberar esa unidad también -- si no,
+    # quedaría 'instalado' para siempre, apuntando a un convertidor que ya
+    # no existe.
+    items_convertidor = db.execute(
+        "SELECT * FROM convertidor_items WHERE convertidor_id = ? AND tipo = 'convertidor' AND convertidor_hijo_id IS NOT NULL",
+        (convertidor_id,),
+    ).fetchall()
+    for item in items_convertidor:
+        revertir_convertidor_al_quitar_item(db, item["convertidor_hijo_id"])
 
     db.execute("DELETE FROM convertidores_torque WHERE id = ?", (convertidor_id,))
     db.commit()
@@ -659,17 +857,23 @@ def agregar_item_convertidor(convertidor_id):
     tipo = (data.get("tipo") or "").strip().lower()
     if tipo not in TIPOS_ITEM:
         return jsonify({"error": f"Tipo de ítem inválido. Usa uno de: {', '.join(TIPOS_ITEM)}"}), 400
-    try:
-        cantidad = float(data.get("cantidad"))
-        if cantidad <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({"error": "La cantidad debe ser un número mayor a 0"}), 400
+
+    if tipo == "convertidor":
+        # Una unidad de convertidor no tiene "cantidad" -- siempre es 1.
+        cantidad = 1.0
+    else:
+        try:
+            cantidad = float(data.get("cantidad"))
+            if cantidad <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"error": "La cantidad debe ser un número mayor a 0"}), 400
 
     usuario = usuario_actual()
     ts = now_iso()
     producto_id = None
     movimiento_id = None
+    convertidor_hijo_id = None
     descripcion = (data.get("descripcion") or "").strip().upper()
 
     if tipo == "repuesto":
@@ -712,19 +916,68 @@ def agregar_item_convertidor(convertidor_id):
         detalle = (data.get("detalle") or "").strip().upper()
         aplica_iva = 1 if data.get("aplica_iva") else 0
 
+    if tipo == "convertidor":
+        # Repara ESTE convertidor usando otro de STOCK como repuesto (ej.
+        # el auto trae un convertidor "madre" interno/externo que no
+        # sirve y se repara con uno de stock ya listo). El de stock queda
+        # 'instalado' -- igual que si se hubiese instalado en la OT de un
+        # auto -- y ya no se puede volver a ofrecer en ningún otro lado
+        # hasta que se elimine este ítem (ver eliminar_item_convertidor).
+        # Su costo NO se congela acá: se sigue en vivo cada vez que se
+        # consulta el convertidor madre (ver _convertidor_dict /
+        # _convertidor_costo_total), según lo que se definió con el taller.
+        try:
+            convertidor_hijo_id = int(data.get("convertidor_hijo_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Debes indicar qué convertidor de stock usar como repuesto"}), 400
+        if convertidor_hijo_id == convertidor_id:
+            return jsonify({"error": "Un convertidor no puede usarse a sí mismo como repuesto"}), 400
+        hijo = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_hijo_id,)).fetchone()
+        if hijo is None:
+            return jsonify({"error": "El convertidor de stock indicado no existe"}), 400
+        if hijo["origen_tipo"] != "stock_taller":
+            return jsonify({"error": "Solo se puede cargar como repuesto un convertidor de STOCK del taller."}), 400
+        if hijo["estado"] != ESTADO_CONVERTIDOR_DISPONIBLE:
+            return jsonify({
+                "error": f"Ese convertidor de stock está '{ESTADOS_CONVERTIDOR_LABEL.get(hijo['estado'], hijo['estado'])}', "
+                         f"solo se puede usar uno que esté '{ESTADOS_CONVERTIDOR_LABEL[ESTADO_CONVERTIDOR_DISPONIBLE]}'."
+            }), 409
+        costo_unitario = 0  # ignorado al leer -- el costo real se calcula en vivo, ver _convertidor_dict
+        if not descripcion:
+            partes = ["CONVERTIDOR DE STOCK COMO REPUESTO"]
+            if hijo["marca"]:
+                partes.append(hijo["marca"])
+            if hijo["modelo"]:
+                partes.append(hijo["modelo"])
+            if hijo["numero_serie"]:
+                partes.append(f"N/S {hijo['numero_serie']}")
+            descripcion = " ".join(partes).upper()
+        db.execute(
+            "UPDATE convertidores_torque SET estado = 'instalado', actualizado_en = ? WHERE id = ?",
+            (ts, convertidor_hijo_id),
+        )
+
     cur = db.execute(
         """
         INSERT INTO convertidor_items (
             convertidor_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
-            movimiento_id, usuario, creado_en, detalle, aplica_iva
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            movimiento_id, usuario, creado_en, detalle, aplica_iva, convertidor_hijo_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (convertidor_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva),
+        (
+            convertidor_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
+            movimiento_id, usuario, ts, detalle, aplica_iva, convertidor_hijo_id,
+        ),
     )
     db.execute("UPDATE convertidores_torque SET actualizado_en = ? WHERE id = ?", (ts, convertidor_id))
     db.commit()
     nuevo_item = dict(db.execute("SELECT * FROM convertidor_items WHERE id = ?", (cur.lastrowid,)).fetchone())
-    nuevo_item["subtotal"] = _item_subtotal(nuevo_item)
+    if tipo == "convertidor" and convertidor_hijo_id:
+        costo_vivo = _convertidor_costo_estimado(db, convertidor_hijo_id)
+        nuevo_item["costo_unitario"] = costo_vivo
+        nuevo_item["subtotal"] = costo_vivo
+    else:
+        nuevo_item["subtotal"] = _item_subtotal(nuevo_item)
     return jsonify(nuevo_item), 201
 
 
@@ -746,6 +999,10 @@ def eliminar_item_convertidor(convertidor_id, item_id):
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE CONVERTIDOR #{convertidor_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
             )
+    elif item["tipo"] == "convertidor" and item["convertidor_hijo_id"]:
+        # Libera el convertidor de stock que estaba cargado como repuesto
+        # de este -- vuelve a 'listo' para poder usarse de nuevo.
+        revertir_convertidor_al_quitar_item(db, item["convertidor_hijo_id"])
 
     db.execute("DELETE FROM convertidor_items WHERE id = ?", (item_id,))
     db.execute("UPDATE convertidores_torque SET actualizado_en = ? WHERE id = ?", (now_iso(), convertidor_id))

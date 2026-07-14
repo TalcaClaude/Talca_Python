@@ -545,6 +545,55 @@ def init_operativo_db(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_convertidor_id ON orden_items (convertidor_id)")
     db.commit()
 
+    # Repara orden_items si su llave foránea convertidor_id quedó
+    # apuntando a 'convertidores_torque_legado...' en vez de
+    # 'convertidores_torque' (mismo mecanismo que ya se documentó arriba
+    # para garantia_items -> garantias -- ver _reparar_fk_hacia_tabla_renombrada
+    # en core.py). Se confirmó en producción el 14/07/2026: mover un
+    # convertidor 'interno' a 'entregado' guardaba el cambio de estado
+    # pero el auto-cargo a la OT de origen fallaba con 'FOREIGN KEY
+    # constraint failed' al insertar en orden_items -- exactamente esta
+    # causa. Se corre en cada arranque; si la llave ya está bien, no hace
+    # nada.
+    sql_orden_items_actual = """
+        CREATE TABLE IF NOT EXISTS orden_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+            tipo TEXT NOT NULL,
+            producto_id INTEGER REFERENCES productos(id),
+            descripcion TEXT DEFAULT '',
+            cantidad REAL NOT NULL DEFAULT 1,
+            costo_unitario REAL NOT NULL DEFAULT 0,
+            movimiento_id INTEGER REFERENCES movimientos(id),
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            detalle TEXT DEFAULT '',
+            aplica_iva INTEGER NOT NULL DEFAULT 0,
+            convertidor_id INTEGER REFERENCES convertidores_torque(id)
+        );
+    """
+    _reparar_fk_hacia_tabla_renombrada(
+        db,
+        "orden_items",
+        sql_orden_items_actual,
+        [
+            "id", "orden_id", "tipo", "producto_id", "descripcion", "cantidad",
+            "costo_unitario", "movimiento_id", "usuario", "creado_en",
+            "detalle", "aplica_iva", "convertidor_id",
+        ],
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_orden_id ON orden_items (orden_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_producto_id ON orden_items (producto_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_usuario_tipo ON orden_items (usuario, tipo)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_convertidor_id ON orden_items (convertidor_id)")
+    db.commit()
+
+    # Con la FK ya reparada, reintenta el auto-cargo de cualquier
+    # convertidor 'interno' que haya quedado 'entregado' sin su ítem
+    # correspondiente en la OT de origen (ver
+    # convertidores.reparar_cargas_internas_pendientes -- idempotente).
+    convertidores.reparar_cargas_internas_pendientes(db)
+
 
 # ---------------------------------------------------------------------------
 # Clientes

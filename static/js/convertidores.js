@@ -240,13 +240,13 @@ async function cargarDashboardConvertidores() {
 // ---------------------------------------------------------------------------
 
 const CONV_ESTADO_LABEL = {
-  ingreso: "Ingreso", diagnostico: "Diagnóstico", reparacion: "Reparación",
-  control_calidad: "Control de calidad", listo: "Listo para instalar",
+  ingreso: "Ingreso", esperando_aprobacion: "Esperando aprobación", reparacion: "Reparación",
+  esperando_repuesto: "Esperando repuesto", listo: "Listo para instalar",
   instalado: "Instalado", entregado: "Entregado", cancelado: "Cancelado",
 };
 
 const CONV_ESTADOS_TABLERO = [
-  "ingreso", "diagnostico", "reparacion", "control_calidad", "listo",
+  "ingreso", "esperando_aprobacion", "reparacion", "esperando_repuesto", "listo",
   "instalado", "entregado", "cancelado",
 ];
 
@@ -531,11 +531,12 @@ function renderItemsConvertidor(convertidor) {
   if (convertidor.items.length === 0) {
     tbody.innerHTML = `<tr><td colspan="6" class="vacio">Sin ítems todavía.</td></tr>`;
   } else {
+    const TIPO_LABEL = { repuesto: "Repuesto", mano_obra: "Mano de obra", convertidor: "Convertidor de stock" };
     tbody.innerHTML = convertidor.items.map(it => `
       <tr>
-        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
-        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}</td>
-        <td class="num">${it.cantidad}</td>
+        <td>${TIPO_LABEL[it.tipo] || it.tipo}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.tipo === "convertidor" && it.convertidor_hijo ? `<br><a href="/convertidores?ver=${it.convertidor_hijo.id}" class="ayuda-inline">Ver convertidor #${it.convertidor_hijo.id}</a> — costo en vivo` : ""}</td>
+        <td class="num">${it.tipo === "convertidor" ? "—" : it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
         <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
         <td><button type="button" class="btn-link btn-link--peligro" data-eliminar-conv-item="${it.id}">Eliminar</button></td>
@@ -562,6 +563,10 @@ async function abrirDetalleConvertidor(id) {
       document.getElementById("convd-instalado-info").textContent = convertidor.origen_tipo === "desde_ot_auto"
         ? `Cargado automáticamente como costo en su OT de origen (OT #${convertidor.instalado_en_orden_id}).`
         : `Instalado en la OT #${convertidor.instalado_en_orden_id}.`;
+    } else if (convertidor.instalado_en_convertidor_id) {
+      document.getElementById("convd-instalado-info").style.display = "";
+      document.getElementById("convd-instalado-info").innerHTML =
+        `Cargado como repuesto del <a href="/convertidores?ver=${convertidor.instalado_en_convertidor_id}">convertidor #${convertidor.instalado_en_convertidor_id}</a>.`;
     } else {
       document.getElementById("convd-instalado-info").style.display = "none";
     }
@@ -585,11 +590,26 @@ async function abrirDetalleConvertidor(id) {
     document.getElementById("convi-producto-id").value = "";
     document.getElementById("convi-producto-resultados").style.display = "none";
     document.getElementById("form-conv-item").reset();
+    await renderSelectConvertidoresStockDisponibles(id);
     document.getElementById("convi-tipo").dispatchEvent(new Event("change"));
 
     abrirModal("modal-op-convertidor-detalle");
   } catch (e) {
     toast(e.message, true);
+  }
+}
+
+// Unidades de STOCK "listas para instalar" disponibles para usar como
+// repuesto de ESTE convertidor (tipo de ítem "convertidor") -- se excluye
+// la propia unidad para que no se pueda ofrecer a sí misma.
+async function renderSelectConvertidoresStockDisponibles(convertidorId) {
+  const select = document.getElementById("convi-convertidor-hijo-id");
+  try {
+    const data = await api(`/api/convertidores/disponibles?origen=stock_taller&excluir_id=${convertidorId}`);
+    select.innerHTML = '<option value="">Selecciona una unidad de stock…</option>' +
+      data.convertidores.map(c => `<option value="${c.id}">Convertidor #${c.id} — ${escapeHtml([c.marca, c.modelo].filter(Boolean).join(" ") || "Sin marca/modelo")} — ${fmtMoney(c.costo_total)}</option>`).join("");
+  } catch (e) {
+    select.innerHTML = '<option value="">No se pudo cargar el stock disponible</option>';
   }
 }
 
@@ -694,34 +714,43 @@ document.getElementById("btn-convd-guardar").addEventListener("click", async () 
 });
 
 document.getElementById("convi-tipo").addEventListener("change", (e) => {
-  const esRepuesto = e.target.value === "repuesto";
-  document.getElementById("convi-campo-producto").style.display = esRepuesto ? "flex" : "none";
-  document.getElementById("convi-campo-descripcion").style.display = esRepuesto ? "none" : "flex";
-  document.getElementById("convi-campo-costo").style.display = esRepuesto ? "none" : "flex";
-  document.getElementById("convi-fila-mo-extra").style.display = esRepuesto ? "none" : "flex";
+  const tipo = e.target.value;
+  document.getElementById("convi-campo-producto").style.display = tipo === "repuesto" ? "flex" : "none";
+  document.getElementById("convi-campo-descripcion").style.display = tipo === "mano_obra" ? "flex" : "none";
+  document.getElementById("convi-campo-costo").style.display = tipo === "mano_obra" ? "flex" : "none";
+  document.getElementById("convi-fila-mo-extra").style.display = tipo === "mano_obra" ? "flex" : "none";
+  document.getElementById("convi-campo-convertidor-hijo").style.display = tipo === "convertidor" ? "flex" : "none";
+  // Un convertidor no tiene "cantidad" -- siempre es 1, así que se oculta
+  // el campo para esa opción (el backend igual la fuerza a 1).
+  document.getElementById("convi-campo-cantidad").style.display = tipo === "convertidor" ? "none" : "flex";
 });
 
 document.getElementById("form-conv-item").addEventListener("submit", async (e) => {
   e.preventDefault();
   const tipo = document.getElementById("convi-tipo").value;
   const convertidorId = document.getElementById("convd-id").value;
-  const payload = {
-    tipo,
-    cantidad: document.getElementById("convi-cantidad").value,
-  };
+  const payload = { tipo };
   if (tipo === "repuesto") {
+    payload.cantidad = document.getElementById("convi-cantidad").value;
     payload.producto_id = document.getElementById("convi-producto-id").value;
     if (!payload.producto_id) {
       toast("Busca el producto y haz clic en él para agregarlo.", true);
       return;
     }
-  } else {
+  } else if (tipo === "mano_obra") {
+    payload.cantidad = document.getElementById("convi-cantidad").value;
     payload.descripcion = document.getElementById("convi-descripcion").value.trim();
     payload.costo_unitario = limpiarMonto(document.getElementById("convi-costo").value) || 0;
     payload.detalle = document.getElementById("convi-mo-detalle").value.trim();
     payload.aplica_iva = document.getElementById("convi-mo-iva").checked;
     if (!payload.descripcion) {
       toast("Describe la mano de obra realizada.", true);
+      return;
+    }
+  } else if (tipo === "convertidor") {
+    payload.convertidor_hijo_id = document.getElementById("convi-convertidor-hijo-id").value;
+    if (!payload.convertidor_hijo_id) {
+      toast("Selecciona el convertidor de stock que vas a usar como repuesto.", true);
       return;
     }
   }
@@ -736,6 +765,11 @@ document.getElementById("form-conv-item").addEventListener("submit", async (e) =
     document.getElementById("convi-tipo").dispatchEvent(new Event("change"));
     const dataProductos = await api("/api/productos");
     state.opProductos = dataProductos.productos;
+    if (tipo === "convertidor") {
+      // La unidad recién usada ya no debe ofrecerse de nuevo -- refresca
+      // el selector para que desaparezca de la lista.
+      await renderSelectConvertidoresStockDisponibles(convertidorId);
+    }
   } catch (e2) {
     toast(e2.message, true);
   }
@@ -749,6 +783,9 @@ async function eliminarItemConvertidor(itemId) {
     toast("Ítem eliminado.");
     const convertidor = await api(`/api/convertidores/${convertidorId}`);
     renderItemsConvertidor(convertidor);
+    // Si el ítem eliminado era un convertidor de stock, esa unidad volvió
+    // a 'listo' -- refresca el selector para que vuelva a aparecer.
+    await renderSelectConvertidoresStockDisponibles(convertidorId);
   } catch (e) {
     toast(e.message, true);
   }

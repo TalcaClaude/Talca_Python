@@ -10,8 +10,8 @@ para que sea fácil de instalar y correr en cualquier PC o servidor.
 import os
 import re
 import json
-import shutil
 import sqlite3
+import shutil
 import time
 import threading
 import smtplib
@@ -5525,6 +5525,131 @@ def limpiar_inventario_duplicado():
     })
 
 
+# ---------------------------------------------------------------------------
+# Respaldos automáticos locales (cada pocos minutos, en el mismo disco)
+# ---------------------------------------------------------------------------
+# Complementa al respaldo diario por correo: cada RESPALDO_LOCAL_INTERVALO_MINUTOS
+# minutos se crea una copia consistente (VACUUM INTO) de la base de datos en
+# una carpeta aparte del mismo volumen, rotando para no acumular copias
+# indefinidamente. Así, ante un problema (borrado accidental, dato corrupto)
+# se puede volver a un estado de "hace pocos minutos" sin depender del correo
+# diario ni de un proveedor externo nuevo (se evaluó Litestream + Cloudflare
+# R2 y se descartó para no sumar otro proveedor más — ver DEPLOY.md).
+
+RESPALDO_LOCAL_INTERVALO_MINUTOS = int(os.environ.get("RESPALDO_LOCAL_INTERVALO_MINUTOS", "15"))
+RESPALDO_LOCAL_MAX_COPIAS = int(os.environ.get("RESPALDO_LOCAL_MAX_COPIAS", "96"))
+RESPALDO_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or ".", "respaldos_locales")
+RESPALDO_LOCAL_PATRON = re.compile(r"^auto_\d{8}_\d{6}\.db$")
+
+
+def _rotar_respaldos_locales():
+    copias = _listar_respaldos_locales()
+    if len(copias) <= RESPALDO_LOCAL_MAX_COPIAS:
+        return
+    for copia in copias[RESPALDO_LOCAL_MAX_COPIAS:]:
+        try:
+            os.remove(os.path.join(RESPALDO_LOCAL_DIR, copia["nombre"]))
+        except OSError:
+            pass
+
+
+def _crear_respaldo_local():
+    """Crea una copia consistente de la base de datos con VACUUM INTO.
+    Devuelve (True, nombre_del_archivo) o (False, mensaje_de_error)."""
+    if not os.path.exists(DB_PATH):
+        return False, "Aún no existe base de datos que respaldar"
+    os.makedirs(RESPALDO_LOCAL_DIR, exist_ok=True)
+    nombre = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    destino = os.path.join(RESPALDO_LOCAL_DIR, nombre)
+    try:
+        # Conexión propia (no g.db): esta función también se llama desde el
+        # hilo en segundo plano, fuera de cualquier request/app_context.
+        db = _conectar_db()
+        try:
+            db.execute("VACUUM INTO ?", (destino,))
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        return False, str(exc)
+    _rotar_respaldos_locales()
+    return True, nombre
+
+
+def _listar_respaldos_locales():
+    if not os.path.isdir(RESPALDO_LOCAL_DIR):
+        return []
+    copias = []
+    for nombre in os.listdir(RESPALDO_LOCAL_DIR):
+        if not RESPALDO_LOCAL_PATRON.match(nombre):
+            continue
+        ruta = os.path.join(RESPALDO_LOCAL_DIR, nombre)
+        try:
+            stat = os.stat(ruta)
+        except OSError:
+            continue
+        copias.append({
+            "nombre": nombre,
+            "tamano_kb": round(stat.st_size / 1024, 1),
+            "creado_en": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    copias.sort(key=lambda c: c["nombre"], reverse=True)
+    return copias
+
+
+def _hilo_respaldos_locales():
+    time.sleep(60)  # deja que el servidor termine de arrancar antes del primer respaldo
+    while True:
+        try:
+            _crear_respaldo_local()
+        except Exception:
+            logging.exception("Error creando respaldo automático local")
+        time.sleep(RESPALDO_LOCAL_INTERVALO_MINUTOS * 60)
+
+
+def iniciar_hilo_respaldos_locales():
+    if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+        hilo = threading.Thread(target=_hilo_respaldos_locales, daemon=True)
+        hilo.start()
+
+
+@app.route("/api/backup/locales", methods=["GET"])
+@requiere_rol()
+def backup_locales_listar():
+    return jsonify({
+        "copias": _listar_respaldos_locales(),
+        "intervalo_minutos": RESPALDO_LOCAL_INTERVALO_MINUTOS,
+        "max_copias": RESPALDO_LOCAL_MAX_COPIAS,
+    })
+
+
+@app.route("/api/backup/locales/crear", methods=["POST"])
+@requiere_rol()
+def backup_locales_crear():
+    exito, resultado = _crear_respaldo_local()
+    if not exito:
+        return jsonify({"error": resultado}), 400
+    return jsonify({"ok": True, "nombre": resultado})
+
+
+@app.route("/api/backup/locales/restaurar", methods=["POST"])
+@requiere_rol()
+def backup_locales_restaurar():
+    nombre = (request.get_json(silent=True) or {}).get("nombre", "").strip()
+    if not RESPALDO_LOCAL_PATRON.match(nombre):
+        return jsonify({"error": "Nombre de respaldo inválido"}), 400
+    origen = os.path.join(RESPALDO_LOCAL_DIR, nombre)
+    if not os.path.exists(origen):
+        return jsonify({"error": "No se encontró ese respaldo"}), 404
+
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+    shutil.copyfile(origen, DB_PATH)
+    init_db()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/backup/descargar", methods=["GET"])
 @requiere_rol()
 def backup_descargar():
@@ -5779,172 +5904,6 @@ def backup_probar_automatico():
     if not exito:
         return jsonify({"error": detalle}), 400
     return jsonify({"ok": True, "detalle": detalle})
-
-# ---------------------------------------------------------------------------
-# Respaldos automáticos locales (cada pocos minutos, en el mismo disco)
-# ---------------------------------------------------------------------------
-#
-# El respaldo por correo (arriba) es la protección "fuera de Railway" pero
-# solo pasa una vez al día. Esto complementa con copias mucho más seguidas
-# (cada RESPALDO_LOCAL_INTERVALO_MINUTOS, cada 15 min por defecto) guardadas
-# en el mismo disco persistente -- así, si alguien comete un error usando el
-# sistema (o un despliegue nuevo trae un bug), se puede volver a un estado de
-# hace pocos minutos sin tener que entrar a la consola de Railway ni
-# depender de que el correo diario haya alcanzado a mandarse.
-#
-# No reemplaza al correo diario: si el disco completo de Railway se pierde
-# (caso raro, ver DEPLOY.md), estas copias se pierden con él -- para ese
-# caso extremo la protección sigue siendo el correo, que vive fuera de
-# Railway. Cada copia se genera con "VACUUM INTO", que arma un archivo
-# consistente aunque haya escrituras ocurriendo al mismo tiempo (a
-# diferencia de copiar el archivo .db a mano, que puede capturarlo a medio
-# escribir). Se guardan como máximo RESPALDO_LOCAL_MAX_COPIAS, borrando las
-# más viejas -- con el intervalo y tope por defecto (15 min x 96 copias)
-# cubre las últimas 24 horas.
-
-RESPALDO_LOCAL_INTERVALO_MINUTOS = int(os.environ.get("RESPALDO_LOCAL_INTERVALO_MINUTOS", "15"))
-RESPALDO_LOCAL_MAX_COPIAS = int(os.environ.get("RESPALDO_LOCAL_MAX_COPIAS", "96"))
-RESPALDO_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or ".", "respaldos_locales")
-RESPALDO_LOCAL_PATRON = re.compile(r"^auto_\d{8}_\d{6}\.db$")
-
-
-def _rotar_respaldos_locales():
-    try:
-        archivos = sorted(
-            f for f in os.listdir(RESPALDO_LOCAL_DIR) if RESPALDO_LOCAL_PATRON.match(f)
-        )
-    except OSError:
-        return
-    exceso = len(archivos) - RESPALDO_LOCAL_MAX_COPIAS
-    for nombre in archivos[:max(exceso, 0)]:
-        try:
-            os.remove(os.path.join(RESPALDO_LOCAL_DIR, nombre))
-        except OSError:
-            pass
-
-
-def _crear_respaldo_local():
-    """Devuelve (exito: bool, detalle: str)."""
-    if not os.path.exists(DB_PATH):
-        return False, "Aún no existe base de datos que respaldar."
-    try:
-        os.makedirs(RESPALDO_LOCAL_DIR, exist_ok=True)
-        nombre = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        destino = os.path.join(RESPALDO_LOCAL_DIR, nombre)
-        db = _conectar_db()
-        # VACUUM INTO exige que el destino no exista todavía.
-        db.execute("VACUUM INTO ?", (destino,))
-        db.close()
-        _rotar_respaldos_locales()
-        return True, nombre
-    except Exception as exc:
-        return False, str(exc)
-
-
-def _listar_respaldos_locales():
-    try:
-        archivos = [f for f in os.listdir(RESPALDO_LOCAL_DIR) if RESPALDO_LOCAL_PATRON.match(f)]
-    except OSError:
-        return []
-    items = []
-    for nombre in archivos:
-        ruta = os.path.join(RESPALDO_LOCAL_DIR, nombre)
-        try:
-            stat = os.stat(ruta)
-        except OSError:
-            continue
-        items.append({
-            "nombre": nombre,
-            "tamano_kb": round(stat.st_size / 1024, 1),
-            "creado_en": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-        })
-    items.sort(key=lambda x: x["creado_en"], reverse=True)
-    return items
-
-
-def _hilo_respaldos_locales():
-    # Primer respaldo poco después de arrancar (no de inmediato: dejar que
-    # init_db() termine de correr todas las migraciones primero), y de ahí
-    # en adelante cada RESPALDO_LOCAL_INTERVALO_MINUTOS.
-    time.sleep(60)
-    while True:
-        try:
-            _crear_respaldo_local()
-        except Exception:
-            pass
-        time.sleep(RESPALDO_LOCAL_INTERVALO_MINUTOS * 60)
-
-
-_hilo_local_iniciado = False
-
-
-def iniciar_hilo_respaldos_locales():
-    global _hilo_local_iniciado
-    if not _hilo_local_iniciado:
-        _hilo_local_iniciado = True
-        hilo = threading.Thread(target=_hilo_respaldos_locales, daemon=True)
-        hilo.start()
-
-
-@app.route("/api/backup/locales", methods=["GET"])
-@requiere_rol()
-def backup_locales_listar():
-    return jsonify({
-        "intervalo_minutos": RESPALDO_LOCAL_INTERVALO_MINUTOS,
-        "max_copias": RESPALDO_LOCAL_MAX_COPIAS,
-        "copias": _listar_respaldos_locales(),
-    })
-
-
-@app.route("/api/backup/locales/crear", methods=["POST"])
-@requiere_rol()
-def backup_locales_crear():
-    exito, detalle = _crear_respaldo_local()
-    if not exito:
-        return jsonify({"error": detalle}), 400
-    return jsonify({"ok": True, "nombre": detalle})
-
-
-@app.route("/api/backup/locales/restaurar", methods=["POST"])
-@requiere_rol()
-def backup_locales_restaurar():
-    """Restaura la base de datos actual desde una de las copias automáticas
-    locales -- mismo efecto que /api/backup/restaurar (reemplaza TODO), pero
-    sin necesitar bajar y volver a subir el archivo a mano. El nombre se
-    valida contra RESPALDO_LOCAL_PATRON (formato fijo auto_AAAAMMDD_HHMMSS.db)
-    antes de construir la ruta, para que no se pueda mandar algo como
-    '../../etc/passwd' y leer un archivo fuera de la carpeta de respaldos."""
-    data = request.get_json(silent=True) or {}
-    nombre = (data.get("nombre") or "").strip()
-    if not RESPALDO_LOCAL_PATRON.match(nombre):
-        return jsonify({"error": "Nombre de respaldo inválido"}), 400
-
-    origen = os.path.join(RESPALDO_LOCAL_DIR, nombre)
-    if not os.path.exists(origen):
-        return jsonify({"error": "Ese respaldo ya no existe (puede que se haya rotado)"}), 404
-
-    try:
-        prueba = sqlite3.connect(origen)
-        prueba.execute("SELECT COUNT(*) FROM productos")
-        prueba.close()
-    except sqlite3.Error:
-        return jsonify({"error": "El archivo de respaldo está dañado o no es una base de datos válida"}), 400
-
-    db = g.pop("db", None)
-    if db is not None:
-        db.close()
-
-    if os.path.exists(DB_PATH):
-        respaldo_previo = DB_PATH + ".antes_de_restaurar"
-        try:
-            os.replace(DB_PATH, respaldo_previo)
-        except OSError:
-            pass
-
-    shutil.copyfile(origen, DB_PATH)
-    init_db()  # por si el respaldo es de una versión de esquema anterior
-
-    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------

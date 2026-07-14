@@ -1978,21 +1978,17 @@ async function cargarRespaldosLocales() {
   try {
     const info = await api("/api/backup/locales");
     if (!info.copias.length) {
-      cont.textContent = "Todavía no hay ningún respaldo local (el primero se genera al minuto de arrancar la app).";
+      cont.innerHTML = `Todavía no hay copias automáticas (se crea la primera al minuto de arrancar el servidor, cada ${info.intervalo_minutos} minutos).`;
       return;
     }
-    const filas = info.copias.map(c => `
+    cont.innerHTML = info.copias.map(c => `
       <div class="respaldo-local-fila">
-        <span>${fmtFecha(c.creado_en)} <span class="ayuda">(${c.tamano_kb} KB)</span></span>
-        <button type="button" class="btn btn-secundario btn-restaurar-local" data-nombre="${escapeHtml(c.nombre)}" data-fecha="${escapeHtml(fmtFecha(c.creado_en))}">Restaurar</button>
+        <span>${escapeHtml(c.creado_en)} · ${c.tamano_kb} KB</span>
+        <button type="button" class="btn btn-secundario btn-chico" data-restaurar-local="${escapeHtml(c.nombre)}" data-fecha-local="${escapeHtml(c.creado_en)}">Restaurar esta copia</button>
       </div>
     `).join("");
-    cont.innerHTML = `
-      <p>${info.copias.length} copia(s) disponibles, cada ${info.intervalo_minutos} min (hasta ${info.max_copias} copias).</p>
-      ${filas}
-    `;
-    cont.querySelectorAll(".btn-restaurar-local").forEach(btn => {
-      btn.addEventListener("click", () => restaurarRespaldoLocal(btn.dataset.nombre, btn.dataset.fecha));
+    cont.querySelectorAll("[data-restaurar-local]").forEach(btn => {
+      btn.addEventListener("click", () => restaurarRespaldoLocal(btn.dataset.restaurarLocal, btn.dataset.fechaLocal));
     });
   } catch (e) {
     cont.textContent = "No se pudo cargar: " + e.message;
@@ -2005,7 +2001,7 @@ document.getElementById("btn-crear-respaldo-local").addEventListener("click", as
   btn.textContent = "Creando…";
   try {
     await api("/api/backup/locales/crear", { method: "POST" });
-    toast("Respaldo creado");
+    toast("Respaldo local creado.");
     await cargarRespaldosLocales();
   } catch (e) {
     toast(e.message, true);
@@ -2016,7 +2012,7 @@ document.getElementById("btn-crear-respaldo-local").addEventListener("click", as
 });
 
 async function restaurarRespaldoLocal(nombre, fecha) {
-  if (!confirm(`Esto reemplaza TODOS los datos actuales por los de este respaldo (${fecha}). ¿Continuar?`)) return;
+  if (!confirm(`Esto reemplaza TODOS los datos actuales por los del respaldo de ${fecha}. ¿Continuar?`)) return;
   try {
     await api("/api/backup/locales/restaurar", { method: "POST", body: JSON.stringify({ nombre }) });
     toast("Datos restaurados correctamente");

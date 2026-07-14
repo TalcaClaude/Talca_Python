@@ -203,3 +203,158 @@ en vez de Resend:
 Si están configuradas tanto `RESEND_API_KEY` como las variables de SMTP,
 el sistema usa Resend primero.
 
+## Respaldo automático del disco completo (mejora futura — requiere plan Pro)
+
+Railway tiene una función propia, nativa, para respaldar todo el disco
+persistente (`/data`) — más simple y más sólida que el respaldo por
+correo porque no depende de que el correo logre enviarse ni de internet
+saliente: hace "fotografías" (snapshots) automáticas de todo el disco,
+no solo de la base de datos.
+
+**Esta función solo está disponible en el plan Pro de Railway (USD
+20/mes)** — el plan Hobby (USD 5/mes, el que se usa hoy) no la incluye.
+Por ahora el sistema se queda en Hobby, así que **el respaldo por correo
+(arriba) es la protección automática principal**, y conviene reforzarlo
+con el hábito de descargar un respaldo manual (botón "Descargar respaldo
+(.db)" dentro del sistema) antes de cada actualización importante.
+
+Si más adelante el taller crece y tiene sentido el gasto adicional, subir
+a Pro y activar esto es la mejora más directa para dar un paso más de
+seguridad. Queda documentado acá para cuando llegue ese momento.
+
+### Cómo activarla (cuando se suba a plan Pro)
+
+1. Dentro de tu proyecto en Railway, entra al servicio de la app.
+2. Ve a la pestaña **"Backups"** (al lado de "Deployments", "Variables",
+   etc. — ya la viste en una captura, existe desde antes, solo hay que
+   configurarla).
+3. Activa un calendario automático. Recomendado para tu caso:
+   - **Diario**: se guarda una copia cada 24 horas, se conservan las
+     últimas 6.
+   - **Semanal**: se guarda una copia cada 7 días, se conserva 1 mes.
+   - Puedes activar ambos calendarios a la vez — no cuesta más
+     configurarlos juntos, y da más opciones de a qué fecha volver si
+     necesitas restaurar.
+4. También puedes generar una copia manual en cualquier momento con el
+   botón correspondiente en esa misma pestaña — por ejemplo, justo antes
+   de una actualización importante.
+
+### Cómo restaurar si algo sale mal
+
+1. En la pestaña "Backups", busca la copia por fecha y click en
+   "Restore".
+2. Railway te muestra el cambio antes de aplicarlo (no pasa nada hasta
+   que confirmes).
+3. **Importante**: al restaurar una copia, se pierden las copias más
+   nuevas que esa (las que se hicieron después). Si tienes dudas, primero
+   descarga un respaldo manual desde el botón "Descargar respaldo (.db)"
+   del sistema, para no perder el estado actual antes de restaurar uno
+   viejo.
+
+### Resumen: por qué conviene usar los dos métodos juntos (cuando se active este)
+
+- **Respaldos de Railway** (al subir a Pro): protección principal,
+  automática, cubre todo el disco, restauración con un clic.
+- **Respaldo por correo** (Resend/Gmail, ya activo hoy): copia
+  secundaria, fuera de Railway — si algún día Railway completo tuviera
+  un problema serio o perdieras acceso a la cuenta, igual tienes una
+  copia reciente en tu Gmail.
+
+Esta combinación es justamente lo que se conoce como la "regla 3-2-1" de
+respaldos: varias copias, guardadas de más de una forma, y al menos una
+fuera de donde vive el sistema original. Por ahora, mientras se está en
+plan Hobby, el correo cumple ese rol solo — no es tan robusto como
+tenerlo combinado con los snapshots de Railway, pero sigue siendo una
+protección real y automática.
+
+## Respaldos automáticos locales (recuperar hasta "hace pocos minutos")
+
+El respaldo por correo (arriba) manda una copia completa **una vez al día**.
+Si un día se borra o se corrompe algo por error, en el peor caso se pierde
+todo lo que pasó desde el último correo (hasta 24 horas de trabajo).
+
+Para bajar eso a minutos en vez de horas, el sistema además crea, cada 15
+minutos, una copia consistente de la base de datos (usando `VACUUM INTO`,
+que garantiza que la copia no queda a medio escribir aunque se tome
+mientras alguien está guardando algo) en una carpeta aparte
+(`respaldos_locales/`) dentro del mismo disco persistente de Railway.
+Guarda como máximo las últimas 96 copias (24 horas a ese ritmo) y va
+borrando las más viejas solas.
+
+Esto se maneja todo desde la propia app, sin agregar ningún proveedor
+externo nuevo: **Logística → Respaldo**, sección "Respaldos automáticos
+locales". Ahí se ve la lista de copias disponibles con su fecha y tamaño, un
+botón para crear una copia manual en el momento (por ejemplo justo antes de
+un cambio delicado), y un botón "Restaurar esta copia" por cada una.
+
+⚠ Restaurar reemplaza TODOS los datos actuales por los de esa copia -- solo
+para recuperarse de un problema real. Ambos endpoints (crear y restaurar)
+exigen sesión de administrador.
+
+### Por qué no se usó Litestream + Cloudflare R2
+
+Se evaluó (y se llegó a construir) una alternativa con **Litestream**,
+replicando la base de datos en streaming a un bucket de Cloudflare R2, que
+hubiera bajado la ventana de pérdida posible a segundos en vez de minutos.
+Se descartó a favor de este enfoque más simple porque:
+
+- Suma un proveedor externo más (Cloudflare) a una lista que ya incluye
+  Railway, GitHub, Twilio y las plataformas de IA -- y minimizar cuántos
+  proveedores hay que administrar es una prioridad explícita.
+- Requiere un `Dockerfile` y un proceso aparte corriendo junto a la app, más
+  piezas que pueden fallar.
+- Para el volumen de trabajo real del taller, la diferencia entre "hace 15
+  minutos" y "hace unos segundos" no justifica esa complejidad extra --
+  sobre todo combinado con el respaldo diario por correo como red de
+  seguridad adicional, ya fuera de Railway.
+
+### Los dos respaldos trabajando juntos
+
+- **Copias automáticas locales (cada 15 min)**: protección principal para el
+  día a día, restaurable con un clic desde la propia app.
+- **Correo diario (Resend/Gmail)**: copia secundaria, fuera de Railway, útil
+  si algún día se pierde el volumen persistente completo (algo que las
+  copias locales, al vivir en el mismo disco, no pueden cubrir) o se
+  necesita una copia offline.
+
+## Dominio propio (para que la dirección se vea profesional)
+
+Por defecto, Railway te da una dirección como
+`https://talleres.up.railway.app` — funciona perfecto, pero se nota que
+es una dirección "gratuita" de la plataforma. Para verte más serio ante
+clientes o una comitiva, puedes usar tu propio dominio (por ejemplo
+`https://sistema.tutaller.cl` o `https://tutaller.com`), sin cambiar nada
+del sistema ni perder el disco persistente ni los datos.
+
+### Paso 1: comprar un dominio
+
+Un dominio se compra por año, normalmente entre USD 10 y 20 al año para
+una terminación `.com`, o el equivalente si eliges una terminación local
+(por ejemplo `.cl` en Chile, a través de NIC Chile). Algunos lugares
+donde comprarlo: Namecheap, Cloudflare Registrar, GoDaddy, o el registrador
+local de tu país. No importa cuál elijas — todos permiten después apuntar
+el dominio a Railway.
+
+### Paso 2: agregar el dominio en Railway
+
+1. Dentro de tu proyecto en Railway, ve a la pestaña "Settings" del
+   servicio → sección "Networking" → "Custom Domain".
+2. Escribe el dominio que compraste (ej: `sistema.tutaller.cl`).
+3. Railway te va a mostrar dos registros para agregar en la configuración
+   DNS de donde compraste el dominio:
+   - Un registro **CNAME**
+   - Un registro **TXT**
+4. Entra al panel de tu registrador de dominios (Namecheap, NIC Chile,
+   etc.), busca la sección "DNS" o "Manejo de DNS", y agrega esos dos
+   registros exactamente como Railway te los muestra.
+5. Espera — puede tardar desde minutos hasta un par de horas en
+   propagarse. Railway detecta el cambio solo y activa un certificado de
+   seguridad (HTTPS) gratis y automático para tu dominio nuevo.
+6. Una vez activo, `https://talleres.up.railway.app` sigue funcionando
+   igual (por si acaso), pero ya puedes compartir y usar tu dirección
+   propia como la principal.
+
+No puedo comprar el dominio ni tocar la configuración DNS por ti —
+son cuentas y pagos que son tuyos — pero si algo no calza al agregar los
+registros, mándame una captura de lo que ves y te ayudo a revisarlo.
+

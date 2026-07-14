@@ -1093,7 +1093,17 @@ def reporte_resumen():
 def reporte_excel():
     """Excel con el detalle de convertidores del período y un resumen por
     origen -- para ver de un vistazo cuántas unidades vienen de stock,
-    de clientes externos o de cajas de autos ya en el taller."""
+    de clientes externos o de cajas de autos ya en el taller.
+
+    IMPORTANTE -- valor_total NO incluye convertidores internos ya cargados
+    en una OT de auto (origen_tipo == 'desde_ot_auto' con
+    instalado_en_orden_id != None): ese costo ya quedó registrado como gasto
+    real en esa OT (ver _orden_dict_detalle / dashboard_operativo en
+    modulos/operativo.py), así que sumarlo también acá lo duplicaría. El
+    detalle por fila SÍ sigue mostrando su costo_estimado individual (para
+    trazabilidad/auditoría), marcado con la columna "Ya cargado en OT" --
+    solo se excluye del TOTAL agregado. Ver decisión del usuario: "excluir
+    de reportes, no borrar datos"."""
     desde, hasta = _rango_fechas()
     db = get_db()
     sql = "SELECT * FROM convertidores_torque WHERE 1=1"
@@ -1110,11 +1120,17 @@ def reporte_excel():
     detalle = []
     conteo_origen = {}
     valor_total = 0
+    valor_ya_cargado_ot = 0
     for r in rows:
         c = _convertidor_dict(db, r)
         origen_txt = ORIGENES_CONVERTIDOR_LABEL.get(c["origen_tipo"], c["origen_tipo"])
         conteo_origen[origen_txt] = conteo_origen.get(origen_txt, 0) + 1
-        valor_total += c["costo_estimado"] or 0
+        costo = c["costo_estimado"] or 0
+        ya_cargado_en_ot = bool(c["origen_tipo"] == "desde_ot_auto" and c.get("instalado_en_orden_id"))
+        if ya_cargado_en_ot:
+            valor_ya_cargado_ot += costo
+        else:
+            valor_total += costo
         detalle.append([
             (c["fecha_recepcion"] or "")[:10],
             c["cliente"]["nombre"] if c["cliente"] else "—",
@@ -1123,7 +1139,8 @@ def reporte_excel():
             c["numero_serie"] or "—",
             ESTADOS_CONVERTIDOR_LABEL.get(c["estado"], c["estado"]),
             "Sí" if c["es_regional"] else "No",
-            round(c["costo_estimado"] or 0, 2),
+            round(costo, 2),
+            f"Sí, OT #{c['instalado_en_orden_id']}" if ya_cargado_en_ot else "No",
         ])
 
     wb = _crear_libro_excel()
@@ -1134,13 +1151,14 @@ def reporte_excel():
         ("Rango", rango_txt),
         ("Convertidores", len(detalle)),
         ("Valor total (estimado)", f"${valor_total:,.0f}".replace(",", ".")),
+        ("Ya cargado en OT de auto (no sumado arriba)", f"${valor_ya_cargado_ot:,.0f}".replace(",", ".")),
     ])
     fila_encabezado = ws.max_row + 1
-    ws.append(["Fecha", "Cliente", "Origen", "Marca/Modelo", "N° de serie", "Estado", "De región", "Costo estimado"])
+    ws.append(["Fecha", "Cliente", "Origen", "Marca/Modelo", "N° de serie", "Estado", "De región", "Costo estimado", "Ya cargado en OT"])
     for fila in detalle:
         ws.append(fila)
     ws.append([])
-    ws.append(["", "", "", "", "", "", "TOTAL", round(valor_total, 2)])
+    ws.append(["", "", "", "", "", "", "TOTAL (sin lo ya cargado en OT)", round(valor_total, 2), ""])
     _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 

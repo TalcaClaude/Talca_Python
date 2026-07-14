@@ -288,6 +288,7 @@ async function cargarDashboardOperativo() {
     document.getElementById("op-s-utilidad-mes").textContent = fmtMoney(data.utilidad_mes);
     document.getElementById("op-s-costo-ots-cerradas").textContent = fmtMoney(data.costo_ots_cerradas);
     document.getElementById("op-s-costo-mano-obra-cerradas").textContent = fmtMoney(data.costo_mano_obra_ots_cerradas || 0);
+    document.getElementById("op-s-costo-convertidores-cerradas").textContent = fmtMoney(data.costo_convertidores_ots_cerradas || 0);
     document.getElementById("op-s-costo-garantias").textContent = fmtMoney(data.costo_garantias_mes);
     document.getElementById("op-s-garantias-abiertas").textContent = data.garantias_abiertas;
     document.getElementById("op-s-ticket-promedio").textContent = fmtMoney(data.ticket_promedio_mes);
@@ -1564,7 +1565,7 @@ function renderValorYPagosOrden(orden) {
 
 // Pestaña "Costos": todos los ítems (repuestos y mano de obra) cargados a
 // la orden, con el resumen de plata y la utilidad estimada.
-const OPOI_TIPO_LABEL = { repuesto: "Repuesto", mano_obra: "Mano de obra" };
+const OPOI_TIPO_LABEL = { repuesto: "Repuesto", mano_obra: "Mano de obra", convertidor_torque: "Convertidor de torque" };
 
 function renderCostosOrden(orden) {
   const tbody = document.getElementById("tbody-opod-costos-items");
@@ -1575,7 +1576,7 @@ function renderCostosOrden(orden) {
     tbody.innerHTML = items.map(it => `
       <tr>
         <td>${escapeHtml(OPOI_TIPO_LABEL[it.tipo] || it.tipo)}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
-        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.tipo === "convertidor_torque" && it.convertidor_id ? `<br><a href="/convertidores?ver=${it.convertidor_id}" class="ayuda-inline">Ver convertidor #${it.convertidor_id}</a>` : ""}</td>
         <td class="num">${it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
         <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
@@ -1584,6 +1585,7 @@ function renderCostosOrden(orden) {
   }
   document.getElementById("opod-c-costo-repuestos").textContent = fmtMoney(orden.costo_repuestos || 0);
   document.getElementById("opod-c-mano-obra").textContent = fmtMoney(orden.mano_obra_cargada || 0);
+  document.getElementById("opod-c-costo-convertidores").textContent = fmtMoney(orden.costo_convertidores || 0);
   document.getElementById("opod-c-neto").textContent = fmtMoney(orden.valor_neto || 0);
   document.getElementById("opod-c-total").textContent = fmtMoney(orden.valor_total || 0);
   document.getElementById("opod-c-pagado").textContent = fmtMoney(orden.total_pagado || 0);

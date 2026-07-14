@@ -917,9 +917,19 @@ def _orden_dict(db, row):
     mano_obra_cargada = sum(
         i["subtotal"] for i in d["items"] if i["tipo"] == "mano_obra"
     )
+    # Costo de convertidores de torque internos cargados como repuesto de
+    # esta OT (ver modulos/convertidores.py, tipo == 'convertidor_torque').
+    # Es plata real que salió del taller (repuestos/mano de obra usados para
+    # reparar el convertidor), así que sí debe restar de la utilidad.
+    costo_convertidores = sum(
+        i["subtotal"] for i in d["items"] if i["tipo"] == "convertidor_torque"
+    )
     d["costo_repuestos"] = round(costo_repuestos, 2)
     d["mano_obra_cargada"] = round(mano_obra_cargada, 2)
-    d["utilidad_estimada"] = round(valor_neto - costo_repuestos - mano_obra_cargada, 2)
+    d["costo_convertidores"] = round(costo_convertidores, 2)
+    d["utilidad_estimada"] = round(
+        valor_neto - costo_repuestos - mano_obra_cargada - costo_convertidores, 2
+    )
 
     try:
         d["equipamiento"] = json.loads(d["equipamiento_json"]) if d.get("equipamiento_json") else {}
@@ -1090,10 +1100,13 @@ def dashboard_operativo():
       - costo_mano_obra_ots_cerradas: costo real de la mano de obra CON costo unitario cargado
         (típicamente trabajo externo/subcontratado) en las órdenes entregadas del mes actual —
         la mano de obra interna sin costo cargado no aporta acá.
+      - costo_convertidores_ots_cerradas: costo real de los convertidores de torque internos
+        cargados como repuesto en las órdenes entregadas del mes actual (ver
+        modulos/convertidores.py) — plata real que salió del taller para repararlos.
       - costo_garantias: costo real de los repuestos/mano de obra usados en TODAS las garantías
         (histórico) — es dinero que sale sin que se le cobre al cliente.
-      - utilidad_mes: monto_cerradas_mes menos el costo de repuestos y de mano de obra (con costo
-        cargado) de esas mismas órdenes.
+      - utilidad_mes: monto_cerradas_mes menos el costo de repuestos, de mano de obra (con costo
+        cargado) y de convertidores de torque internos de esas mismas órdenes.
       - ticket_promedio_mes: monto_cerradas_mes dividido por la cantidad de OTs cerradas este mes.
       - tiempo_promedio_taller_mes: días promedio entre recepción y entrega de las OTs cerradas
         este mes (qué tan rápido se está resolviendo, en promedio).
@@ -1159,17 +1172,40 @@ def dashboard_operativo():
         ).fetchone()
         return fila["total"] or 0
 
+    # Costo de convertidores de torque internos cargados como repuesto de la
+    # OT (ver modulos/convertidores.py) -- plata real que salió del taller
+    # para reparar el convertidor propio, así que también resta de la
+    # utilidad, igual que repuestos y mano de obra con costo.
+    def _suma_costo_convertidores(ids):
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        fila = db.execute(
+            f"SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM orden_items "
+            f"WHERE tipo = 'convertidor_torque' AND orden_id IN ({placeholders})",
+            ids,
+        ).fetchone()
+        return fila["total"] or 0
+
     monto_cerradas_mes = round(sum(_valor_total_orden(r) for r in cerradas_mes), 2)
     monto_por_cerrar = round(sum(_valor_total_orden(r) for r in abiertas), 2)
     costo_repuestos_cerradas_mes = _suma_costo_repuestos(ids_cerradas_mes)
     costo_mano_obra_cerradas_mes = _suma_costo_mano_obra(ids_cerradas_mes)
+    costo_convertidores_cerradas_mes = _suma_costo_convertidores(ids_cerradas_mes)
     # Antes eran históricas (todas las OTs entregadas alguna vez); se acotaron
     # al mes en curso para que sigan el mismo criterio "día a día" que el
     # resto de las tarjetas de este dashboard (ver nota del usuario: todo lo
     # de Operativo debe ser mensual salvo CxC/CxP).
     costo_ots_cerradas = round(costo_repuestos_cerradas_mes, 2)
     costo_mano_obra_ots_cerradas = round(costo_mano_obra_cerradas_mes, 2)
-    utilidad_mes = round(monto_cerradas_mes - costo_repuestos_cerradas_mes - costo_mano_obra_cerradas_mes, 2)
+    costo_convertidores_ots_cerradas = round(costo_convertidores_cerradas_mes, 2)
+    utilidad_mes = round(
+        monto_cerradas_mes
+        - costo_repuestos_cerradas_mes
+        - costo_mano_obra_cerradas_mes
+        - costo_convertidores_cerradas_mes,
+        2,
+    )
 
     costo_garantias = db.execute(
         f"SELECT COALESCE(SUM(cantidad * costo_unitario * {_iva_case}), 0) AS total FROM garantia_items"
@@ -1225,6 +1261,7 @@ def dashboard_operativo():
         "garantias_abiertas": garantias_abiertas,
         "costo_ots_cerradas": costo_ots_cerradas,
         "costo_mano_obra_ots_cerradas": costo_mano_obra_ots_cerradas,
+        "costo_convertidores_ots_cerradas": costo_convertidores_ots_cerradas,
         "costo_garantias": round(costo_garantias, 2),
         "utilidad_mes": utilidad_mes,
         "ticket_promedio_mes": ticket_promedio_mes,

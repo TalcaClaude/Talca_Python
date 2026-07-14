@@ -36,7 +36,8 @@ async function cargarPanelDueno() {
     }
 
     document.getElementById("pd-proyeccion").textContent = pdFmtMoney(d.proyeccion_fin_mes);
-    document.getElementById("pd-margen").textContent = pdFmtMoney(d.margen_bruto_mes);
+    document.getElementById("pd-venta-total").textContent = pdFmtMoney(d.venta_total_mes);
+    document.getElementById("pd-utilidad-estimada").textContent = pdFmtMoney(d.utilidad_estimada_mes);
     document.getElementById("pd-ot-abiertas").textContent = d.ot_abiertas;
     document.getElementById("pd-capacidad").textContent =
       `capacidad de referencia: ~${d.capacidad_semanal_promedio} OT/semana`;

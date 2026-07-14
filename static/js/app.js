@@ -1969,7 +1969,63 @@ document.getElementById("btn-respaldo").addEventListener("click", async () => {
   }
   await cargarEstadoRespaldoAutomatico();
   await cargarEstadoAlertasStock();
+  await cargarRespaldosLocales();
 });
+
+async function cargarRespaldosLocales() {
+  const cont = document.getElementById("respaldo-locales-lista");
+  cont.textContent = "Cargando…";
+  try {
+    const info = await api("/api/backup/locales");
+    if (!info.copias.length) {
+      cont.textContent = "Todavía no hay ningún respaldo local (el primero se genera al minuto de arrancar la app).";
+      return;
+    }
+    const filas = info.copias.map(c => `
+      <div class="respaldo-local-fila">
+        <span>${fmtFecha(c.creado_en)} <span class="ayuda">(${c.tamano_kb} KB)</span></span>
+        <button type="button" class="btn btn-secundario btn-restaurar-local" data-nombre="${escapeHtml(c.nombre)}" data-fecha="${escapeHtml(fmtFecha(c.creado_en))}">Restaurar</button>
+      </div>
+    `).join("");
+    cont.innerHTML = `
+      <p>${info.copias.length} copia(s) disponibles, cada ${info.intervalo_minutos} min (hasta ${info.max_copias} copias).</p>
+      ${filas}
+    `;
+    cont.querySelectorAll(".btn-restaurar-local").forEach(btn => {
+      btn.addEventListener("click", () => restaurarRespaldoLocal(btn.dataset.nombre, btn.dataset.fecha));
+    });
+  } catch (e) {
+    cont.textContent = "No se pudo cargar: " + e.message;
+  }
+}
+
+document.getElementById("btn-crear-respaldo-local").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-crear-respaldo-local");
+  btn.disabled = true;
+  btn.textContent = "Creando…";
+  try {
+    await api("/api/backup/locales/crear", { method: "POST" });
+    toast("Respaldo creado");
+    await cargarRespaldosLocales();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Crear un respaldo ahora";
+  }
+});
+
+async function restaurarRespaldoLocal(nombre, fecha) {
+  if (!confirm(`Esto reemplaza TODOS los datos actuales por los de este respaldo (${fecha}). ¿Continuar?`)) return;
+  try {
+    await api("/api/backup/locales/restaurar", { method: "POST", body: JSON.stringify({ nombre }) });
+    toast("Datos restaurados correctamente");
+    cerrarModal("modal-respaldo");
+    await Promise.all([cargarDashboard(), cargarProductos(), cargarResumen()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 async function cargarEstadoRespaldoAutomatico() {
   const cont = document.getElementById("respaldo-auto-estado");

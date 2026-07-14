@@ -1578,6 +1578,17 @@ svg .chart-punto-hover {
   margin: 6px 0 0;
 }
 
+.respaldo-local-fila {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border, #2a3441);
+  font-size: 13px;
+}
+.respaldo-local-fila:last-child { border-bottom: none; }
+
 .ayuda-inline--bloqueado {
   color: var(--danger);
   background: var(--danger-soft);

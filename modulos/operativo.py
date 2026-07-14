@@ -1143,6 +1143,59 @@ def limpiar_cxc_huerfanas():
     })
 
 
+def resumen_utilidad_mes(db):
+    """Versión liviana del cálculo de monto_cerradas_mes / utilidad_mes de
+    dashboard_operativo(), pensada para que Panel Principal (app.py) pueda
+    mostrar "venta total" y "utilidad estimada" del mes sin duplicar la
+    lógica de negocio (repuestos + mano de obra con costo + convertidores
+    internos se restan del monto cobrado). Debe mantenerse en sincronía con
+    dashboard_operativo() -- mismo criterio "mes en curso" para todo.
+    """
+    hoy = datetime.now()
+    prefijo_mes = f"{hoy.year:04d}-{hoy.month:02d}"
+
+    cerradas_mes = db.execute(
+        "SELECT id, precio_referencial, precio_iva FROM ordenes_trabajo "
+        "WHERE estado = 'entregado' AND substr(fecha_entrega_real, 1, 7) = ?",
+        (prefijo_mes,),
+    ).fetchall()
+    ids_cerradas_mes = [r["id"] for r in cerradas_mes]
+
+    def _valor_total_orden(row):
+        neto = row["precio_referencial"] or 0
+        iva_monto = round(neto * IVA_PORCENTAJE, 2) if row["precio_iva"] else 0.0
+        return round(neto + iva_monto, 2)
+
+    monto_cerradas_mes = round(sum(_valor_total_orden(r) for r in cerradas_mes), 2)
+
+    if not ids_cerradas_mes:
+        return {"monto_cerradas_mes": monto_cerradas_mes, "utilidad_mes": 0.0}
+
+    _iva_case = f"(CASE WHEN aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)"
+    placeholders = ", ".join("?" for _ in ids_cerradas_mes)
+
+    costo_repuestos = db.execute(
+        f"SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM orden_items "
+        f"WHERE tipo = 'repuesto' AND orden_id IN ({placeholders})",
+        ids_cerradas_mes,
+    ).fetchone()["total"] or 0
+    costo_mano_obra = db.execute(
+        f"SELECT COALESCE(SUM(cantidad * costo_unitario * {_iva_case}), 0) AS total FROM orden_items "
+        f"WHERE tipo = 'mano_obra' AND orden_id IN ({placeholders})",
+        ids_cerradas_mes,
+    ).fetchone()["total"] or 0
+    costo_convertidores = db.execute(
+        f"SELECT COALESCE(SUM(cantidad * costo_unitario), 0) AS total FROM orden_items "
+        f"WHERE tipo = 'convertidor_torque' AND orden_id IN ({placeholders})",
+        ids_cerradas_mes,
+    ).fetchone()["total"] or 0
+
+    utilidad_mes = round(
+        monto_cerradas_mes - costo_repuestos - costo_mano_obra - costo_convertidores, 2
+    )
+    return {"monto_cerradas_mes": monto_cerradas_mes, "utilidad_mes": utilidad_mes}
+
+
 @bp.route("/api/operativo/dashboard", methods=["GET"])
 def dashboard_operativo():
     """KPIs para el dashboard del módulo Operativo:

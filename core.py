@@ -366,7 +366,7 @@ def usuario_actual():
 # un despliegue; en el próximo login ya les queda su rol real.
 # ---------------------------------------------------------------------------
 
-ROLES_VALIDOS = ["admin", "finanzas", "bodega", "operativo"]
+ROLES_VALIDOS = ["admin", "finanzas", "bodega", "operativo", "convertidores"]
 
 
 def usuario_rol():

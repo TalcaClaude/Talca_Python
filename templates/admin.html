@@ -27,7 +27,7 @@
     </div>
   </header>
 
-  <p class="ayuda-inline">Cada usuario tiene un rol que determina qué puede hacer, además de lo que ve en pantalla: <strong>admin</strong> puede todo (incluyendo este panel); <strong>finanzas</strong> registra facturas de compra y administra Caja Chica / Cuentas por Cobrar y Pagar; <strong>bodega</strong> aprueba o rechaza la recepción de mercadería (contra lo que llegó físicamente) y administra el inventario; <strong>operativo</strong> trabaja las órdenes de trabajo del taller. El bloqueo por rol se aplica también del lado del servidor, no solo ocultando botones.</p>
+  <p class="ayuda-inline">Cada usuario tiene un rol que determina qué puede hacer, además de lo que ve en pantalla: <strong>admin</strong> puede todo (incluyendo este panel); <strong>finanzas</strong> registra facturas de compra y administra Caja Chica / Cuentas por Cobrar y Pagar; <strong>bodega</strong> aprueba o rechaza la recepción de mercadería (contra lo que llegó físicamente) y administra el inventario; <strong>operativo</strong> trabaja las órdenes de trabajo del taller; <strong>convertidores</strong> trabaja el módulo de Convertidores de Torque. El bloqueo por rol se aplica también del lado del servidor, no solo ocultando botones.</p>
 
   <section class="toolbar">
     <span style="flex:1"></span>
@@ -101,6 +101,7 @@
           <option value="finanzas">Finanzas</option>
           <option value="bodega">Bodega</option>
           <option value="operativo" selected>Operativo</option>
+          <option value="convertidores">Convertidores</option>
         </select>
       </div>
       <div class="modal-actions">
@@ -131,6 +132,7 @@
           <option value="finanzas">Finanzas</option>
           <option value="bodega">Bodega</option>
           <option value="operativo">Operativo</option>
+          <option value="convertidores">Convertidores</option>
         </select>
       </div>
       <label class="toggle-critico">

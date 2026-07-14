@@ -908,6 +908,7 @@ def _recalcular_estado_cxp(db, cxp_id):
 
 
 @bp.route("/api/finanzas/cxp/<int:cxp_id>/pagos", methods=["POST"])
+@requiere_rol("finanzas")
 def finanzas_pagar_cxp(cxp_id):
     """Registra un abono a una Cuenta por Pagar. Si viene 'desde_caja_chica'
     en true, además genera un gasto real en caja_movimientos (categoría
@@ -915,8 +916,16 @@ def finanzas_pagar_cxp(cxp_id):
     saldo de Caja Chica — automatización pedida en el plan del módulo
     financiero ('Pago proveedor → disminuir CxP y registrar egreso').
     cxp_pagos.caja_movimiento_id queda enlazado a ese gasto para poder
-    seguir el rastro en ambos sentidos."""
+    seguir el rastro en ambos sentidos.
+
+    Envuelto en BEGIN IMMEDIATE (_iniciar_transaccion_stock, mismo helper que
+    usan aprobar_factura_pendiente_recepcion/eliminar_factura) para cerrar
+    una condición de carrera: sin esto, dos abonos casi simultáneos podían
+    leer el mismo saldo_actual y ambos pasar la validación, sobrepagando la
+    CxP (y duplicando el gasto en Caja Chica si ambos usaban
+    desde_caja_chica)."""
     db = get_db()
+    _iniciar_transaccion_stock(db)
     cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE id = ?", (cxp_id,)).fetchone()
     if cxp is None:
         return jsonify({"error": "Cuenta por pagar no encontrada"}), 404

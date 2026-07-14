@@ -10,6 +10,7 @@ para que sea fácil de instalar y correr en cualquier PC o servidor.
 import os
 import re
 import json
+import shutil
 import sqlite3
 import time
 import threading
@@ -2989,12 +2990,40 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
 
 
 @app.route("/api/facturas/<int:factura_id>", methods=["DELETE"])
+@requiere_rol("finanzas")
 def eliminar_factura(factura_id):
     db = get_db()
     _iniciar_transaccion_stock(db)
     factura = db.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
     if factura is None:
         return jsonify({"error": "Factura no encontrada"}), 404
+
+    # cuentas_por_pagar.factura_id tiene ON DELETE CASCADE (y cxp_pagos en
+    # cascada desde ahí) -- si esta factura ya generó una CxP y esa CxP ya
+    # tiene abonos (plata real que salió de Caja Chica o se transfirió a un
+    # proveedor), borrar la factura borraría en silencio el historial de esos
+    # pagos, dejando el gasto de Caja Chica huérfano sin explicación. Se
+    # bloquea sin excepción (ni siquiera con forzar=1, que solo estaba
+    # pensado para la reversión de stock) -- hay que resolver la CxP primero.
+    cxp_con_abonos = db.execute(
+        """
+        SELECT cxp.id, cxp.concepto, COALESCE(SUM(p.monto), 0) AS total_abonado
+        FROM cuentas_por_pagar cxp
+        JOIN cxp_pagos p ON p.cxp_id = cxp.id
+        WHERE cxp.factura_id = ?
+        GROUP BY cxp.id
+        HAVING total_abonado > 0
+        """,
+        (factura_id,),
+    ).fetchall()
+    if cxp_con_abonos:
+        total = round(sum(r["total_abonado"] for r in cxp_con_abonos), 2)
+        return jsonify({
+            "error": f"Esta factura ya tiene ${round(total):,}".replace(",", ".")
+                     + " en abonos pagados registrados en su Cuenta por Pagar. No se puede eliminar así "
+                       "porque se perdería el rastro de esos pagos reales -- resuelve o anula esos abonos "
+                       "primero desde Finanzas antes de eliminar la factura.",
+        }), 409
 
     forzar = request.args.get("forzar") == "1"
     usuario = usuario_actual()  # siempre quien tiene la sesión iniciada, nunca lo que mande el cliente
@@ -5497,6 +5526,7 @@ def limpiar_inventario_duplicado():
 
 
 @app.route("/api/backup/descargar", methods=["GET"])
+@requiere_rol()
 def backup_descargar():
     if not os.path.exists(DB_PATH):
         return jsonify({"error": "Aún no existe base de datos que respaldar"}), 404
@@ -5512,6 +5542,7 @@ def backup_descargar():
 
 
 @app.route("/api/backup/restaurar", methods=["POST"])
+@requiere_rol()
 def backup_restaurar():
     archivo = request.files.get("archivo")
     if not archivo or archivo.filename == "":
@@ -5748,6 +5779,172 @@ def backup_probar_automatico():
     if not exito:
         return jsonify({"error": detalle}), 400
     return jsonify({"ok": True, "detalle": detalle})
+
+# ---------------------------------------------------------------------------
+# Respaldos automáticos locales (cada pocos minutos, en el mismo disco)
+# ---------------------------------------------------------------------------
+#
+# El respaldo por correo (arriba) es la protección "fuera de Railway" pero
+# solo pasa una vez al día. Esto complementa con copias mucho más seguidas
+# (cada RESPALDO_LOCAL_INTERVALO_MINUTOS, cada 15 min por defecto) guardadas
+# en el mismo disco persistente -- así, si alguien comete un error usando el
+# sistema (o un despliegue nuevo trae un bug), se puede volver a un estado de
+# hace pocos minutos sin tener que entrar a la consola de Railway ni
+# depender de que el correo diario haya alcanzado a mandarse.
+#
+# No reemplaza al correo diario: si el disco completo de Railway se pierde
+# (caso raro, ver DEPLOY.md), estas copias se pierden con él -- para ese
+# caso extremo la protección sigue siendo el correo, que vive fuera de
+# Railway. Cada copia se genera con "VACUUM INTO", que arma un archivo
+# consistente aunque haya escrituras ocurriendo al mismo tiempo (a
+# diferencia de copiar el archivo .db a mano, que puede capturarlo a medio
+# escribir). Se guardan como máximo RESPALDO_LOCAL_MAX_COPIAS, borrando las
+# más viejas -- con el intervalo y tope por defecto (15 min x 96 copias)
+# cubre las últimas 24 horas.
+
+RESPALDO_LOCAL_INTERVALO_MINUTOS = int(os.environ.get("RESPALDO_LOCAL_INTERVALO_MINUTOS", "15"))
+RESPALDO_LOCAL_MAX_COPIAS = int(os.environ.get("RESPALDO_LOCAL_MAX_COPIAS", "96"))
+RESPALDO_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or ".", "respaldos_locales")
+RESPALDO_LOCAL_PATRON = re.compile(r"^auto_\d{8}_\d{6}\.db$")
+
+
+def _rotar_respaldos_locales():
+    try:
+        archivos = sorted(
+            f for f in os.listdir(RESPALDO_LOCAL_DIR) if RESPALDO_LOCAL_PATRON.match(f)
+        )
+    except OSError:
+        return
+    exceso = len(archivos) - RESPALDO_LOCAL_MAX_COPIAS
+    for nombre in archivos[:max(exceso, 0)]:
+        try:
+            os.remove(os.path.join(RESPALDO_LOCAL_DIR, nombre))
+        except OSError:
+            pass
+
+
+def _crear_respaldo_local():
+    """Devuelve (exito: bool, detalle: str)."""
+    if not os.path.exists(DB_PATH):
+        return False, "Aún no existe base de datos que respaldar."
+    try:
+        os.makedirs(RESPALDO_LOCAL_DIR, exist_ok=True)
+        nombre = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        destino = os.path.join(RESPALDO_LOCAL_DIR, nombre)
+        db = _conectar_db()
+        # VACUUM INTO exige que el destino no exista todavía.
+        db.execute("VACUUM INTO ?", (destino,))
+        db.close()
+        _rotar_respaldos_locales()
+        return True, nombre
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _listar_respaldos_locales():
+    try:
+        archivos = [f for f in os.listdir(RESPALDO_LOCAL_DIR) if RESPALDO_LOCAL_PATRON.match(f)]
+    except OSError:
+        return []
+    items = []
+    for nombre in archivos:
+        ruta = os.path.join(RESPALDO_LOCAL_DIR, nombre)
+        try:
+            stat = os.stat(ruta)
+        except OSError:
+            continue
+        items.append({
+            "nombre": nombre,
+            "tamano_kb": round(stat.st_size / 1024, 1),
+            "creado_en": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        })
+    items.sort(key=lambda x: x["creado_en"], reverse=True)
+    return items
+
+
+def _hilo_respaldos_locales():
+    # Primer respaldo poco después de arrancar (no de inmediato: dejar que
+    # init_db() termine de correr todas las migraciones primero), y de ahí
+    # en adelante cada RESPALDO_LOCAL_INTERVALO_MINUTOS.
+    time.sleep(60)
+    while True:
+        try:
+            _crear_respaldo_local()
+        except Exception:
+            pass
+        time.sleep(RESPALDO_LOCAL_INTERVALO_MINUTOS * 60)
+
+
+_hilo_local_iniciado = False
+
+
+def iniciar_hilo_respaldos_locales():
+    global _hilo_local_iniciado
+    if not _hilo_local_iniciado:
+        _hilo_local_iniciado = True
+        hilo = threading.Thread(target=_hilo_respaldos_locales, daemon=True)
+        hilo.start()
+
+
+@app.route("/api/backup/locales", methods=["GET"])
+@requiere_rol()
+def backup_locales_listar():
+    return jsonify({
+        "intervalo_minutos": RESPALDO_LOCAL_INTERVALO_MINUTOS,
+        "max_copias": RESPALDO_LOCAL_MAX_COPIAS,
+        "copias": _listar_respaldos_locales(),
+    })
+
+
+@app.route("/api/backup/locales/crear", methods=["POST"])
+@requiere_rol()
+def backup_locales_crear():
+    exito, detalle = _crear_respaldo_local()
+    if not exito:
+        return jsonify({"error": detalle}), 400
+    return jsonify({"ok": True, "nombre": detalle})
+
+
+@app.route("/api/backup/locales/restaurar", methods=["POST"])
+@requiere_rol()
+def backup_locales_restaurar():
+    """Restaura la base de datos actual desde una de las copias automáticas
+    locales -- mismo efecto que /api/backup/restaurar (reemplaza TODO), pero
+    sin necesitar bajar y volver a subir el archivo a mano. El nombre se
+    valida contra RESPALDO_LOCAL_PATRON (formato fijo auto_AAAAMMDD_HHMMSS.db)
+    antes de construir la ruta, para que no se pueda mandar algo como
+    '../../etc/passwd' y leer un archivo fuera de la carpeta de respaldos."""
+    data = request.get_json(silent=True) or {}
+    nombre = (data.get("nombre") or "").strip()
+    if not RESPALDO_LOCAL_PATRON.match(nombre):
+        return jsonify({"error": "Nombre de respaldo inválido"}), 400
+
+    origen = os.path.join(RESPALDO_LOCAL_DIR, nombre)
+    if not os.path.exists(origen):
+        return jsonify({"error": "Ese respaldo ya no existe (puede que se haya rotado)"}), 404
+
+    try:
+        prueba = sqlite3.connect(origen)
+        prueba.execute("SELECT COUNT(*) FROM productos")
+        prueba.close()
+    except sqlite3.Error:
+        return jsonify({"error": "El archivo de respaldo está dañado o no es una base de datos válida"}), 400
+
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+    if os.path.exists(DB_PATH):
+        respaldo_previo = DB_PATH + ".antes_de_restaurar"
+        try:
+            os.replace(DB_PATH, respaldo_previo)
+        except OSError:
+            pass
+
+    shutil.copyfile(origen, DB_PATH)
+    init_db()  # por si el respaldo es de una versión de esquema anterior
+
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------
@@ -7494,6 +7691,7 @@ from modulos.operativo import (  # noqa: E402
     ESTADOS_CERRADOS,
     _actualizar_estado_orden_por_agente,
     _actualizar_campos_orden_por_agente,
+    resumen_utilidad_mes,
 )
 app.register_blueprint(bp_operativo)
 
@@ -7573,8 +7771,15 @@ def panel_dueno():
     dias_totales_mes = ultimo_dia_mes.day
     proyeccion_fin_mes = round(ingresos_mes / dias_transcurridos * dias_totales_mes, 2) if dias_transcurridos else 0
 
-    gastos_mes = _gastos_mes(db, prefijo_actual)
-    margen_bruto_mes = round(ingresos_mes - gastos_mes, 2)
+    # "Margen bruto" (ingresos - gastos de caja) se retiró de Panel Principal
+    # a pedido del usuario: mezclaba cobros de caja con gastos de caja de
+    # naturaleza distinta y no reflejaba la operación real. Las métricas que
+    # importan son venta_total_mes (ventas devengadas del mes, mismo criterio
+    # que Operativo) y utilidad_estimada_mes (esa venta menos repuestos, mano
+    # de obra con costo y convertidores internos -- ver resumen_utilidad_mes).
+    _resumen_utilidad = resumen_utilidad_mes(db)
+    venta_total_mes = _resumen_utilidad["monto_cerradas_mes"]
+    utilidad_estimada_mes = _resumen_utilidad["utilidad_mes"]
 
     placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
     ot_abiertas = db.execute(
@@ -7677,7 +7882,8 @@ def panel_dueno():
         "ingresos_mes_anterior": round(ingresos_mes_anterior, 2),
         "var_pct_mes": round(var_pct, 1) if var_pct is not None else None,
         "proyeccion_fin_mes": proyeccion_fin_mes,
-        "margen_bruto_mes": margen_bruto_mes,
+        "venta_total_mes": venta_total_mes,
+        "utilidad_estimada_mes": utilidad_estimada_mes,
         "ot_abiertas": ot_abiertas,
         "capacidad_semanal_promedio": capacidad_semanal,
         "cxc_pendiente": cxc_pendiente,
@@ -8530,6 +8736,7 @@ def migracion_ordenes_historicas():
 
 init_db()
 iniciar_hilo_respaldos()
+iniciar_hilo_respaldos_locales()
 iniciar_hilo_alertas_stock()
 iniciar_hilo_recalculo_stock_minimo()
 

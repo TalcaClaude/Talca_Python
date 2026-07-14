@@ -81,6 +81,7 @@ from core import (
     _reparar_fk_hacia_tabla_renombrada,
     get_db,
     now_iso,
+    requiere_rol,
     usuario_actual,
 )
 
@@ -815,6 +816,7 @@ def _convertidor_dict(db, row):
 
 
 @bp.route("/api/convertidores", methods=["POST"])
+@requiere_rol("convertidores")
 def crear_convertidor():
     db = get_db()
     data = request.get_json(force=True, silent=True) or {}
@@ -886,10 +888,12 @@ def crear_convertidor():
     # arriba) -- se ignora lo que venga en el payload para esos casos, para
     # que no quede un valor residual que _convertidor_costo_estimado tenga
     # que descartar más tarde.
-    precio_venta = (
-        float(data["precio_venta"]) if (origen_tipo not in ORIGENES_INTERNOS and data.get("precio_venta") not in (None, ""))
-        else None
-    )
+    precio_venta = None
+    if origen_tipo not in ORIGENES_INTERNOS and data.get("precio_venta") not in (None, ""):
+        try:
+            precio_venta = float(data["precio_venta"])
+        except (TypeError, ValueError):
+            return jsonify({"error": "precio_venta debe ser un número"}), 400
 
     ts = now_iso()
     cur = db.execute(
@@ -918,6 +922,7 @@ def crear_convertidor():
 
 
 @bp.route("/api/convertidores", methods=["GET"])
+@requiere_rol("convertidores")
 def listar_convertidores():
     db = get_db()
     estado = (request.args.get("estado") or "").strip()
@@ -932,6 +937,7 @@ def listar_convertidores():
 
 
 @bp.route("/api/convertidores/disponibles", methods=["GET"])
+@requiere_rol("convertidores")
 def convertidores_disponibles():
     """Para los dos selectores de 'agregar repuesto' que consumen esto:
     la OT de un auto (modulos/operativo.py) y el ítem 'convertidor' de
@@ -966,6 +972,7 @@ def convertidores_disponibles():
 
 
 @bp.route("/api/convertidores/<int:convertidor_id>", methods=["GET"])
+@requiere_rol("convertidores")
 def obtener_convertidor(convertidor_id):
     db = get_db()
     row = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
@@ -975,6 +982,7 @@ def obtener_convertidor(convertidor_id):
 
 
 @bp.route("/api/convertidores/<int:convertidor_id>", methods=["PUT"])
+@requiere_rol("convertidores")
 def editar_convertidor(convertidor_id):
     db = get_db()
     row = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
@@ -1007,7 +1015,13 @@ def editar_convertidor(convertidor_id):
     else:
         precio_venta = row["precio_venta"]
         if "precio_venta" in data:
-            precio_venta = float(data["precio_venta"]) if data.get("precio_venta") not in (None, "") else None
+            if data.get("precio_venta") not in (None, ""):
+                try:
+                    precio_venta = float(data["precio_venta"])
+                except (TypeError, ValueError):
+                    return jsonify({"error": "precio_venta debe ser un número"}), 400
+            else:
+                precio_venta = None
 
     # "De región" solo aplica al origen 'cliente_directo' (ver crear_convertidor)
     # -- el origen no se puede cambiar después de creado, así que si esta
@@ -1086,6 +1100,7 @@ def editar_convertidor(convertidor_id):
 
 
 @bp.route("/api/convertidores/<int:convertidor_id>", methods=["DELETE"])
+@requiere_rol("convertidores")
 def eliminar_convertidor(convertidor_id):
     db = get_db()
     _iniciar_transaccion_stock(db)
@@ -1153,6 +1168,7 @@ def eliminar_convertidor(convertidor_id):
 
 
 @bp.route("/api/convertidores/<int:convertidor_id>/items", methods=["POST"])
+@requiere_rol("convertidores")
 def agregar_item_convertidor(convertidor_id):
     db = get_db()
     _iniciar_transaccion_stock(db)
@@ -1291,6 +1307,7 @@ def agregar_item_convertidor(convertidor_id):
 
 
 @bp.route("/api/convertidores/<int:convertidor_id>/items/<int:item_id>", methods=["DELETE"])
+@requiere_rol("convertidores")
 def eliminar_item_convertidor(convertidor_id, item_id):
     db = get_db()
     _iniciar_transaccion_stock(db)
@@ -1324,6 +1341,7 @@ def eliminar_item_convertidor(convertidor_id, item_id):
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/convertidores/dashboard", methods=["GET"])
+@requiere_rol("convertidores")
 def dashboard_convertidores():
     """Resumen para la pestaña Dashboard del módulo: cuántos hay por
     estado, cuánto valor en reparación hay abierto, cuánto se cerró este
@@ -1434,6 +1452,7 @@ def dashboard_convertidores():
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/convertidores/reportes/resumen", methods=["GET"])
+@requiere_rol("convertidores")
 def reporte_resumen():
     """Contador rápido (mismo patrón que Operativo: preview antes de
     descargar) de cuántos convertidores caen en el rango de fechas
@@ -1453,6 +1472,7 @@ def reporte_resumen():
 
 
 @bp.route("/api/convertidores/reportes/excel", methods=["GET"])
+@requiere_rol("convertidores")
 def reporte_excel():
     """Excel con el detalle de convertidores del período y un resumen por
     origen -- para ver de un vistazo cuántas unidades vienen de stock,

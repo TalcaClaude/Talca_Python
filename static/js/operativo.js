@@ -1576,7 +1576,7 @@ function renderCostosOrden(orden) {
     tbody.innerHTML = items.map(it => `
       <tr>
         <td>${escapeHtml(OPOI_TIPO_LABEL[it.tipo] || it.tipo)}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
-        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.tipo === "convertidor_torque" && it.convertidor_id ? `<br><a href="/convertidores?ver=${it.convertidor_id}" class="ayuda-inline">Ver convertidor #${it.convertidor_id}</a>` : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.tipo === "convertidor_torque" && it.convertidor_id ? `<br><a href="/convertidores?ver=${it.convertidor_id}#convertidores" class="ayuda-inline">Ver convertidor #${it.convertidor_id}</a>` : ""}</td>
         <td class="num">${it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
         <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
@@ -2179,7 +2179,7 @@ function renderItemsOrden(orden) {
     tbody.innerHTML = orden.items.map(it => `
       <tr>
         <td>${TIPO_ITEM_LABEL_OT[it.tipo] || it.tipo}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
-        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.convertidor_id ? `<br><a href="/convertidores?ver=${it.convertidor_id}" class="ayuda-inline">Ver convertidor #${it.convertidor_id}</a>` : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.convertidor_id ? `<br><a href="/convertidores?ver=${it.convertidor_id}#convertidores" class="ayuda-inline">Ver convertidor #${it.convertidor_id}</a>` : ""}</td>
         <td class="num">${it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
         <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
@@ -2753,6 +2753,8 @@ document.getElementById("form-op-garantia-nueva").addEventListener("submit", asy
 
 // ---- Detalle de garantía ----
 
+const GAR_TIPO_ITEM_LABEL = { repuesto: "Repuesto", mano_obra: "Mano de obra", convertidor_torque: "Convertidor de torque" };
+
 function renderItemsGarantia(garantia) {
   const tbody = document.getElementById("tbody-gar-items");
   if (garantia.items.length === 0) {
@@ -2760,8 +2762,8 @@ function renderItemsGarantia(garantia) {
   } else {
     tbody.innerHTML = garantia.items.map(it => `
       <tr>
-        <td>${it.tipo === "repuesto" ? "Repuesto" : "Mano de obra"}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
-        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}</td>
+        <td>${GAR_TIPO_ITEM_LABEL[it.tipo] || it.tipo}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.tipo === "convertidor_torque" && it.convertidor_id ? `<br><a href="/convertidores?ver=${it.convertidor_id}#convertidores" class="ayuda-inline">Ver convertidor #${it.convertidor_id}</a>` : ""}</td>
         <td class="num">${it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
         <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>

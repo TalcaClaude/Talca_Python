@@ -11,6 +11,7 @@ const state = {
   opConvertidores: [],
   opClientes: [],
   opOrdenes: [],
+  opGarantias: [],
   opProductos: [],
 };
 
@@ -213,7 +214,12 @@ async function cargarDashboardConvertidores() {
     const d = await api("/api/convertidores/dashboard");
     document.getElementById("conv-s-abiertos").textContent = d.abiertos;
     document.getElementById("conv-s-valor").textContent = fmtMoney(d.valor_en_reparacion);
+    document.getElementById("conv-s-valor-cerrado").textContent = fmtMoney(d.valor_cerrado_mes || 0);
+    document.getElementById("conv-s-valor-cerrado-interno-nota").textContent =
+      `este mes: ${fmtMoney(d.valor_cerrado_interno_mes || 0)}`;
+    document.getElementById("conv-s-gasto-externos").textContent = fmtMoney(d.gasto_externos_mes || 0);
     document.getElementById("conv-s-regionales").textContent = d.regionales_pendientes;
+    document.getElementById("conv-s-garantias").textContent = d.convertidores_en_garantia || 0;
     document.getElementById("conv-s-tiempo").textContent = d.tiempo_promedio_cierre_mes_dias != null
       ? `${d.tiempo_promedio_cierre_mes_dias} día(s)` : "—";
     document.getElementById("conv-s-total").textContent = d.total;
@@ -254,6 +260,7 @@ const CONV_ORIGEN_LABEL = {
   cliente_directo: "Cliente trae el convertidor",
   stock_taller: "Stock del taller",
   desde_ot_auto: "Desde la caja de un auto",
+  desde_garantia: "Desde una garantía",
 };
 
 // Etiquetas cortas para el badge de la tarjeta del tablero (pedido del
@@ -262,6 +269,7 @@ const CONV_ORIGEN_BADGE = {
   cliente_directo: "Externo",
   stock_taller: "Stock",
   desde_ot_auto: "Interno",
+  desde_garantia: "Garantía",
 };
 
 async function cargarConvertidoresTab() {
@@ -432,8 +440,10 @@ function actualizarCamposOrigenConvertidor() {
   document.getElementById("convn-campo-cliente").style.display = origen === "cliente_directo" ? "flex" : "none";
   document.getElementById("convn-campo-equipo").style.display = origen === "cliente_directo" ? "flex" : "none";
   document.getElementById("convn-campo-orden").style.display = origen === "desde_ot_auto" ? "flex" : "none";
+  document.getElementById("convn-campo-garantia").style.display = origen === "desde_garantia" ? "flex" : "none";
   document.getElementById("convn-cliente-id").required = origen === "cliente_directo";
   document.getElementById("convn-orden-origen-id").required = origen === "desde_ot_auto";
+  document.getElementById("convn-garantia-origen-id").required = origen === "desde_garantia";
   document.getElementById("convn-campo-regional").style.display = origen === "cliente_directo" ? "flex" : "none";
   if (origen !== "cliente_directo") document.getElementById("convn-es-regional").checked = false;
 }
@@ -445,6 +455,13 @@ function renderSelectOrdenesConvertidor() {
     abiertas.map(o => `<option value="${o.id}">OT #${o.id} — ${escapeHtml(o.cliente ? o.cliente.nombre : "")} — ${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</option>`).join("");
 }
 
+function renderSelectGarantiasConvertidor() {
+  const select = document.getElementById("convn-garantia-origen-id");
+  const abiertas = (state.opGarantias || []).filter(g => !["entregado", "cancelado"].includes(g.estado));
+  select.innerHTML = '<option value="">Selecciona la garantía…</option>' +
+    abiertas.map(g => `<option value="${g.id}">Garantía #${g.id} — ${escapeHtml(g.cliente ? g.cliente.nombre : "")} — ${fmtFechaSolo((g.fecha_recepcion || "").slice(0, 10))}</option>`).join("");
+}
+
 async function abrirNuevoConvertidor() {
   document.getElementById("form-op-convertidor-nuevo").reset();
   if (state.opClientes.length === 0) {
@@ -453,13 +470,19 @@ async function abrirNuevoConvertidor() {
   }
   renderSelectClientesOperativo("convn-cliente-id", "");
   document.getElementById("convn-equipo-id").innerHTML = '<option value="">Sin vehículo asociado</option>';
-  // state.opOrdenes se carga bajo demanda: esta página no tiene una pestaña
-  // de "Órdenes de Trabajo" que la deje cargada como efecto secundario (a
-  // diferencia de cuando Convertidores vivía dentro de Operativo), así que
-  // se trae acá mismo, justo antes de armar el selector.
-  const dataOrdenes = await api("/api/operativo/ordenes?mes=todos");
+  // state.opOrdenes/state.opGarantias se cargan bajo demanda: esta página
+  // no tiene pestañas de "Órdenes de Trabajo"/"Garantías" que las dejen
+  // cargadas como efecto secundario (a diferencia de cuando Convertidores
+  // vivía dentro de Operativo), así que se traen acá mismo, justo antes de
+  // armar los selectores.
+  const [dataOrdenes, dataGarantias] = await Promise.all([
+    api("/api/operativo/ordenes?mes=todos"),
+    api("/api/operativo/garantias"),
+  ]);
   state.opOrdenes = dataOrdenes.ordenes;
+  state.opGarantias = dataGarantias.garantias;
   renderSelectOrdenesConvertidor();
+  renderSelectGarantiasConvertidor();
   actualizarCamposOrigenConvertidor();
   abrirModal("modal-op-convertidor-nuevo");
 }
@@ -513,6 +536,12 @@ document.getElementById("form-op-convertidor-nuevo").addEventListener("submit", 
       toast("Selecciona la OT del auto.", true);
       return;
     }
+  } else if (origenTipo === "desde_garantia") {
+    payload.garantia_origen_id = document.getElementById("convn-garantia-origen-id").value;
+    if (!payload.garantia_origen_id) {
+      toast("Selecciona la garantía.", true);
+      return;
+    }
   }
   try {
     await api("/api/convertidores", { method: "POST", body: JSON.stringify(payload) });
@@ -535,7 +564,7 @@ function renderItemsConvertidor(convertidor) {
     tbody.innerHTML = convertidor.items.map(it => `
       <tr>
         <td>${TIPO_LABEL[it.tipo] || it.tipo}${it.aplica_iva ? ' <span style="font-size:11px; color:var(--accent-2); border:1px solid var(--accent-2); border-radius:4px; padding:1px 4px;">+IVA</span>' : ""}</td>
-        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.tipo === "convertidor" && it.convertidor_hijo ? `<br><a href="/convertidores?ver=${it.convertidor_hijo.id}" class="ayuda-inline">Ver convertidor #${it.convertidor_hijo.id}</a> — costo en vivo` : ""}</td>
+        <td>${escapeHtml(it.descripcion)}${it.detalle ? `<br><span class="ayuda-inline" style="margin:0">${escapeHtml(it.detalle)}</span>` : ""}${it.tipo === "convertidor" && it.convertidor_hijo ? `<br><a href="/convertidores?ver=${it.convertidor_hijo.id}#convertidores" class="ayuda-inline">Ver convertidor #${it.convertidor_hijo.id}</a> — costo en vivo` : ""}</td>
         <td class="num">${it.tipo === "convertidor" ? "—" : it.cantidad}</td>
         <td class="num">${fmtMoney(it.costo_unitario)}</td>
         <td class="num">${fmtMoney(it.subtotal !== undefined ? it.subtotal : it.cantidad * it.costo_unitario)}</td>
@@ -563,10 +592,14 @@ async function abrirDetalleConvertidor(id) {
       document.getElementById("convd-instalado-info").textContent = convertidor.origen_tipo === "desde_ot_auto"
         ? `Cargado automáticamente como costo en su OT de origen (OT #${convertidor.instalado_en_orden_id}).`
         : `Instalado en la OT #${convertidor.instalado_en_orden_id}.`;
+    } else if (convertidor.instalado_en_garantia_id) {
+      document.getElementById("convd-instalado-info").style.display = "";
+      document.getElementById("convd-instalado-info").textContent =
+        `Cargado automáticamente como costo en su garantía de origen (garantía #${convertidor.instalado_en_garantia_id}) -- no se le cobró al cliente.`;
     } else if (convertidor.instalado_en_convertidor_id) {
       document.getElementById("convd-instalado-info").style.display = "";
       document.getElementById("convd-instalado-info").innerHTML =
-        `Cargado como repuesto del <a href="/convertidores?ver=${convertidor.instalado_en_convertidor_id}">convertidor #${convertidor.instalado_en_convertidor_id}</a>.`;
+        `Cargado como repuesto del <a href="/convertidores?ver=${convertidor.instalado_en_convertidor_id}#convertidores">convertidor #${convertidor.instalado_en_convertidor_id}</a>.`;
     } else {
       document.getElementById("convd-instalado-info").style.display = "none";
     }
@@ -579,6 +612,13 @@ async function abrirDetalleConvertidor(id) {
     document.getElementById("convd-numero-serie").value = convertidor.numero_serie || "";
     document.getElementById("convd-motivo").value = convertidor.motivo || "";
     document.getElementById("convd-diagnostico").value = convertidor.diagnostico || "";
+    // precio_venta NUNCA aplica a un origen interno (desde_ot_auto/
+    // desde_garantia) -- no genera ingreso directo, su costo real ya se
+    // carga solo como gasto en la OT/garantía de origen (ver
+    // ORIGENES_INTERNOS en modulos/convertidores.py). Se oculta el campo
+    // para no confundir; el backend lo ignora igual aunque llegara a mandarse.
+    const esInterno = convertidor.origen_tipo === "desde_ot_auto" || convertidor.origen_tipo === "desde_garantia";
+    document.getElementById("convd-campo-precio-venta").style.display = esInterno ? "none" : "flex";
     document.getElementById("convd-precio-venta").value = convertidor.precio_venta != null ? fmtMoney(convertidor.precio_venta).replace(/[^0-9]/g, "") : "";
     renderItemsConvertidor(convertidor);
 

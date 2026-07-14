@@ -11,7 +11,7 @@ dentro de la OT de un auto (ver orden_items.convertidor_id, que sigue
 viviendo en modulos/operativo.py porque orden_items es una tabla de ese
 módulo).
 
-Tres orígenes posibles para un convertidor, confirmados con el taller:
+Cuatro orígenes posibles para un convertidor, confirmados con el taller:
   - 'cliente_directo': el cliente trae solo el convertidor a reparar (sin
     traer el auto completo) -- este es el único caso "externo" en el que
     aplica el flag es_regional (ver crear_convertidor).
@@ -22,6 +22,13 @@ Tres orígenes posibles para un convertidor, confirmados con el taller:
     caja) — orden_origen_id queda apuntando a esa OT. Estos son
     "internos": al llegar a 'entregado' se cargan solos como costo en esa
     misma OT (ver _cargar_convertidor_interno_en_ot_origen).
+  - 'desde_garantia': igual que 'desde_ot_auto' pero cuando el auto entró
+    por una garantía en vez de una OT normal -- garantia_origen_id queda
+    apuntando a esa garantía. También es "interno": al llegar a
+    'entregado' se carga solo como ítem de esa misma garantía (ver
+    _cargar_convertidor_interno_en_garantia_origen), sin cobrarle nada al
+    cliente -- es plata que el taller absorbe, igual que cualquier otro
+    repuesto/mano de obra de garantía.
 
 Flujo de estados: ingreso -> esperando_aprobacion -> reparacion ->
 esperando_repuesto -> listo. Desde 'listo' hay dos salidas: se instala en
@@ -85,12 +92,29 @@ bp = Blueprint("convertidores", __name__)
 # (no queda fijo al momento de cargarlo, ver _convertidor_costo_estimado).
 TIPOS_ITEM = ["repuesto", "mano_obra", "convertidor"]
 
-ORIGENES_CONVERTIDOR = ["cliente_directo", "stock_taller", "desde_ot_auto"]
+ORIGENES_CONVERTIDOR = ["cliente_directo", "stock_taller", "desde_ot_auto", "desde_garantia"]
 ORIGENES_CONVERTIDOR_LABEL = {
     "cliente_directo": "Cliente trae el convertidor",
     "stock_taller": "Stock del taller",
     "desde_ot_auto": "Desde la caja de un auto (OT existente)",
+    "desde_garantia": "Desde una garantía",
 }
+
+# 'desde_ot_auto' y 'desde_garantia' son "internos": el convertidor no se
+# vende ni se le cobra a nadie por separado -- su costo se carga solo,
+# como GASTO, en la OT/garantía a la que pertenece (ver
+# _cargar_convertidor_interno_en_ot_origen / _cargar_convertidor_interno_en_garantia_origen).
+# Por eso 'precio_venta' NO aplica acá: no generan ingreso directo, solo
+# a través de la OT del auto (o de la garantía). Si se le dejara usar
+# precio_venta igual que a los orígenes externos (cliente_directo/
+# stock_taller), pasarían dos cosas
+# malas: (1) ese precio_venta se contaría como si fuera ingreso en algún
+# reporte cuando en realidad es 0 -- el único ingreso real es lo que se le
+# cobra al cliente en la OT/garantía --, y (2) el costo cargado a la
+# OT/garantía quedaría "congelado" en ese precio_venta y dejaría de
+# reflejar ítems (ej. mano de obra) agregados después, porque
+# _convertidor_costo_estimado preferiría precio_venta sobre el costo real.
+ORIGENES_INTERNOS = {"desde_ot_auto", "desde_garantia"}
 
 # Renombrado desde ["ingreso", "diagnostico", "reparacion", "control_calidad",
 # "listo", "instalado", "entregado", "cancelado"] -- init_convertidores_db
@@ -139,6 +163,7 @@ def init_convertidores_db(db):
             cliente_id INTEGER REFERENCES clientes(id),
             equipo_id INTEGER REFERENCES equipos(id),
             orden_origen_id INTEGER REFERENCES ordenes_trabajo(id),
+            garantia_origen_id INTEGER REFERENCES garantias(id),
             marca TEXT DEFAULT '',
             modelo TEXT DEFAULT '',
             numero_serie TEXT DEFAULT '',
@@ -186,9 +211,9 @@ def init_convertidores_db(db):
         sql_convertidores_actual,
         [
             "id", "origen_tipo", "cliente_id", "equipo_id", "orden_origen_id",
-            "marca", "modelo", "numero_serie", "motivo", "diagnostico",
-            "responsable", "estado", "precio_venta", "es_regional", "fecha_recepcion",
-            "fecha_cierre", "usuario", "creado_en", "actualizado_en",
+            "garantia_origen_id", "marca", "modelo", "numero_serie", "motivo",
+            "diagnostico", "responsable", "estado", "precio_venta", "es_regional",
+            "fecha_recepcion", "fecha_cierre", "usuario", "creado_en", "actualizado_en",
         ],
     )
     # 'es_regional' se agregó después del primer despliegue del módulo --
@@ -220,6 +245,7 @@ def init_convertidores_db(db):
         CREATE INDEX IF NOT EXISTS idx_convertidores_cliente_id ON convertidores_torque (cliente_id);
         CREATE INDEX IF NOT EXISTS idx_convertidores_equipo_id ON convertidores_torque (equipo_id);
         CREATE INDEX IF NOT EXISTS idx_convertidores_estado ON convertidores_torque (estado);
+        CREATE INDEX IF NOT EXISTS idx_convertidores_garantia_origen_id ON convertidores_torque (garantia_origen_id);
         CREATE INDEX IF NOT EXISTS idx_convertidor_items_convertidor_id ON convertidor_items (convertidor_id);
         CREATE INDEX IF NOT EXISTS idx_convertidor_items_convertidor_hijo_id ON convertidor_items (convertidor_hijo_id);
         """
@@ -252,6 +278,27 @@ def init_convertidores_db(db):
             "id", "convertidor_id", "tipo", "producto_id", "descripcion",
             "cantidad", "costo_unitario", "movimiento_id", "usuario",
             "creado_en", "detalle", "aplica_iva", "convertidor_hijo_id",
+        ],
+    )
+    db.commit()
+
+    # Repara convertidores_torque si su llave foránea garantia_origen_id
+    # quedó apuntando a 'garantias_legado...' -- mismo mecanismo que ya
+    # mordió a orden_items.convertidor_id (ver el comentario largo en
+    # modulos/operativo.py:init_operativo_db). 'garantias' SÍ se
+    # reconstruye ocasionalmente (ver _reconstruir_tabla_legada_si_hace_falta
+    # más arriba en este archivo), así que esta tabla corre el mismo riesgo
+    # apenas exista al menos un convertidor 'desde_garantia'. Se corre en
+    # cada arranque; si la llave ya está bien, no hace nada.
+    _reparar_fk_hacia_tabla_renombrada(
+        db,
+        "convertidores_torque",
+        sql_convertidores_actual,
+        [
+            "id", "origen_tipo", "cliente_id", "equipo_id", "orden_origen_id",
+            "garantia_origen_id", "marca", "modelo", "numero_serie", "motivo",
+            "diagnostico", "responsable", "estado", "precio_venta", "es_regional",
+            "fecha_recepcion", "fecha_cierre", "usuario", "creado_en", "actualizado_en",
         ],
     )
     db.commit()
@@ -325,12 +372,23 @@ def _convertidor_costo_estimado(db, convertidor_id, _visitados=None):
     de cualquier convertidor-repuesto que tenga adentro). Mismo criterio
     en los tres lugares que necesitan "cuánto vale este convertidor ahora
     mismo": instalarlo en la OT de un auto, cargarlo automáticamente en su
-    OT de origen al llegar a 'entregado', y cargarlo como repuesto de
-    OTRO convertidor."""
-    fila = db.execute("SELECT precio_venta FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
+    OT/garantía de origen al llegar a 'entregado', y cargarlo como
+    repuesto de OTRO convertidor.
+
+    EXCEPCIÓN -- orígenes internos (ver ORIGENES_INTERNOS): acá
+    precio_venta NUNCA se usa, aunque tenga un valor cargado (ej. residual
+    de un edit viejo) -- siempre se devuelve el costo real en vivo
+    (_convertidor_costo_total). Así el monto que se carga a la OT/garantía
+    de origen siempre refleja los ítems reales (incluida mano de obra
+    agregada después), en vez de quedar "congelado" en un precio de venta
+    que no debería existir para un convertidor que no se vende por
+    separado."""
+    fila = db.execute(
+        "SELECT precio_venta, origen_tipo FROM convertidores_torque WHERE id = ?", (convertidor_id,)
+    ).fetchone()
     if fila is None:
         return 0
-    if fila["precio_venta"] not in (None, ""):
+    if fila["origen_tipo"] not in ORIGENES_INTERNOS and fila["precio_venta"] not in (None, ""):
         return fila["precio_venta"]
     return _convertidor_costo_total(db, convertidor_id, _visitados)
 
@@ -464,31 +522,205 @@ def _cargar_convertidor_interno_en_ot_origen(db, convertidor_id):
     db.commit()
 
 
+def _cargar_convertidor_interno_en_garantia_origen(db, convertidor_id):
+    """Mismo mecanismo que _cargar_convertidor_interno_en_ot_origen pero
+    para convertidores 'desde_garantia' (el auto entró por una garantía en
+    vez de una OT normal). Apenas termina la propia reparación del
+    convertidor (queda 'entregado'), se carga automáticamente como ítem de
+    esa misma garantía (garantia_origen_id) con tipo 'convertidor_torque'
+    -- ese costo NO se le cobra al cliente, es plata que el taller absorbe
+    como cualquier otro repuesto/mano de obra de garantía (ver
+    garantia_items en modulos/operativo.py, que ya lo suma sin distinción
+    de tipo dentro de "Costo garantías (mes)").
+
+    Idempotente: si ya hay un garantia_items apuntando a este convertidor,
+    no lo vuelve a agregar."""
+    convertidor = db.execute(
+        "SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)
+    ).fetchone()
+    if convertidor is None or not convertidor["garantia_origen_id"]:
+        return
+
+    ya_cargado = db.execute(
+        "SELECT id FROM garantia_items WHERE convertidor_id = ?", (convertidor_id,)
+    ).fetchone()
+    if ya_cargado:
+        return
+
+    garantia_id = convertidor["garantia_origen_id"]
+    garantia = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
+    if garantia is None:
+        return
+
+    # Mismo motivo que en _cargar_convertidor_interno_en_ot_origen:
+    # usuario_actual() necesita sesión, pero reparar_cargas_internas_pendientes()
+    # se llama al arrancar el servidor, fuera de cualquier request.
+    try:
+        usuario = usuario_actual()
+    except RuntimeError:
+        usuario = "Sistema"
+    ts = now_iso()
+    partes = ["CONVERTIDOR DE TORQUE (REPARACIÓN INTERNA - GARANTÍA)"]
+    if convertidor["marca"]:
+        partes.append(convertidor["marca"])
+    if convertidor["modelo"]:
+        partes.append(convertidor["modelo"])
+    if convertidor["numero_serie"]:
+        partes.append(f"N/S {convertidor['numero_serie']}")
+    descripcion = " ".join(partes).upper()
+
+    costo_unitario = _convertidor_costo_estimado(db, convertidor_id)
+
+    db.execute(
+        """
+        INSERT INTO garantia_items (
+            garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
+            movimiento_id, usuario, creado_en, detalle, aplica_iva, convertidor_id
+        ) VALUES (?, 'convertidor_torque', NULL, ?, 1, ?, NULL, ?, ?, '', 0, ?)
+        """,
+        (garantia_id, descripcion, costo_unitario, usuario, ts, convertidor_id),
+    )
+    db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (ts, garantia_id))
+    db.commit()
+
+
+def _retirar_carga_interna(db, convertidor_id):
+    """Contrapartida de _cargar_convertidor_interno_en_ot_origen /
+    _cargar_convertidor_interno_en_garantia_origen: si un convertidor
+    'interno' RETROCEDE desde 'entregado' a cualquier otro estado (ej. se
+    detectó que la reparación no quedó bien y hay que reabrirlo), el ítem
+    que se había auto-cargado en la OT/garantía de origen ya no
+    corresponde -- el convertidor todavía no está listo, así que no debería
+    seguir sumando como costo cerrado en esa OT/garantía. Se elimina acá
+    (en vez de dejarlo con un costo "pegado" del momento en que se cargó);
+    cuando el convertidor vuelva a 'entregado' se vuelve a cargar solo, con
+    el costo actualizado a ESE momento (ver disparar_carga_interna_ot/
+    disparar_carga_interna_garantia en editar_convertidor). Esto es lo que
+    evita que un ítem de repuesto/mano de obra agregado después de un
+    primer 'entregado' -> retroceso -> 'entregado' se pierda del costo
+    final: al retroceder se borra el cargo viejo, y al re-entregar se
+    recalcula desde cero con TODOS los ítems que tenga en ese momento."""
+    item_ot = db.execute(
+        "SELECT id, orden_id FROM orden_items WHERE convertidor_id = ?", (convertidor_id,)
+    ).fetchone()
+    if item_ot is not None:
+        db.execute("DELETE FROM orden_items WHERE id = ?", (item_ot["id"],))
+        db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (now_iso(), item_ot["orden_id"]))
+
+    item_garantia = db.execute(
+        "SELECT id, garantia_id FROM garantia_items WHERE convertidor_id = ?", (convertidor_id,)
+    ).fetchone()
+    if item_garantia is not None:
+        db.execute("DELETE FROM garantia_items WHERE id = ?", (item_garantia["id"],))
+        db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (now_iso(), item_garantia["garantia_id"]))
+
+    db.commit()
+
+
 def reparar_cargas_internas_pendientes(db):
-    """Reintenta el auto-cargo a la OT de origen para convertidores
-    'desde_ot_auto' que ya llegaron a 'entregado' pero se quedaron sin su
-    ítem correspondiente en orden_items -- típicamente porque el intento
-    original falló con 'FOREIGN KEY constraint failed' (ver
+    """Reintenta el auto-cargo a la OT/garantía de origen para
+    convertidores internos ('desde_ot_auto' o 'desde_garantia') que ya
+    llegaron a 'entregado' pero se quedaron sin su ítem correspondiente en
+    orden_items/garantia_items -- típicamente porque el intento original
+    falló con 'FOREIGN KEY constraint failed' (ver
     modulos/operativo.py:init_operativo_db(), donde se repara la FK de
     orden_items.convertidor_id hacia convertidores_torque justo antes de
     llamar a esta función). El cambio de estado a 'entregado' sí se
     guarda aunque la carga falle -- por eso una unidad puede quedar
-    "entregada" en el tablero pero sin su costo reflejado en la OT del
-    auto, y como el auto-cargo solo se dispara en la TRANSICIÓN a
+    "entregada" en el tablero pero sin su costo reflejado en la OT/garantía
+    de origen, y como el auto-cargo solo se dispara en la TRANSICIÓN a
     'entregado' (ver editar_convertidor), una unidad que ya está
     'entregado' no lo vuelve a intentar sola.
 
     Se llama desde modulos/operativo.py:init_operativo_db(), en cada
     arranque, DESPUÉS de reparar esa FK -- es idempotente (usa el mismo
-    chequeo "ya_cargado" que la carga normal, dentro de
-    _cargar_convertidor_interno_en_ot_origen), así que no hace nada si ya
+    chequeo "ya_cargado" que la carga normal), así que no hace nada si ya
     no queda ninguna unidad pendiente."""
-    pendientes = db.execute(
+    pendientes_ot = db.execute(
         "SELECT id FROM convertidores_torque "
         "WHERE origen_tipo = 'desde_ot_auto' AND estado = 'entregado' AND orden_origen_id IS NOT NULL"
     ).fetchall()
-    for fila in pendientes:
+    for fila in pendientes_ot:
         _cargar_convertidor_interno_en_ot_origen(db, fila["id"])
+
+    pendientes_garantia = db.execute(
+        "SELECT id FROM convertidores_torque "
+        "WHERE origen_tipo = 'desde_garantia' AND estado = 'entregado' AND garantia_origen_id IS NOT NULL"
+    ).fetchall()
+    for fila in pendientes_garantia:
+        _cargar_convertidor_interno_en_garantia_origen(db, fila["id"])
+
+
+def reparar_costos_congelados_convertidores_internos(db):
+    """Corrige tres problemas de datos heredados de una versión anterior
+    del código, donde un convertidor 'interno' (desde_ot_auto/
+    desde_garantia) SÍ podía usar precio_venta en vez de su costo real de
+    ítems, y retroceder desde 'entregado' no retiraba el cargo ya hecho
+    (ver _convertidor_costo_estimado y _retirar_carga_interna, ya
+    corregidos para que esto no vuelva a pasar):
+
+      1. precio_venta residual: si a una unidad interna le quedó un
+         precio_venta cargado (de antes de esta corrección), se limpia acá
+         -- ya no se usa para nada, pero dejarlo puesto es confuso (parece
+         que el convertidor "se vendió" cuando en realidad su costo real
+         está reflejado como gasto en su OT/garantía de origen).
+
+      2. costo_unitario desactualizado en unidades TODAVÍA 'entregado':
+         el ítem que se auto-cargó en orden_items/garantia_items guarda un
+         costo_unitario FIJO al momento de cargarlo (no se recalcula solo
+         en cada lectura). Si ese monto se calculó con el precio_venta
+         viejo (bug) en vez del costo real de los ítems, quedó incorrecto.
+         Acá se recalcula el costo real actual (_convertidor_costo_total,
+         que nunca usa precio_venta) y se actualiza el ítem si no coincide.
+
+      3. cargo huérfano en unidades que YA NO están 'entregado': antes de
+         que existiera _retirar_carga_interna, retroceder un convertidor
+         desde 'entregado' a otro estado no quitaba el ítem ya cargado en
+         la OT/garantía -- quedaba con un costo "pegado" de una reparación
+         que en realidad se reabrió. Acá se detecta y se retira (ver
+         _retirar_carga_interna); si el convertidor vuelve a 'entregado'
+         más adelante, se vuelve a cargar solo con el costo correcto de
+         ese momento.
+
+    Se llama desde modulos/operativo.py:init_operativo_db(), en cada
+    arranque, después de reparar_cargas_internas_pendientes() -- es
+    idempotente (si no hay nada que corregir, no hace nada)."""
+    internos = db.execute(
+        "SELECT id, estado, origen_tipo, precio_venta FROM convertidores_torque WHERE origen_tipo IN ('desde_ot_auto', 'desde_garantia')"
+    ).fetchall()
+    ts = now_iso()
+    for c in internos:
+        if c["precio_venta"] not in (None, ""):
+            db.execute(
+                "UPDATE convertidores_torque SET precio_venta = NULL, actualizado_en = ? WHERE id = ?",
+                (ts, c["id"]),
+            )
+
+        if c["estado"] != "entregado":
+            # Ya no está entregado -- cualquier cargo que le haya quedado
+            # de una entrega anterior ya no corresponde.
+            _retirar_carga_interna(db, c["id"])
+            continue
+
+        costo_correcto = _convertidor_costo_total(db, c["id"])
+
+        if c["origen_tipo"] == "desde_ot_auto":
+            item = db.execute(
+                "SELECT id, costo_unitario, orden_id FROM orden_items WHERE convertidor_id = ? ORDER BY id DESC LIMIT 1",
+                (c["id"],),
+            ).fetchone()
+            if item is not None and round(item["costo_unitario"] or 0, 2) != round(costo_correcto, 2):
+                db.execute("UPDATE orden_items SET costo_unitario = ? WHERE id = ?", (costo_correcto, item["id"]))
+                db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, item["orden_id"]))
+        elif c["origen_tipo"] == "desde_garantia":
+            item = db.execute(
+                "SELECT id, costo_unitario, garantia_id FROM garantia_items WHERE convertidor_id = ? ORDER BY id DESC LIMIT 1",
+                (c["id"],),
+            ).fetchone()
+            if item is not None and round(item["costo_unitario"] or 0, 2) != round(costo_correcto, 2):
+                db.execute("UPDATE garantia_items SET costo_unitario = ? WHERE id = ?", (costo_correcto, item["id"]))
+                db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (ts, item["garantia_id"]))
+    db.commit()
 
 
 def revertir_convertidor_al_quitar_item(db, convertidor_id):
@@ -549,8 +781,14 @@ def _convertidor_dict(db, row):
     d["total_reparacion"] = sum(i["subtotal"] for i in d["items"])
     # Precio a mostrar en la tarjeta del tablero: el precio de venta
     # explícito si se cargó uno, si no, la suma de los ítems propios
-    # (mismo criterio que agregar_convertidor_a_orden al instalarlo).
-    d["costo_estimado"] = d["precio_venta"] if d["precio_venta"] not in (None, "") else d["total_reparacion"]
+    # (mismo criterio que agregar_convertidor_a_orden al instalarlo) --
+    # salvo un origen interno (ver ORIGENES_INTERNOS), donde precio_venta
+    # nunca aplica y siempre se muestra el costo real de los ítems, mismo
+    # criterio que _convertidor_costo_estimado.
+    if d["origen_tipo"] in ORIGENES_INTERNOS:
+        d["costo_estimado"] = d["total_reparacion"]
+    else:
+        d["costo_estimado"] = d["precio_venta"] if d["precio_venta"] not in (None, "") else d["total_reparacion"]
     # Ítem de orden_items (si ya está instalado en la OT de un auto) donde
     # quedó registrado — útil para que el detalle del convertidor muestre
     # "instalado en OT #X".
@@ -558,6 +796,12 @@ def _convertidor_dict(db, row):
         "SELECT orden_id FROM orden_items WHERE convertidor_id = ? ORDER BY id DESC LIMIT 1", (d["id"],)
     ).fetchone()
     d["instalado_en_orden_id"] = instalacion["orden_id"] if instalacion else None
+    # Mismo criterio pero para un convertidor 'desde_garantia' -- el ítem
+    # de garantia_items (si ya se auto-cargó) donde quedó registrado.
+    carga_garantia = db.execute(
+        "SELECT garantia_id FROM garantia_items WHERE convertidor_id = ? ORDER BY id DESC LIMIT 1", (d["id"],)
+    ).fetchone()
+    d["instalado_en_garantia_id"] = carga_garantia["garantia_id"] if carga_garantia else None
     # Mismo criterio pero para el otro camino posible: que esta unidad haya
     # quedado cargada como repuesto DENTRO de otro convertidor (ver
     # agregar_item_convertidor). Los dos campos son mutuamente excluyentes
@@ -582,6 +826,7 @@ def crear_convertidor():
     cliente_id = None
     equipo_id = None
     orden_origen_id = None
+    garantia_origen_id = None
 
     if origen_tipo == "cliente_directo":
         # El cliente trae solo la pieza -- exige cliente, el equipo es
@@ -614,6 +859,21 @@ def crear_convertidor():
         cliente_id = orden["cliente_id"]
         equipo_id = orden["equipo_id"]
 
+    elif origen_tipo == "desde_garantia":
+        # Igual que 'desde_ot_auto' pero el auto entró por una garantía --
+        # se completan cliente_id/equipo_id automáticamente desde esa
+        # garantía, y al llegar a 'entregado' el costo se carga solo como
+        # ítem de esa misma garantía (no se le cobra al cliente).
+        try:
+            garantia_origen_id = int(data.get("garantia_origen_id"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Debes indicar la garantía de la que sale este convertidor"}), 400
+        garantia = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_origen_id,)).fetchone()
+        if garantia is None:
+            return jsonify({"error": "La garantía indicada no existe"}), 400
+        cliente_id = garantia["cliente_id"]
+        equipo_id = garantia["equipo_id"]
+
     # 'stock_taller': sin cliente ni equipo, se repara por cuenta del taller.
 
     # "De región" solo tiene sentido cuando el cliente trae el convertidor
@@ -622,24 +882,33 @@ def crear_convertidor():
     # payload para esos casos (evita datos inconsistentes en la tarjeta).
     es_regional = 1 if (origen_tipo == "cliente_directo" and data.get("es_regional")) else 0
 
+    # precio_venta NUNCA aplica a un origen interno (ver ORIGENES_INTERNOS
+    # arriba) -- se ignora lo que venga en el payload para esos casos, para
+    # que no quede un valor residual que _convertidor_costo_estimado tenga
+    # que descartar más tarde.
+    precio_venta = (
+        float(data["precio_venta"]) if (origen_tipo not in ORIGENES_INTERNOS and data.get("precio_venta") not in (None, ""))
+        else None
+    )
+
     ts = now_iso()
     cur = db.execute(
         """
         INSERT INTO convertidores_torque (
-            origen_tipo, cliente_id, equipo_id, orden_origen_id, marca, modelo,
+            origen_tipo, cliente_id, equipo_id, orden_origen_id, garantia_origen_id, marca, modelo,
             numero_serie, motivo, diagnostico, responsable, estado, precio_venta,
             es_regional, fecha_recepcion, usuario, creado_en, actualizado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ingreso', ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ingreso', ?, ?, ?, ?, ?, ?)
         """,
         (
-            origen_tipo, cliente_id, equipo_id, orden_origen_id,
+            origen_tipo, cliente_id, equipo_id, orden_origen_id, garantia_origen_id,
             (data.get("marca") or "").strip().upper(),
             (data.get("modelo") or "").strip().upper(),
             (data.get("numero_serie") or "").strip().upper(),
             (data.get("motivo") or "").strip().upper(),
             (data.get("diagnostico") or "").strip().upper(),
             (data.get("responsable") or "").strip().upper(),
-            float(data["precio_venta"]) if data.get("precio_venta") not in (None, "") else None,
+            precio_venta,
             es_regional, ts, usuario_actual(), ts, ts,
         ),
     )
@@ -728,9 +997,17 @@ def editar_convertidor(convertidor_id):
                          "como repuesto en la OT de un auto -- no se puede setear a mano."
             }), 400
 
-    precio_venta = row["precio_venta"]
-    if "precio_venta" in data:
-        precio_venta = float(data["precio_venta"]) if data.get("precio_venta") not in (None, "") else None
+    # precio_venta NUNCA aplica a un origen interno (ver ORIGENES_INTERNOS)
+    # -- el origen no se puede cambiar después de creado, así que si esta
+    # unidad es interna, precio_venta se fuerza a None pase lo que mande
+    # el payload (protege contra un valor residual de una versión anterior
+    # o un payload manual mal armado).
+    if row["origen_tipo"] in ORIGENES_INTERNOS:
+        precio_venta = None
+    else:
+        precio_venta = row["precio_venta"]
+        if "precio_venta" in data:
+            precio_venta = float(data["precio_venta"]) if data.get("precio_venta") not in (None, "") else None
 
     # "De región" solo aplica al origen 'cliente_directo' (ver crear_convertidor)
     # -- el origen no se puede cambiar después de creado, así que si esta
@@ -747,16 +1024,35 @@ def editar_convertidor(convertidor_id):
         fecha_cierre = None
 
     # Un convertidor 'interno' (viene de la caja de un auto que ya tiene
-    # su propia OT) se carga solo, como costo, en esa misma OT apenas
-    # termina su propia reparación -- ver _cargar_convertidor_interno_en_ot_origen.
-    # Se detecta ANTES del UPDATE (comparando contra el estado previo) para
-    # no disparar el efecto secundario en cada guardado repetido, solo la
-    # primera vez que entra a 'entregado'.
-    disparar_carga_interna = (
+    # su propia OT, o de una garantía) se carga solo, como costo, en esa
+    # misma OT/garantía apenas termina su propia reparación -- ver
+    # _cargar_convertidor_interno_en_ot_origen /
+    # _cargar_convertidor_interno_en_garantia_origen. Se detecta ANTES del
+    # UPDATE (comparando contra el estado previo) para no disparar el
+    # efecto secundario en cada guardado repetido, solo la primera vez que
+    # entra a 'entregado'.
+    disparar_carga_interna_ot = (
         estado == "entregado"
         and row["estado"] != "entregado"
         and row["origen_tipo"] == "desde_ot_auto"
         and row["orden_origen_id"]
+    )
+    disparar_carga_interna_garantia = (
+        estado == "entregado"
+        and row["estado"] != "entregado"
+        and row["origen_tipo"] == "desde_garantia"
+        and row["garantia_origen_id"]
+    )
+    # Caso contrario -- RETROCESO: el convertidor estaba 'entregado' (ya
+    # cargado como costo en su OT/garantía de origen) y se mueve a
+    # cualquier otro estado (se reabre la reparación). El cargo viejo ya no
+    # corresponde -- se retira acá (ver _retirar_carga_interna) para que no
+    # quede "pegado" con un costo desactualizado; al volver a 'entregado'
+    # se recarga solo con el costo real de ese momento.
+    retrocede_desde_entregado = (
+        estado != "entregado"
+        and row["estado"] == "entregado"
+        and row["origen_tipo"] in ORIGENES_INTERNOS
     )
 
     db.execute(
@@ -778,8 +1074,12 @@ def editar_convertidor(convertidor_id):
     )
     db.commit()
 
-    if disparar_carga_interna:
+    if disparar_carga_interna_ot:
         _cargar_convertidor_interno_en_ot_origen(db, convertidor_id)
+    if disparar_carga_interna_garantia:
+        _cargar_convertidor_interno_en_garantia_origen(db, convertidor_id)
+    if retrocede_desde_entregado:
+        _retirar_carga_interna(db, convertidor_id)
 
     actualizado = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
     return jsonify(_convertidor_dict(db, actualizado))
@@ -795,17 +1095,26 @@ def eliminar_convertidor(convertidor_id):
     ya_en_ot = db.execute(
         "SELECT orden_id FROM orden_items WHERE convertidor_id = ? LIMIT 1", (convertidor_id,)
     ).fetchone()
-    # Una unidad 'instalado' quedó consumida por uno de dos caminos
-    # posibles -- la OT de un auto, o el ítem de OTRO convertidor -- ver
-    # cuál para dar un mensaje de error que apunte al lugar correcto.
+    ya_en_garantia = db.execute(
+        "SELECT garantia_id FROM garantia_items WHERE convertidor_id = ? LIMIT 1", (convertidor_id,)
+    ).fetchone()
+    # Una unidad 'instalado' quedó consumida por uno de tres caminos
+    # posibles -- la OT de un auto, una garantía, o el ítem de OTRO
+    # convertidor -- ver cuál para dar un mensaje de error que apunte al
+    # lugar correcto.
     ya_en_convertidor = db.execute(
         "SELECT convertidor_id FROM convertidor_items WHERE convertidor_hijo_id = ? LIMIT 1", (convertidor_id,)
     ).fetchone()
-    if convertidor["estado"] == "instalado" or ya_en_ot is not None or ya_en_convertidor is not None:
+    if convertidor["estado"] == "instalado" or ya_en_ot is not None or ya_en_garantia is not None or ya_en_convertidor is not None:
         if ya_en_convertidor is not None:
             mensaje = (
                 f"Este convertidor ya está cargado como repuesto del convertidor #{ya_en_convertidor['convertidor_id']} "
                 "-- elimina primero ese ítem si de verdad quieres deshacerlo."
+            )
+        elif ya_en_garantia is not None:
+            mensaje = (
+                f"Este convertidor ya está cargado como ítem en la garantía #{ya_en_garantia['garantia_id']} "
+                "-- elimina primero ese ítem desde la garantía correspondiente si de verdad quieres deshacerlo."
             )
         else:
             mensaje = (
@@ -1017,10 +1326,34 @@ def eliminar_item_convertidor(convertidor_id, item_id):
 @bp.route("/api/convertidores/dashboard", methods=["GET"])
 def dashboard_convertidores():
     """Resumen para la pestaña Dashboard del módulo: cuántos hay por
-    estado, cuánto valor en reparación hay abierto, cuántos "de región"
-    siguen pendientes de despachar de vuelta, y el tiempo promedio de
-    reparación de los que se cerraron el mes en curso (mismo criterio de
-    "mes en curso" que usa Operativo en su propio dashboard)."""
+    estado, cuánto valor en reparación hay abierto, cuánto se cerró este
+    mes, cuánto costó realmente reparar unidades externas (cliente_directo)
+    este mes, cuántos convertidores han pasado por una garantía, cuántos
+    "de región" siguen pendientes de despachar de vuelta, y el tiempo
+    promedio de reparación de los que se cerraron el mes en curso (mismo
+    criterio de "mes en curso" que usa Operativo en su propio dashboard).
+
+    IMPORTANTE -- precio_venta NUNCA se usa para un origen interno
+    (ORIGENES_INTERNOS: 'desde_ot_auto'/'desde_garantia'), ni acá ni en
+    ningún otro lado del módulo (ver _convertidor_costo_estimado /
+    _convertidor_dict): esas unidades no se venden por separado, no
+    generan ingreso directo -- su costo real es siempre la suma de sus
+    ítems, y ese costo ya se refleja como GASTO en la OT/garantía a la que
+    pertenecen. Si se dejara usar precio_venta ahí, se contaría plata que
+    nunca existió como ingreso, y el monto cargado a la OT/garantía
+    quedaría "congelado" sin reflejar ítems agregados después.
+
+    IMPORTANTE #2 -- valor_cerrado_mes NO incluye convertidores internos
+    (desde_ot_auto/desde_garantia) que llegaron a 'entregado' este mes: ese
+    costo ya se contabiliza como GASTO en Operativo (costo_convertidores_ots_cerradas)
+    o en Garantías (costo_garantias_mes) apenas el convertidor se entrega
+    -- son el mismo peso mirado desde el otro lado (gasto ahí, no "valor
+    generado" acá). Si se sumara también en esta tarjeta, el mismo monto
+    aparecería como algo positivo en Convertidores Y como un costo en
+    Operativo/Garantías al mismo tiempo, confundiendo al dueño al comparar
+    dashboards (mismo tipo de duplicación que ya se corrigió en
+    reporte_excel -- ver ahí el comentario largo). valor_cerrado_interno_mes
+    se reporta aparte, solo informativo."""
     db = get_db()
     rows = db.execute("SELECT * FROM convertidores_torque").fetchall()
 
@@ -1028,6 +1361,10 @@ def dashboard_convertidores():
     por_origen = {origen: 0 for origen in ORIGENES_CONVERTIDOR}
     abiertos = 0
     valor_en_reparacion = 0.0
+    valor_cerrado_mes = 0.0
+    valor_cerrado_interno_mes = 0.0
+    gasto_externos_mes = 0.0
+    convertidores_en_garantia = 0
     regionales_pendientes = 0
     tiempos_cierre_mes = []
     mes_actual = datetime.now().strftime("%Y-%m")
@@ -1036,13 +1373,29 @@ def dashboard_convertidores():
         d = dict(r)
         por_estado[d["estado"]] = por_estado.get(d["estado"], 0) + 1
         por_origen[d["origen_tipo"]] = por_origen.get(d["origen_tipo"], 0) + 1
+        if d["origen_tipo"] == "desde_garantia" or d["garantia_origen_id"]:
+            convertidores_en_garantia += 1
+        es_interno = d["origen_tipo"] in ORIGENES_INTERNOS
+        cerrado_este_mes = d["estado"] in ESTADOS_CONVERTIDOR_CERRADOS and (d["fecha_cierre"] or "").startswith(mes_actual)
         if d["estado"] not in ESTADOS_CONVERTIDOR_CERRADOS:
             abiertos += 1
-            costo = d["precio_venta"] if d["precio_venta"] not in (None, "") else _convertidor_costo_total(db, d["id"])
+            costo = _convertidor_costo_total(db, d["id"]) if es_interno else (
+                d["precio_venta"] if d["precio_venta"] not in (None, "") else _convertidor_costo_total(db, d["id"])
+            )
             valor_en_reparacion += costo or 0
         if d["es_regional"] and d["estado"] not in ("entregado", "cancelado"):
             regionales_pendientes += 1
-        if d["estado"] in ESTADOS_CONVERTIDOR_CERRADOS and (d["fecha_cierre"] or "").startswith(mes_actual):
+        if cerrado_este_mes:
+            costo_cierre = _convertidor_costo_total(db, d["id"]) if es_interno else (
+                d["precio_venta"] if d["precio_venta"] not in (None, "") else _convertidor_costo_total(db, d["id"])
+            )
+            if es_interno:
+                # No se suma a valor_cerrado_mes -- ya quedó contabilizado
+                # como gasto en Operativo/Garantías (ver docstring). Se
+                # reporta aparte, solo para transparencia.
+                valor_cerrado_interno_mes += costo_cierre or 0
+            else:
+                valor_cerrado_mes += costo_cierre or 0
             if d["fecha_recepcion"] and d["fecha_cierre"]:
                 try:
                     dt_ini = datetime.fromisoformat(d["fecha_recepcion"][:19])
@@ -1050,6 +1403,12 @@ def dashboard_convertidores():
                     tiempos_cierre_mes.append((dt_fin - dt_ini).total_seconds() / 86400)
                 except ValueError:
                     pass
+            if d["origen_tipo"] == "cliente_directo":
+                # Cuánto le costó REALMENTE al taller reparar esta unidad
+                # externa (repuestos + mano de obra reales, nunca
+                # precio_venta) -- para comparar contra lo cobrado y ver el
+                # margen real de este servicio, no solo lo cobrado.
+                gasto_externos_mes += _convertidor_costo_total(db, d["id"]) or 0
 
     tiempo_promedio_dias = round(sum(tiempos_cierre_mes) / len(tiempos_cierre_mes), 1) if tiempos_cierre_mes else None
 
@@ -1057,6 +1416,10 @@ def dashboard_convertidores():
         "total": len(rows),
         "abiertos": abiertos,
         "valor_en_reparacion": round(valor_en_reparacion, 2),
+        "valor_cerrado_mes": round(valor_cerrado_mes, 2),
+        "valor_cerrado_interno_mes": round(valor_cerrado_interno_mes, 2),
+        "gasto_externos_mes": round(gasto_externos_mes, 2),
+        "convertidores_en_garantia": convertidores_en_garantia,
         "regionales_pendientes": regionales_pendientes,
         "tiempo_promedio_cierre_mes_dias": tiempo_promedio_dias,
         "por_estado": por_estado,
@@ -1096,13 +1459,14 @@ def reporte_excel():
     de clientes externos o de cajas de autos ya en el taller.
 
     IMPORTANTE -- valor_total NO incluye convertidores internos ya cargados
-    en una OT de auto (origen_tipo == 'desde_ot_auto' con
-    instalado_en_orden_id != None): ese costo ya quedó registrado como gasto
-    real en esa OT (ver _orden_dict_detalle / dashboard_operativo en
+    en la OT/garantía de origen (origen_tipo en ORIGENES_INTERNOS, con
+    instalado_en_orden_id o instalado_en_garantia_id != None): ese costo ya
+    quedó registrado como gasto real en esa OT/garantía (ver
+    _orden_dict_detalle / dashboard_operativo / "Costo garantías" en
     modulos/operativo.py), así que sumarlo también acá lo duplicaría. El
     detalle por fila SÍ sigue mostrando su costo_estimado individual (para
-    trazabilidad/auditoría), marcado con la columna "Ya cargado en OT" --
-    solo se excluye del TOTAL agregado. Ver decisión del usuario: "excluir
+    trazabilidad/auditoría), marcado con la columna "Ya cargado en OT/garantía"
+    -- solo se excluye del TOTAL agregado. Ver decisión del usuario: "excluir
     de reportes, no borrar datos"."""
     desde, hasta = _rango_fechas()
     db = get_db()
@@ -1120,17 +1484,24 @@ def reporte_excel():
     detalle = []
     conteo_origen = {}
     valor_total = 0
-    valor_ya_cargado_ot = 0
+    valor_ya_cargado = 0
     for r in rows:
         c = _convertidor_dict(db, r)
         origen_txt = ORIGENES_CONVERTIDOR_LABEL.get(c["origen_tipo"], c["origen_tipo"])
         conteo_origen[origen_txt] = conteo_origen.get(origen_txt, 0) + 1
         costo = c["costo_estimado"] or 0
         ya_cargado_en_ot = bool(c["origen_tipo"] == "desde_ot_auto" and c.get("instalado_en_orden_id"))
-        if ya_cargado_en_ot:
-            valor_ya_cargado_ot += costo
+        ya_cargado_en_garantia = bool(c["origen_tipo"] == "desde_garantia" and c.get("instalado_en_garantia_id"))
+        if ya_cargado_en_ot or ya_cargado_en_garantia:
+            valor_ya_cargado += costo
         else:
             valor_total += costo
+        if ya_cargado_en_ot:
+            marca_cargado = f"Sí, OT #{c['instalado_en_orden_id']}"
+        elif ya_cargado_en_garantia:
+            marca_cargado = f"Sí, garantía #{c['instalado_en_garantia_id']}"
+        else:
+            marca_cargado = "No"
         detalle.append([
             (c["fecha_recepcion"] or "")[:10],
             c["cliente"]["nombre"] if c["cliente"] else "—",
@@ -1140,7 +1511,7 @@ def reporte_excel():
             ESTADOS_CONVERTIDOR_LABEL.get(c["estado"], c["estado"]),
             "Sí" if c["es_regional"] else "No",
             round(costo, 2),
-            f"Sí, OT #{c['instalado_en_orden_id']}" if ya_cargado_en_ot else "No",
+            marca_cargado,
         ])
 
     wb = _crear_libro_excel()
@@ -1151,14 +1522,14 @@ def reporte_excel():
         ("Rango", rango_txt),
         ("Convertidores", len(detalle)),
         ("Valor total (estimado)", f"${valor_total:,.0f}".replace(",", ".")),
-        ("Ya cargado en OT de auto (no sumado arriba)", f"${valor_ya_cargado_ot:,.0f}".replace(",", ".")),
+        ("Ya cargado en OT/garantía (no sumado arriba)", f"${valor_ya_cargado:,.0f}".replace(",", ".")),
     ])
     fila_encabezado = ws.max_row + 1
-    ws.append(["Fecha", "Cliente", "Origen", "Marca/Modelo", "N° de serie", "Estado", "De región", "Costo estimado", "Ya cargado en OT"])
+    ws.append(["Fecha", "Cliente", "Origen", "Marca/Modelo", "N° de serie", "Estado", "De región", "Costo estimado", "Ya cargado en OT/garantía"])
     for fila in detalle:
         ws.append(fila)
     ws.append([])
-    ws.append(["", "", "", "", "", "", "TOTAL (sin lo ya cargado en OT)", round(valor_total, 2), ""])
+    ws.append(["", "", "", "", "", "", "TOTAL (sin lo ya cargado en OT/garantía)", round(valor_total, 2), ""])
     _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 

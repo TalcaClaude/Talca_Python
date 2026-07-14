@@ -43,6 +43,7 @@
 
   <section class="vista" id="vista-dashboard">
 
+  <h3 class="dash-titulo">Resumen general</h3>
   <section class="summary" id="op-summary">
     <div class="summary-card">
       <span class="summary-label">OTs abiertas</span>
@@ -64,6 +65,18 @@
       <span class="summary-label">Ticket promedio (mes)</span>
       <span class="summary-value" id="op-s-ticket-promedio">—</span>
     </div>
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">Garantías abiertas</span>
+      <span class="summary-value" id="op-s-garantias-abiertas">—</span>
+    </div>
+    <div class="summary-card">
+      <span class="summary-label">Aprobación de presupuestos (histórico)</span>
+      <span class="summary-value" id="op-s-tasa-aprobacion">—</span>
+    </div>
+  </section>
+
+  <h3 class="dash-titulo">Costos y utilidad (mes)</h3>
+  <section class="summary" id="op-summary-costos">
     <div class="summary-card summary-card--positivo">
       <span class="summary-label">Utilidad estimada (mes)</span>
       <span class="summary-value" id="op-s-utilidad-mes">—</span>
@@ -80,14 +93,6 @@
       <span class="summary-label">Costo convertidores internos OTs cerradas (mes)</span>
       <span class="summary-value" id="op-s-costo-convertidores-cerradas">—</span>
     </div>
-    <div class="summary-card">
-      <span class="summary-label">Tiempo promedio en taller (mes)</span>
-      <span class="summary-value" id="op-s-tiempo-promedio">—</span>
-    </div>
-    <div class="summary-card summary-card--warn">
-      <span class="summary-label">Garantías abiertas</span>
-      <span class="summary-value" id="op-s-garantias-abiertas">—</span>
-    </div>
     <div class="summary-card summary-card--warn">
       <span class="summary-label">Costo garantías (mes)</span>
       <span class="summary-value" id="op-s-costo-garantias">—</span>
@@ -96,9 +101,13 @@
       <span class="summary-label">Costo garantías / ingresos (mes)</span>
       <span class="summary-value" id="op-s-costo-garantias-pct">—</span>
     </div>
+  </section>
+
+  <h3 class="dash-titulo">Información adicional</h3>
+  <section class="summary" id="op-summary-adicional">
     <div class="summary-card">
-      <span class="summary-label">Aprobación de presupuestos (histórico)</span>
-      <span class="summary-value" id="op-s-tasa-aprobacion">—</span>
+      <span class="summary-label">Tiempo promedio en taller (mes)</span>
+      <span class="summary-value" id="op-s-tiempo-promedio">—</span>
     </div>
   </section>
 

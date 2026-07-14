@@ -50,9 +50,21 @@
       <span class="summary-label">Valor en reparación (abiertos)</span>
       <span class="summary-value" id="conv-s-valor">—</span>
     </div>
+    <div class="summary-card summary-card--positivo">
+      <span class="summary-label">Valor cerrado — externos/stock (mes)</span>
+      <span class="summary-value" id="conv-s-valor-cerrado">—</span>
+    </div>
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">Gasto real en externos (mes)</span>
+      <span class="summary-value" id="conv-s-gasto-externos">—</span>
+    </div>
     <div class="summary-card summary-card--warn">
       <span class="summary-label">De región pendientes de enviar</span>
       <span class="summary-value" id="conv-s-regionales">—</span>
+    </div>
+    <div class="summary-card summary-card--warn">
+      <span class="summary-label">Convertidores en garantía</span>
+      <span class="summary-value" id="conv-s-garantias">—</span>
     </div>
     <div class="summary-card">
       <span class="summary-label">Tiempo promedio de reparación (mes)</span>
@@ -63,6 +75,7 @@
       <span class="summary-value" id="conv-s-total">—</span>
     </div>
   </section>
+  <p class="ayuda-inline">"Valor cerrado" solo cuenta convertidores de stock/externos (cliente_directo) -- los internos (desde una OT o una garantía) NO se suman acá porque su costo ya se cuenta como gasto en Operativo/Garantías al momento de entregarse (<span id="conv-s-valor-cerrado-interno-nota"></span>), sumarlo también acá lo duplicaría. "Gasto real en externos" es cuánto le costó al taller reparar los convertidores que trajo un cliente directamente (repuestos + mano de obra reales), sin importar lo que se les haya cobrado -- útil para ver el margen real de ese servicio.</p>
 
   <div class="chart-grid">
     <div class="chart-card">
@@ -182,6 +195,7 @@
           <option value="stock_taller">Stock del taller (sin cliente todavía)</option>
           <option value="cliente_directo">El cliente trae el convertidor</option>
           <option value="desde_ot_auto">Desde la caja de un auto (OT existente)</option>
+          <option value="desde_garantia">Desde una garantía</option>
         </select>
       </div>
 
@@ -201,6 +215,12 @@
         <label>OT del auto *</label>
         <select id="convn-orden-origen-id" required><option value="">Selecciona la OT…</option></select>
         <p class="ayuda-inline">El cliente y el vehículo se completan solos desde esa OT.</p>
+      </div>
+
+      <div class="campo" id="convn-campo-garantia" style="display:none">
+        <label>Garantía *</label>
+        <select id="convn-garantia-origen-id" required><option value="">Selecciona la garantía…</option></select>
+        <p class="ayuda-inline">El cliente y el vehículo se completan solos desde esa garantía. Este convertidor no se le cobra al cliente -- su costo se carga solo, como gasto, en esa misma garantía cuando quede "Entregado".</p>
       </div>
 
       <div class="campo" id="convn-campo-regional" style="display:none">
@@ -288,9 +308,10 @@
       <label>Diagnóstico</label>
       <textarea id="convd-diagnostico" rows="2"></textarea>
     </div>
-    <div class="campo">
+    <div class="campo" id="convd-campo-precio-venta">
       <label>Precio de venta / instalación (opcional — si se deja vacío, se usa la suma de los ítems de abajo)</label>
       <input type="text" inputmode="numeric" id="convd-precio-venta" class="input-monto">
+      <p class="ayuda-inline">No aplica a convertidores internos (desde una OT o una garantía) -- ese campo se oculta para esos casos porque no generan un ingreso propio, solo un gasto que se carga solo en su OT/garantía de origen.</p>
     </div>
     <div class="campo" id="convd-campo-regional" style="display:none">
       <label class="check-inline"><input type="checkbox" id="convd-es-regional"> Es de región</label>

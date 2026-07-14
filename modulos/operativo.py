@@ -588,11 +588,66 @@ def init_operativo_db(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_convertidor_id ON orden_items (convertidor_id)")
     db.commit()
 
+    # garantia_items.convertidor_id: mismo enganche que orden_items.convertidor_id
+    # de arriba, pero para cuando el auto que trae el convertidor entró por
+    # una garantía en vez de una OT normal (origen_tipo == 'desde_garantia',
+    # ver modulos/convertidores.py:_cargar_convertidor_interno_en_garantia_origen).
+    # Tiene que agregarse ACÁ, después de convertidores.init_convertidores_db(),
+    # por la misma razón que orden_items.convertidor_id -- referencia
+    # convertidores_torque(id).
+    columnas_garantia_items = [c[1] for c in db.execute("PRAGMA table_info(garantia_items)").fetchall()]
+    if "convertidor_id" not in columnas_garantia_items:
+        db.execute(
+            "ALTER TABLE garantia_items ADD COLUMN convertidor_id INTEGER REFERENCES convertidores_torque(id)"
+        )
+        db.commit()
+    db.execute("CREATE INDEX IF NOT EXISTS idx_garantia_items_convertidor_id ON garantia_items (convertidor_id)")
+    db.commit()
+
+    # Repara garantia_items si su llave foránea convertidor_id quedó
+    # apuntando a 'convertidores_torque_legado...' -- mismo mecanismo que
+    # ya se documentó arriba para orden_items.convertidor_id. Se corre en
+    # cada arranque; si la llave ya está bien, no hace nada.
+    sql_garantia_items_actual = """
+        CREATE TABLE IF NOT EXISTS garantia_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            garantia_id INTEGER NOT NULL REFERENCES garantias(id) ON DELETE CASCADE,
+            tipo TEXT NOT NULL,
+            producto_id INTEGER REFERENCES productos(id),
+            descripcion TEXT DEFAULT '',
+            cantidad REAL NOT NULL DEFAULT 1,
+            costo_unitario REAL NOT NULL DEFAULT 0,
+            movimiento_id INTEGER REFERENCES movimientos(id),
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            detalle TEXT DEFAULT '',
+            aplica_iva INTEGER NOT NULL DEFAULT 0,
+            convertidor_id INTEGER REFERENCES convertidores_torque(id)
+        );
+    """
+    _reparar_fk_hacia_tabla_renombrada(
+        db,
+        "garantia_items",
+        sql_garantia_items_actual,
+        [
+            "id", "garantia_id", "tipo", "producto_id", "descripcion", "cantidad",
+            "costo_unitario", "movimiento_id", "usuario", "creado_en",
+            "detalle", "aplica_iva", "convertidor_id",
+        ],
+    )
+    db.commit()
+
     # Con la FK ya reparada, reintenta el auto-cargo de cualquier
     # convertidor 'interno' que haya quedado 'entregado' sin su ítem
-    # correspondiente en la OT de origen (ver
+    # correspondiente en la OT/garantía de origen (ver
     # convertidores.reparar_cargas_internas_pendientes -- idempotente).
     convertidores.reparar_cargas_internas_pendientes(db)
+
+    # Corrige costos congelados/precio_venta residual de convertidores
+    # internos que pudieron quedar mal calculados con una versión anterior
+    # del código (ver convertidores.reparar_costos_congelados_convertidores_internos
+    # -- idempotente).
+    convertidores.reparar_costos_congelados_convertidores_internos(db)
 
 
 # ---------------------------------------------------------------------------
@@ -3098,6 +3153,14 @@ def eliminar_item_garantia(garantia_id, item_id):
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE GARANTÍA #{garantia_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
             )
+
+    if item["tipo"] == "convertidor_torque" and item["convertidor_id"]:
+        # Mismo caso que eliminar_item_orden(): no hay stock que devolver
+        # (el convertidor no vive en 'productos'), pero se intenta liberar
+        # la unidad por si acaso -- en la práctica es un no-op porque un
+        # convertidor 'desde_garantia' queda 'entregado', no 'instalado'
+        # (ver revertir_convertidor_al_quitar_item en convertidores.py).
+        convertidores.revertir_convertidor_al_quitar_item(db, item["convertidor_id"])
 
     db.execute("DELETE FROM garantia_items WHERE id = ?", (item_id,))
     db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (now_iso(), garantia_id))

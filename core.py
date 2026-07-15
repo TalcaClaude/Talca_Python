@@ -24,7 +24,7 @@ from functools import wraps
 import statistics
 import math
 
-from flask import g, jsonify, request, send_file, session
+from flask import g, jsonify, redirect, request, send_file, session
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "inventario.db"))
@@ -387,6 +387,49 @@ def requiere_rol(*roles_permitidos):
             if rol != "admin" and rol not in roles_permitidos:
                 permitidos = ", ".join(roles_permitidos) or "admin"
                 return jsonify({"error": f"Esta acción es solo para el rol {permitidos}. Tu rol actual es '{rol}'."}), 403
+            return vista(*args, **kwargs)
+        return envoltura
+    return decorador
+
+
+# Cada rol no-admin queda encerrado en UN solo módulo -- hasta esta
+# migración, requiere_rol() solo protegía acciones puntuales (guardar,
+# aprobar, eliminar), pero las PÁGINAS en sí (/logistica, /operativo,
+# /finanzas, /convertidores, /agente-ia) no tenían ningún control: cualquier
+# usuario con sesión iniciada podía entrar a cualquier módulo con solo
+# escribir la URL, y la barra lateral se los mostraba todos. Se detectó
+# porque un usuario 'bodega' podía ver el resto de los módulos igual, cuando
+# la idea de ese rol siempre fue que solo tuviera acceso a Logística.
+ROL_MODULO_HOME = {
+    "finanzas": "/finanzas",
+    "bodega": "/logistica",
+    "operativo": "/operativo",
+    "convertidores": "/convertidores",
+}
+
+
+def home_del_rol():
+    """A dónde mandar a alguien que pidió una página a la que su rol no
+    tiene acceso: admin (o cualquier rol no contemplado arriba) va al
+    selector de módulos ('/'); cualquier otro rol va derecho al único
+    módulo que sí le corresponde -- así, aunque escriba la URL de otro
+    módulo a mano, nunca llega a verla."""
+    return ROL_MODULO_HOME.get(usuario_rol(), "/")
+
+
+def requiere_modulo(*roles_permitidos):
+    """Decorador para las páginas de cada módulo (ej. /operativo,
+    /logistica): si la sesión activa no es 'admin' ni tiene uno de los
+    roles indicados, la redirige a home_del_rol() en vez de mostrar la
+    página. A diferencia de requiere_rol() (pensado para endpoints de API,
+    que devuelve 403 en JSON), esto es para vistas HTML completas, así que
+    redirige en vez de devolver un error."""
+    def decorador(vista):
+        @wraps(vista)
+        def envoltura(*args, **kwargs):
+            rol = usuario_rol()
+            if rol != "admin" and rol not in roles_permitidos:
+                return redirect(home_del_rol())
             return vista(*args, **kwargs)
         return envoltura
     return decorador

@@ -70,6 +70,8 @@ from core import (  # noqa: E402
     usuario_actual,
     usuario_rol,
     requiere_rol,
+    requiere_modulo,
+    home_del_rol,
     ROLES_VALIDOS,
     formatear_rut,
     _estimar_lead_time_dias,
@@ -1368,25 +1370,36 @@ def resetear_password_usuario_admin(usuario_id):
 
 @app.route("/")
 def inicio():
+    # El Panel Principal cruza datos de Operativo y Finanzas (ingresos,
+    # CxC/CxP, utilidad) -- no es "de nadie en particular", así que solo
+    # admin lo ve. Cualquier otro rol tiene un único módulo permitido (ver
+    # ROL_MODULO_HOME en core.py) y va derecho ahí, en vez de aterrizar en
+    # una pantalla que igual no le sirve de nada.
+    if usuario_rol() != "admin":
+        return redirect(home_del_rol())
     return render_template("inicio.html", modulo_activo="panel")
 
 
 @app.route("/logistica")
+@requiere_modulo("bodega")
 def vista_logistica():
     return render_template("index.html", modulo_activo="logistica")
 
 
 @app.route("/operativo")
+@requiere_modulo("operativo")
 def vista_operativo():
     return render_template("operativo.html", modulo_activo="operativo")
 
 
 @app.route("/finanzas")
+@requiere_modulo("finanzas")
 def vista_finanzas():
     return render_template("finanzas.html", modulo_activo="finanzas")
 
 
 @app.route("/agente-ia")
+@requiere_modulo("operativo")
 def vista_agente_ia():
     return render_template("agente_ia.html", modulo_activo="agente")
 

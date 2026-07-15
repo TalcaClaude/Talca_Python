@@ -3246,6 +3246,46 @@ class TestRolesYPermisos(unittest.TestCase):
         resp_login_nueva = client.post("/login", data={"username": "rol_test_reset1", "password": "nuevaclave789"})
         self.assertEqual(resp_login_nueva.status_code, 302)
 
+    def test_bodega_no_puede_entrar_a_otros_modulos_ni_al_panel_principal(self):
+        # Bug reportado: un usuario 'bodega' podía navegar a cualquier
+        # módulo con solo escribir la URL (las páginas no tenían ningún
+        # control de rol, a diferencia de los endpoints de API sensibles
+        # que ya estaban protegidos). Ahora cada rol no-admin queda
+        # encerrado en su único módulo permitido (ver requiere_modulo() /
+        # home_del_rol() en core.py).
+        self._crear_usuario("rol_test_bodega_paginas", "clave123456", "bodega")
+        client = self._client_como("rol_test_bodega_paginas", "clave123456")
+        for ruta in ("/operativo", "/finanzas", "/convertidores", "/agente-ia"):
+            resp = client.get(ruta)
+            self.assertEqual(resp.status_code, 302, f"{ruta} debería redirigir, dio {resp.status_code}")
+            self.assertIn("/logistica", resp.headers["Location"], f"{ruta} no redirigió a /logistica")
+        # /administracion ya redirigía siempre a "/" (comportamiento previo,
+        # sin cambios) -- y "/" a su vez redirige a /logistica para este rol.
+        resp_admin = client.get("/administracion")
+        self.assertEqual(resp_admin.status_code, 302)
+        self.assertTrue(resp_admin.headers["Location"].endswith("/"))
+        resp_raiz = client.get("/", follow_redirects=True)
+        self.assertEqual(resp_raiz.status_code, 200)
+        self.assertIn("/logistica", resp_raiz.request.path)
+        resp_propio = client.get("/logistica")
+        self.assertEqual(resp_propio.status_code, 200)
+
+    def test_operativo_no_puede_entrar_a_logistica_ni_a_finanzas(self):
+        self._crear_usuario("rol_test_operativo_paginas", "clave123456", "operativo")
+        client = self._client_como("rol_test_operativo_paginas", "clave123456")
+        for ruta in ("/logistica", "/finanzas", "/convertidores"):
+            resp = client.get(ruta)
+            self.assertEqual(resp.status_code, 302)
+            self.assertIn("/operativo", resp.headers["Location"])
+        # Sí tiene acceso a su propio módulo y a Agente IA (van de la mano).
+        self.assertEqual(client.get("/operativo").status_code, 200)
+        self.assertEqual(client.get("/agente-ia").status_code, 200)
+
+    def test_admin_puede_entrar_a_todos_los_modulos(self):
+        for ruta in ("/", "/logistica", "/operativo", "/finanzas", "/convertidores", "/agente-ia", "/administracion"):
+            resp = self.admin_client.get(ruta)
+            self.assertEqual(resp.status_code, 200, f"{ruta} debería dar 200 para admin, dio {resp.status_code}")
+
     def test_usuario_viejo_creado_por_el_panel_historico_de_logistica_queda_como_operativo(self):
         # /api/usuarios es el panel de creación de cuentas que ya existía
         # en Logística antes de que hubiera roles — ahora solo lo puede

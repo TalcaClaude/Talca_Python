@@ -82,6 +82,7 @@ from core import (
     get_db,
     now_iso,
     requiere_rol,
+    requiere_modulo,
     usuario_actual,
 )
 
@@ -310,6 +311,7 @@ def init_convertidores_db(db):
 # ---------------------------------------------------------------------------
 
 @bp.route("/convertidores")
+@requiere_modulo("convertidores")
 def vista_convertidores():
     return render_template("convertidores.html", modulo_activo="convertidores")
 

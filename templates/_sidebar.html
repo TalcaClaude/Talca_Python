@@ -5,6 +5,13 @@
   dentro de ese módulo. Los enlaces de submenú usan los mismos `data-vista`
   que ya manejan los .js de cada módulo, así que al llegar con ?v=xxx el
   script de cada página puede abrir directamente esa pestaña si quiere.
+
+  Cada bloque de módulo abajo está envuelto en un IF de Jinja sobre
+  rol_usuario (admin o el rol dueño de ese módulo) -- un rol no-admin ya no
+  puede ENTRAR a otro módulo (ver requiere_modulo() en core.py, aplicado a
+  cada página en app.py/modulos/convertidores.py), pero mostrarle el link
+  igual invitaba a hacer clic para toparse con una redirección confusa. Si
+  el rol no tiene acceso, directamente no ve el módulo en la barra lateral.
 -->
 <nav class="sidebar">
   <div class="sidebar-brand">
@@ -12,13 +19,16 @@
     <p>Panel Principal</p>
   </div>
 
+  {% if rol_usuario == "admin" %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'panel' else '' }}">
     <a class="sidebar-modulo-header" href="/" style="text-decoration:none; display:flex;">
       <span class="sidebar-modulo-tag">00</span>
       <span class="sidebar-modulo-nombre">Panel Principal</span>
     </a>
   </div>
+  {% endif %}
 
+  {% if rol_usuario == "admin" or rol_usuario == "bodega" %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'logistica' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">01</span>
@@ -37,7 +47,9 @@
       <a class="sidebar-subitem" href="/logistica#reportes">Reportes</a>
     </div>
   </div>
+  {% endif %}
 
+  {% if rol_usuario == "admin" or rol_usuario == "operativo" %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'operativo' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">02</span>
@@ -52,7 +64,9 @@
       <a class="sidebar-subitem" data-vista-link="reportes" href="/operativo#reportes">Reportes</a>
     </div>
   </div>
+  {% endif %}
 
+  {% if rol_usuario == "admin" or rol_usuario == "convertidores" %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'convertidores' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">03</span>
@@ -65,7 +79,9 @@
       <a class="sidebar-subitem" data-vista-link="reportes" href="/convertidores#reportes">Reportes</a>
     </div>
   </div>
+  {% endif %}
 
+  {% if rol_usuario == "admin" or rol_usuario == "finanzas" %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'finanzas' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">04</span>
@@ -80,13 +96,16 @@
       <a class="sidebar-subitem" data-vista-link="caja" href="/finanzas#caja">Caja chica</a>
     </div>
   </div>
+  {% endif %}
 
+  {% if rol_usuario == "admin" or rol_usuario == "operativo" %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'agente' else '' }}">
     <a class="sidebar-modulo-header" href="/agente-ia" style="text-decoration:none; display:flex;">
       <span class="sidebar-modulo-tag">05</span>
       <span class="sidebar-modulo-nombre">Agente IA</span>
     </a>
   </div>
+  {% endif %}
 </nav>
 
 <script>

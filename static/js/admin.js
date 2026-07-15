@@ -275,8 +275,244 @@ document.getElementById("btn-diagnostico-garantias").addEventListener("click", a
 });
 
 // ---------------------------------------------------------------------------
+// Respaldo de datos
+// ---------------------------------------------------------------------------
+// Movido acá desde Logística (donde vivía como un botón "Respaldo" suelto,
+// visible incluso para bodega aunque los endpoints de abajo son admin-only
+// -- ver @requiere_rol() en app.py) para juntar todo lo de administración
+// del sistema en un solo lugar. A diferencia del modal de antes, acá se
+// carga directo al entrar a la página (ver "Init" más abajo), sin botón
+// disparador.
+
+async function cargarDiagnosticoGeneral() {
+  const cont = document.getElementById("respaldo-diagnostico");
+  cont.textContent = "Cargando diagnóstico…";
+  try {
+    const info = await api("/api/estado");
+    const disco = info.parece_disco_persistente ? "✓ usando disco persistente (/data)" : "⚠ NO parece estar usando un disco persistente — revisa la variable DB_PATH en Railway";
+    cont.innerHTML = `
+      Ruta de la base de datos: <span class="mono">${escapeHtml(info.db_path)}</span><br>
+      ${disco}<br>
+      Productos: ${info.cantidad_productos} · Facturas: ${info.cantidad_facturas} · Movimientos: ${info.cantidad_movimientos}
+      (${info.tamano_kb} KB)
+    `;
+  } catch (e) {
+    cont.textContent = "No se pudo cargar el diagnóstico: " + e.message;
+  }
+}
+
+async function cargarDiagnosticoDisco() {
+  const cont = document.getElementById("disco-diagnostico");
+  cont.textContent = "Cargando…";
+  try {
+    const info = await api("/api/admin/diagnostico-disco");
+    const d = info.disco;
+    const clasePct = d.porcentaje_usado >= 90 ? "ayuda-inline--bloqueado" : "";
+    const filas = info.desglose
+      .slice()
+      .sort((a, b) => b.mb - a.mb)
+      .map(f => `
+        <div class="disco-fila">
+          <span>${escapeHtml(f.carpeta)}</span>
+          <span class="mono">${f.mb} MB${f.archivos ? ` (${f.archivos} archivo${f.archivos === 1 ? "" : "s"})` : ""}</span>
+        </div>
+      `).join("");
+    cont.innerHTML = `
+      <p class="${clasePct}" style="font-weight:600">
+        Disco: ${d.usado_mb} MB usados de ${d.total_mb} MB (${d.porcentaje_usado}%) — ${d.libre_mb} MB libres
+      </p>
+      <div class="disco-desglose">${filas}</div>
+    `;
+  } catch (e) {
+    cont.textContent = "No se pudo cargar: " + e.message;
+  }
+}
+
+document.getElementById("btn-refrescar-disco").addEventListener("click", cargarDiagnosticoDisco);
+
+document.getElementById("btn-limpiar-respaldos-urgencia").addEventListener("click", async () => {
+  if (!confirm("Esto borra TODOS los respaldos automáticos locales excepto los 3 más recientes, para liberar espacio ya. ¿Continuar?")) return;
+  const btn = document.getElementById("btn-limpiar-respaldos-urgencia");
+  btn.disabled = true;
+  btn.textContent = "Liberando espacio…";
+  try {
+    const resultado = await api("/api/backup/locales/limpiar", { method: "POST", body: JSON.stringify({ conservar: 3 }) });
+    toast(`Se borraron ${resultado.borrados} respaldos — ${resultado.mb_liberados} MB liberados.`);
+    await cargarRespaldosLocales();
+    await cargarDiagnosticoDisco();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Liberar espacio ahora (borra respaldos viejos, deja los 3 más recientes)";
+  }
+});
+
+async function cargarRespaldosLocales() {
+  const cont = document.getElementById("respaldo-locales-lista");
+  cont.textContent = "Cargando…";
+  try {
+    const info = await api("/api/backup/locales");
+    if (!info.copias.length) {
+      cont.innerHTML = `Todavía no hay copias automáticas (se crea la primera al minuto de arrancar el servidor, cada ${info.intervalo_minutos} minutos).`;
+      return;
+    }
+    cont.innerHTML = info.copias.map(c => `
+      <div class="respaldo-local-fila">
+        <span>${escapeHtml(c.creado_en)} · ${c.tamano_kb} KB</span>
+        <button type="button" class="btn btn-secundario btn-chico" data-restaurar-local="${escapeHtml(c.nombre)}" data-fecha-local="${escapeHtml(c.creado_en)}">Restaurar esta copia</button>
+      </div>
+    `).join("");
+    cont.querySelectorAll("[data-restaurar-local]").forEach(btn => {
+      btn.addEventListener("click", () => restaurarRespaldoLocal(btn.dataset.restaurarLocal, btn.dataset.fechaLocal));
+    });
+  } catch (e) {
+    cont.textContent = "No se pudo cargar: " + e.message;
+  }
+}
+
+document.getElementById("btn-crear-respaldo-local").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-crear-respaldo-local");
+  btn.disabled = true;
+  btn.textContent = "Creando…";
+  try {
+    await api("/api/backup/locales/crear", { method: "POST" });
+    toast("Respaldo local creado.");
+    await cargarRespaldosLocales();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Crear un respaldo ahora";
+  }
+});
+
+// A diferencia de cuando esto vivía en Logística (donde se refrescaban
+// dashboard/productos/resumen en el propio módulo tras restaurar), acá lo
+// más simple y confiable es recargar la página entera -- una restauración
+// reemplaza TODOS los datos, así que cualquier cosa en pantalla (usuarios
+// incluidos) puede haber cambiado.
+async function restaurarRespaldoLocal(nombre, fecha) {
+  if (!confirm(`Esto reemplaza TODOS los datos actuales por los del respaldo de ${fecha}. ¿Continuar?`)) return;
+  try {
+    await api("/api/backup/locales/restaurar", { method: "POST", body: JSON.stringify({ nombre }) });
+    toast("Datos restaurados correctamente");
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function cargarEstadoRespaldoAutomatico() {
+  const cont = document.getElementById("respaldo-auto-estado");
+  cont.textContent = "Cargando…";
+  try {
+    const info = await api("/api/backup/estado-automatico");
+    if (!info.configurado) {
+      cont.innerHTML = `⚠ No está configurado todavía. Se necesita agregar la variable <span class="mono">RESEND_API_KEY</span> en Railway (recomendado), o las variables <span class="mono">SMTP_USER</span> y <span class="mono">SMTP_PASSWORD</span> (ver guía DEPLOY.md).`;
+      return;
+    }
+    const ultimo = info.historial.find(h => h.exito);
+    const ultimoTexto = ultimo ? `Último envío exitoso: ${fmtFecha(ultimo.fecha)}` : "Todavía no se ha enviado ningún respaldo exitoso.";
+    cont.innerHTML = `
+      ✓ Configurado — se envía a <span class="mono">${escapeHtml(info.destinatario)}</span> cada ${info.intervalo_horas}h.<br>
+      ${ultimoTexto}
+    `;
+  } catch (e) {
+    cont.textContent = "No se pudo cargar: " + e.message;
+  }
+}
+
+document.getElementById("btn-probar-respaldo-auto").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-probar-respaldo-auto");
+  btn.disabled = true;
+  btn.textContent = "Enviando…";
+  try {
+    await api("/api/backup/probar-automatico", { method: "POST" });
+    toast("Respaldo de prueba enviado. Revisa tu correo.");
+    await cargarEstadoRespaldoAutomatico();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Enviar un respaldo de prueba ahora";
+  }
+});
+
+async function cargarEstadoAlertasStock() {
+  const cont = document.getElementById("alertas-stock-estado");
+  cont.textContent = "Cargando…";
+  try {
+    const info = await api("/api/alertas-stock/estado");
+    if (!info.configurado) {
+      cont.innerHTML = `⚠ No está configurado todavía. Se necesita agregar la variable <span class="mono">RESEND_API_KEY</span> en Railway (recomendado), o las variables <span class="mono">SMTP_USER</span> y <span class="mono">SMTP_PASSWORD</span> (ver guía DEPLOY.md) — las mismas que usa el respaldo automático.`;
+      return;
+    }
+    const ultimoEnviado = info.historial.find(h => h.correo_enviado);
+    const ultimoTexto = ultimoEnviado
+      ? `Último correo de alerta enviado: ${fmtFecha(ultimoEnviado.fecha)} (${ultimoEnviado.n_productos} producto(s))`
+      : "Todavía no se ha enviado ningún correo de alerta (no ha habido productos críticos, o aún no se hace el primer chequeo).";
+    const criticosAhora = info.n_productos_criticos_ahora > 0
+      ? `<strong>${info.n_productos_criticos_ahora} producto(s) con stock crítico ahora mismo.</strong>`
+      : "No hay productos con stock crítico en este momento.";
+    cont.innerHTML = `
+      ✓ Configurado — se revisa y avisa a <span class="mono">${escapeHtml(info.destinatario)}</span> cada ${info.intervalo_horas}h si corresponde.<br>
+      ${criticosAhora}<br>
+      ${ultimoTexto}
+    `;
+  } catch (e) {
+    cont.textContent = "No se pudo cargar: " + e.message;
+  }
+}
+
+document.getElementById("btn-probar-alertas-stock").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-probar-alertas-stock");
+  btn.disabled = true;
+  btn.textContent = "Revisando…";
+  try {
+    const data = await api("/api/alertas-stock/probar", { method: "POST" });
+    toast(data.n_productos > 0
+      ? `Alerta enviada: ${data.n_productos} producto(s) con stock crítico.`
+      : "Revisado: no hay productos con stock crítico por ahora.");
+    await cargarEstadoAlertasStock();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Revisar y enviar ahora si corresponde";
+  }
+});
+
+document.getElementById("form-restaurar").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = document.getElementById("restaurar-archivo");
+  if (!input.files.length) {
+    toast("Selecciona un archivo primero", true);
+    return;
+  }
+  if (!confirm("Esto reemplaza TODOS los datos actuales por los del archivo. ¿Continuar?")) return;
+
+  const formData = new FormData();
+  formData.append("archivo", input.files[0]);
+  try {
+    const res = await fetch("/api/backup/restaurar", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Error al restaurar");
+    toast("Datos restaurados correctamente");
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
 cargarSesion();
 cargarUsuarios();
+cargarDiagnosticoGeneral();
+cargarDiagnosticoDisco();
+cargarEstadoRespaldoAutomatico();
+cargarEstadoAlertasStock();
+cargarRespaldosLocales();

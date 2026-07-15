@@ -1414,7 +1414,7 @@ def vista_administracion():
     # @requiere_rol(), así que esto es solo para la página en sí.
     if usuario_rol() != "admin":
         return redirect(url_for("inicio"))
-    return render_template("admin.html")
+    return render_template("admin.html", modulo_activo="administracion")
 
 
 @app.route("/api/sesion", methods=["GET"])
@@ -4719,6 +4719,78 @@ _DESCRIPCION_CAMPO_DIAGNOSTICO_CLIENTE = (
 MAX_ACCIONES_POR_MENSAJE = 5
 
 
+def _llamar_claude_generar_diagnostico_cliente(sintoma, diagnostico_tecnico):
+    """Genera el texto del campo 'diagnóstico (resumen para el cliente)' a
+    partir del diagnóstico técnico que se esté escribiendo -- pensado para
+    autocompletar ese campo en tiempo real desde la pestaña Diagnóstico de
+    una OT (ver /api/operativo/ia/diagnostico-cliente más abajo), con la
+    MISMA redacción/guía que ya usa el agente de WhatsApp cuando el
+    mecánico manda un audio y la IA completa 'diagnostico' como parte de
+    _llamar_claude_interpretar_mensaje_agente (ver
+    _DESCRIPCION_CAMPO_DIAGNOSTICO_CLIENTE arriba) -- así el resumen que ve
+    el cliente es consistente sea cual sea el camino por el que se generó.
+    Devuelve un string (puede ser vacío) o lanza RuntimeError con un
+    mensaje explicable para mostrar en la interfaz."""
+    if requests is None:
+        raise RuntimeError("Falta la librería 'requests' en el servidor.")
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("Falta la variable de entorno ANTHROPIC_API_KEY en el servidor.")
+
+    diagnostico_tecnico = (diagnostico_tecnico or "").strip()
+    if not diagnostico_tecnico:
+        return ""
+
+    herramienta = {
+        "name": "generar_resumen_cliente",
+        "description": "Registra el resumen de diagnóstico en lenguaje simple para el cliente.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"texto": {"type": "string", "description": _DESCRIPCION_CAMPO_DIAGNOSTICO_CLIENTE}},
+            "required": ["texto"],
+        },
+    }
+    contexto_sintoma = f"Síntoma reportado por el cliente: {(sintoma or '').strip()}\n" if (sintoma or "").strip() else ""
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 400,
+        "tools": [herramienta],
+        "tool_choice": {"type": "tool", "name": "generar_resumen_cliente"},
+        "messages": [{
+            "role": "user",
+            "content": (
+                f"{contexto_sintoma}Diagnóstico técnico interno del taller (notas del mecánico, puede estar "
+                f"incompleto todavía): {diagnostico_tecnico}\n\n"
+                "Redacta el resumen de diagnóstico para el cliente usando la herramienta generar_resumen_cliente, "
+                "a partir de lo que ya está escrito arriba aunque no esté terminado."
+            ),
+        }],
+    }
+    try:
+        resp = requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"No se pudo contactar al servicio de IA: {e}")
+
+    if resp.status_code >= 400:
+        detalle = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
+        raise RuntimeError(f"El servicio de IA respondió con error ({resp.status_code}): {detalle}")
+
+    data = resp.json()
+    for bloque in data.get("content", []):
+        if bloque.get("type") == "tool_use" and bloque.get("name") == "generar_resumen_cliente":
+            return (bloque.get("input") or {}).get("texto", "") or ""
+
+    raise RuntimeError("La IA no devolvió el resumen en el formato esperado.")
+
+
 def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
     """Usa Claude (misma integración por HTTPS directo que
     _llamar_claude_vision_factura, más arriba) para traducir un mensaje de
@@ -5598,6 +5670,29 @@ def notificaciones_sugerencias_diagnostico():
     return jsonify(_agente_listar_todas_sugerencias_pendientes(db))
 
 
+@app.route("/api/operativo/ia/diagnostico-cliente", methods=["POST"])
+@requiere_rol("operativo")
+def ia_diagnostico_cliente():
+    """Autocompleta (sin guardar) el campo 'Diagnóstico (resumen para el
+    cliente)' de la pestaña Diagnóstico de una OT, a partir de lo que se
+    vaya escribiendo en 'Diagnóstico técnico' -- ver
+    _llamar_claude_generar_diagnostico_cliente arriba y el listener de
+    input en operativo.js que llama a este endpoint con un debounce
+    mientras la persona escribe. No recibe ni necesita el ID de la orden:
+    es una generación de texto sin efecto secundario sobre ningún dato
+    guardado, la propia pantalla decide si usa o descarta el resultado."""
+    data = request.get_json(force=True, silent=True) or {}
+    diagnostico_tecnico = (data.get("diagnostico_tecnico") or "").strip()
+    sintoma = (data.get("sintoma") or "").strip()
+    if not diagnostico_tecnico:
+        return jsonify({"diagnostico_cliente": ""})
+    try:
+        texto = _llamar_claude_generar_diagnostico_cliente(sintoma, diagnostico_tecnico)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"diagnostico_cliente": texto})
+
+
 @app.route("/api/agente/simular-mensaje", methods=["POST"])
 def simular_mensaje_agente():
     """Deja probar el agente completo (IA + validación de transición +
@@ -5855,17 +5950,22 @@ def limpiar_inventario_duplicado():
 
 
 # Cambiado de 15 a 60 minutos (julio 2026, tras el incidente del volumen al
-# 95%): con MAX_COPIAS=96 sin tocar, esto pasa de cubrir 24 horas de
-# historial a cubrir 96 horas (4 días) -- ambos casos terminan ocupando el
-# MISMO tope de disco en régimen (96 copias × tamaño de la base de datos en
-# ese momento), la rotación en _rotar_respaldos_locales() ya se encarga de
-# eso solo; lo único que cambia con el intervalo es cuánto tarda en llegar a
-# ese tope y cuánto historial cubre. El respiro real vino de subir el
-# volumen de Railway de 500 MB a 5 GB -- si el disco vuelve a quedar
-# ajustado, bajar RESPALDO_LOCAL_MAX_COPIAS (no solo el intervalo) es lo que
-# de verdad baja el tope de disco.
+# 95%): con MAX_COPIAS sin tocar, esto pasa de cubrir 24 horas de
+# historial a cubrir muchas más horas con la misma cantidad de copias --
+# ambos casos terminan ocupando el MISMO tope de disco en régimen
+# (MAX_COPIAS × tamaño de la base de datos en ese momento), la rotación en
+# _rotar_respaldos_locales() ya se encarga de eso solo; lo único que cambia
+# con el intervalo es cuánto tarda en llegar a ese tope y cuánto historial
+# cubre. El respiro real vino de subir el volumen de Railway de 500 MB a
+# 5 GB -- si el disco vuelve a quedar ajustado, bajar RESPALDO_LOCAL_MAX_
+# COPIAS (no solo el intervalo) es lo que de verdad baja el tope de disco.
+#
+# Bajado de 96 a 48 (julio 2026, mismo incidente): el disco se seguía
+# llenando más rápido de lo esperado incluso después de subir el volumen a
+# 5 GB, así que se acota también el techo real (48 copias × tamaño de la
+# base en ese momento) hasta confirmar que el consumo se estabiliza.
 RESPALDO_LOCAL_INTERVALO_MINUTOS = int(os.environ.get("RESPALDO_LOCAL_INTERVALO_MINUTOS", "60"))
-RESPALDO_LOCAL_MAX_COPIAS = int(os.environ.get("RESPALDO_LOCAL_MAX_COPIAS", "96"))
+RESPALDO_LOCAL_MAX_COPIAS = int(os.environ.get("RESPALDO_LOCAL_MAX_COPIAS", "48"))
 RESPALDO_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or ".", "respaldos_locales")
 RESPALDO_LOCAL_PATRON = re.compile(r"^auto_\d{8}_\d{6}\.db$")
 

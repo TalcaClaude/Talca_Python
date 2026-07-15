@@ -29,7 +29,6 @@
       {% if rol_usuario == "admin" %}
       <a href="/administracion" class="btn btn-secundario">Administración</a>
       {% endif %}
-      <button class="btn btn-secundario" id="btn-respaldo">Respaldo</button>
       <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
       {% include "_notificaciones.html" %}
       <button class="btn btn-secundario" id="btn-importar-excel" style="display:none">Importar Excel</button>
@@ -913,63 +912,6 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-proveedor">Cancelar</button>
         <button type="submit" class="btn btn-primary">Guardar proveedor</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<!-- Modal: Respaldo -->
-<div class="modal-overlay" id="modal-respaldo">
-  <div class="modal">
-    <div class="modal-head">
-      <h2>Respaldo de datos</h2>
-      <button class="modal-close" data-close="modal-respaldo">&times;</button>
-    </div>
-
-    <div id="respaldo-diagnostico" class="ayuda">Cargando diagnóstico…</div>
-
-    <h3 class="subtitulo">Uso de disco del servidor</h3>
-    <p class="ayuda-inline">Desglose de qué está ocupando espacio en el disco donde vive la base de datos — útil para detectar a tiempo si el disco se está por llenar (ver incidente de julio 2026, en que el volumen llegó al 95%).</p>
-    <div id="disco-diagnostico" class="ayuda">Cargando…</div>
-    <div class="modal-actions modal-actions--start">
-      <button type="button" class="btn btn-secundario" id="btn-refrescar-disco">Actualizar</button>
-      <button type="button" class="btn btn-danger" id="btn-limpiar-respaldos-urgencia">Liberar espacio ahora (borra respaldos viejos, deja los 3 más recientes)</button>
-    </div>
-
-    <h3 class="subtitulo">Respaldo automático diario (por correo)</h3>
-    <div id="respaldo-auto-estado" class="ayuda">Cargando…</div>
-    <div class="modal-actions modal-actions--start">
-      <button type="button" class="btn btn-secundario" id="btn-probar-respaldo-auto">Enviar un respaldo de prueba ahora</button>
-    </div>
-
-    <h3 class="subtitulo">Alertas de stock crítico (por correo)</h3>
-    <p class="ayuda-inline">Usa las mismas credenciales del respaldo automático. Una vez al día revisa si hay productos en o bajo su stock mínimo, y si hay alguno, avisa por correo — si no hay ninguno, no manda nada.</p>
-    <div id="alertas-stock-estado" class="ayuda">Cargando…</div>
-    <div class="modal-actions modal-actions--start">
-      <button type="button" class="btn btn-secundario" id="btn-probar-alertas-stock">Revisar y enviar ahora si corresponde</button>
-    </div>
-
-    <h3 class="subtitulo">Respaldos automáticos locales (cada 1 hora)</h3>
-    <p class="ayuda-inline">El sistema guarda copias automáticas de la base de datos cada 1 hora en el mismo servidor, además del respaldo diario por correo. Sirven para volver a "hace poco" ante un error, sin depender de que llegue el correo del día. Si el disco queda con menos de 100 MB libres, se salta el respaldo automático en vez de arriesgarse a llenarlo.</p>
-    <div id="respaldo-locales-lista" class="ayuda">Cargando…</div>
-    <div class="modal-actions modal-actions--start">
-      <button type="button" class="btn btn-secundario" id="btn-crear-respaldo-local">Crear un respaldo ahora</button>
-    </div>
-
-    <h3 class="subtitulo">Descargar respaldo</h3>
-    <p class="ayuda-inline">Guarda una copia de toda la base de datos en tu computador. Hazlo antes de cada actualización del sistema, por si algo sale mal.</p>
-    <div class="modal-actions modal-actions--start">
-      <a href="/api/backup/descargar" class="btn btn-primary" id="btn-descargar-respaldo">Descargar respaldo (.db)</a>
-    </div>
-
-    <h3 class="subtitulo">Restaurar desde un respaldo</h3>
-    <p class="ayuda-inline">⚠ Esto reemplaza TODOS los datos actuales por los del archivo que subas. Úsalo solo para recuperarte de una pérdida de datos.</p>
-    <form id="form-restaurar">
-      <div class="campo">
-        <input type="file" id="restaurar-archivo" accept=".db">
-      </div>
-      <div class="modal-actions modal-actions--start">
-        <button type="submit" class="btn btn-danger">Restaurar (reemplaza todo)</button>
       </div>
     </form>
   </div>

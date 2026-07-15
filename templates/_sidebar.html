@@ -106,6 +106,15 @@
     </a>
   </div>
   {% endif %}
+
+  {% if rol_usuario == "admin" %}
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'administracion' else '' }}">
+    <a class="sidebar-modulo-header" href="/administracion" style="text-decoration:none; display:flex;">
+      <span class="sidebar-modulo-tag">06</span>
+      <span class="sidebar-modulo-nombre">Administración</span>
+    </a>
+  </div>
+  {% endif %}
 </nav>
 
 <script>

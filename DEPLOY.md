@@ -132,8 +132,8 @@ navegador (sí, directamente esa dirección). Te muestra algo como:
 - Anota `cantidad_productos` antes y después de cada actualización, para
   confirmar si los datos sobreviven.
 
-**Antes de cada actualización**, desde la aplicación misma, usa el botón
-**"Respaldo"** (arriba a la derecha) y descarga una copia. Si algo sale
+**Antes de cada actualización**, desde la aplicación misma, entra a
+**Administración → Respaldo de datos** y descarga una copia. Si algo sale
 mal, desde ese mismo lugar puedes subir ese archivo y restaurar todo tal
 como estaba.
 
@@ -178,8 +178,8 @@ En la pestaña "Variables" del servicio, agrega:
   verifiques un dominio propio)
 
 Railway va a reiniciar la app sola. Desde ese momento, todos los días se
-manda un respaldo solo, y queda registrado en el botón "Respaldo" de la
-aplicación (ahí puedes ver la fecha del último envío exitoso, y mandar uno
+manda un respaldo solo, y queda registrado en Administración → Respaldo de
+datos (ahí puedes ver la fecha del último envío exitoso, y mandar uno
 de prueba para confirmar que quedó bien configurado).
 
 ### Alternativa: SMTP con Gmail (solo si no usas Railway, o tu plan lo permite)
@@ -280,8 +280,9 @@ una copia consistente de la base de datos (usando `VACUUM INTO`, que
 garantiza que la copia no queda a medio escribir aunque se tome mientras
 alguien está guardando algo) en una carpeta aparte (`respaldos_locales/`)
 dentro del mismo disco persistente de Railway. Guarda como máximo las
-últimas 96 copias (`RESPALDO_LOCAL_MAX_COPIAS`, 4 días a ese ritmo) y va
-borrando las más viejas solas.
+últimas 48 copias (`RESPALDO_LOCAL_MAX_COPIAS`, 2 días a ese ritmo -- bajado
+de 96 en julio 2026, ver el incidente más abajo) y va borrando las más
+viejas solas.
 
 ⚠ **El intervalo NO controla cuánto disco ocupan los respaldos** — eso lo
 determina `RESPALDO_LOCAL_MAX_COPIAS` × el tamaño de la base de datos en ese
@@ -297,13 +298,16 @@ por defecto): si queda menos que eso, se salta el respaldo en vez de
 arriesgarse a terminar de llenar el disco.
 
 Esto se maneja todo desde la propia app, sin agregar ningún proveedor
-externo nuevo: **Logística → Respaldo**, sección "Respaldos automáticos
-locales". Ahí se ve la lista de copias disponibles con su fecha y tamaño, un
-botón para crear una copia manual en el momento (por ejemplo justo antes de
-un cambio delicado), y un botón "Restaurar esta copia" por cada una. La
-misma pantalla también tiene una sección "Uso de disco del servidor" con el
-desglose de qué está ocupando espacio, y un botón "Liberar espacio ahora"
-que borra de urgencia todos los respaldos menos los 3 más recientes.
+externo nuevo: **Administración → Respaldo de datos**, sección "Respaldos
+automáticos locales" (antes vivía como un botón "Respaldo" suelto dentro de
+Logística; se juntó con Usuarios y Mantenimiento en un solo panel de
+administración en julio 2026). Ahí se ve la lista de copias disponibles con
+su fecha y tamaño, un botón para crear una copia manual en el momento (por
+ejemplo justo antes de un cambio delicado), y un botón "Restaurar esta
+copia" por cada una. La misma pantalla también tiene una sección "Uso de
+disco del servidor" con el desglose de qué está ocupando espacio, y un
+botón "Liberar espacio ahora" que borra de urgencia todos los respaldos
+menos los 3 más recientes.
 
 ⚠ Restaurar reemplaza TODOS los datos actuales por los de esa copia -- solo
 para recuperarse de un problema real. Todos estos endpoints exigen sesión
@@ -319,9 +323,12 @@ rompiendo TODO el sistema -- cualquier escritura a SQLite (no solo los
 respaldos) empezó a fallar con `disk I/O error`. Se resolvió: (1) subiendo
 el volumen de Railway a 5 GB, (2) agregando el endpoint de diagnóstico de
 disco y el botón de limpieza de urgencia (ver arriba), y (3) el guard de
-espacio libre mínimo antes de crear un respaldo nuevo. Si esto vuelve a
-pasar, el primer lugar para mirar es **Logística → Respaldo → Uso de disco
-del servidor**.
+espacio libre mínimo antes de crear un respaldo nuevo. El disco se seguía
+llenando más rápido de lo esperado incluso con el volumen ya en 5 GB, así
+que además se bajó `RESPALDO_LOCAL_MAX_COPIAS` de 96 a 48 para acotar
+también el techo real, hasta confirmar que el consumo se estabiliza. Si
+esto vuelve a pasar, el primer lugar para mirar es **Administración →
+Respaldo de datos → Uso de disco del servidor**.
 
 ### Por qué no se usó Litestream + Cloudflare R2
 

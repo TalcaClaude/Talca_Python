@@ -965,7 +965,8 @@
       </div>
       <div class="campo">
         <label>Diagnóstico (resumen para el cliente)</label>
-        <textarea id="opdi-diagnostico" rows="2" placeholder="Resumen simple, en lenguaje de cliente — este texto va junto al presupuesto que se le envía"></textarea>
+        <textarea id="opdi-diagnostico" rows="2" placeholder="Resumen simple, en lenguaje de cliente — este texto va junto al presupuesto que se le envía. Se autocompleta con IA a medida que escribes el diagnóstico técnico."></textarea>
+        <p class="ayuda-inline" id="opdi-diagnostico-ia-estado" style="display:none"></p>
       </div>
       <div class="modal-actions modal-actions--start">
         <button type="button" class="btn btn-primary" id="btn-opdi-guardar">Guardar diagnóstico</button>

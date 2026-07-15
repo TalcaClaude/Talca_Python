@@ -2285,6 +2285,12 @@ async function abrirDiagnostico() {
     // tiene la sesión iniciada al guardar.
     document.getElementById("opdi-responsable-diagnostico").value = orden.responsable_diagnostico || "";
     document.getElementById("opdi-diagnostico").value = orden.diagnostico || "";
+    // Se resetea el rastreo de "último texto generado por IA" cada vez que
+    // se abre una OT -- si no, al pasar de una OT a otra el autocompletado
+    // podría comparar contra el texto de la orden anterior y pisar un
+    // diagnóstico de cliente ya guardado que nadie pidió tocar.
+    _opdiUltimoGeneradoIA = orden.diagnostico || "";
+    _opdiMostrarEstadoIA("");
     await cargarSugerenciasDiagnostico(ordenId);
   } catch (e) {
     toast(e.message, true);
@@ -2363,6 +2369,76 @@ async function atenderSugerenciaDiagnostico(sugerenciaId, ordenId) {
     toast(e.message, true);
   }
 }
+
+// ---- Autocompletar "Diagnóstico (resumen para el cliente)" con IA ----
+// A medida que se escribe el "Diagnóstico técnico", se genera
+// automáticamente (con un pequeño retraso mientras se sigue escribiendo)
+// un resumen en lenguaje simple para el campo que ve el cliente junto al
+// presupuesto -- misma redacción que ya usa el agente de WhatsApp cuando
+// el mecánico manda un audio (ver /api/operativo/ia/diagnostico-cliente y
+// _DESCRIPCION_CAMPO_DIAGNOSTICO_CLIENTE en app.py), pero ahora también al
+// escribir manualmente desde el sistema. Solo se autocompleta mientras el
+// campo de cliente esté vacío o siga teniendo el último texto que generó
+// la IA -- si alguien lo edita a mano, se deja de pisar hasta que la
+// persona vuelva a tocar el diagnóstico técnico (ver abrirDiagnostico, que
+// resetea _opdiUltimoGeneradoIA al abrir cada OT).
+let _opdiDebounceTimer = null;
+let _opdiUltimoGeneradoIA = "";
+let _opdiPeticionEnCurso = 0;
+
+function _opdiMostrarEstadoIA(texto) {
+  const el = document.getElementById("opdi-diagnostico-ia-estado");
+  if (!texto) {
+    el.style.display = "none";
+    el.textContent = "";
+    return;
+  }
+  el.style.display = "block";
+  el.textContent = texto;
+}
+
+async function _opdiGenerarDiagnosticoCliente() {
+  const campoTecnico = document.getElementById("opdi-diagnostico-tecnico");
+  const campoCliente = document.getElementById("opdi-diagnostico");
+  const tecnico = campoTecnico.value.trim();
+  if (!tecnico) {
+    _opdiMostrarEstadoIA("");
+    return;
+  }
+  // Si el campo de cliente tiene algo distinto de lo último que generó la
+  // IA, asumimos que alguien lo editó a mano y no lo pisamos.
+  if (campoCliente.value.trim() && campoCliente.value.trim() !== _opdiUltimoGeneradoIA.trim()) {
+    return;
+  }
+
+  const miPeticion = ++_opdiPeticionEnCurso;
+  _opdiMostrarEstadoIA("✨ Generando resumen para el cliente con IA…");
+  try {
+    const data = await api("/api/operativo/ia/diagnostico-cliente", {
+      method: "POST",
+      body: JSON.stringify({
+        diagnostico_tecnico: tecnico,
+        sintoma: document.getElementById("opdi-sintoma").value.trim(),
+      }),
+    });
+    if (miPeticion !== _opdiPeticionEnCurso) return; // llegó tarde, ya hay una petición más nueva en curso
+    if (data.diagnostico_cliente) {
+      campoCliente.value = data.diagnostico_cliente;
+      _opdiUltimoGeneradoIA = data.diagnostico_cliente;
+      _opdiMostrarEstadoIA("✓ Resumen generado con IA — revísalo antes de guardar.");
+    } else {
+      _opdiMostrarEstadoIA("");
+    }
+  } catch (e) {
+    if (miPeticion !== _opdiPeticionEnCurso) return;
+    _opdiMostrarEstadoIA("No se pudo generar el resumen con IA: " + e.message);
+  }
+}
+
+document.getElementById("opdi-diagnostico-tecnico").addEventListener("input", () => {
+  clearTimeout(_opdiDebounceTimer);
+  _opdiDebounceTimer = setTimeout(_opdiGenerarDiagnosticoCliente, 1200);
+});
 
 document.getElementById("btn-opdi-guardar").addEventListener("click", async () => {
   const ordenId = document.getElementById("opod-id").value;

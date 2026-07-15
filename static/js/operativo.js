@@ -1417,7 +1417,10 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     cerrarModal("modal-op-orden-nueva");
     toast("Orden creada.");
     await cargarOperativo();
-    abrirDetalleOrden(nueva.id);
+    // Por obligación, al ingresar el auto se piden 7 fotos fijas antes de
+    // enviarle al cliente el registro fotográfico -- ver spec del usuario.
+    // Se puede cerrar y retomar después desde la pestaña "Fotos" de la OT.
+    abrirFotosIngreso(nueva.id);
   } catch (e2) {
     toast(e2.message, true);
     // Puede pasar que el bloqueo haya aparecido justo entre que se
@@ -1600,6 +1603,7 @@ function renderCostosOrden(orden) {
 // al hacer clic, igual que antes hacían los botones al abrir su modal.
 const OPOD_TAB_LOADERS = {
   recepcion: () => abrirRecepcionLectura(),
+  fotos: () => cargarFotosOrdenTab(),
   diagnostico: () => abrirDiagnostico(),
   presupuesto: () => abrirPresupuestoModal(),
   repuestos: () => abrirRepuestosModal(),
@@ -1877,6 +1881,256 @@ document.getElementById("form-op-equipo-editar").addEventListener("submit", asyn
     await cargarOperativo();
   } catch (e2) {
     toast(e2.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Fotos de recepción del vehículo
+// ---------------------------------------------------------------------------
+// Al crear una orden se abre automáticamente modal-op-fotos-ingreso pidiendo
+// las 7 fotos obligatorias (FOTOS_CATEGORIAS_OBLIGATORIAS). Se puede cerrar y
+// retomar después desde la pestaña "Fotos" de la OT (misma lógica de
+// render/subida, reutilizada en los dos lugares).
+
+const FOTOS_CATEGORIAS_OBLIGATORIAS = [
+  ["frente", "Frente"],
+  ["costado_derecho", "Costado derecho"],
+  ["costado_izquierdo", "Costado izquierdo"],
+  ["atras", "Atrás"],
+  ["parabrisas", "Parabrisas"],
+  ["tablero", "Tablero"],
+  ["vin", "VIN"],
+];
+
+// categoría pendiente de subir con el próximo archivo elegido -- se setea
+// justo antes de disparar el click() del <input type=file> oculto
+// correspondiente, porque un solo input se reutiliza para todas las
+// categorías (evita crear un <input> nuevo por cada tile).
+let _opFotosCategoriaPendiente = null;
+let _opFotosTituloPendiente = "";
+
+function _renderFotosTile(categoria, label, foto) {
+  if (foto) {
+    return `
+      <div class="op-foto-tile op-foto-tile--lista" data-foto-id="${foto.id}" data-foto-url="/api/operativo/fotos/${foto.id}/archivo" data-foto-titulo="${escapeHtml(label)}">
+        <div class="op-foto-tile-preview"><img src="/api/operativo/fotos/${foto.id}/archivo" alt="${escapeHtml(label)}" loading="lazy"></div>
+        <div class="op-foto-tile-titulo op-foto-tile-titulo--lista">${escapeHtml(label)}</div>
+        <button type="button" class="op-foto-tile-borrar" data-borrar-foto="${foto.id}">Eliminar</button>
+      </div>`;
+  }
+  return `
+    <div class="op-foto-tile" data-categoria-vacia="${categoria}" data-categoria-label="${escapeHtml(label)}">
+      <div class="op-foto-tile-preview">Sin foto</div>
+      <div class="op-foto-tile-titulo op-foto-tile-titulo--pendiente">${escapeHtml(label)}</div>
+      <button type="button" class="btn btn-secundario btn-chico" data-tomar-foto="${categoria}" data-tomar-foto-label="${escapeHtml(label)}">Tomar/Subir foto</button>
+    </div>`;
+}
+
+function _renderFotosGrid(gridEl, fotos) {
+  const porCategoria = {};
+  (fotos || []).forEach(f => { if (f.categoria !== "libre") porCategoria[f.categoria] = f; });
+  const libres = (fotos || []).filter(f => f.categoria === "libre");
+
+  let html = FOTOS_CATEGORIAS_OBLIGATORIAS.map(([cat, label]) => _renderFotosTile(cat, label, porCategoria[cat])).join("");
+  html += libres.map(f => _renderFotosTile("libre", f.titulo || "Foto adicional", f)).join("");
+  gridEl.innerHTML = html;
+}
+
+function _wireFotosGrid(gridEl, inputArchivoEl, onCambio) {
+  gridEl.querySelectorAll("[data-tomar-foto]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      _opFotosCategoriaPendiente = btn.dataset.tomarFoto;
+      _opFotosTituloPendiente = btn.dataset.tomarFotoLabel || "";
+      inputArchivoEl.click();
+    });
+  });
+  gridEl.querySelectorAll("[data-borrar-foto]").forEach(btn => {
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (!confirm("¿Eliminar esta foto?")) return;
+      try {
+        await api(`/api/operativo/fotos/${btn.dataset.borrarFoto}`, { method: "DELETE" });
+        toast("Foto eliminada.");
+        await onCambio();
+      } catch (e) {
+        toast(e.message, true);
+      }
+    });
+  });
+  gridEl.querySelectorAll(".op-foto-tile--lista").forEach(tile => {
+    tile.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-borrar-foto]")) return;
+      abrirFotoZoom(tile.dataset.fotoUrl, tile.dataset.fotoTitulo);
+    });
+  });
+}
+
+async function _subirFotoOrden(ordenId, categoria, titulo, archivo) {
+  const formData = new FormData();
+  formData.append("archivo", archivo);
+  formData.append("categoria", categoria);
+  if (titulo) formData.append("titulo", titulo);
+  const res = await fetch(`/api/operativo/ordenes/${ordenId}/fotos`, { method: "POST", body: formData });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "No se pudo subir la foto");
+  return data;
+}
+
+function abrirFotoZoom(url, titulo) {
+  document.getElementById("opfz-titulo").textContent = titulo || "Foto";
+  const img = document.getElementById("opfz-img");
+  img.src = url;
+  img.classList.remove("op-foto-zoom-activo");
+  abrirModal("modal-op-foto-zoom");
+}
+
+document.getElementById("opfz-img").addEventListener("click", (e) => {
+  e.target.classList.toggle("op-foto-zoom-activo");
+});
+
+// ---- Flujo obligatorio al crear la orden ----
+
+async function abrirFotosIngreso(ordenId) {
+  document.getElementById("opfi-orden-id").value = ordenId;
+  await cargarFotosIngreso();
+  abrirModal("modal-op-fotos-ingreso");
+}
+
+// Cerrar (X o "Completar después") también deja a la persona en el detalle
+// de la OT recién creada, en vez de devolverla al tablero sin más -- la
+// idea es que "cerrar" sea "lo dejo para después", no "perder el hilo".
+document.querySelectorAll('#modal-op-fotos-ingreso [data-close="modal-op-fotos-ingreso"]').forEach(btn => {
+  btn.addEventListener("click", () => {
+    const ordenId = document.getElementById("opfi-orden-id").value;
+    if (ordenId) abrirDetalleOrden(parseInt(ordenId, 10));
+  });
+});
+
+async function cargarFotosIngreso() {
+  const ordenId = document.getElementById("opfi-orden-id").value;
+  try {
+    const data = await api(`/api/operativo/ordenes/${ordenId}/fotos`);
+    const grid = document.getElementById("opfi-fotos-grid");
+    _renderFotosGrid(grid, data.fotos);
+    _wireFotosGrid(grid, document.getElementById("opfi-archivo-libre"), cargarFotosIngreso);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-opfi-agregar-libre").addEventListener("click", () => {
+  const titulo = (prompt("Título de la foto (ej: Rayón puerta trasera derecha)") || "").trim();
+  if (!titulo) return;
+  _opFotosCategoriaPendiente = "libre";
+  _opFotosTituloPendiente = titulo;
+  document.getElementById("opfi-archivo-libre").click();
+});
+
+document.getElementById("opfi-archivo-libre").addEventListener("change", async (e) => {
+  const archivo = e.target.files[0];
+  const ordenId = document.getElementById("opfi-orden-id").value;
+  if (!archivo || !_opFotosCategoriaPendiente) { e.target.value = ""; return; }
+  try {
+    await _subirFotoOrden(ordenId, _opFotosCategoriaPendiente, _opFotosTituloPendiente, archivo);
+    toast("Foto guardada.");
+    await cargarFotosIngreso();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    e.target.value = "";
+    _opFotosCategoriaPendiente = null;
+    _opFotosTituloPendiente = "";
+  }
+});
+
+document.getElementById("btn-opfi-finalizar").addEventListener("click", async () => {
+  const ordenId = document.getElementById("opfi-orden-id").value;
+  const btn = document.getElementById("btn-opfi-finalizar");
+  btn.disabled = true;
+  btn.textContent = "Enviando…";
+  try {
+    const data = await api(`/api/operativo/ordenes/${ordenId}/fotos/finalizar`, { method: "POST" });
+    if (data.correo_enviado) {
+      toast("Registro fotográfico enviado al cliente.");
+    } else {
+      toast("Fotos guardadas, pero no se pudo enviar el correo: " + (data.correo_detalle || "revisa el correo del cliente."), true);
+    }
+    cerrarModal("modal-op-fotos-ingreso");
+    abrirDetalleOrden(parseInt(ordenId, 10));
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Enviar registro fotográfico al cliente";
+  }
+});
+
+// ---- Pestaña "Fotos" dentro del detalle de la OT (para completar/revisar
+// después, si en la recepción se cerró el modal sin terminar) ----
+
+async function cargarFotosOrdenTab() {
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    const data = await api(`/api/operativo/ordenes/${ordenId}/fotos`);
+    const grid = document.getElementById("opod-fotos-grid");
+    _renderFotosGrid(grid, data.fotos);
+    _wireFotosGrid(grid, document.getElementById("opod-fotos-archivo-libre"), cargarFotosOrdenTab);
+
+    const aviso = document.getElementById("opod-fotos-faltan");
+    if (data.faltan_obligatorias.length) {
+      aviso.style.display = "";
+      aviso.textContent = `Faltan fotos obligatorias: ${data.faltan_obligatorias.join(", ")}.`;
+    } else {
+      aviso.style.display = "none";
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-opod-fotos-agregar").addEventListener("click", () => {
+  const titulo = (prompt("Título de la foto (ej: Rayón puerta trasera derecha)") || "").trim();
+  if (!titulo) return;
+  _opFotosCategoriaPendiente = "libre";
+  _opFotosTituloPendiente = titulo;
+  document.getElementById("opod-fotos-archivo-libre").click();
+});
+
+document.getElementById("opod-fotos-archivo-libre").addEventListener("change", async (e) => {
+  const archivo = e.target.files[0];
+  const ordenId = document.getElementById("opod-id").value;
+  if (!archivo || !_opFotosCategoriaPendiente) { e.target.value = ""; return; }
+  try {
+    await _subirFotoOrden(ordenId, _opFotosCategoriaPendiente, _opFotosTituloPendiente, archivo);
+    toast("Foto guardada.");
+    await cargarFotosOrdenTab();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    e.target.value = "";
+    _opFotosCategoriaPendiente = null;
+    _opFotosTituloPendiente = "";
+  }
+});
+
+document.getElementById("btn-opod-fotos-finalizar").addEventListener("click", async () => {
+  const ordenId = document.getElementById("opod-id").value;
+  const btn = document.getElementById("btn-opod-fotos-finalizar");
+  btn.disabled = true;
+  btn.textContent = "Enviando…";
+  try {
+    const data = await api(`/api/operativo/ordenes/${ordenId}/fotos/finalizar`, { method: "POST" });
+    if (data.correo_enviado) {
+      toast("Registro fotográfico enviado al cliente.");
+    } else {
+      toast("Fotos guardadas, pero no se pudo enviar el correo: " + (data.correo_detalle || "revisa el correo del cliente."), true);
+    }
+    await cargarFotosOrdenTab();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Enviar registro fotográfico al cliente";
   }
 });
 

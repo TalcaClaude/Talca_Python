@@ -508,6 +508,46 @@
   </div>
 </div>
 
+<!-- Módulo Operativo: fotos obligatorias de recepción -- se abre automáticamente
+     al crear una orden. Exige las 7 fotos fijas antes de poder mandar el
+     registro fotográfico al cliente; se puede cerrar y retomar después desde
+     la pestaña "Fotos" de la OT (ver modal-op-orden-detalle). -->
+<div class="modal-overlay" id="modal-op-fotos-ingreso">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Fotos de recepción del vehículo</h2>
+      <button class="modal-close" data-close="modal-op-fotos-ingreso">&times;</button>
+    </div>
+    <p class="ayuda-inline">
+      Toma las 7 fotos obligatorias del vehículo. Al terminar, se genera un registro fotográfico en PDF y se envía por correo al cliente (con copia al taller). Puedes agregar fotos adicionales de daños, rayones, etc. Si no alcanzas a terminar ahora, puedes cerrar esta ventana y completarlo después desde la pestaña "Fotos" de la OT.
+    </p>
+    <input type="hidden" id="opfi-orden-id">
+    <div id="opfi-fotos-grid" class="op-fotos-grid"></div>
+    <input type="file" id="opfi-archivo-libre" accept="image/*" capture="environment" style="display:none">
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-secundario" id="btn-opfi-agregar-libre">+ Agregar foto de daño/detalle</button>
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-op-fotos-ingreso">Completar después</button>
+      <button type="button" class="btn btn-primary" id="btn-opfi-finalizar">Enviar registro fotográfico al cliente</button>
+    </div>
+  </div>
+</div>
+
+<!-- Visor de fotos con zoom -->
+<div class="modal-overlay" id="modal-op-foto-zoom">
+  <div class="modal op-foto-zoom-modal">
+    <div class="modal-head">
+      <h2 id="opfz-titulo">Foto</h2>
+      <button class="modal-close" data-close="modal-op-foto-zoom">&times;</button>
+    </div>
+    <div class="op-foto-zoom-contenedor" id="opfz-contenedor">
+      <img id="opfz-img" src="" alt="">
+    </div>
+    <p class="ayuda-inline">Click en la imagen para acercar/alejar.</p>
+  </div>
+</div>
+
 <!-- Módulo Operativo: nueva orden de trabajo (minimal — la recepción completa se hace después, desde la OT) -->
 <div class="modal-overlay" id="modal-op-orden-nueva">
   <div class="modal modal-ancho">
@@ -752,6 +792,7 @@
     <div class="op-tabs">
       <button type="button" class="op-tab activo" data-opod-tab="ot">OT</button>
       <button type="button" class="op-tab" data-opod-tab="recepcion">Recepción</button>
+      <button type="button" class="op-tab" data-opod-tab="fotos">Fotos</button>
       <button type="button" class="op-tab" data-opod-tab="diagnostico">Diagnóstico</button>
       <button type="button" class="op-tab" data-opod-tab="presupuesto">Presupuesto</button>
       <button type="button" class="op-tab" data-opod-tab="repuestos">Carga de repuestos</button>
@@ -884,6 +925,16 @@
       <div class="op-resumen-cliente-auto" id="op-recepcion-lectura"></div>
       <h3 class="subtitulo">Equipamiento — qué trajo el vehículo</h3>
       <div class="op-equipamiento-grid op-equipamiento-grid--lectura" id="op-equipamiento-grid-lectura"></div>
+    </div>
+
+    <div class="op-tab-panel" id="opod-panel-fotos" style="display:none">
+      <div id="opod-fotos-faltan" class="ayuda-inline ayuda-inline--bloqueado" style="display:none"></div>
+      <div class="modal-actions modal-actions--start">
+        <button type="button" class="btn btn-secundario" id="btn-opod-fotos-agregar">+ Agregar foto</button>
+        <button type="button" class="btn btn-primary" id="btn-opod-fotos-finalizar">Enviar registro fotográfico al cliente</button>
+      </div>
+      <input type="file" id="opod-fotos-archivo-libre" accept="image/*" capture="environment" style="display:none">
+      <div class="op-fotos-grid" id="opod-fotos-grid"></div>
     </div>
 
     <div class="op-tab-panel" id="opod-panel-diagnostico" style="display:none">

@@ -22,12 +22,15 @@ movimientos (los repuestos de una orden las referencian).
 """
 
 import json
+import os
 import re
+import uuid
 from datetime import datetime, timedelta
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, render_template, request, send_file
 
 from core import (
+    DB_PATH,
     IVA_PORCENTAJE,
     _aplicar_entrada_stock,
     _aplicar_salida_stock,
@@ -155,6 +158,26 @@ ESTADOS_GARANTIA_LABEL = {
     "prueba": "Prueba", "revision": "Revisión", "listo": "Listo",
     "entregado": "Entregado", "rechazada": "Rechazada",
 }
+
+# ---------------------------------------------------------------------------
+# Fotos de recepción del vehículo (OTs y garantías) -- ver sección "Fotos de
+# vehículos" más abajo. 7 categorías obligatorias al ingresar un auto
+# (definidas a pedido del usuario); "libre" es para fotos adicionales
+# (daños, rayones, lo que el personal estime) con un título escrito a mano.
+# ---------------------------------------------------------------------------
+FOTOS_CATEGORIAS_OBLIGATORIAS = [
+    ("frente", "Frente"),
+    ("costado_derecho", "Costado derecho"),
+    ("costado_izquierdo", "Costado izquierdo"),
+    ("atras", "Atrás"),
+    ("parabrisas", "Parabrisas"),
+    ("tablero", "Tablero"),
+    ("vin", "VIN"),
+]
+FOTOS_CATEGORIAS_OBLIGATORIAS_SET = {c for c, _ in FOTOS_CATEGORIAS_OBLIGATORIAS}
+FOTOS_CATEGORIA_LABEL = dict(FOTOS_CATEGORIAS_OBLIGATORIAS)
+FOTOS_CATEGORIA_LABEL["libre"] = "Foto adicional"
+FOTOS_ENTIDADES_VALIDAS = {"orden", "garantia"}
 
 # Convertidores de torque ahora es su propio módulo (ver
 # modulos/convertidores.py) -- lo único que queda acá es el enganche hacia
@@ -637,6 +660,31 @@ def init_operativo_db(db):
     )
     db.commit()
 
+    # Fotos de recepción/daños del vehículo (OTs y garantías) -- ver
+    # sección "Fotos de vehículos" más abajo. 'entidad_tipo' + 'entidad_id'
+    # en vez de dos columnas separadas (orden_id/garantia_id) porque una
+    # foto siempre pertenece a UNA sola de las dos, nunca ambas, y así no
+    # queda una columna siempre NULL según el caso (mismo criterio que
+    # 'origen_tipo' en convertidores_torque).
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS fotos_vehiculo (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entidad_tipo TEXT NOT NULL,
+            entidad_id INTEGER NOT NULL,
+            categoria TEXT NOT NULL DEFAULT 'libre',
+            titulo TEXT DEFAULT '',
+            archivo TEXT NOT NULL,
+            origen TEXT NOT NULL DEFAULT 'ingreso',
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_fotos_vehiculo_entidad
+            ON fotos_vehiculo (entidad_tipo, entidad_id);
+        """
+    )
+    db.commit()
+
     # Con la FK ya reparada, reintenta el auto-cargo de cualquier
     # convertidor 'interno' que haya quedado 'entregado' sin su ítem
     # correspondiente en la OT/garantía de origen (ver
@@ -648,6 +696,356 @@ def init_operativo_db(db):
     # del código (ver convertidores.reparar_costos_congelados_convertidores_internos
     # -- idempotente).
     convertidores.reparar_costos_congelados_convertidores_internos(db)
+
+
+# ---------------------------------------------------------------------------
+# Fotos de vehículos (OTs y garantías)
+# ---------------------------------------------------------------------------
+#
+# Al ingresar un auto se exigen 7 fotos fijas (FOTOS_CATEGORIAS_OBLIGATORIAS)
+# más las libres que el personal quiera agregar (daños, rayones, etc., con
+# título propio). Se guardan en disco (mismo volumen persistente que la
+# base de datos, ver DEPLOY.md) comprimidas a WebP -- una foto de celular
+# sin comprimir pesa 3-6 MB; así queda en ~100-250 KB sin pérdida visible
+# para este uso, para que el disco alcance para años de fotos. La tabla usa
+# 'entidad_tipo' + 'entidad_id' genérico (en vez de columnas separadas
+# orden_id/garantia_id) porque una foto es de una OT O de una garantía,
+# nunca ambas -- mismo criterio que 'origen_tipo' en convertidores_torque.
+
+def _fotos_dir():
+    d = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or ".", "fotos_vehiculos")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _comprimir_foto(imagen_bytes, max_lado=1600, calidad=78):
+    """Redimensiona (lado más largo a max_lado px) y comprime a WebP.
+    Lanza ValueError si la imagen no se puede leer (formato no soportado,
+    archivo corrupto, no es una imagen) -- el llamador lo traduce a un 400
+    en vez de dejar pasar un 500."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise ValueError(
+            "Falta instalar la librería Pillow en el servidor para procesar fotos"
+        ) from exc
+    import io as _io
+    try:
+        img = Image.open(_io.BytesIO(imagen_bytes))
+        # Respeta la orientación real de la foto: los celulares suelen
+        # guardar la rotación en metadata EXIF en vez de rotar los píxeles.
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"No se pudo leer la imagen: {exc}")
+
+    ancho, alto = img.size
+    lado_mayor = max(ancho, alto)
+    if lado_mayor > max_lado:
+        factor = max_lado / lado_mayor
+        img = img.resize(
+            (max(1, round(ancho * factor)), max(1, round(alto * factor))), Image.LANCZOS
+        )
+
+    salida = _io.BytesIO()
+    img.save(salida, format="WEBP", quality=calidad, method=4)
+    return salida.getvalue()
+
+
+def _guardar_foto_entidad(db, entidad_tipo, entidad_id, categoria, titulo, imagen_bytes, usuario, origen="ingreso"):
+    if entidad_tipo not in FOTOS_ENTIDADES_VALIDAS:
+        raise ValueError("Tipo de entidad inválido")
+    comprimida = _comprimir_foto(imagen_bytes)
+    ts = now_iso()
+    nombre_archivo = f"{entidad_tipo}_{entidad_id}_{uuid.uuid4().hex}.webp"
+    ruta_absoluta = os.path.join(_fotos_dir(), nombre_archivo)
+    with open(ruta_absoluta, "wb") as f:
+        f.write(comprimida)
+    cur = db.execute(
+        """
+        INSERT INTO fotos_vehiculo
+            (entidad_tipo, entidad_id, categoria, titulo, archivo, origen, usuario, creado_en)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            entidad_tipo, entidad_id, categoria or "libre", (titulo or "").strip().upper(),
+            nombre_archivo, origen, usuario, ts,
+        ),
+    )
+    db.commit()
+    fila = db.execute("SELECT * FROM fotos_vehiculo WHERE id = ?", (cur.lastrowid,)).fetchone()
+    d = dict(fila)
+    d["categoria_label"] = FOTOS_CATEGORIA_LABEL.get(d["categoria"], d["categoria"])
+    return d
+
+
+def _listar_fotos_entidad(db, entidad_tipo, entidad_id):
+    filas = db.execute(
+        "SELECT * FROM fotos_vehiculo WHERE entidad_tipo = ? AND entidad_id = ? ORDER BY creado_en",
+        (entidad_tipo, entidad_id),
+    ).fetchall()
+    resultado = []
+    for f in filas:
+        d = dict(f)
+        d["categoria_label"] = FOTOS_CATEGORIA_LABEL.get(d["categoria"], d["categoria"])
+        resultado.append(d)
+    return resultado
+
+
+def _fotos_obligatorias_faltantes(db, entidad_tipo, entidad_id):
+    presentes = {
+        r["categoria"] for r in db.execute(
+            "SELECT DISTINCT categoria FROM fotos_vehiculo WHERE entidad_tipo = ? AND entidad_id = ?",
+            (entidad_tipo, entidad_id),
+        ).fetchall()
+    }
+    return [label for cat, label in FOTOS_CATEGORIAS_OBLIGATORIAS if cat not in presentes]
+
+
+def _resolver_entidad_fotos(db, entidad_tipo, entidad_id):
+    tabla = "ordenes_trabajo" if entidad_tipo == "orden" else "garantias"
+    return db.execute(f"SELECT id FROM {tabla} WHERE id = ?", (entidad_id,)).fetchone()
+
+
+def _subir_foto_generico(db, entidad_tipo, entidad_id):
+    archivo = request.files.get("archivo")
+    if not archivo or archivo.filename == "":
+        return jsonify({"error": "Selecciona o toma una foto"}), 400
+    categoria = (request.form.get("categoria") or "libre").strip().lower()
+    if categoria != "libre" and categoria not in FOTOS_CATEGORIAS_OBLIGATORIAS_SET:
+        return jsonify({"error": "Categoría de foto inválida"}), 400
+    titulo = (request.form.get("titulo") or "").strip()
+    if categoria == "libre" and not titulo:
+        titulo = "Foto adicional"
+
+    imagen_bytes = archivo.read()
+    if not imagen_bytes:
+        return jsonify({"error": "El archivo llegó vacío"}), 400
+    if len(imagen_bytes) > 15 * 1024 * 1024:
+        return jsonify({"error": "La foto es demasiado grande (máximo 15 MB antes de comprimir)"}), 400
+
+    try:
+        foto = _guardar_foto_entidad(db, entidad_tipo, entidad_id, categoria, titulo, imagen_bytes, usuario_actual())
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(foto), 201
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/fotos", methods=["GET"])
+@requiere_rol("operativo")
+def listar_fotos_orden(orden_id):
+    db = get_db()
+    if _resolver_entidad_fotos(db, "orden", orden_id) is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    return jsonify({
+        "fotos": _listar_fotos_entidad(db, "orden", orden_id),
+        "faltan_obligatorias": _fotos_obligatorias_faltantes(db, "orden", orden_id),
+    })
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/fotos", methods=["POST"])
+@requiere_rol("operativo")
+def subir_foto_orden(orden_id):
+    db = get_db()
+    if _resolver_entidad_fotos(db, "orden", orden_id) is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+    return _subir_foto_generico(db, "orden", orden_id)
+
+
+@bp.route("/api/operativo/garantias/<int:garantia_id>/fotos", methods=["GET"])
+@requiere_rol("operativo")
+def listar_fotos_garantia(garantia_id):
+    db = get_db()
+    if _resolver_entidad_fotos(db, "garantia", garantia_id) is None:
+        return jsonify({"error": "Garantía no encontrada"}), 404
+    return jsonify({
+        "fotos": _listar_fotos_entidad(db, "garantia", garantia_id),
+        "faltan_obligatorias": _fotos_obligatorias_faltantes(db, "garantia", garantia_id),
+    })
+
+
+@bp.route("/api/operativo/garantias/<int:garantia_id>/fotos", methods=["POST"])
+@requiere_rol("operativo")
+def subir_foto_garantia(garantia_id):
+    db = get_db()
+    if _resolver_entidad_fotos(db, "garantia", garantia_id) is None:
+        return jsonify({"error": "Garantía no encontrada"}), 404
+    return _subir_foto_generico(db, "garantia", garantia_id)
+
+
+@bp.route("/api/operativo/fotos/<int:foto_id>/archivo", methods=["GET"])
+@requiere_rol("operativo")
+def servir_foto(foto_id):
+    db = get_db()
+    foto = db.execute("SELECT * FROM fotos_vehiculo WHERE id = ?", (foto_id,)).fetchone()
+    if foto is None:
+        return jsonify({"error": "Foto no encontrada"}), 404
+    ruta = os.path.join(_fotos_dir(), foto["archivo"])
+    if not os.path.exists(ruta):
+        return jsonify({"error": "El archivo de la foto ya no existe en el disco"}), 404
+    return send_file(ruta, mimetype="image/webp")
+
+
+@bp.route("/api/operativo/fotos/<int:foto_id>", methods=["DELETE"])
+@requiere_rol("operativo")
+def eliminar_foto(foto_id):
+    db = get_db()
+    foto = db.execute("SELECT * FROM fotos_vehiculo WHERE id = ?", (foto_id,)).fetchone()
+    if foto is None:
+        return jsonify({"error": "Foto no encontrada"}), 404
+    ruta = os.path.join(_fotos_dir(), foto["archivo"])
+    db.execute("DELETE FROM fotos_vehiculo WHERE id = ?", (foto_id,))
+    db.commit()
+    try:
+        if os.path.exists(ruta):
+            os.remove(ruta)
+    except OSError:
+        pass
+    return jsonify({"ok": True})
+
+
+def _armar_pdf_fotos_ingreso(db, orden, cliente, fotos):
+    """Arma (sin construir todavía -- eso lo hace el llamador con
+    doc.build) el PDF de registro fotográfico que se manda al cliente al
+    finalizar la recepción del vehículo. Mismo patrón que
+    _armar_presupuesto_pdf (reportlab, SimpleDocTemplate)."""
+    import io as _io
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
+
+    orden_id = orden["id"]
+    equipo = orden.get("equipo") or {}
+
+    buffer = _io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        topMargin=1.6 * cm, bottomMargin=1.6 * cm, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
+    )
+    estilos = getSampleStyleSheet()
+    estilos.add(ParagraphStyle(name="TituloFotosIng", fontSize=18, leading=22, spaceAfter=2, fontName="Helvetica-Bold"))
+    estilos.add(ParagraphStyle(name="SubtituloFotosIng", fontSize=10, textColor="#666666", spaceAfter=16))
+    estilos.add(ParagraphStyle(name="SeccionFotosIng", fontSize=11, textColor="#1F2430", spaceBefore=14, spaceAfter=6, fontName="Helvetica-Bold"))
+    estilos.add(ParagraphStyle(name="PieFotoIng", fontSize=8.5, textColor="#444444", alignment=1, spaceBefore=2, spaceAfter=10))
+
+    elementos = [
+        Paragraph("Talleres Calificados", estilos["TituloFotosIng"]),
+        Paragraph(
+            f"Registro fotográfico de recepción — OT{orden_id} · {datetime.now().strftime('%d-%m-%Y %H:%M')}",
+            estilos["SubtituloFotosIng"],
+        ),
+    ]
+
+    elementos.append(Paragraph("Datos del vehículo", estilos["SeccionFotosIng"]))
+    elementos.append(Paragraph(
+        f"<b>Cliente:</b> {cliente.get('nombre') or '—'} &nbsp;&nbsp; "
+        f"<b>Patente:</b> {equipo.get('identificador') or '—'} &nbsp;&nbsp; "
+        f"<b>Marca/Modelo:</b> {equipo.get('marca') or '—'} {equipo.get('modelo') or ''}",
+        estilos["Normal"],
+    ))
+    elementos.append(Spacer(1, 10))
+
+    ancho_foto = 8.0 * cm
+    fila_imgs, fila_labels = [], []
+
+    def _cerrar_fila():
+        while len(fila_imgs) < 2:
+            fila_imgs.append("")
+            fila_labels.append("")
+        t = Table([list(fila_imgs), list(fila_labels)], colWidths=[ancho_foto + 0.4 * cm] * 2)
+        t.setStyle(TableStyle([("ALIGN", (0, 0), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+        elementos.append(t)
+
+    for foto in fotos:
+        ruta = os.path.join(_fotos_dir(), foto["archivo"])
+        if not os.path.exists(ruta):
+            continue
+        try:
+            img = RLImage(ruta, width=ancho_foto, height=ancho_foto * 0.75)
+        except Exception:
+            continue
+        etiqueta = Paragraph(foto.get("titulo") or foto.get("categoria_label") or "", estilos["PieFotoIng"])
+        fila_imgs.append(img)
+        fila_labels.append(etiqueta)
+        if len(fila_imgs) == 2:
+            _cerrar_fila()
+            fila_imgs, fila_labels = [], []
+    if fila_imgs:
+        _cerrar_fila()
+
+    nombre_cliente = (cliente.get("nombre") or "").title()
+    nombre = _nombre_archivo_seguro(f"Fotos Recepcion Talleres Calificados OT{orden_id} {nombre_cliente}").strip()
+    nombre = f"{nombre}.pdf"
+    return buffer, doc, elementos, nombre
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/fotos/finalizar", methods=["POST"])
+@requiere_rol("operativo")
+def finalizar_fotos_orden(orden_id):
+    """Cierra la etapa de fotos de recepción: exige que estén las 7 fotos
+    obligatorias, arma un PDF con todas las fotos (obligatorias + libres) y
+    se lo manda por correo al cliente, con copia al taller
+    (PRESUPUESTO_COPIA_TALLER -- mismo listado de correos administrativos
+    que ya se usaba para el envío de presupuestos, para no duplicar esa
+    configuración). A propósito NO bloquea el ingreso del auto si el
+    cliente no tiene correo registrado o el envío falla -- solo se informa
+    en la respuesta, para que el personal pueda reenviarlo después a mano
+    en vez de trabar la recepción física del vehículo."""
+    db = get_db()
+    row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+
+    faltantes = _fotos_obligatorias_faltantes(db, "orden", orden_id)
+    if faltantes:
+        return jsonify({
+            "error": "Faltan fotos obligatorias: " + ", ".join(faltantes),
+            "faltan_obligatorias": faltantes,
+        }), 400
+
+    orden = _orden_dict_detalle(db, row)
+    cliente = orden.get("cliente") or {}
+    fotos = _listar_fotos_entidad(db, "orden", orden_id)
+
+    from app import _enviar_correo, PRESUPUESTO_COPIA_TALLER
+
+    destinatario = (cliente.get("email") or "").strip()
+    correo_enviado = False
+    correo_detalle = "Este cliente no tiene un correo registrado."
+    if destinatario:
+        pdf_bytes = None
+        try:
+            buffer, doc, elementos, nombre_pdf = _armar_pdf_fotos_ingreso(db, orden, cliente, fotos)
+            doc.build(elementos)
+            buffer.seek(0)
+            pdf_bytes = buffer.getvalue()
+        except Exception as exc:
+            correo_detalle = f"No se pudo generar el PDF: {exc}"
+        if pdf_bytes:
+            nombre_cliente = (cliente.get("nombre") or "").title() or "cliente"
+            asunto = f"Recepción de tu vehículo — OT{orden_id} — Talleres Calificados"
+            cuerpo = (
+                f"Hola {nombre_cliente},\n\n"
+                f"Te confirmamos la recepción de tu vehículo (OT{orden_id}). Adjuntamos el registro "
+                f"fotográfico tomado al momento del ingreso.\n\n"
+                f"Ante cualquier consulta, contáctanos.\n\n"
+                f"Talleres Calificados"
+            )
+            correo_enviado, correo_detalle = _enviar_correo(
+                destinatario, asunto, cuerpo,
+                adjunto_bytes=pdf_bytes, adjunto_nombre=nombre_pdf, cc=PRESUPUESTO_COPIA_TALLER,
+            )
+
+    return jsonify({
+        "ok": True,
+        "correo_enviado": correo_enviado,
+        "correo_detalle": correo_detalle,
+        "destinatario": destinatario or None,
+    })
 
 
 # ---------------------------------------------------------------------------

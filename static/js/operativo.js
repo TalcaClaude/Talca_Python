@@ -2266,6 +2266,46 @@ async function abrirDiagnostico() {
     // tiene la sesión iniciada al guardar.
     document.getElementById("opdi-responsable-diagnostico").value = orden.responsable_diagnostico || "";
     document.getElementById("opdi-diagnostico").value = orden.diagnostico || "";
+    await cargarSugerenciasDiagnostico(ordenId);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// Sugerencias de diagnóstico dejadas por mecánicos de perfil restringido
+// (ver migración 16 / agente_mecanicos.tipo) — el mecánico no puede
+// escribir directo en diagnóstico_tecnico/diagnóstico, así que su
+// comentario queda acá para que la parte operativa decida si lo usa.
+async function cargarSugerenciasDiagnostico(ordenId) {
+  const wrap = document.getElementById("opdi-sugerencias-wrap");
+  const lista = document.getElementById("opdi-sugerencias-lista");
+  try {
+    const sugerencias = await api(`/api/ordenes/${ordenId}/sugerencias-diagnostico`);
+    if (!sugerencias.length) {
+      wrap.style.display = "none";
+      lista.innerHTML = "";
+      return;
+    }
+    wrap.style.display = "block";
+    lista.innerHTML = sugerencias.map(s => `
+      <div class="op-sugerencia-diagnostico" data-id="${s.id}" style="border:1px solid var(--borde, #333); border-radius:8px; padding:10px; margin-bottom:8px">
+        <p style="margin:0 0 6px 0">${escapeHtml(s.texto)}</p>
+        <p class="ayuda-inline" style="margin:0 0 8px 0">Por: ${escapeHtml(s.mecanico_nombre)} — ${fmtFecha(s.creado_en)}</p>
+        <button type="button" class="btn btn-secundario btn-chico" data-atender-sugerencia="${s.id}">Marcar como revisada</button>
+      </div>
+    `).join("");
+    lista.querySelectorAll("[data-atender-sugerencia]").forEach(btn => {
+      btn.addEventListener("click", () => atenderSugerenciaDiagnostico(parseInt(btn.dataset.atenderSugerencia, 10), ordenId));
+    });
+  } catch (e) {
+    wrap.style.display = "none";
+  }
+}
+
+async function atenderSugerenciaDiagnostico(sugerenciaId, ordenId) {
+  try {
+    await api(`/api/sugerencias-diagnostico/${sugerenciaId}/atender`, { method: "POST" });
+    await cargarSugerenciasDiagnostico(ordenId);
   } catch (e) {
     toast(e.message, true);
   }

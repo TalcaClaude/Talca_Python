@@ -51,12 +51,13 @@
         <tr>
           <th>Nombre</th>
           <th>Teléfono</th>
+          <th>Perfil</th>
           <th>Estado</th>
           <th></th>
         </tr>
       </thead>
       <tbody id="tbody-mecanicos-agente">
-        <tr><td colspan="4" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="5" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -176,6 +177,18 @@
           <label>Teléfono de WhatsApp *</label>
           <input type="text" id="mec-telefono" required placeholder="Ej: +56912345678" autocomplete="off">
           <p class="ayuda-inline">Con código de país (ej. +56 para Chile). Es el número desde el que va a escribirle al agente.</p>
+        </div>
+        <div class="campo">
+          <label>Perfil *</label>
+          <select id="mec-tipo">
+            <option value="completo">Completo — puede mandar fotos y cambiar diagnóstico/estado de la OT</option>
+            <option value="mecanico">Mecánico (restringido) — solo puede mandar fotos; su comentario queda como sugerencia</option>
+          </select>
+          <p class="ayuda-inline">
+            Un mecánico de perfil restringido puede mandar fotos igual que cualquiera (quedan archivadas en la
+            OT), pero no puede cambiar el diagnóstico ni el estado por WhatsApp — si manda un comentario junto
+            con la foto (o solo texto), queda guardado como sugerencia para que la parte operativa lo revise.
+          </p>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secundario" data-close="modal-mecanico-agente">Cancelar</button>

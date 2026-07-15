@@ -279,5 +279,158 @@ class TestFotosPorWhatsAppFase3(unittest.TestCase):
         self.assertEqual(len(listado["faltan_obligatorias"]), 7)
 
 
+class TestPerfilMecanicoRestringido(unittest.TestCase):
+    """Perfil 'mecanico' (ver migración 16 / agente_mecanicos.tipo): puede
+    mandar fotos igual que cualquier mecánico (se archivan igual), pero NO
+    tiene permiso para cambiar diagnóstico/estado por WhatsApp -- su texto
+    queda como sugerencia en sugerencias_diagnostico en vez de ejecutarse.
+    El perfil 'completo' (default) sigue con el comportamiento de siempre."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre="Cliente Perfil"):
+        resp = self.client.post("/api/operativo/clientes", json={"nombre": nombre})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_equipo(self, cliente_id, identificador):
+        resp = self.client.post(
+            "/api/operativo/equipos",
+            json={"cliente_id": cliente_id, "identificador": identificador, "marca": "Marca", "modelo": "Modelo"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden(self, cliente_id, equipo_id):
+        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id, "equipo_id": equipo_id})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _registrar_mecanico(self, nombre, telefono, tipo="completo"):
+        resp = self.client.post(
+            "/api/agente/mecanicos", json={"nombre": nombre, "telefono": telefono, "tipo": tipo}
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _subir_foto(self, telefono, texto=""):
+        data = {"telefono": telefono, "foto": (io.BytesIO(_imagen_jpeg_valida()), "foto.jpg")}
+        if texto:
+            data["texto"] = texto
+        return self.client.post("/api/agente/simular-mensaje-foto", data=data, content_type="multipart/form-data")
+
+    def _mandar_texto(self, telefono, texto):
+        return self.client.post("/api/agente/simular-mensaje", json={"telefono": telefono, "texto": texto})
+
+    def _sugerencias_de(self, orden_id):
+        return self.client.get(f"/api/ordenes/{orden_id}/sugerencias-diagnostico").get_json()
+
+    def test_mecanico_restringido_manda_foto_con_comentario_queda_como_sugerencia(self):
+        self._registrar_mecanico("Mecánico Restringido Uno", "+56900900001", tipo="mecanico")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PERF001")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+                           return_value={"tipo": "otro", "patente": ""}):
+            resp = self._subir_foto(
+                "+56900900001", texto=f"ot {orden['id']} direccion hidraulica para reparar"
+            )
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "foto_vehiculo_archivada_con_sugerencia")
+        self.assertIn("archivada", data["respuesta_texto"])
+        self.assertIn("sugerencia", data["respuesta_texto"])
+
+        # La foto quedó archivada igual que a cualquier mecánico.
+        fotos = self.client.get(f"/api/operativo/ordenes/{orden['id']}/fotos").get_json()["fotos"]
+        self.assertEqual(len(fotos), 1)
+        self.assertEqual(fotos[0]["origen"], "desarme_armado")
+
+        # El diagnóstico real de la OT NO se tocó.
+        orden_actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(orden_actual.get("diagnostico_tecnico") or "", "")
+
+        # El comentario quedó como sugerencia pendiente, vinculada a la foto.
+        sugerencias = self._sugerencias_de(orden["id"])
+        self.assertEqual(len(sugerencias), 1)
+        self.assertIn("direccion hidraulica", sugerencias[0]["texto"])
+        self.assertEqual(sugerencias[0]["mecanico_nombre"], "MECÁNICO RESTRINGIDO UNO")
+        self.assertIsNotNone(sugerencias[0]["foto_id"])
+        self.assertEqual(sugerencias[0]["atendida"], 0)
+
+    def test_mecanico_restringido_manda_solo_texto_con_ot_queda_como_sugerencia(self):
+        self._registrar_mecanico("Mecánico Restringido Dos", "+56900900002", tipo="mecanico")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PERF002")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto("+56900900002", f"ot {orden['id']} el auto ya casi queda listo")
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "sugerencia_registrada")
+        self.assertEqual(data["ot_id"], orden["id"])
+
+        sugerencias = self._sugerencias_de(orden["id"])
+        self.assertEqual(len(sugerencias), 1)
+        self.assertIsNone(sugerencias[0]["foto_id"])
+
+    def test_mecanico_restringido_manda_texto_sin_ot_pide_el_numero(self):
+        self._registrar_mecanico("Mecánico Restringido Tres", "+56900900003", tipo="mecanico")
+        resp = self._mandar_texto("+56900900003", "el auto ya casi queda listo")
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "sugerencia_sin_ot")
+        self.assertIn("número de OT", data["respuesta_texto"])
+
+    def test_mecanico_completo_sigue_pudiendo_cambiar_diagnostico(self):
+        # Regresión: el perfil 'completo' (default) NO debe verse afectado
+        # por este cambio -- sigue pudiendo escribir diagnóstico por texto.
+        self._registrar_mecanico("Mecánico Completo Uno", "+56900900004", tipo="completo")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PERF004")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        respuesta_ia = {
+            "acciones": [{"tipo": "actualizar_diagnostico", "ot_id": orden["id"],
+                          "diagnostico_tecnico": "Correa de distribución rota"}],
+            "resumen": "actualiza diagnóstico",
+        }
+        with patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
+            resp = self._mandar_texto("+56900900004", f"ot {orden['id']} correa de distribución rota")
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        orden_actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertIn("CORREA DE DISTRIBUCIÓN ROTA", (orden_actual.get("diagnostico_tecnico") or "").upper())
+        self.assertEqual(self._sugerencias_de(orden["id"]), [])
+
+    def test_atender_sugerencia_la_saca_de_pendientes(self):
+        self._registrar_mecanico("Mecánico Restringido Cinco", "+56900900005", tipo="mecanico")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PERF005")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        self._mandar_texto("+56900900005", f"ot {orden['id']} algo raro en el motor")
+        sugerencias = self._sugerencias_de(orden["id"])
+        self.assertEqual(len(sugerencias), 1)
+
+        resp = self.client.post(f"/api/sugerencias-diagnostico/{sugerencias[0]['id']}/atender")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertEqual(self._sugerencias_de(orden["id"]), [])
+
+    def test_crear_mecanico_con_tipo_invalido_falla(self):
+        resp = self.client.post(
+            "/api/agente/mecanicos",
+            json={"nombre": "Mecánico Malo", "telefono": "+56900900006", "tipo": "lo-que-sea"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1044,6 +1044,40 @@ def init_db():
         db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN foto_archivo TEXT DEFAULT ''")
         db.commit()
 
+    # ---- Migración 16: perfil restringido de "mecánico" para el agente de
+    # WhatsApp. Un mecánico registrado en agente_mecanicos puede ser de tipo
+    # 'completo' (comportamiento de siempre: puede mandar fotos Y cambiar
+    # diagnóstico/estado de la OT por texto) o 'mecanico' (solo puede mandar
+    # fotos, que se archivan igual que siempre; cualquier texto que mande —
+    # con o sin foto — NO se escribe en diagnóstico/estado, se guarda como
+    # sugerencia en sugerencias_diagnostico para que la parte operativa la
+    # revise y decida). Todo mecánico que ya existiera ANTES de esta
+    # migración queda en 'completo' (el DEFAULT de la columna se aplica a
+    # las filas existentes) — nadie pierde permisos de un día para otro solo
+    # por este despliegue; el perfil 'mecanico' se asigna a mano desde la
+    # administración de mecánicos para quien corresponda.
+    columnas_agente_mecanicos = [c[1] for c in db.execute("PRAGMA table_info(agente_mecanicos)").fetchall()]
+    if "tipo" not in columnas_agente_mecanicos:
+        db.execute("ALTER TABLE agente_mecanicos ADD COLUMN tipo TEXT NOT NULL DEFAULT 'completo'")
+        db.commit()
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sugerencias_diagnostico (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ot_id INTEGER NOT NULL,
+            foto_id INTEGER,
+            mecanico_nombre TEXT NOT NULL,
+            texto TEXT NOT NULL,
+            creado_en TEXT NOT NULL,
+            atendida INTEGER NOT NULL DEFAULT 0,
+            atendida_por TEXT DEFAULT '',
+            atendida_en TEXT
+        )
+        """
+    )
+    db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -4933,6 +4967,35 @@ def _transcribir_audio_whatsapp(audio_bytes, mime_type):
     return texto
 
 
+def _agente_guardar_sugerencia_diagnostico(db, ot_id, foto_id, mecanico_nombre, texto):
+    """Guarda un comentario de un mecánico de perfil restringido (ver
+    migración 16) como sugerencia de diagnóstico, en vez de escribirlo
+    directo en diagnostico_tecnico/diagnostico de la OT. 'foto_id' queda en
+    NULL cuando la sugerencia vino de un mensaje de puro texto (sin foto
+    adjunta). Lo que hace visible estas sugerencias a la parte operativa es
+    _agente_listar_sugerencias_pendientes(), usado desde el detalle de la
+    OT en el módulo Operativo."""
+    db.execute(
+        """
+        INSERT INTO sugerencias_diagnostico
+            (ot_id, foto_id, mecanico_nombre, texto, creado_en, atendida)
+        VALUES (?, ?, ?, ?, ?, 0)
+        """,
+        (ot_id, foto_id, mecanico_nombre, texto, now_iso()),
+    )
+    db.commit()
+
+
+def _agente_listar_sugerencias_pendientes(db, ot_id):
+    """Sugerencias de diagnóstico (ver _agente_guardar_sugerencia_diagnostico)
+    aún no revisadas para una OT, más recientes primero."""
+    filas = db.execute(
+        "SELECT * FROM sugerencias_diagnostico WHERE ot_id = ? AND atendida = 0 ORDER BY creado_en DESC",
+        (ot_id,),
+    ).fetchall()
+    return [dict(f) for f in filas]
+
+
 def _agente_ejecutar_una_accion(db, mecanico, accion):
     """Ejecuta UNA acción ya interpretada (un elemento de la lista
     'acciones' que devuelve _llamar_claude_interpretar_mensaje_agente) y
@@ -5127,6 +5190,16 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
             "\"Agente IA\" en Logística.",
         )
 
+    # Perfil restringido (ver migración 16, columna 'tipo' de
+    # agente_mecanicos): un mecánico 'mecanico' puede mandar fotos, que se
+    # archivan exactamente igual que a cualquier otro mecánico, pero NO
+    # tiene permiso para cambiar diagnóstico/estado de la OT por texto --
+    # cualquier comentario que mande (con o sin foto) se guarda como
+    # SUGERENCIA para que la parte operativa la revise, en vez de
+    # ejecutarse como una acción real. El permiso de escribir diagnóstico
+    # sigue existiendo tal cual para un mecánico de tipo 'completo'.
+    es_mecanico_restringido = (mecanico["tipo"] if "tipo" in mecanico.keys() else "completo") == "mecanico"
+
     if imagen_bytes is not None:
         try:
             clasificacion = _llamar_claude_vision_clasificar_foto_whatsapp(imagen_bytes, imagen_mime)
@@ -5197,7 +5270,7 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
             # modulos/operativo.py, _renderFotosGrid en operativo.js).
             titulo_foto = texto_mensaje.strip() or "Foto enviada por WhatsApp"
             try:
-                _guardar_foto_entidad(
+                foto_archivada = _guardar_foto_entidad(
                     db, "orden", ot_resuelta["ot_id"], "libre", titulo_foto, imagen_bytes,
                     mecanico["nombre"], origen="desarme_armado",
                 )
@@ -5227,6 +5300,22 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                     mecanico["nombre"], "foto_vehiculo_archivada", ot_resuelta["ot_id"], "", "", True,
                     nota_foto_archivada,
                 )
+
+            if es_mecanico_restringido:
+                # Perfil restringido: la foto ya quedó archivada arriba (eso
+                # NO cambia para nadie), pero el comentario que la acompaña
+                # no se interpreta como una acción de diagnóstico/estado --
+                # este perfil no tiene ese permiso. Queda como sugerencia,
+                # vinculada tanto a la OT como a la foto recién archivada.
+                _agente_guardar_sugerencia_diagnostico(
+                    db, ot_resuelta["ot_id"], foto_archivada["id"], mecanico["nombre"], texto_resto,
+                )
+                return _registrar(
+                    mecanico["nombre"], "foto_vehiculo_archivada_con_sugerencia", ot_resuelta["ot_id"], "", "", True,
+                    f"{nota_foto_archivada}\n💡 Dejé tu comentario (\"{texto_resto}\") como sugerencia de "
+                    f"diagnóstico en la OT #{ot_resuelta['ot_id']} para que la parte operativa lo revise.",
+                )
+
             texto_mensaje = f"{texto_resto} (OT identificada por la foto adjunta: OT #{ot_resuelta['ot_id']})"
         # No queda ningún 'else' acá: con tipo_foto != "factura" ya cubierto
         # arriba (y "factura" resuelto en el primer if, que siempre
@@ -5237,6 +5326,36 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
 
     if not texto_mensaje:
         return _registrar("", "error", None, "", "", False, "El mensaje llegó vacío.")
+
+    if es_mecanico_restringido:
+        # Mensaje de puro texto (sin foto) de un mecánico restringido: no
+        # tiene permiso para ejecutar acciones de diagnóstico/estado, así
+        # que en vez de interpretarlo como una acción se intenta guardar
+        # como sugerencia -- para eso sí o sí necesita traer un número de OT
+        # explícito (sin foto no hay patente que leer para resolverla sola).
+        ordenes_abiertas_texto = _agente_listar_ordenes_abiertas(db)
+        match_ot_numero_texto = re.search(r"\bot\s*#?\s*(\d+)\b", texto_mensaje, re.IGNORECASE)
+        ot_para_sugerencia = None
+        if match_ot_numero_texto:
+            ot_id_deseado_texto = int(match_ot_numero_texto.group(1))
+            ot_para_sugerencia = next(
+                (o for o in ordenes_abiertas_texto if o["ot_id"] == ot_id_deseado_texto), None
+            )
+        if ot_para_sugerencia is None:
+            return _registrar(
+                mecanico["nombre"], "sugerencia_sin_ot", None, "", "", False,
+                "Tu perfil solo puede mandar fotos y comentarios para la OT, no cambiar el diagnóstico "
+                "directamente. Indica el número de OT (ej. \"OT 3321\") junto con tu comentario para que "
+                "quede registrado como sugerencia.",
+            )
+        _agente_guardar_sugerencia_diagnostico(
+            db, ot_para_sugerencia["ot_id"], None, mecanico["nombre"], texto_mensaje,
+        )
+        return _registrar(
+            mecanico["nombre"], "sugerencia_registrada", ot_para_sugerencia["ot_id"], "", "", True,
+            f"💡 Dejé tu comentario como sugerencia de diagnóstico en la OT #{ot_para_sugerencia['ot_id']} "
+            f"para que la parte operativa lo revise.",
+        )
 
     try:
         ordenes_abiertas = _agente_listar_ordenes_abiertas(db)
@@ -5345,9 +5464,12 @@ def crear_mecanico_agente():
     existente = db.execute("SELECT id FROM agente_mecanicos WHERE telefono = ?", (telefono,)).fetchone()
     if existente:
         return jsonify({"error": "Ya hay un mecánico registrado con ese teléfono"}), 400
+    tipo = (data.get("tipo") or "completo").strip()
+    if tipo not in ("completo", "mecanico"):
+        return jsonify({"error": "El tipo de mecánico debe ser 'completo' o 'mecanico'"}), 400
     cur = db.execute(
-        "INSERT INTO agente_mecanicos (nombre, telefono, activo, creado_en) VALUES (?, ?, 1, ?)",
-        (nombre.upper(), telefono, now_iso()),
+        "INSERT INTO agente_mecanicos (nombre, telefono, activo, tipo, creado_en) VALUES (?, ?, 1, ?, ?)",
+        (nombre.upper(), telefono, tipo, now_iso()),
     )
     db.commit()
     fila = db.execute("SELECT * FROM agente_mecanicos WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -5364,7 +5486,13 @@ def editar_mecanico_agente(mecanico_id):
     activo = fila["activo"]
     if "activo" in data:
         activo = 1 if data.get("activo") else 0
-    db.execute("UPDATE agente_mecanicos SET activo = ? WHERE id = ?", (activo, mecanico_id))
+    tipo = fila["tipo"] if "tipo" in fila.keys() else "completo"
+    if "tipo" in data:
+        tipo_nuevo = (data.get("tipo") or "completo").strip()
+        if tipo_nuevo not in ("completo", "mecanico"):
+            return jsonify({"error": "El tipo de mecánico debe ser 'completo' o 'mecanico'"}), 400
+        tipo = tipo_nuevo
+    db.execute("UPDATE agente_mecanicos SET activo = ?, tipo = ? WHERE id = ?", (activo, tipo, mecanico_id))
     db.commit()
     actualizado = db.execute("SELECT * FROM agente_mecanicos WHERE id = ?", (mecanico_id,)).fetchone()
     return jsonify(dict(actualizado))
@@ -5376,6 +5504,36 @@ def eliminar_mecanico_agente(mecanico_id):
     db.execute("DELETE FROM agente_mecanicos WHERE id = ?", (mecanico_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/ordenes/<int:ot_id>/sugerencias-diagnostico", methods=["GET"])
+def listar_sugerencias_diagnostico_ot(ot_id):
+    """Sugerencias de diagnóstico pendientes de revisar para una OT (ver
+    _agente_guardar_sugerencia_diagnostico) -- dejadas por un mecánico de
+    perfil restringido vía WhatsApp. Se usa desde el detalle de la OT en
+    Operativo para mostrar el aviso a la parte operativa."""
+    db = get_db()
+    return jsonify(_agente_listar_sugerencias_pendientes(db, ot_id))
+
+
+@app.route("/api/sugerencias-diagnostico/<int:sugerencia_id>/atender", methods=["POST"])
+@requiere_rol("operativo")
+def atender_sugerencia_diagnostico(sugerencia_id):
+    """Marca una sugerencia como revisada -- no cambia nada del diagnóstico
+    real de la OT, solo saca el aviso pendiente. La decisión de si el
+    hallazgo del mecánico se traduce o no en un cambio real de diagnóstico
+    la toma a mano la parte operativa, editando la OT como siempre."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM sugerencias_diagnostico WHERE id = ?", (sugerencia_id,)).fetchone()
+    if not fila:
+        return jsonify({"error": "No existe esa sugerencia"}), 404
+    db.execute(
+        "UPDATE sugerencias_diagnostico SET atendida = 1, atendida_por = ?, atendida_en = ? WHERE id = ?",
+        (usuario_actual(), now_iso(), sugerencia_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM sugerencias_diagnostico WHERE id = ?", (sugerencia_id,)).fetchone()
+    return jsonify(dict(actualizada))
 
 
 @app.route("/api/agente/simular-mensaje", methods=["POST"])

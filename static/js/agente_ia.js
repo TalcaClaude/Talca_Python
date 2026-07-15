@@ -112,22 +112,24 @@ async function cargarMecanicosAgente() {
     renderTablaMecanicosAgente();
     renderSelectMecanicosAgente();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Error al cargar mecánicos: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar mecánicos: ${e.message}</td></tr>`;
   }
 }
 
 function renderTablaMecanicosAgente() {
   const tbody = document.getElementById("tbody-mecanicos-agente");
   if (!state.agenteMecanicos.length) {
-    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Todavía no hay mecánicos registrados.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Todavía no hay mecánicos registrados.</td></tr>`;
     return;
   }
   tbody.innerHTML = state.agenteMecanicos.map(m => `
     <tr data-id="${m.id}">
       <td>${escapeHtml(m.nombre)}</td>
       <td class="mono">${escapeHtml(m.telefono)}</td>
+      <td>${m.tipo === "mecanico" ? "Mecánico (restringido)" : "Completo"}</td>
       <td><span class="badge-urgencia ${m.activo ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${m.activo ? "Activo" : "Inactivo"}</span></td>
       <td>
+        <button type="button" class="btn btn-secundario btn-chico" data-toggle-tipo-mecanico="${m.id}">${m.tipo === "mecanico" ? "Dar permiso completo" : "Restringir a solo fotos"}</button>
         <button type="button" class="btn btn-secundario btn-chico" data-toggle-mecanico="${m.id}">${m.activo ? "Desactivar" : "Activar"}</button>
         <button type="button" class="btn btn-danger btn-chico" data-eliminar-mecanico="${m.id}">Eliminar</button>
       </td>
@@ -136,6 +138,9 @@ function renderTablaMecanicosAgente() {
 
   tbody.querySelectorAll("[data-toggle-mecanico]").forEach(btn => {
     btn.addEventListener("click", () => alternarActivoMecanicoAgente(parseInt(btn.dataset.toggleMecanico, 10)));
+  });
+  tbody.querySelectorAll("[data-toggle-tipo-mecanico]").forEach(btn => {
+    btn.addEventListener("click", () => alternarTipoMecanicoAgente(parseInt(btn.dataset.toggleTipoMecanico, 10)));
   });
   tbody.querySelectorAll("[data-eliminar-mecanico]").forEach(btn => {
     btn.addEventListener("click", () => eliminarMecanicoAgente(parseInt(btn.dataset.eliminarMecanico, 10)));
@@ -168,6 +173,23 @@ async function alternarActivoMecanicoAgente(id) {
   }
 }
 
+async function alternarTipoMecanicoAgente(id) {
+  const m = state.agenteMecanicos.find(x => x.id === id);
+  if (!m) return;
+  const nuevoTipo = m.tipo === "mecanico" ? "completo" : "mecanico";
+  const confirmacion = nuevoTipo === "mecanico"
+    ? `¿Restringir a "${m.nombre}" a solo mandar fotos? Ya no va a poder cambiar diagnóstico ni estado de la OT por WhatsApp — su comentario quedará como sugerencia.`
+    : `¿Dar permiso completo a "${m.nombre}"? Va a poder volver a cambiar diagnóstico y estado de la OT por WhatsApp.`;
+  if (!confirm(confirmacion)) return;
+  try {
+    await api(`/api/agente/mecanicos/${id}`, { method: "PUT", body: JSON.stringify({ tipo: nuevoTipo }) });
+    toast("Perfil del mecánico actualizado");
+    await cargarMecanicosAgente();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
 async function eliminarMecanicoAgente(id) {
   const m = state.agenteMecanicos.find(x => x.id === id);
   if (!m) return;
@@ -191,6 +213,7 @@ document.getElementById("form-mecanico-agente").addEventListener("submit", async
   const payload = {
     nombre: document.getElementById("mec-nombre").value,
     telefono: document.getElementById("mec-telefono").value,
+    tipo: document.getElementById("mec-tipo").value,
   };
   try {
     await api("/api/agente/mecanicos", { method: "POST", body: JSON.stringify(payload) });

@@ -273,23 +273,55 @@ El respaldo por correo (arriba) manda una copia completa **una vez al día**.
 Si un día se borra o se corrompe algo por error, en el peor caso se pierde
 todo lo que pasó desde el último correo (hasta 24 horas de trabajo).
 
-Para bajar eso a minutos en vez de horas, el sistema además crea, cada 15
-minutos, una copia consistente de la base de datos (usando `VACUUM INTO`,
-que garantiza que la copia no queda a medio escribir aunque se tome
-mientras alguien está guardando algo) en una carpeta aparte
-(`respaldos_locales/`) dentro del mismo disco persistente de Railway.
-Guarda como máximo las últimas 96 copias (24 horas a ese ritmo) y va
+Para bajar eso a minutos en vez de horas, el sistema además crea, cada 60
+minutos (configurable con la variable de entorno
+`RESPALDO_LOCAL_INTERVALO_MINUTOS`; era cada 15 minutos hasta julio 2026),
+una copia consistente de la base de datos (usando `VACUUM INTO`, que
+garantiza que la copia no queda a medio escribir aunque se tome mientras
+alguien está guardando algo) en una carpeta aparte (`respaldos_locales/`)
+dentro del mismo disco persistente de Railway. Guarda como máximo las
+últimas 96 copias (`RESPALDO_LOCAL_MAX_COPIAS`, 4 días a ese ritmo) y va
 borrando las más viejas solas.
+
+⚠ **El intervalo NO controla cuánto disco ocupan los respaldos** — eso lo
+determina `RESPALDO_LOCAL_MAX_COPIAS` × el tamaño de la base de datos en ese
+momento (la rotación borra la más vieja apenas se supera ese número). Subir
+el intervalo solo hace que se tarde más en llegar a ese tope y que cubra más
+historial por la misma cantidad de disco. Si el disco vuelve a quedar
+justo, lo que hay que bajar es `RESPALDO_LOCAL_MAX_COPIAS`, no (solo) el
+intervalo -- ver el incidente de julio 2026 más abajo.
+
+Además, desde ese mismo incidente, antes de crear cada respaldo el sistema
+revisa el espacio libre del disco (`RESPALDO_LOCAL_MIN_MB_LIBRES`, 100 MB
+por defecto): si queda menos que eso, se salta el respaldo en vez de
+arriesgarse a terminar de llenar el disco.
 
 Esto se maneja todo desde la propia app, sin agregar ningún proveedor
 externo nuevo: **Logística → Respaldo**, sección "Respaldos automáticos
 locales". Ahí se ve la lista de copias disponibles con su fecha y tamaño, un
 botón para crear una copia manual en el momento (por ejemplo justo antes de
-un cambio delicado), y un botón "Restaurar esta copia" por cada una.
+un cambio delicado), y un botón "Restaurar esta copia" por cada una. La
+misma pantalla también tiene una sección "Uso de disco del servidor" con el
+desglose de qué está ocupando espacio, y un botón "Liberar espacio ahora"
+que borra de urgencia todos los respaldos menos los 3 más recientes.
 
 ⚠ Restaurar reemplaza TODOS los datos actuales por los de esa copia -- solo
-para recuperarse de un problema real. Ambos endpoints (crear y restaurar)
-exigen sesión de administrador.
+para recuperarse de un problema real. Todos estos endpoints exigen sesión
+de administrador.
+
+### Incidente de julio 2026: el volumen de Railway llegó al 95%
+
+El volumen persistente estaba configurado en 500 MB. Con el intervalo de 15
+minutos y `RESPALDO_LOCAL_MAX_COPIAS=96` de ese momento, los respaldos
+automáticos por sí solos llegaron a ocupar la mayoría del disco disponible
+(96 copias completas de la base de datos), y el disco casi lleno terminó
+rompiendo TODO el sistema -- cualquier escritura a SQLite (no solo los
+respaldos) empezó a fallar con `disk I/O error`. Se resolvió: (1) subiendo
+el volumen de Railway a 5 GB, (2) agregando el endpoint de diagnóstico de
+disco y el botón de limpieza de urgencia (ver arriba), y (3) el guard de
+espacio libre mínimo antes de crear un respaldo nuevo. Si esto vuelve a
+pasar, el primer lugar para mirar es **Logística → Respaldo → Uso de disco
+del servidor**.
 
 ### Por qué no se usó Litestream + Cloudflare R2
 
@@ -310,7 +342,7 @@ Se descartó a favor de este enfoque más simple porque:
 
 ### Los dos respaldos trabajando juntos
 
-- **Copias automáticas locales (cada 15 min)**: protección principal para el
+- **Copias automáticas locales (cada 60 min)**: protección principal para el
   día a día, restaurable con un clic desde la propia app.
 - **Correo diario (Resend/Gmail)**: copia secundaria, fuera de Railway, útil
   si algún día se pierde el volumen persistente completo (algo que las

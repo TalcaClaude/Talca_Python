@@ -450,7 +450,7 @@ function abrirEdicionCajaGasto(id) {
 document.getElementById("btn-eliminar-caja-gasto").addEventListener("click", async () => {
   const id = state.cajaMovimientoActivoId;
   if (!id) return;
-  if (!confirm("¿Eliminar este gasto?")) return;
+  if (!confirm("¿Eliminar este gasto? No se puede deshacer.")) return;
   try {
     await api(`/api/caja/movimiento/${id}`, { method: "DELETE" });
     toast("Gasto eliminado");
@@ -535,7 +535,7 @@ function abrirEdicionCajaAporte(id) {
 document.getElementById("btn-eliminar-caja-aporte").addEventListener("click", async () => {
   const id = state.cajaMovimientoActivoId;
   if (!id) return;
-  if (!confirm("¿Eliminar este aporte?")) return;
+  if (!confirm("¿Eliminar este aporte? No se puede deshacer.")) return;
   try {
     await api(`/api/caja/movimiento/${id}`, { method: "DELETE" });
     toast("Aporte eliminado");

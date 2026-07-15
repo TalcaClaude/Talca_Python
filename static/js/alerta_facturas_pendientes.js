@@ -196,6 +196,12 @@ document.getElementById("afp-btn-flotante")?.addEventListener("click", afpAbrirL
 document.getElementById("afp-btn-aprobar")?.addEventListener("click", async () => {
   const id = afpDetalleActivoId;
   if (!id) return;
+  // Esta es la acción de mayor impacto del widget -- genera stock real y una
+  // cuenta por pagar de inmediato, apenas se confirma -- así que pide
+  // confirmación igual que "Rechazar factura" (ver más abajo), que ya la
+  // tenía. Antes esta quedaba como la única sin confirmar pese a ser la más
+  // riesgosa de las dos.
+  if (!confirm("¿Aprobar esta recepción? Se va a generar stock y una cuenta por pagar de inmediato. Esto no se puede deshacer desde acá.")) return;
   const lineasRecibidas = [...document.querySelectorAll(".afp-input-recibido")].map(inp => ({
     producto_id: parseInt(inp.dataset.productoId, 10),
     cantidad_recibida: parseInt(inp.value || "0", 10),

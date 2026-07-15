@@ -786,11 +786,43 @@ function renderTableroOperativo() {
 // filtros propios, independientes de los del tablero.
 // ---------------------------------------------------------------------------
 
+// Por defecto NO se trae el historial completo (~3.000+ OT/garantías) cada
+// vez que se abre la pestaña -- eso la hacía lenta para nada (a pedido del
+// taller, jul. 2026). En cambio se manda un "desde" reciente (acá, 6 meses
+// atrás) y el backend siempre agrega además TODO lo que sigue abierto sin
+// importar su fecha (ver _listado_ordenes_liviano/_listado_garantias_liviano
+// en modulos/operativo.py) -- así nunca se esconde trabajo activo, solo se
+// acota el historial ya cerrado.
+//
+// OJO: este default se aplica DENTRO de cargarListadoOperativo() (con un
+// flag para que sea una sola vez), y NO en un bloque suelto al cargar la
+// página -- se probó así primero y falló: activarPestanaDesdeHash() (más
+// arriba en este archivo) puede llamar a cargarListadoOperativo() ANTES de
+// que el script llegue a esta sección si la URL ya viene con "#listado",
+// así que un bloque de inicialización acá abajo corría demasiado tarde y
+// la primera carga salía sin fecha (pedía el historial completo igual).
+let opListadoFechaPorDefectoAplicada = false;
+
 async function cargarListadoOperativo() {
   const tbody = document.getElementById("op-list-tbody");
   if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="vacio">Cargando…</td></tr>`;
   try {
-    const data = await api("/api/operativo/listado");
+    const campoDesde = document.getElementById("op-list-fecha-desde");
+    if (!opListadoFechaPorDefectoAplicada) {
+      opListadoFechaPorDefectoAplicada = true;
+      if (!campoDesde.value) {
+        const hace6Meses = new Date();
+        hace6Meses.setMonth(hace6Meses.getMonth() - 6);
+        campoDesde.value = hace6Meses.toISOString().slice(0, 10);
+      }
+    }
+    const desde = campoDesde.value;
+    const hasta = document.getElementById("op-list-fecha-hasta").value;
+    const qs = new URLSearchParams();
+    if (desde) qs.set("desde", desde);
+    if (hasta) qs.set("hasta", hasta);
+    const query = qs.toString() ? `?${qs.toString()}` : "";
+    const data = await api(`/api/operativo/listado${query}`);
     state.opListado = data.filas;
     renderListadoOperativo();
   } catch (e) {
@@ -808,8 +840,14 @@ function renderListadoOperativo() {
   const filtroEstado = document.getElementById("op-list-filtro-estado").value;
   const filtroPrioridad = document.getElementById("op-list-filtro-prioridad").value;
   const busqueda = document.getElementById("op-list-buscar").value.trim().toLowerCase();
-  const fechaDesde = document.getElementById("op-list-fecha-desde").value;
-  const fechaHasta = document.getElementById("op-list-fecha-hasta").value;
+
+  // OJO: acá NO se vuelve a filtrar por fecha -- eso ya lo hizo el backend
+  // en cargarListadoOperativo() (mandó desde/hasta como query params). Si
+  // se repitiera el filtro acá con las mismas fechas, se terminaría
+  // escondiendo por accidente las OT/garantías que siguen ABIERTAS pero
+  // ingresaron antes del rango elegido (el backend las trae a propósito,
+  // sin importar su fecha, porque son trabajo activo -- ver
+  // _listado_ordenes_liviano en modulos/operativo.py).
 
   // El filtro de prioridad solo aplica a OT normales (las garantías no
   // tienen prioridad) -- si está activo, se excluyen directamente las
@@ -824,8 +862,6 @@ function renderListadoOperativo() {
     .filter(f => !filtroTipo || f.tipo === filtroTipo)
     .filter(f => filtroEstado ? f.estado === filtroEstado : f.estado !== "cancelado")
     .filter(f => !filtroPrioridad || f.tipo === "nuevo")
-    .filter(f => !fechaDesde || (f.fecha_recepcion || "").slice(0, 10) >= fechaDesde)
-    .filter(f => !fechaHasta || (f.fecha_recepcion || "").slice(0, 10) <= fechaHasta)
     .filter(coincide)
     .sort((a, b) => b.id - a.id);
 
@@ -865,10 +901,59 @@ function renderListadoOperativo() {
   });
 }
 
+// Las etapas de OT y de garantías son procesos distintos (algunas se llaman
+// igual -- "Diagnóstico", "Listo", "Entregado" -- pero varias son
+// exclusivas de un tipo, ej. "Recibido" solo existe en OT e "Ingreso" solo
+// en garantías). Al elegir "Solo garantías"/"Solo nuevos (OT)" en el filtro
+// de Tipo, se oculta el <optgroup> del <select> de Etapa que no corresponde,
+// para no dejar elegir una etapa que nunca va a traer resultados con ese
+// tipo. Si la etapa elegida quedaba en el grupo que se acaba de ocultar, se
+// vuelve a "Todas las etapas" en vez de dejar un filtro imposible puesto.
+function actualizarOpcionesEstadoListado() {
+  const tipo = document.getElementById("op-list-filtro-tipo").value;
+  const selectEstado = document.getElementById("op-list-filtro-estado");
+  const grupoOt = document.getElementById("op-list-optgroup-ot");
+  const grupoGarantia = document.getElementById("op-list-optgroup-garantia");
+
+  const ocultarOt = tipo === "garantia";
+  const ocultarGarantia = tipo === "nuevo";
+  grupoOt.hidden = ocultarOt;
+  grupoOt.style.display = ocultarOt ? "none" : "";
+  grupoGarantia.hidden = ocultarGarantia;
+  grupoGarantia.style.display = ocultarGarantia ? "none" : "";
+
+  const valorActual = selectEstado.value;
+  if (!valorActual) return;
+  // OJO: 'optgroup' no tiene propiedad .options (esa es solo de <select>) --
+  // hay que buscar los <option> con querySelectorAll.
+  const estadosOt = new Set(Array.from(grupoOt.querySelectorAll("option")).map(o => o.value));
+  const estadosGarantia = new Set(Array.from(grupoGarantia.querySelectorAll("option")).map(o => o.value));
+  const sigueValido = (!ocultarOt && estadosOt.has(valorActual)) || (!ocultarGarantia && estadosGarantia.has(valorActual));
+  if (!sigueValido) selectEstado.value = "";
+}
+
 ["op-list-buscar"].forEach(id => document.getElementById(id).addEventListener("input", renderListadoOperativo));
-["op-list-filtro-tipo", "op-list-filtro-estado", "op-list-filtro-prioridad", "op-list-fecha-desde", "op-list-fecha-hasta"].forEach(id => {
+document.getElementById("op-list-filtro-tipo").addEventListener("change", () => {
+  actualizarOpcionesEstadoListado();
+  renderListadoOperativo();
+});
+["op-list-filtro-estado", "op-list-filtro-prioridad"].forEach(id => {
   document.getElementById(id).addEventListener("change", renderListadoOperativo);
 });
+// Los campos de fecha (a diferencia de los demás filtros) SÍ disparan un
+// nuevo pedido al backend en vez de solo re-filtrar lo ya cargado -- son
+// justamente los que controlan cuánto historial se trae (ver
+// cargarListadoOperativo), así que cambiarlos tiene que ir a buscar datos
+// nuevos, no filtrar los que ya están en memoria.
+["op-list-fecha-desde", "op-list-fecha-hasta"].forEach(id => {
+  document.getElementById(id).addEventListener("change", cargarListadoOperativo);
+});
+document.getElementById("op-list-btn-historial-completo").addEventListener("click", () => {
+  document.getElementById("op-list-fecha-desde").value = "";
+  document.getElementById("op-list-fecha-hasta").value = "";
+  cargarListadoOperativo();
+});
+actualizarOpcionesEstadoListado();
 
 // El tablero (kanban) tiene más columnas de las que caben en una pantalla
 // normal, así que hace scroll horizontal — estas dos franjas con flecha

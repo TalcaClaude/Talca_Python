@@ -116,6 +116,16 @@
   </section>
 
   <section class="chart-card" style="margin-top:22px;">
+    <h3>Migración de datos (clientes / autos / OT abiertas)</h3>
+    <!-- Antes esta herramienta solo se podía llegar tipeando la URL a mano
+         (/admin/migracion-datos) -- no tenía ningún link visible desde acá,
+         a diferencia de las demás herramientas de mantenimiento de esta
+         página. -->
+    <p class="chart-sub">Herramienta de uso único para la carga inicial desde el sistema anterior (clientes, autos y OT que seguían abiertas al momento de migrar).</p>
+    <a href="/admin/migracion-datos" class="btn btn-secundario">Ir a Migración de datos</a>
+  </section>
+
+  <section class="chart-card" style="margin-top:22px;">
     <h3>Migración: repuestos/mano de obra de garantías</h3>
     <p class="chart-sub">Carga el archivo <code>garantias_items_extraidos.json</code> (extraído del sistema anterior) para agregar los repuestos y mano de obra históricos a las garantías que ya están migradas. Solo agrega ítems informativos — no toca stock ni el catálogo. Es seguro correrla más de una vez: las garantías que ya tengan estos ítems se saltan.</p>
     <input type="file" id="migracion-garantias-items-archivo" accept="application/json" style="margin-bottom:10px">

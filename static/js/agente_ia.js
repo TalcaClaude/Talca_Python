@@ -164,6 +164,12 @@ function renderSelectMecanicosAgente() {
 async function alternarActivoMecanicoAgente(id) {
   const m = state.agenteMecanicos.find(x => x.id === id);
   if (!m) return;
+  // Solo se confirma al DESACTIVAR (le corta el acceso al agente de
+  // WhatsApp a esa persona) -- volver a activarlo es una acción de bajo
+  // riesgo y no hace falta frenarla. Antes ninguna de las dos direcciones
+  // pedía confirmación, a diferencia de "restringir a solo fotos" (más
+  // abajo, alternarTipoMecanicoAgente) y "eliminar", que sí la tenían.
+  if (m.activo && !confirm(`¿Desactivar a "${m.nombre}"? Va a dejar de poder usar el agente de WhatsApp hasta que lo actives de nuevo.`)) return;
   try {
     await api(`/api/agente/mecanicos/${id}`, { method: "PUT", body: JSON.stringify({ activo: !m.activo }) });
     toast(m.activo ? "Mecánico desactivado" : "Mecánico activado");

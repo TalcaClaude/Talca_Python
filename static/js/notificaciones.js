@@ -78,7 +78,12 @@ async function notifCargarLista() {
         </p>
         <p class="notif-item-texto">${notifEscapeHtml(s.texto)}</p>
         <p class="notif-item-meta">Por: ${notifEscapeHtml(s.mecanico_nombre)} — ${notifFmtFecha(s.creado_en)}</p>
-        <button type="button" class="btn btn-secundario btn-chico" data-notif-atender="${s.id}">Marcar como revisada</button>
+        <!-- "Descartar sugerencia" (no "Marcar como revisada") a propósito --
+             es el mismo texto que usa el modal de la OT para esta misma
+             acción (operativo.js, "Descartar sin agregar"). El texto viejo
+             no dejaba claro que la sugerencia de la IA se pierde, no que
+             solo se "marca" como vista. -->
+        <button type="button" class="btn btn-secundario btn-chico" data-notif-atender="${s.id}">Descartar sugerencia</button>
       </div>
     `).join("");
     lista.querySelectorAll("[data-notif-atender]").forEach(btn => {

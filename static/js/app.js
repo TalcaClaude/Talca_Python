@@ -26,6 +26,11 @@ const state = {
 // ---------------------------------------------------------------------------
 
 function fmtMoney(n) {
+  // Antes esto mostraba literalmente "$NaN" si 'n' venía null/undefined
+  // (ej. un campo de precio todavía sin cargar) -- las otras dos copias de
+  // este mismo formateador (pdFmtMoney en panel_dueno.js, la de charts.js)
+  // ya devolvían "—" en ese caso; esta quedó desalineada.
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return "$" + Math.round(n).toLocaleString("es-CL");
 }
 

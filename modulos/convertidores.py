@@ -894,8 +894,13 @@ def crear_convertidor():
     if origen_tipo not in ORIGENES_INTERNOS and data.get("precio_venta") not in (None, ""):
         try:
             precio_venta = float(data["precio_venta"])
+            # A diferencia de todos los montos de Finanzas (gasto, aporte,
+            # pago de CxP, CxP manual), este no exigía > 0 -- se podía
+            # cargar un precio de venta en $0 o negativo sin ningún aviso.
+            if precio_venta <= 0:
+                raise ValueError
         except (TypeError, ValueError):
-            return jsonify({"error": "precio_venta debe ser un número"}), 400
+            return jsonify({"error": "precio_venta debe ser un número mayor a 0"}), 400
 
     ts = now_iso()
     cur = db.execute(
@@ -1020,8 +1025,10 @@ def editar_convertidor(convertidor_id):
             if data.get("precio_venta") not in (None, ""):
                 try:
                     precio_venta = float(data["precio_venta"])
+                    if precio_venta <= 0:
+                        raise ValueError
                 except (TypeError, ValueError):
-                    return jsonify({"error": "precio_venta debe ser un número"}), 400
+                    return jsonify({"error": "precio_venta debe ser un número mayor a 0"}), 400
             else:
                 precio_venta = None
 
@@ -1215,8 +1222,10 @@ def agregar_item_convertidor(convertidor_id):
         if data.get("costo_unitario") not in (None, ""):
             try:
                 costo_unitario = float(data.get("costo_unitario"))
+                if costo_unitario < 0:
+                    raise ValueError
             except (TypeError, ValueError):
-                return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+                return jsonify({"error": "El costo unitario debe ser un número válido y no puede ser negativo"}), 400
         cantidad_stock = int(round(cantidad))
         try:
             _aplicar_salida_stock(
@@ -1238,8 +1247,10 @@ def agregar_item_convertidor(convertidor_id):
             return jsonify({"error": "Describe la mano de obra realizada"}), 400
         try:
             costo_unitario = float(data.get("costo_unitario") or 0)
+            if costo_unitario < 0:
+                raise ValueError
         except (TypeError, ValueError):
-            return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
+            return jsonify({"error": "El costo unitario debe ser un número válido y no puede ser negativo"}), 400
         detalle = (data.get("detalle") or "").strip().upper()
         aplica_iva = 1 if data.get("aplica_iva") else 0
 

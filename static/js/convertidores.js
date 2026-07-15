@@ -373,6 +373,16 @@ document.querySelectorAll("#conv-kanban .op-columna").forEach(columna => {
     if (!convertidorId || !nuevoEstado) return;
     const convertidor = (state.opConvertidores || []).find(c => c.id === convertidorId);
     if (convertidor && convertidor.estado === nuevoEstado) return;
+    // "Entregado"/"Cancelado" cierran el convertidor -- a diferencia de
+    // mover entre las demás columnas (que solo son pasos intermedios del
+    // proceso), estas dos son difíciles de revertir a mano una vez movidas
+    // por error con el mouse, así que sí piden confirmación (mismo criterio
+    // que ya se usa para eliminar un convertidor, más abajo en este
+    // archivo).
+    if (["entregado", "cancelado"].includes(nuevoEstado)) {
+      const etiqueta = CONV_ESTADO_LABEL[nuevoEstado] || nuevoEstado;
+      if (!confirm(`¿Mover el convertidor #${convertidorId} a "${etiqueta}"? Es un estado de cierre, después es más difícil volver atrás.`)) return;
+    }
     try {
       await api(`/api/convertidores/${convertidorId}`, { method: "PUT", body: JSON.stringify({ estado: nuevoEstado }) });
       toast(`Convertidor #${convertidorId} movido a "${CONV_ESTADO_LABEL[nuevoEstado] || nuevoEstado}".`);

@@ -1206,6 +1206,43 @@ class TestCorrelativoYListadoOperativo(unittest.TestCase):
         resp = self.client.get("/api/operativo/listado?tipo=lo-que-sea")
         self.assertEqual(resp.status_code, 400)
 
+    def test_listado_con_desde_acota_lo_cerrado_pero_no_lo_abierto(self):
+        # Objetivo del filtro desde/hasta: no traer los ~3.000+ registros
+        # del historial completo cada vez que se abre la pestaña, PERO sin
+        # esconder nunca trabajo que sigue abierto, sin importar su fecha
+        # de ingreso (ver _listado_ordenes_liviano en modulos/operativo.py).
+        cliente = self._crear_cliente("Cliente Filtro Fecha")
+        orden_vieja_cerrada = self._crear_orden(cliente["id"])
+        orden_vieja_abierta = self._crear_orden(cliente["id"])
+
+        db = taller_app._conectar_db()
+        db.execute(
+            "UPDATE ordenes_trabajo SET fecha_recepcion = '2019-05-01T09:00:00', "
+            "estado = 'entregado', fecha_entrega_real = '2019-05-03T09:00:00' WHERE id = ?",
+            (orden_vieja_cerrada["id"],),
+        )
+        db.execute(
+            "UPDATE ordenes_trabajo SET fecha_recepcion = '2019-05-01T09:00:00' WHERE id = ?",
+            (orden_vieja_abierta["id"],),
+        )
+        db.commit()
+        db.close()
+
+        # Con un "desde" reciente (hoy), la cerrada de 2019 debería quedar
+        # afuera -- pero la abierta de 2019 debería seguir apareciendo,
+        # porque es trabajo activo sin importar cuándo ingresó.
+        hoy = taller_app.now_iso()[:10]
+        resp = self.client.get(f"/api/operativo/listado?desde={hoy}")
+        ids = [f["id"] for f in resp.get_json()["filas"]]
+        self.assertNotIn(orden_vieja_cerrada["id"], ids, "La OT vieja y cerrada no debería aparecer con un 'desde' reciente")
+        self.assertIn(orden_vieja_abierta["id"], ids, "La OT vieja pero todavía abierta debería aparecer igual")
+
+        # Sin desde/hasta (botón "Ver historial completo"), aparecen ambas.
+        resp_completo = self.client.get("/api/operativo/listado")
+        ids_completo = [f["id"] for f in resp_completo.get_json()["filas"]]
+        self.assertIn(orden_vieja_cerrada["id"], ids_completo)
+        self.assertIn(orden_vieja_abierta["id"], ids_completo)
+
 
 class TestPresupuestoDescargaEnvioYOrdenImprimible(unittest.TestCase):
     """Cubre las funcionalidades nuevas: (1) el PDF del presupuesto se

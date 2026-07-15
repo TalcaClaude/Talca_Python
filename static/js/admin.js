@@ -189,14 +189,32 @@ function abrirEdicionUsuario(id) {
 document.getElementById("form-editar-usuario").addEventListener("submit", async (e) => {
   e.preventDefault();
   const id = document.getElementById("eu-id").value;
+  const nuevoActivo = document.getElementById("eu-activo").checked;
+  const nuevoEsAdmin = document.getElementById("eu-es-admin").checked;
+
+  // Solo se confirma cuando el cambio es sensible (le corta el acceso a la
+  // persona, o le da/saca permiso de Administrador) -- comparado contra los
+  // valores que tenía ANTES de abrir el modal (state.usuarios sigue con la
+  // lista vieja hasta que se recarga después de guardar). Editar solo el
+  // nombre o los módulos, por ejemplo, sigue guardando directo sin
+  // interrumpir. Antes ningún cambio acá pedía confirmación, a diferencia
+  // de "Resetear contraseña" en el mismo modal (ver más abajo), que si bien
+  // tampoco la tenía, es igual de sensible -- se agregó a las dos.
+  const original = state.usuarios.find(u => String(u.id) === String(id));
+  if (original) {
+    if (original.activo && !nuevoActivo && !confirm(`¿Desactivar la cuenta de "${original.username}"? No va a poder iniciar sesión hasta que la reactives.`)) return;
+    if (!original.es_admin && nuevoEsAdmin && !confirm(`¿Dar acceso de Administrador a "${original.username}"? Va a poder ver y modificar todos los módulos.`)) return;
+    if (original.es_admin && !nuevoEsAdmin && !confirm(`¿Quitarle el acceso de Administrador a "${original.username}"?`)) return;
+  }
+
   try {
     await api(`/api/admin/usuarios/${id}`, {
       method: "PUT",
       body: JSON.stringify({
         nombre: document.getElementById("eu-nombre").value,
-        es_admin: document.getElementById("eu-es-admin").checked,
+        es_admin: nuevoEsAdmin,
         modulos: leerModulosMarcados("eu-modulo"),
-        activo: document.getElementById("eu-activo").checked,
+        activo: nuevoActivo,
       }),
     });
     toast("Usuario actualizado");
@@ -215,6 +233,8 @@ document.getElementById("btn-resetear-password").addEventListener("click", async
     toast("La contraseña debe tener al menos 6 caracteres", true);
     return;
   }
+  const original = state.usuarios.find(u => String(u.id) === String(id));
+  if (!confirm(`¿Resetear la contraseña de "${original ? original.username : "este usuario"}"? La contraseña anterior deja de funcionar de inmediato.`)) return;
   try {
     await api(`/api/admin/usuarios/${id}/resetear-password`, {
       method: "POST",
@@ -234,6 +254,7 @@ document.getElementById("btn-resetear-password").addEventListener("click", async
 // ---------------------------------------------------------------------------
 
 document.getElementById("btn-limpiar-cxc-huerfanas").addEventListener("click", async () => {
+  if (!confirm("¿Eliminar las Cuentas por Cobrar huérfanas? Se borran de forma permanente las que no tengan ningún pago registrado.")) return;
   const btn = document.getElementById("btn-limpiar-cxc-huerfanas");
   const resultado = document.getElementById("resultado-limpiar-cxc");
   btn.disabled = true;

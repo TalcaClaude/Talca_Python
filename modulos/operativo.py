@@ -2159,16 +2159,24 @@ def listar_ordenes():
     return jsonify({"ordenes": [_orden_dict(db, r) for r in rows], "total": len(rows), "mes_filtrado": mes or "todos"})
 
 
-def _listado_ordenes_liviano(db):
+def _listado_ordenes_liviano(db, desde=None, hasta=None):
     """Una fila liviana por OT para la pestaña 'Listado' -- a propósito NO
     usa _orden_dict (que trae items/pagos completos con varias queries por
-    fila): acá se listan TODAS las OT de siempre, historial completo
-    incluido (~3.000+ cerradas, ver comentario de listar_ordenes), así que
-    haría falta miles de queries si se reusara _orden_dict fila por fila.
-    En cambio se resuelve todo con una sola query (con subquery de
-    pagos_orden, que ya tiene índice por orden_id)."""
-    rows = db.execute(
-        """
+    fila): con el historial completo (~3.000+ cerradas, ver comentario de
+    listar_ordenes) haría falta miles de queries si se reusara _orden_dict
+    fila por fila. En cambio se resuelve todo con una sola query (con
+    subquery de pagos_orden, que ya tiene índice por orden_id).
+
+    'desde'/'hasta' (YYYY-MM-DD, ambos opcionales) acotan por fecha de
+    ingreso -- pero SOLO a las OT ya CERRADAS. Las abiertas se traen
+    siempre, sin importar la fecha, porque son trabajo activo (mismo
+    criterio que usa listar_ordenes con el mes). Así, por defecto el
+    frontend manda un 'desde' reciente para no traer los ~3.000+ registros
+    del historial completo cada vez que se abre la pestaña, sin por eso
+    esconder ninguna OT que siga abierta. Si no viene ni 'desde' ni
+    'hasta', no hay filtro de fecha -- se trae todo el historial (lo que
+    usa el botón "Ver historial completo" del frontend)."""
+    sql = """
         SELECT
             o.id, o.estado, o.fecha_recepcion, o.fecha_entrega_real,
             o.precio_referencial, o.precio_iva,
@@ -2178,9 +2186,23 @@ def _listado_ordenes_liviano(db):
         FROM ordenes_trabajo o
         LEFT JOIN clientes c ON c.id = o.cliente_id
         LEFT JOIN equipos e ON e.id = o.equipo_id
-        ORDER BY o.id DESC
-        """
-    ).fetchall()
+        WHERE 1=1
+    """
+    params = []
+    if desde or hasta:
+        condiciones_fecha = []
+        params_fecha = []
+        if desde:
+            condiciones_fecha.append("substr(o.fecha_recepcion, 1, 10) >= ?")
+            params_fecha.append(desde)
+        if hasta:
+            condiciones_fecha.append("substr(o.fecha_recepcion, 1, 10) <= ?")
+            params_fecha.append(hasta)
+        placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
+        sql += f" AND (o.estado NOT IN ({placeholders_cerrados}) OR ({' AND '.join(condiciones_fecha)}))"
+        params = list(ESTADOS_CERRADOS) + params_fecha
+    sql += " ORDER BY o.id DESC"
+    rows = db.execute(sql, params).fetchall()
     filas = []
     for r in rows:
         valor_neto = r["precio_referencial"] or 0
@@ -2205,13 +2227,13 @@ def _listado_ordenes_liviano(db):
     return filas
 
 
-def _listado_garantias_liviano(db):
+def _listado_garantias_liviano(db, desde=None, hasta=None):
     """Misma idea que _listado_ordenes_liviano pero para garantías -- estas
     no tienen precio/pagos propios (una garantía no se le cobra al
     cliente), así que 'valor_total'/'total_pagado' quedan en None (el
-    frontend los muestra como "—")."""
-    rows = db.execute(
-        """
+    frontend los muestra como "—"). 'desde'/'hasta' siguen el mismo
+    criterio (solo acotan las cerradas; las abiertas siempre se traen)."""
+    sql = """
         SELECT
             g.id, g.estado, g.fecha_recepcion, g.fecha_cierre,
             c.nombre AS cliente_nombre,
@@ -2219,9 +2241,23 @@ def _listado_garantias_liviano(db):
         FROM garantias g
         LEFT JOIN clientes c ON c.id = g.cliente_id
         LEFT JOIN equipos e ON e.id = g.equipo_id
-        ORDER BY g.id DESC
-        """
-    ).fetchall()
+        WHERE 1=1
+    """
+    params = []
+    if desde or hasta:
+        condiciones_fecha = []
+        params_fecha = []
+        if desde:
+            condiciones_fecha.append("substr(g.fecha_recepcion, 1, 10) >= ?")
+            params_fecha.append(desde)
+        if hasta:
+            condiciones_fecha.append("substr(g.fecha_recepcion, 1, 10) <= ?")
+            params_fecha.append(hasta)
+        placeholders_cerrados = ", ".join("?" for _ in ESTADOS_GARANTIA_CERRADOS)
+        sql += f" AND (g.estado NOT IN ({placeholders_cerrados}) OR ({' AND '.join(condiciones_fecha)}))"
+        params = list(ESTADOS_GARANTIA_CERRADOS) + params_fecha
+    sql += " ORDER BY g.id DESC"
+    rows = db.execute(sql, params).fetchall()
     filas = []
     for r in rows:
         filas.append({
@@ -2243,7 +2279,7 @@ def _listado_garantias_liviano(db):
 def listado_operativo():
     """Alimenta la pestaña 'Listado': a diferencia de listar_ordenes (que
     por defecto acota a las OT abiertas + las cerradas del mes en curso,
-    pensado para el tablero del día a día), acá SIEMPRE se trae el
+    pensado para el tablero del día a día), acá se puede traer el
     historial completo -- todas las OT y garantías de siempre, abiertas o
     cerradas, de cualquier mes -- porque la idea de esta vista es poder
     buscar cualquier OT o garantía que se haya ingresado alguna vez (a
@@ -2252,17 +2288,26 @@ def listado_operativo():
     ?tipo=nuevo      -> solo OT normales (tabla ordenes_trabajo)
     ?tipo=garantia   -> solo garantías (tabla garantias)
     sin ?tipo, o vacío -> ambas mezcladas, más recientes primero
-    """
+
+    ?desde=YYYY-MM-DD / ?hasta=YYYY-MM-DD (opcionales) -- acotan por fecha
+    de ingreso, pero SOLO a lo ya CERRADO (lo abierto siempre se trae, ver
+    _listado_ordenes_liviano/_listado_garantias_liviano). El frontend manda
+    un 'desde' reciente por defecto para no traer los ~3.000+ registros del
+    historial completo en cada apertura de la pestaña; el botón "Ver
+    historial completo" del frontend simplemente no manda ninguno de los
+    dos, y acá eso trae todo sin filtrar."""
     db = get_db()
     tipo = (request.args.get("tipo") or "").strip().lower()
     if tipo and tipo not in ("nuevo", "garantia"):
         return jsonify({"error": "Tipo inválido. Usa 'nuevo' o 'garantia'."}), 400
+    desde = (request.args.get("desde") or "").strip() or None
+    hasta = (request.args.get("hasta") or "").strip() or None
 
     filas = []
     if tipo != "garantia":
-        filas.extend(_listado_ordenes_liviano(db))
+        filas.extend(_listado_ordenes_liviano(db, desde, hasta))
     if tipo != "nuevo":
-        filas.extend(_listado_garantias_liviano(db))
+        filas.extend(_listado_garantias_liviano(db, desde, hasta))
     filas.sort(key=lambda f: f["fecha_recepcion"] or "", reverse=True)
     return jsonify({"filas": filas, "total": len(filas)})
 

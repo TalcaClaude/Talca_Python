@@ -242,14 +242,22 @@
        ingresado alguna vez -- a diferencia del tablero (kanban), que
        agrupa por etapa y por defecto solo trae el mes en curso. Se
        alimenta de su propio endpoint (/api/operativo/listado, ver
-       cargarListadoOperativo en operativo.js), NO de state.opOrdenes,
-       porque acá se trae SIEMPRE el historial completo (todas las OT y
-       garantías de siempre, sin acotar por mes) y con una fila liviana
-       (sin items/pagos completos) para no repetir miles de queries. El
-       filtro "Tipo" separa OT normales de garantías -- ambas comparten
-       correlativo desde jul. 2026 (ver _asignar_id_correlativo en
-       modulos/operativo.py), así que un mismo número de OT ya no se
-       repite entre una y otra. Columnas: lo pedido como mínimo (cliente,
+       cargarListadoOperativo en operativo.js), NO de state.opOrdenes.
+
+       Por defecto NO trae el historial completo -- eso son ~3.000+
+       registros, y traerlos siempre que se abre la pestaña la hacía lenta
+       para nada (a pedido del taller, jul. 2026). En cambio, el frontend
+       manda un "desde" reciente (los campos de fecha de ingreso, ver
+       cargarListadoOperativo) y el backend siempre trae además TODO lo que
+       sigue abierto sin importar su fecha (es trabajo activo, no
+       historial). El botón "Ver historial completo" limpia esas fechas y
+       vuelve a pedir sin acotar, para cuando de verdad hace falta buscar
+       algo viejo. El filtro "Tipo" separa OT normales de garantías --
+       ambas comparten correlativo desde jul. 2026 (ver
+       _asignar_id_correlativo en modulos/operativo.py), así que un mismo
+       número de OT ya no se repite entre una y otra (ojo: esto no aplica
+       a lo que ya existía antes de ese cambio -- ver el comentario de
+       _asignar_id_correlativo). Columnas: lo pedido como mínimo (cliente,
        marca/modelo, patente, color, Nº de OT, fecha de ingreso, etapa
        actual) + días en taller y valor/pagado (estos dos quedan en "—"
        para garantías, que no llevan cobro propio) -- se sacaron
@@ -267,18 +275,41 @@
       <option value="nuevo">Solo nuevos (OT)</option>
       <option value="garantia">Solo garantías</option>
     </select>
+    <!-- Las etapas de OT y de garantías son procesos distintos (ver
+         ESTADOS_ORDEN/ESTADOS_GARANTIA en modulos/operativo.py) -- algunas
+         se llaman igual en los dos (ej. "Diagnóstico", "Listo",
+         "Entregado") pero otras son exclusivas de uno u otro (ej.
+         "Recibido"/"Presupuesto" solo existen en OT; "Ingreso"/"Prueba"/
+         "Rechazada" solo en garantías). Por eso este <select> tiene sus
+         opciones agrupadas en <optgroup> y actualizarOpcionesEstadoListado()
+         (operativo.js) oculta el grupo que no corresponde según el filtro
+         de Tipo -- así, al elegir "Solo garantías", acá solo se pueden ver
+         etapas de garantías, en vez de mostrar etapas de OT que nunca van a
+         traer resultados. -->
     <select id="op-list-filtro-estado">
       <option value="">Todas las etapas (excepto cancelado)</option>
-      <option value="recibido">Recibido</option>
-      <option value="diagnostico">Diagnóstico</option>
-      <option value="presupuesto">Presupuesto</option>
-      <option value="esperando_aprobacion">Esperando aprobación</option>
-      <option value="reparacion">Reparación</option>
-      <option value="esperando_repuesto">Esperando repuesto</option>
-      <option value="control_calidad">Pruebas de ruta</option>
-      <option value="listo">Listo</option>
-      <option value="entregado">Entregado</option>
-      <option value="cancelado">Cancelado</option>
+      <optgroup label="Etapas de OT" id="op-list-optgroup-ot">
+        <option value="recibido">Recibido</option>
+        <option value="diagnostico">Diagnóstico</option>
+        <option value="presupuesto">Presupuesto</option>
+        <option value="esperando_aprobacion">Esperando aprobación</option>
+        <option value="reparacion">Reparación</option>
+        <option value="esperando_repuesto">Esperando repuesto</option>
+        <option value="control_calidad">Pruebas de ruta</option>
+        <option value="listo">Listo</option>
+        <option value="entregado">Entregado</option>
+        <option value="cancelado">Cancelado</option>
+      </optgroup>
+      <optgroup label="Etapas de garantías" id="op-list-optgroup-garantia">
+        <option value="ingreso">Ingreso</option>
+        <option value="diagnostico">Diagnóstico</option>
+        <option value="reparacion">Reparación</option>
+        <option value="prueba">Prueba</option>
+        <option value="revision">Revisión</option>
+        <option value="listo">Listo</option>
+        <option value="entregado">Entregado</option>
+        <option value="rechazada">Rechazada</option>
+      </optgroup>
     </select>
     <select id="op-list-filtro-prioridad">
       <option value="">Toda prioridad</option>
@@ -292,6 +323,7 @@
       <span>–</span>
       <input type="date" id="op-list-fecha-hasta" title="Ingreso hasta">
     </div>
+    <button type="button" class="btn btn-secundario" id="op-list-btn-historial-completo" title="Trae también lo cerrado de cualquier fecha, no solo lo reciente">Ver historial completo</button>
     <span style="flex:1"></span>
     <span class="chart-sub" id="op-list-contador" style="align-self:center;">0 OT</span>
   </section>

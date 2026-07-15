@@ -52,6 +52,12 @@
 <script>
 document.getElementById("form-migracion").addEventListener("submit", async (e) => {
   e.preventDefault();
+  // Crea clientes/autos/OTs reales de una -- a diferencia del resto de
+  // acciones "de una sola vez" del sistema (ej. resetear contraseña,
+  // aprobar recepción de factura), esta no tenía ningún confirm() pese a
+  // ser la más difícil de deshacer a mano si se sube el archivo
+  // equivocado.
+  if (!confirm("¿Importar estos 3 archivos? Va a crear clientes, autos y OT reales en el sistema. Revisá que sean los archivos correctos antes de continuar.")) return;
   const btn = document.getElementById("mig-btn-enviar");
   const out = document.getElementById("mig-resultado");
   const fd = new FormData();

@@ -101,6 +101,32 @@ class TestFotosPorWhatsAppFase3(unittest.TestCase):
         self.assertEqual(fotos[0]["usuario"], "MECÁNICO UNO")  # responsable siempre queda registrado
         self.assertIn("cable cortado", fotos[0]["titulo"].lower())
 
+    def test_foto_de_una_pieza_suelta_clasificada_otro_igual_se_archiva_con_numero_de_ot(self):
+        # Caso real reportado por el usuario: mandó la foto de una carcasa/
+        # radiador de aceite (una pieza suelta, sin verse el auto completo)
+        # con "Ot 3103" en el pie de foto. La IA la clasificó como 'otro'
+        # (no 'vehiculo'), y con la lógica vieja eso hacía que se rechazara
+        # como "no reconocida" aunque el número de OT estaba clarísimo en
+        # el texto. Ahora el archivado no exige tipo_foto == 'vehiculo'.
+        self._registrar_mecanico("Mecánico Diez", "+56900800010")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "AGF010")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+                           return_value={"tipo": "otro", "patente": ""}):
+            resp = self._subir_foto("+56900800010", texto=f"Ot {orden['id']}")
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "foto_vehiculo_archivada")
+        self.assertEqual(data["ot_id"], orden["id"])
+
+        fotos = self._fotos_de(orden["id"])
+        self.assertEqual(len(fotos), 1)
+        self.assertEqual(fotos[0]["origen"], "desarme_armado")
+        self.assertEqual(fotos[0]["usuario"], "MECÁNICO DIEZ")
+
     def test_foto_con_patente_detectada_se_archiva_en_la_ot_correcta(self):
         self._registrar_mecanico("Mecánico Dos", "+56900800002")
         cliente = self._crear_cliente()

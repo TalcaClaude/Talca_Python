@@ -5142,7 +5142,17 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                 return _registrar(mecanico["nombre"], "error", None, "", "", False, f"No pude leer la factura: {e}")
             return _registrar(mecanico["nombre"], "factura_recibida", None, "", "", True, resultado_factura["mensaje"])
 
-        if tipo_foto == "vehiculo":
+        if tipo_foto != "factura":
+            # A propósito NO se exige tipo_foto == "vehiculo": un mecánico
+            # también manda fotos de una pieza suelta (ej. un radiador de
+            # aceite arriba de un paño, un cable cortado) que la IA
+            # clasifica como 'otro' porque no se ve un auto completo -- eso
+            # es exactamente el caso de uso principal de este archivado
+            # (ver spec del usuario: "un mecánico manda una foto de un daño
+            # y pone 'ot 3321'"). Mientras el mensaje traiga un número de OT
+            # explícito, se archiva igual sea cual sea la clasificación;
+            # 'vehiculo' solo aporta la patente como alternativa para
+            # cuando no se escribió el número.
             origen = "foto_vehiculo"
             patente = clasificacion.get("patente") or ""
 
@@ -5170,9 +5180,8 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                 if not patente:
                     return _registrar(
                         mecanico["nombre"], "foto_vehiculo_sin_patente", None, "", "", False,
-                        "Recibí la foto del vehículo, pero no logré leer la patente con claridad ni encontré "
-                        "un número de OT en el mensaje. Manda una foto donde se vea mejor la patente, o "
-                        "escribe el número de OT (ej. \"OT 3321\") junto con la foto.",
+                        "Recibí la foto, pero no encontré ningún número de OT en el mensaje ni logré leer una "
+                        "patente en la foto. Escribe el número de OT (ej. \"OT 3321\") junto con la foto.",
                     )
                 return _registrar(
                     mecanico["nombre"], "foto_vehiculo_ot_no_encontrada", None, "", "", False,
@@ -5219,12 +5228,12 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                     nota_foto_archivada,
                 )
             texto_mensaje = f"{texto_resto} (OT identificada por la foto adjunta: OT #{ot_resuelta['ot_id']})"
-        else:
-            return _registrar(
-                mecanico["nombre"], "foto_no_reconocida", None, "", "", False,
-                "Recibí una foto, pero no la reconocí como una factura de compra ni como la foto de un "
-                "vehículo con patente visible. Mándala de nuevo más nítida, o escribe la acción en texto.",
-            )
+        # No queda ningún 'else' acá: con tipo_foto != "factura" ya cubierto
+        # arriba (y "factura" resuelto en el primer if, que siempre
+        # retorna), toda foto que llega por WhatsApp pasa por la lógica de
+        # archivado -- no existe ya un tercer camino "no reconocida" para
+        # fotos (si acaso no se puede resolver la OT, ver los 'return'
+        # dentro de la rama de arriba).
 
     if not texto_mensaje:
         return _registrar("", "error", None, "", "", False, "El mensaje llegó vacío.")

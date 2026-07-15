@@ -2407,7 +2407,7 @@ class TestAgenteWhatsApp(unittest.TestCase):
         data = resp.get_json()
         self.assertFalse(data["exito"])
         self.assertEqual(data["accion"], "foto_vehiculo_sin_patente")
-        self.assertIn("no logré leer la patente", data["respuesta_texto"])
+        self.assertIn("logré leer una patente", data["respuesta_texto"])
 
     def test_foto_de_vehiculo_sin_ot_abierta_para_esa_patente_avisa(self):
         # Fase 3: ya no existe "foto_vehiculo_sin_accion" -- una foto sin
@@ -2426,7 +2426,15 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(data["accion"], "foto_vehiculo_ot_no_encontrada")
         self.assertIn("SINTX01", data["respuesta_texto"])
 
-    def test_foto_que_no_es_factura_ni_vehiculo_no_se_procesa(self):
+    def test_foto_clasificada_otro_sin_numero_de_ot_pide_el_numero(self):
+        # Corregido a partir de un caso real: un mecánico mandó la foto de
+        # una pieza suelta (un radiador de aceite arriba de un paño) con
+        # "Ot 3103" en el pie de foto -- la IA la clasificó como 'otro'
+        # (no se ve un auto completo), pero como el archivado YA NO exige
+        # tipo_foto == 'vehiculo' (ver _agente_procesar_mensaje), esa foto
+        # se archiva igual mientras el mensaje traiga el número de OT. Este
+        # test cubre el caso sin número: ahí sí no hay cómo resolver la OT,
+        # así que se pide explícitamente en vez de descartar la foto.
         self._registrar_mecanico("Mecánico Foto Rara", "+56900771155")
         with patch.object(
             taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
@@ -2435,7 +2443,8 @@ class TestAgenteWhatsApp(unittest.TestCase):
             resp = self._subir_foto_por_agente("+56900771155", filename="algo.jpg")
         data = resp.get_json()
         self.assertFalse(data["exito"])
-        self.assertEqual(data["accion"], "foto_no_reconocida")
+        self.assertEqual(data["accion"], "foto_vehiculo_sin_patente")
+        self.assertIn("número de OT", data["respuesta_texto"])
 
     def test_foto_de_factura_queda_pendiente_de_revision_y_no_toca_el_inventario(self):
         pendiente_id, producto_id, numero = self._preparar_pendiente("100001")

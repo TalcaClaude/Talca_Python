@@ -236,23 +236,37 @@
 
   <section class="vista" id="vista-listado" style="display:none">
 
-  <!-- Versión de prueba: vista de las OT en líneas, correlativo (Nº = OT
-       más reciente arriba), pensada para tener un vistazo general rápido
-       -- a diferencia del tablero (kanban), que agrupa por etapa. Usa la
-       misma data ya cargada por cargarOperativo() (state.opOrdenes), así
-       que muestra siempre las mismas OT que el tablero: todas las
-       abiertas + las cerradas del mes elegido. Columnas: lo pedido como
-       mínimo (cliente, marca/modelo, patente, color, Nº de OT, fecha de
-       ingreso, etapa actual) + días en taller y valor/pagado -- se sacaron
+  <!-- Versión de prueba: vista de las OT (y garantías) en líneas,
+       correlativo (Nº = más reciente arriba), pensada para tener un
+       vistazo general rápido y buscar cualquier OT o garantía que se haya
+       ingresado alguna vez -- a diferencia del tablero (kanban), que
+       agrupa por etapa y por defecto solo trae el mes en curso. Se
+       alimenta de su propio endpoint (/api/operativo/listado, ver
+       cargarListadoOperativo en operativo.js), NO de state.opOrdenes,
+       porque acá se trae SIEMPRE el historial completo (todas las OT y
+       garantías de siempre, sin acotar por mes) y con una fila liviana
+       (sin items/pagos completos) para no repetir miles de queries. El
+       filtro "Tipo" separa OT normales de garantías -- ambas comparten
+       correlativo desde jul. 2026 (ver _asignar_id_correlativo en
+       modulos/operativo.py), así que un mismo número de OT ya no se
+       repite entre una y otra. Columnas: lo pedido como mínimo (cliente,
+       marca/modelo, patente, color, Nº de OT, fecha de ingreso, etapa
+       actual) + días en taller y valor/pagado (estos dos quedan en "—"
+       para garantías, que no llevan cobro propio) -- se sacaron
        prioridad, saldo y entrega estimada a pedido del taller para que
-       entre todo sin tener que hacer scroll horizontal (ver
-       .tabla-wrap--ancha en style.css, que le da más ancho a esta tabla
-       en particular). El filtro de prioridad se dejó en la barra de
-       arriba igual, por si sirve para acotar la búsqueda aunque ya no se
-       muestre como columna. -->
+       entre todo sin tener que hacer scroll horizontal (ver el ancho de
+       .app en style.css). El filtro de prioridad se dejó en la barra de
+       arriba igual, por si sirve para acotar la búsqueda de OT normales
+       aunque ya no se muestre como columna (no aplica a garantías, que no
+       tienen prioridad). -->
 
   <section class="toolbar">
     <input type="text" id="op-list-buscar" placeholder="Buscar por cliente, patente, marca o modelo…">
+    <select id="op-list-filtro-tipo">
+      <option value="">Nuevos y garantías</option>
+      <option value="nuevo">Solo nuevos (OT)</option>
+      <option value="garantia">Solo garantías</option>
+    </select>
     <select id="op-list-filtro-estado">
       <option value="">Todas las etapas (excepto cancelado)</option>
       <option value="recibido">Recibido</option>
@@ -287,6 +301,7 @@
       <thead>
         <tr>
           <th>Nº OT</th>
+          <th>Tipo</th>
           <th>Días</th>
           <th>Cliente</th>
           <th>Marca</th>
@@ -300,7 +315,7 @@
         </tr>
       </thead>
       <tbody id="op-list-tbody">
-        <tr><td colspan="11" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="12" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>

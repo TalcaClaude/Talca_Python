@@ -102,6 +102,16 @@ def _iniciar_transaccion_stock(db):
     db.execute("BEGIN IMMEDIATE")
 
 
+def _iniciar_transaccion_correlativo(db):
+    """Mismo mecanismo que _iniciar_transaccion_stock (BEGIN IMMEDIATE toma
+    el lock de escritura al toque) pero usado para el correlativo compartido
+    entre OT y garantías -- ver _asignar_id_correlativo en
+    modulos/operativo.py. Es una función aparte (aunque hace lo mismo) para
+    que quede claro en el código de OT/garantías por qué se está tomando el
+    lock ahí -- no es por stock."""
+    db.execute("BEGIN IMMEDIATE")
+
+
 def _reconstruir_tabla_legada_si_hace_falta(db, tabla, sql_create_nueva, columnas_objetivo, mapeos_legado=None):
     """
     Sanea una tabla que puede venir de una versión mucho más vieja del

@@ -39,6 +39,7 @@ from core import (
     _estilo_encabezado,
     _excel_response,
     _excel_resumen,
+    _iniciar_transaccion_correlativo,
     _iniciar_transaccion_stock,
     _pdf_documento,
     _pdf_response,
@@ -2158,6 +2159,114 @@ def listar_ordenes():
     return jsonify({"ordenes": [_orden_dict(db, r) for r in rows], "total": len(rows), "mes_filtrado": mes or "todos"})
 
 
+def _listado_ordenes_liviano(db):
+    """Una fila liviana por OT para la pestaña 'Listado' -- a propósito NO
+    usa _orden_dict (que trae items/pagos completos con varias queries por
+    fila): acá se listan TODAS las OT de siempre, historial completo
+    incluido (~3.000+ cerradas, ver comentario de listar_ordenes), así que
+    haría falta miles de queries si se reusara _orden_dict fila por fila.
+    En cambio se resuelve todo con una sola query (con subquery de
+    pagos_orden, que ya tiene índice por orden_id)."""
+    rows = db.execute(
+        """
+        SELECT
+            o.id, o.estado, o.fecha_recepcion, o.fecha_entrega_real,
+            o.precio_referencial, o.precio_iva,
+            c.nombre AS cliente_nombre,
+            e.marca, e.modelo, e.color, e.identificador AS patente,
+            (SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE orden_id = o.id) AS total_pagado
+        FROM ordenes_trabajo o
+        LEFT JOIN clientes c ON c.id = o.cliente_id
+        LEFT JOIN equipos e ON e.id = o.equipo_id
+        ORDER BY o.id DESC
+        """
+    ).fetchall()
+    filas = []
+    for r in rows:
+        valor_neto = r["precio_referencial"] or 0
+        valor_iva_monto = round(valor_neto * IVA_PORCENTAJE, 2) if r["precio_iva"] else 0.0
+        valor_total = round(valor_neto + valor_iva_monto, 2)
+        filas.append({
+            "id": r["id"],
+            "tipo": "nuevo",
+            "estado": r["estado"],
+            "estado_label": ESTADOS_LABEL.get(r["estado"], r["estado"]),
+            "cliente_nombre": r["cliente_nombre"],
+            "marca": r["marca"], "modelo": r["modelo"], "color": r["color"], "patente": r["patente"],
+            "fecha_recepcion": r["fecha_recepcion"],
+            # Se reusa el nombre 'fecha_entrega_real' (en vez de un genérico
+            # 'fecha_cierre') a propósito, para que el frontend pueda
+            # calcular "días en el taller" con la misma función que ya usa
+            # el tablero (diasEnTallerNumero), sin tener que tocarla.
+            "fecha_entrega_real": r["fecha_entrega_real"],
+            "valor_total": valor_total,
+            "total_pagado": round(r["total_pagado"] or 0, 2),
+        })
+    return filas
+
+
+def _listado_garantias_liviano(db):
+    """Misma idea que _listado_ordenes_liviano pero para garantías -- estas
+    no tienen precio/pagos propios (una garantía no se le cobra al
+    cliente), así que 'valor_total'/'total_pagado' quedan en None (el
+    frontend los muestra como "—")."""
+    rows = db.execute(
+        """
+        SELECT
+            g.id, g.estado, g.fecha_recepcion, g.fecha_cierre,
+            c.nombre AS cliente_nombre,
+            e.marca, e.modelo, e.color, e.identificador AS patente
+        FROM garantias g
+        LEFT JOIN clientes c ON c.id = g.cliente_id
+        LEFT JOIN equipos e ON e.id = g.equipo_id
+        ORDER BY g.id DESC
+        """
+    ).fetchall()
+    filas = []
+    for r in rows:
+        filas.append({
+            "id": r["id"],
+            "tipo": "garantia",
+            "estado": r["estado"],
+            "estado_label": ESTADOS_GARANTIA_LABEL.get(r["estado"], r["estado"]),
+            "cliente_nombre": r["cliente_nombre"],
+            "marca": r["marca"], "modelo": r["modelo"], "color": r["color"], "patente": r["patente"],
+            "fecha_recepcion": r["fecha_recepcion"],
+            "fecha_entrega_real": r["fecha_cierre"],
+            "valor_total": None,
+            "total_pagado": None,
+        })
+    return filas
+
+
+@bp.route("/api/operativo/listado", methods=["GET"])
+def listado_operativo():
+    """Alimenta la pestaña 'Listado': a diferencia de listar_ordenes (que
+    por defecto acota a las OT abiertas + las cerradas del mes en curso,
+    pensado para el tablero del día a día), acá SIEMPRE se trae el
+    historial completo -- todas las OT y garantías de siempre, abiertas o
+    cerradas, de cualquier mes -- porque la idea de esta vista es poder
+    buscar cualquier OT o garantía que se haya ingresado alguna vez (a
+    pedido del taller, jul. 2026).
+
+    ?tipo=nuevo      -> solo OT normales (tabla ordenes_trabajo)
+    ?tipo=garantia   -> solo garantías (tabla garantias)
+    sin ?tipo, o vacío -> ambas mezcladas, más recientes primero
+    """
+    db = get_db()
+    tipo = (request.args.get("tipo") or "").strip().lower()
+    if tipo and tipo not in ("nuevo", "garantia"):
+        return jsonify({"error": "Tipo inválido. Usa 'nuevo' o 'garantia'."}), 400
+
+    filas = []
+    if tipo != "garantia":
+        filas.extend(_listado_ordenes_liviano(db))
+    if tipo != "nuevo":
+        filas.extend(_listado_garantias_liviano(db))
+    filas.sort(key=lambda f: f["fecha_recepcion"] or "", reverse=True)
+    return jsonify({"filas": filas, "total": len(filas)})
+
+
 def _orden_dict_detalle(db, row):
     """Versión completa de la orden para la vista de detalle: agrega
     presupuesto y control de calidad. Deliberadamente NO se usa en
@@ -2182,9 +2291,36 @@ def obtener_orden(orden_id):
     return jsonify(_orden_dict_detalle(db, row))
 
 
+def _asignar_id_correlativo(db):
+    """Calcula el próximo id a usar para una OT o una garantía nueva, de
+    forma que 'ordenes_trabajo' y 'garantias' compartan un mismo correlativo
+    y un número de OT nunca se repita entre una orden normal y una
+    garantía -- así el número siempre identifica a un único vehículo, sea
+    la OT original o una garantía posterior sobre ese mismo trabajo (a
+    pedido del taller, jul. 2026). Los convertidores de torque quedan
+    fuera a propósito -- son casi un negocio aparte y ahí sí puede
+    repetirse un número con una OT/garantía.
+
+    Debe llamarse DESPUÉS de _iniciar_transaccion_correlativo (BEGIN
+    IMMEDIATE) y el INSERT explícito que use este id debe ir en la misma
+    transacción -- si no, dos altas casi simultáneas podrían calcular el
+    mismo próximo número (ver _iniciar_transaccion_stock en core.py para
+    el porqué del lock).
+
+    Las OT y garantías creadas ANTES de este cambio conservan su id
+    original tal cual (ya se comunicaron a clientes en papeletas/PDFs/
+    WhatsApp), así que sí puede coincidir un número de OT vieja con uno de
+    garantía vieja -- la unificación rige solo hacia adelante, no
+    reordena ni renumera el historial."""
+    max_ot = db.execute("SELECT COALESCE(MAX(id), 0) AS m FROM ordenes_trabajo").fetchone()["m"]
+    max_gar = db.execute("SELECT COALESCE(MAX(id), 0) AS m FROM garantias").fetchone()["m"]
+    return max(max_ot, max_gar) + 1
+
+
 @bp.route("/api/operativo/ordenes", methods=["POST"])
 def crear_orden():
     db = get_db()
+    _iniciar_transaccion_correlativo(db)
     data = request.get_json(force=True, silent=True) or {}
 
     try:
@@ -2237,16 +2373,17 @@ def crear_orden():
             return jsonify({"error": "El kilometraje debe ser un número entero"}), 400
 
     ts = now_iso()
-    cur = db.execute(
+    nuevo_id = _asignar_id_correlativo(db)
+    db.execute(
         """
         INSERT INTO ordenes_trabajo (
-            cliente_id, equipo_id, estado, descripcion_problema, mecanico,
+            id, cliente_id, equipo_id, estado, descripcion_problema, mecanico,
             fecha_recepcion, fecha_entrega_estimada, usuario, creado_en, actualizado_en,
             kilometraje, prioridad, recepcionado_por
-        ) VALUES (?, ?, 'recibido', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, 'recibido', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            cliente_id, equipo_id,
+            nuevo_id, cliente_id, equipo_id,
             (data.get("descripcion_problema") or "").strip().upper(),
             (data.get("mecanico") or "").strip().upper(),
             ts,
@@ -2258,7 +2395,7 @@ def crear_orden():
         ),
     )
     db.commit()
-    nueva = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (cur.lastrowid,)).fetchone()
+    nueva = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (nuevo_id,)).fetchone()
     return jsonify(_orden_dict(db, nueva)), 201
 
 
@@ -3405,6 +3542,7 @@ def _garantia_dict(db, row):
 @bp.route("/api/operativo/garantias", methods=["POST"])
 def crear_garantia():
     db = get_db()
+    _iniciar_transaccion_correlativo(db)  # ver _asignar_id_correlativo más abajo
     data = request.get_json(force=True, silent=True) or {}
 
     try:
@@ -3479,22 +3617,23 @@ def crear_garantia():
         return jsonify({"error": "Describe el motivo de la garantía"}), 400
 
     ts = now_iso()
-    cur = db.execute(
+    nuevo_id = _asignar_id_correlativo(db)
+    db.execute(
         """
         INSERT INTO garantias (
-            cliente_id, equipo_id, orden_origen_id, motivo, diagnostico, responsable,
+            id, cliente_id, equipo_id, orden_origen_id, motivo, diagnostico, responsable,
             estado, fecha_recepcion, usuario, creado_en, actualizado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, 'ingreso', ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ingreso', ?, ?, ?, ?)
         """,
         (
-            cliente_id, equipo_id, orden_origen_id, motivo,
+            nuevo_id, cliente_id, equipo_id, orden_origen_id, motivo,
             (data.get("diagnostico") or "").strip().upper(),
             (data.get("responsable") or "").strip().upper(),
             ts, usuario_actual(), ts, ts,
         ),
     )
     db.commit()
-    nueva = db.execute("SELECT * FROM garantias WHERE id = ?", (cur.lastrowid,)).fetchone()
+    nueva = db.execute("SELECT * FROM garantias WHERE id = ?", (nuevo_id,)).fetchone()
     return jsonify(_garantia_dict(db, nueva)), 201
 
 

@@ -7,6 +7,7 @@ const state = {
   opRecepcionEquipoActual: null,
   opProductos: [],
   opGarantias: [],
+  opListado: [], // filas livianas de OT + garantías para la pestaña "Listado" -- ver cargarListadoOperativo()
   catalogoVehiculos: null, // { marcas: [...], modelos: {marca: [...]} } — catálogo de referencia (no depende del historial de OTs)
   opMesTablero: null, // mes elegido para el tablero de OTs (null = mes en curso, "todos" = historial completo)
   opMesDashboard: null, // mismo criterio, para los gráficos del dashboard
@@ -268,10 +269,11 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("brand-sub").textContent = titulos[vista];
     detenerPollingOrdenes();
     if (vista === "dashboard") cargarDashboardOperativo();
-    if (vista === "ordenes" || vista === "listado") {
+    if (vista === "ordenes") {
       cargarOperativo();
       iniciarPollingOrdenes();
     }
+    if (vista === "listado") cargarListadoOperativo();
     if (vista === "clientes") cargarClientesTab();
     if (vista === "garantias") cargarGarantiasTab();
     if (vista === "reportes") cargarResumenReportesOperativo();
@@ -450,7 +452,6 @@ async function cargarOperativo(silencioso = false) {
     state.opClientes = dataClientes.clientes;
     state.opProductos = dataProductos.productos;
     renderTableroOperativo();
-    renderListadoOperativo();
     await cargarCatalogoVehiculos();
     poblarDatalistsOperativo();
   } catch (e) {
@@ -774,71 +775,98 @@ function renderTableroOperativo() {
 }
 
 // ---------------------------------------------------------------------------
-// Vista "Listado": las mismas OT del tablero (state.opOrdenes -- ver
-// cargarOperativo), pero en líneas por orden correlativo (Nº de OT más
-// reciente arriba) en vez de agrupadas por etapa. Pensada para tener un
-// vistazo general rápido con filtros propios, independientes de los del
-// tablero (op-filtro-estado/op-buscar) -- así se puede tener un filtro
-// distinto en cada pestaña sin que se pisen entre sí.
+// Vista "Listado": historial completo de OT + garantías (todos los meses,
+// abiertas y cerradas), en líneas por orden correlativo (Nº más reciente
+// arriba) en vez de agrupadas por etapa. A diferencia del tablero, NO usa
+// state.opOrdenes (que por defecto acota al mes en curso para lo cerrado) --
+// se alimenta de su propio endpoint liviano /api/operativo/listado (ver
+// cargarListadoOperativo) para poder traer todo el historial sin repetir
+// miles de queries por fila. Pensada para tener un vistazo general rápido y
+// poder buscar cualquier OT o garantía que se haya ingresado alguna vez, con
+// filtros propios, independientes de los del tablero.
 // ---------------------------------------------------------------------------
+
+async function cargarListadoOperativo() {
+  const tbody = document.getElementById("op-list-tbody");
+  if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="vacio">Cargando…</td></tr>`;
+  try {
+    const data = await api("/api/operativo/listado");
+    state.opListado = data.filas;
+    renderListadoOperativo();
+  } catch (e) {
+    toast(e.message, true);
+    if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="vacio">No se pudo cargar el listado.</td></tr>`;
+  }
+}
 
 function renderListadoOperativo() {
   const tbody = document.getElementById("op-list-tbody");
   const contador = document.getElementById("op-list-contador");
   if (!tbody) return; // la pestaña "Listado" puede no estar en el DOM todavía
 
+  const filtroTipo = document.getElementById("op-list-filtro-tipo").value;
   const filtroEstado = document.getElementById("op-list-filtro-estado").value;
   const filtroPrioridad = document.getElementById("op-list-filtro-prioridad").value;
   const busqueda = document.getElementById("op-list-buscar").value.trim().toLowerCase();
   const fechaDesde = document.getElementById("op-list-fecha-desde").value;
   const fechaHasta = document.getElementById("op-list-fecha-hasta").value;
 
-  const coincide = (orden) => coincideBusqueda(
+  // El filtro de prioridad solo aplica a OT normales (las garantías no
+  // tienen prioridad) -- si está activo, se excluyen directamente las
+  // garantías del resultado, no se las deja pasar sin filtrar.
+  const coincide = (f) => coincideBusqueda(
     busqueda,
-    orden.cliente ? orden.cliente.nombre : "",
-    orden.equipo ? `${orden.equipo.marca} ${orden.equipo.modelo} ${orden.equipo.identificador}` : "",
+    f.cliente_nombre || "",
+    `${f.marca || ""} ${f.modelo || ""} ${f.patente || ""}`,
   );
 
-  const ordenes = (state.opOrdenes || [])
-    .filter(o => filtroEstado ? o.estado === filtroEstado : o.estado !== "cancelado")
-    .filter(o => !filtroPrioridad || (o.prioridad || "media") === filtroPrioridad)
-    .filter(o => !fechaDesde || (o.fecha_recepcion || "").slice(0, 10) >= fechaDesde)
-    .filter(o => !fechaHasta || (o.fecha_recepcion || "").slice(0, 10) <= fechaHasta)
+  const filas = (state.opListado || [])
+    .filter(f => !filtroTipo || f.tipo === filtroTipo)
+    .filter(f => filtroEstado ? f.estado === filtroEstado : f.estado !== "cancelado")
+    .filter(f => !filtroPrioridad || f.tipo === "nuevo")
+    .filter(f => !fechaDesde || (f.fecha_recepcion || "").slice(0, 10) >= fechaDesde)
+    .filter(f => !fechaHasta || (f.fecha_recepcion || "").slice(0, 10) <= fechaHasta)
     .filter(coincide)
     .sort((a, b) => b.id - a.id);
 
-  contador.textContent = `${ordenes.length} OT${ordenes.length === 1 ? "" : "s"}`;
+  contador.textContent = `${filas.length} línea${filas.length === 1 ? "" : "s"}`;
 
-  if (ordenes.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="11" class="vacio">Sin órdenes que coincidan con el filtro.</td></tr>`;
+  if (filas.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="12" class="vacio">Sin resultados que coincidan con el filtro.</td></tr>`;
     return;
   }
 
-  tbody.innerHTML = ordenes.map(o => {
-    const dias = diasEnTallerNumero(o);
+  tbody.innerHTML = filas.map(f => {
+    const dias = diasEnTallerNumero({ fecha_recepcion: f.fecha_recepcion, fecha_entrega_real: f.fecha_entrega_real });
+    const esGarantia = f.tipo === "garantia";
     return `
-      <tr data-id="${o.id}">
-        <td class="mono">OT #${o.id}</td>
+      <tr data-id="${f.id}" data-tipo="${f.tipo}">
+        <td class="mono">${esGarantia ? "G" : "OT"} #${f.id}</td>
+        <td>${esGarantia ? "Garantía" : "Nuevo"}</td>
         <td>${dias === null ? "—" : dias}</td>
-        <td>${escapeHtml(o.cliente ? o.cliente.nombre : "—")}</td>
-        <td>${escapeHtml(o.equipo ? o.equipo.marca : "") || "—"}</td>
-        <td>${escapeHtml(o.equipo ? o.equipo.modelo : "") || "—"}</td>
-        <td>${escapeHtml(o.equipo ? o.equipo.color : "") || "—"}</td>
-        <td class="mono">${escapeHtml(o.equipo ? o.equipo.identificador : "") || "—"}</td>
-        <td>${escapeHtml(OP_ESTADOS_LABEL[o.estado] || o.estado)}</td>
-        <td class="num">${fmtMoney(o.valor_total || 0)}</td>
-        <td class="num">${fmtMoney(o.total_pagado || 0)}</td>
-        <td>${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</td>
+        <td>${escapeHtml(f.cliente_nombre || "—")}</td>
+        <td>${escapeHtml(f.marca || "") || "—"}</td>
+        <td>${escapeHtml(f.modelo || "") || "—"}</td>
+        <td>${escapeHtml(f.color || "") || "—"}</td>
+        <td class="mono">${escapeHtml(f.patente || "") || "—"}</td>
+        <td>${escapeHtml(f.estado_label || f.estado)}</td>
+        <td class="num">${f.valor_total === null ? "—" : fmtMoney(f.valor_total)}</td>
+        <td class="num">${f.total_pagado === null ? "—" : fmtMoney(f.total_pagado)}</td>
+        <td>${fmtFechaSolo((f.fecha_recepcion || "").slice(0, 10))}</td>
       </tr>`;
   }).join("");
 
   tbody.querySelectorAll("tr[data-id]").forEach(tr => {
-    tr.addEventListener("click", () => abrirDetalleOrden(parseInt(tr.dataset.id, 10)));
+    const id = parseInt(tr.dataset.id, 10);
+    tr.addEventListener("click", () => {
+      if (tr.dataset.tipo === "garantia") abrirDetalleGarantia(id);
+      else abrirDetalleOrden(id);
+    });
   });
 }
 
 ["op-list-buscar"].forEach(id => document.getElementById(id).addEventListener("input", renderListadoOperativo));
-["op-list-filtro-estado", "op-list-filtro-prioridad", "op-list-fecha-desde", "op-list-fecha-hasta"].forEach(id => {
+["op-list-filtro-tipo", "op-list-filtro-estado", "op-list-filtro-prioridad", "op-list-fecha-desde", "op-list-fecha-hasta"].forEach(id => {
   document.getElementById(id).addEventListener("change", renderListadoOperativo);
 });
 

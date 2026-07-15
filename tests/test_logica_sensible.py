@@ -1109,6 +1109,104 @@ class TestOperativoFase35(unittest.TestCase):
         self.assertIsNotNone(item["creado_en"])
 
 
+class TestCorrelativoYListadoOperativo(unittest.TestCase):
+    """OT y garantías comparten un mismo correlativo desde jul. 2026 (ver
+    _asignar_id_correlativo en modulos/operativo.py) para que un número de
+    OT nunca corresponda a dos vehículos distintos -- salvo convertidores
+    de torque, que quedan aparte a propósito. Además cubre el endpoint
+    /api/operativo/listado, que a diferencia de /api/operativo/ordenes trae
+    SIEMPRE el historial completo (todos los meses) y mezcla OT + garantías
+    con un filtro de tipo."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre="Cliente Correlativo"):
+        resp = self.client.post("/api/operativo/clientes", json={"nombre": nombre})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden(self, cliente_id):
+        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_garantia(self, cliente_id, motivo="Motivo de prueba"):
+        resp = self.client.post(
+            "/api/operativo/garantias", json={"cliente_id": cliente_id, "motivo": motivo}
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def test_ot_y_garantia_nunca_comparten_numero_y_quedan_correlativas(self):
+        cliente = self._crear_cliente()
+        orden_1 = self._crear_orden(cliente["id"])
+        garantia_1 = self._crear_garantia(cliente["id"])
+        orden_2 = self._crear_orden(cliente["id"])
+        garantia_2 = self._crear_garantia(cliente["id"])
+
+        ids = [orden_1["id"], garantia_1["id"], orden_2["id"], garantia_2["id"]]
+        self.assertEqual(len(ids), len(set(ids)), f"Los IDs no deberían repetirse nunca: {ids}")
+        # Cada alta sucesiva (sea OT o garantía) debe sacar un número más
+        # alto que todas las anteriores, sin importar de qué tabla venga.
+        self.assertTrue(ids[0] < ids[1] < ids[2] < ids[3], ids)
+
+    def test_listado_incluye_historial_completo_no_solo_mes_en_curso(self):
+        cliente = self._crear_cliente("Cliente Listado Histórico")
+        orden = self._crear_orden(cliente["id"])
+        # Se cierra la orden con fecha de entrega de un mes bien viejo, para
+        # simular una OT del historial (no del mes en curso).
+        db = taller_app._conectar_db()
+        db.execute(
+            "UPDATE ordenes_trabajo SET estado = 'entregado', fecha_entrega_real = '2020-01-15T10:00:00' WHERE id = ?",
+            (orden["id"],),
+        )
+        db.commit()
+        db.close()
+
+        # /api/operativo/ordenes (el tablero) por defecto NO la trae -- es
+        # de un mes viejo y ya está cerrada.
+        resp_tablero = self.client.get("/api/operativo/ordenes")
+        ids_tablero = [o["id"] for o in resp_tablero.get_json()["ordenes"]]
+        self.assertNotIn(orden["id"], ids_tablero)
+
+        # /api/operativo/listado sí, porque siempre trae todo el historial.
+        resp_listado = self.client.get("/api/operativo/listado")
+        self.assertEqual(resp_listado.status_code, 200)
+        filas = resp_listado.get_json()["filas"]
+        fila = next((f for f in filas if f["id"] == orden["id"] and f["tipo"] == "nuevo"), None)
+        self.assertIsNotNone(fila, "La OT vieja cerrada debería aparecer en el listado histórico")
+        self.assertEqual(fila["estado_label"], "Entregado")
+
+    def test_listado_incluye_garantias_y_filtra_por_tipo(self):
+        cliente = self._crear_cliente("Cliente Listado Garantía")
+        garantia = self._crear_garantia(cliente["id"], motivo="Falla eléctrica")
+
+        resp_todos = self.client.get("/api/operativo/listado")
+        filas_todos = resp_todos.get_json()["filas"]
+        fila = next((f for f in filas_todos if f["id"] == garantia["id"] and f["tipo"] == "garantia"), None)
+        self.assertIsNotNone(fila)
+        self.assertIsNone(fila["valor_total"])
+        self.assertIsNone(fila["total_pagado"])
+
+        resp_solo_nuevos = self.client.get("/api/operativo/listado?tipo=nuevo")
+        filas_solo_nuevos = resp_solo_nuevos.get_json()["filas"]
+        self.assertTrue(all(f["tipo"] == "nuevo" for f in filas_solo_nuevos))
+        self.assertFalse(any(f["id"] == garantia["id"] for f in filas_solo_nuevos))
+
+        resp_solo_garantias = self.client.get("/api/operativo/listado?tipo=garantia")
+        filas_solo_garantias = resp_solo_garantias.get_json()["filas"]
+        self.assertTrue(all(f["tipo"] == "garantia" for f in filas_solo_garantias))
+        self.assertTrue(any(f["id"] == garantia["id"] for f in filas_solo_garantias))
+
+    def test_listado_tipo_invalido_da_400(self):
+        resp = self.client.get("/api/operativo/listado?tipo=lo-que-sea")
+        self.assertEqual(resp.status_code, 400)
+
+
 class TestPresupuestoDescargaEnvioYOrdenImprimible(unittest.TestCase):
     """Cubre las funcionalidades nuevas: (1) el PDF del presupuesto se
     descarga con el nombre "Presupuesto Talleres Calificados OT<n>

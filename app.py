@@ -5853,7 +5853,18 @@ def limpiar_inventario_duplicado():
 # diario ni de un proveedor externo nuevo (se evaluó Litestream + Cloudflare
 # R2 y se descartó para no sumar otro proveedor más — ver DEPLOY.md).
 
-RESPALDO_LOCAL_INTERVALO_MINUTOS = int(os.environ.get("RESPALDO_LOCAL_INTERVALO_MINUTOS", "15"))
+
+# Cambiado de 15 a 60 minutos (julio 2026, tras el incidente del volumen al
+# 95%): con MAX_COPIAS=96 sin tocar, esto pasa de cubrir 24 horas de
+# historial a cubrir 96 horas (4 días) -- ambos casos terminan ocupando el
+# MISMO tope de disco en régimen (96 copias × tamaño de la base de datos en
+# ese momento), la rotación en _rotar_respaldos_locales() ya se encarga de
+# eso solo; lo único que cambia con el intervalo es cuánto tarda en llegar a
+# ese tope y cuánto historial cubre. El respiro real vino de subir el
+# volumen de Railway de 500 MB a 5 GB -- si el disco vuelve a quedar
+# ajustado, bajar RESPALDO_LOCAL_MAX_COPIAS (no solo el intervalo) es lo que
+# de verdad baja el tope de disco.
+RESPALDO_LOCAL_INTERVALO_MINUTOS = int(os.environ.get("RESPALDO_LOCAL_INTERVALO_MINUTOS", "60"))
 RESPALDO_LOCAL_MAX_COPIAS = int(os.environ.get("RESPALDO_LOCAL_MAX_COPIAS", "96"))
 RESPALDO_LOCAL_DIR = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or ".", "respaldos_locales")
 RESPALDO_LOCAL_PATRON = re.compile(r"^auto_\d{8}_\d{6}\.db$")

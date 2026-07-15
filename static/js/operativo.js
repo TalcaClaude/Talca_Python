@@ -1439,7 +1439,7 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     // Por obligación, al ingresar el auto se piden 7 fotos fijas antes de
     // enviarle al cliente el registro fotográfico -- ver spec del usuario.
     // Se puede cerrar y retomar después desde la pestaña "Fotos" de la OT.
-    abrirFotosIngreso(nueva.id);
+    abrirFotosIngreso("orden", nueva.id);
   } catch (e2) {
     toast(e2.message, true);
     // Puede pasar que el bloqueo haya aparecido justo entre que se

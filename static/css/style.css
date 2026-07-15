@@ -198,6 +198,75 @@ body::before { content: none; }
 
 .shell-main { flex: 1; min-width: 0; }
 
+/* ---------- Responsive: barra lateral en celular/tablet ----------
+   En desktop el botón hamburguesa y el fondo oscuro no se ven -- la barra
+   lateral se comporta exactamente igual que siempre (fija, en flujo,
+   siempre visible). Recién debajo de 900px (ver breakpoint ya usado en el
+   resto del archivo para los otros cambios grandes de layout) la barra
+   deja de ocupar espacio fijo y pasa a un panel que se desliza por encima
+   del contenido (position: fixed + transform), abierto/cerrado por el
+   botón (ver script al final de _sidebar.html). */
+
+.sidebar-toggle-btn {
+  display: none;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .sidebar-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    width: 42px;
+    height: 42px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 19px;
+    cursor: pointer;
+    z-index: 300;
+  }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(6, 10, 16, 0.6);
+    z-index: 240;
+  }
+  .sidebar-backdrop.visible { display: block; }
+
+  body.sidebar-bloqueada { overflow: hidden; }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 250;
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+  }
+  .sidebar.sidebar-visible { transform: translateX(0); }
+
+  /* Solo las páginas con barra lateral (.shell-main > .app) necesitan el
+     espacio extra arriba para el botón hamburguesa -- las páginas sueltas
+     sin sidebar (login, seguimiento, migración de datos) no lo usan y no
+     deben perder ese espacio de arriba porque sí. */
+  .shell-main .app { padding: 72px 16px 60px; }
+  .app { padding-left: 16px; padding-right: 16px; }
+}
+
+@media (max-width: 480px) {
+  .sidebar { width: 84vw; }
+}
+
 /* ---------- Topbar ---------- */
 
 .topbar {
@@ -1245,6 +1314,7 @@ svg .chart-punto-hover {
   border: 1px solid var(--line);
   border-radius: 8px;
   overflow: hidden;
+  overflow-x: auto;
 }
 
 .tabla {
@@ -1649,6 +1719,12 @@ svg .chart-punto-hover {
   gap: 4px;
   margin-bottom: 18px;
   border-bottom: 1px solid var(--line);
+  /* En pantallas angostas hay más pestañas que ancho disponible (ej.
+     Operativo: Dashboard/Órdenes/Garantías/Clientes/Reportes) -- en vez de
+     que se corten o se apilen rompiendo el subrayado, se dejan deslizar
+     horizontalmente (patrón estándar de tabs en mobile). */
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .tab {
@@ -1664,6 +1740,8 @@ svg .chart-punto-hover {
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .tab:hover { color: var(--text); }
@@ -2287,11 +2365,21 @@ svg .chart-punto-hover {
 
 /* ---------- Responsive ---------- */
 
+@media (max-width: 900px) {
+  .topbar { flex-wrap: wrap; row-gap: 10px; }
+  .topbar-acciones { flex-wrap: wrap; }
+  .wapd-datos { min-width: 0; }
+  .notif-bell-panel { width: min(340px, calc(100vw - 32px)); right: -8px; }
+}
+
 @media (max-width: 760px) {
   .summary { grid-template-columns: 1fr 1fr; }
   .grid-2, .grid-3 { grid-template-columns: 1fr; }
   .detalle-grid { grid-template-columns: 1fr; }
-  .tabla-wrap { overflow-x: auto; }
   .tabla { min-width: 720px; }
   .fac-linea-row { grid-template-columns: 1fr; }
+  .brand-text h1 { font-size: 19px; }
+  .brand-sub { font-size: 11.5px; }
+  .brand { gap: 10px; }
+  .wapd-foto { flex: 1 1 100%; }
 }

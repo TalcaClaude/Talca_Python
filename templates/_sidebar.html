@@ -16,8 +16,20 @@
   pero mostrarle el link igual invitaba a hacer clic para toparse con una
   redirección confusa. Si no tiene acceso, directamente no ve el módulo en
   la barra lateral.
+
+  Responsive (celular/tablet, ver style.css @media max-width:900px): en
+  pantallas angostas la barra lateral deja de ocupar espacio fijo del
+  layout y pasa a ser un panel que se desliza por encima del contenido
+  (position: fixed + transform), oculto por defecto. El botón hamburguesa
+  de acá abajo (visible solo en ese breakpoint, ver .sidebar-toggle-btn)
+  la abre/cierra agregando la clase "sidebar-visible"; el fondo oscuro
+  (.sidebar-backdrop) permite cerrarla tocando fuera. En desktop ambos
+  quedan con display:none y la barra se comporta exactamente igual que
+  antes.
 -->
-<nav class="sidebar">
+<button type="button" class="sidebar-toggle-btn" id="sidebar-toggle-btn" aria-label="Abrir menú">☰</button>
+<div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+<nav class="sidebar" id="sidebar-nav">
   <div class="sidebar-brand">
     <h1>Inventario<span>Taller</span></h1>
     <p>Panel Principal</p>
@@ -132,4 +144,40 @@
       modulo.classList.toggle('activo');
     });
   });
+
+  // Apertura/cierre de la barra lateral en celular/tablet (ver comentario
+  // arriba del <nav>). En desktop estos elementos ni se muestran, así que
+  // este código simplemente no tiene nada que hacer ahí.
+  (function () {
+    var toggleBtn = document.getElementById('sidebar-toggle-btn');
+    var backdrop = document.getElementById('sidebar-backdrop');
+    var sidebar = document.getElementById('sidebar-nav');
+    if (!toggleBtn || !backdrop || !sidebar) return;
+
+    function abrir() {
+      sidebar.classList.add('sidebar-visible');
+      backdrop.classList.add('visible');
+      document.body.classList.add('sidebar-bloqueada');
+    }
+    function cerrar() {
+      sidebar.classList.remove('sidebar-visible');
+      backdrop.classList.remove('visible');
+      document.body.classList.remove('sidebar-bloqueada');
+    }
+
+    toggleBtn.addEventListener('click', function () {
+      sidebar.classList.contains('sidebar-visible') ? cerrar() : abrir();
+    });
+    backdrop.addEventListener('click', cerrar);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') cerrar();
+    });
+    // Al navegar a un módulo/pestaña (incluye links con solo #hash, que
+    // los .js de cada módulo interceptan para cambiar de vista sin recargar
+    // la página) se cierra el panel, para no dejarlo tapando el contenido
+    // recién elegido.
+    sidebar.querySelectorAll('a').forEach(function (link) {
+      link.addEventListener('click', cerrar);
+    });
+  })();
 </script>

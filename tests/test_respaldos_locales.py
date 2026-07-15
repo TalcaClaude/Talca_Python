@@ -144,6 +144,65 @@ class TestRespaldosLocales(unittest.TestCase):
         resp_restaurar = cliente_finanzas.post("/api/backup/restaurar", data={})
         self.assertEqual(resp_restaurar.status_code, 403)
 
+    def test_diagnostico_disco_devuelve_desglose_por_carpeta(self):
+        # Agregado tras el incidente de julio 2026 (volumen de Railway al
+        # 95%, mucho antes de lo esperado) -- deja ver qué carpeta está
+        # ocupando espacio sin tener acceso directo al disco del servidor.
+        resp = self.client.get("/api/admin/diagnostico-disco")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertIn("porcentaje_usado", data["disco"])
+        nombres = [f["carpeta"] for f in data["desglose"]]
+        self.assertIn("Base de datos (inventario.db)", nombres)
+        self.assertIn("Respaldos automáticos locales", nombres)
+
+    def test_diagnostico_disco_requiere_admin(self):
+        cliente_bodega = self._crear_usuario_con_rol("bodega_disco", "bodega")
+        resp = cliente_bodega.get("/api/admin/diagnostico-disco")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_limpiar_respaldos_deja_solo_los_mas_recientes(self):
+        for _ in range(5):
+            self.client.post("/api/backup/locales/crear")
+            time.sleep(1.1)  # el nombre del archivo depende de la hora al segundo
+        antes = self.client.get("/api/backup/locales").get_json()["copias"]
+        self.assertEqual(len(antes), 5)
+
+        resp = self.client.post("/api/backup/locales/limpiar", json={"conservar": 2})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["borrados"], 3)
+        self.assertEqual(data["copias_restantes"], 2)
+
+        despues = self.client.get("/api/backup/locales").get_json()["copias"]
+        self.assertEqual(len(despues), 2)
+        # Se conservan los MÁS RECIENTES (los nombres más nuevos), no
+        # cualquiera -- _listar_respaldos_locales ya ordena por nombre
+        # descendente, así que los primeros 'conservar' son los últimos.
+        self.assertEqual([c["nombre"] for c in despues], [c["nombre"] for c in antes[:2]])
+
+    def test_limpiar_respaldos_requiere_admin(self):
+        cliente_finanzas = self._crear_usuario_con_rol("fin_limpiar", "finanzas")
+        resp = cliente_finanzas.post("/api/backup/locales/limpiar", json={})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_no_crea_respaldo_si_queda_poco_disco_libre(self):
+        # Guard agregado tras el incidente de julio 2026: un respaldo más
+        # (copia completa de la base de datos) es exactamente lo que NO hay
+        # que hacer cuando el disco está casi lleno -- puede terminar de
+        # llenarlo y entonces se rompe TODO (cualquier escritura a SQLite
+        # empieza a tirar 'disk I/O error', no solo los respaldos).
+        original = taller_app.shutil.disk_usage
+        try:
+            class _DiscoFalso:
+                free = 10 * 1024 * 1024  # 10 MB -- bajo el mínimo por defecto (100 MB)
+            taller_app.shutil.disk_usage = lambda ruta: _DiscoFalso()
+            exito, detalle = taller_app._crear_respaldo_local()
+            self.assertFalse(exito)
+            self.assertIn("MB libres", detalle)
+        finally:
+            taller_app.shutil.disk_usage = original
+
 
 if __name__ == "__main__":
     unittest.main()

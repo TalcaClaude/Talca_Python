@@ -928,6 +928,14 @@
 
     <div id="respaldo-diagnostico" class="ayuda">Cargando diagnóstico…</div>
 
+    <h3 class="subtitulo">Uso de disco del servidor</h3>
+    <p class="ayuda-inline">Desglose de qué está ocupando espacio en el disco donde vive la base de datos — útil para detectar a tiempo si el disco se está por llenar (ver incidente de julio 2026, en que el volumen llegó al 95%).</p>
+    <div id="disco-diagnostico" class="ayuda">Cargando…</div>
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-secundario" id="btn-refrescar-disco">Actualizar</button>
+      <button type="button" class="btn btn-danger" id="btn-limpiar-respaldos-urgencia">Liberar espacio ahora (borra respaldos viejos, deja los 3 más recientes)</button>
+    </div>
+
     <h3 class="subtitulo">Respaldo automático diario (por correo)</h3>
     <div id="respaldo-auto-estado" class="ayuda">Cargando…</div>
     <div class="modal-actions modal-actions--start">

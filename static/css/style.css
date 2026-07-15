@@ -1729,6 +1729,22 @@ svg .chart-punto-hover {
   border-bottom: none;
 }
 
+.disco-desglose {
+  margin-top: 6px;
+}
+.disco-fila {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.disco-fila:last-child {
+  border-bottom: none;
+}
+
 .estado-pill {
   font-size: 11px;
   font-weight: 700;

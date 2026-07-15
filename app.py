@@ -5870,11 +5870,32 @@ def _rotar_respaldos_locales():
             pass
 
 
+RESPALDO_LOCAL_MIN_MB_LIBRES = int(os.environ.get("RESPALDO_LOCAL_MIN_MB_LIBRES", "100"))
+
+
 def _crear_respaldo_local():
     """Crea una copia consistente de la base de datos con VACUUM INTO.
-    Devuelve (True, nombre_del_archivo) o (False, mensaje_de_error)."""
+    Devuelve (True, nombre_del_archivo) o (False, mensaje_de_error).
+
+    Antes de escribir nada, revisa el espacio libre del disco: si queda
+    menos de RESPALDO_LOCAL_MIN_MB_LIBRES, se salta el respaldo en vez de
+    intentarlo -- un disco casi lleno (ver incidente de julio 2026, volumen
+    de Railway al 95%) es exactamente el escenario donde un respaldo más NO
+    ayuda (es una copia completa de la base de datos) y puede terminar de
+    llenarlo, lo que rompe TODO el sistema (cualquier escritura a SQLite
+    empieza a tirar 'disk I/O error', no solo los respaldos)."""
     if not os.path.exists(DB_PATH):
         return False, "Aún no existe base de datos que respaldar"
+    try:
+        libres_mb = shutil.disk_usage(os.path.dirname(os.path.abspath(DB_PATH)) or ".").free / (1024 * 1024)
+        if libres_mb < RESPALDO_LOCAL_MIN_MB_LIBRES:
+            return False, (
+                f"Se salta el respaldo: quedan solo {libres_mb:.0f} MB libres en el disco "
+                f"(mínimo configurado: {RESPALDO_LOCAL_MIN_MB_LIBRES} MB). Libera espacio antes de que "
+                f"esto afecte al resto del sistema."
+            )
+    except OSError:
+        pass  # si no se puede medir, se sigue intentando el respaldo como antes
     os.makedirs(RESPALDO_LOCAL_DIR, exist_ok=True)
     nombre = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
     destino = os.path.join(RESPALDO_LOCAL_DIR, nombre)
@@ -5917,7 +5938,9 @@ def _hilo_respaldos_locales():
     time.sleep(60)  # deja que el servidor termine de arrancar antes del primer respaldo
     while True:
         try:
-            _crear_respaldo_local()
+            ok, detalle = _crear_respaldo_local()
+            if not ok:
+                logging.warning("Respaldo automático local no se creó: %s", detalle)
         except Exception:
             logging.exception("Error creando respaldo automático local")
         time.sleep(RESPALDO_LOCAL_INTERVALO_MINUTOS * 60)
@@ -5939,6 +5962,59 @@ def backup_locales_listar():
     })
 
 
+def _tamano_carpeta_mb(ruta):
+    """Suma recursiva del tamaño de todos los archivos bajo 'ruta', en MB.
+    0 si la carpeta todavía no existe (nunca se guardó nada ahí)."""
+    if not os.path.isdir(ruta):
+        return 0.0, 0
+    total_bytes = 0
+    total_archivos = 0
+    for dirpath, _dirnames, nombres in os.walk(ruta):
+        for nombre in nombres:
+            try:
+                total_bytes += os.path.getsize(os.path.join(dirpath, nombre))
+                total_archivos += 1
+            except OSError:
+                continue
+    return round(total_bytes / (1024 * 1024), 1), total_archivos
+
+
+@app.route("/api/admin/diagnostico-disco", methods=["GET"])
+@requiere_rol()
+def diagnostico_disco():
+    """Desglosa qué está ocupando el disco del servidor -- la base de datos
+    en sí, los respaldos automáticos locales, y cada carpeta de fotos/
+    comprobantes -- para poder identificar qué crece más rápido de lo
+    esperado sin tener acceso directo al volumen (ver incidente de julio
+    2026: el volumen de Railway llegó al 95% mucho antes de lo previsto)."""
+    base_dir = os.path.dirname(os.path.abspath(DB_PATH)) or "."
+    uso_disco = shutil.disk_usage(base_dir)
+
+    db_mb = round(os.path.getsize(DB_PATH) / (1024 * 1024), 1) if os.path.exists(DB_PATH) else 0.0
+    respaldos_mb, respaldos_n = _tamano_carpeta_mb(RESPALDO_LOCAL_DIR)
+    fotos_vehiculos_mb, fotos_vehiculos_n = _tamano_carpeta_mb(os.path.join(base_dir, "fotos_vehiculos"))
+    fotos_productos_mb, fotos_productos_n = _tamano_carpeta_mb(FOTOS_DIR)
+    facturas_whatsapp_mb, facturas_whatsapp_n = _tamano_carpeta_mb(FACTURAS_WHATSAPP_DIR)
+    comprobantes_mb, comprobantes_n = _tamano_carpeta_mb(COMPROBANTES_DIR)
+
+    return jsonify({
+        "disco": {
+            "total_mb": round(uso_disco.total / (1024 * 1024), 1),
+            "usado_mb": round(uso_disco.used / (1024 * 1024), 1),
+            "libre_mb": round(uso_disco.free / (1024 * 1024), 1),
+            "porcentaje_usado": round(100 * uso_disco.used / uso_disco.total, 1) if uso_disco.total else 0,
+        },
+        "desglose": [
+            {"carpeta": "Base de datos (inventario.db)", "mb": db_mb, "archivos": 1},
+            {"carpeta": "Respaldos automáticos locales", "mb": respaldos_mb, "archivos": respaldos_n},
+            {"carpeta": "Fotos de órdenes/garantías", "mb": fotos_vehiculos_mb, "archivos": fotos_vehiculos_n},
+            {"carpeta": "Fotos de productos", "mb": fotos_productos_mb, "archivos": fotos_productos_n},
+            {"carpeta": "Facturas recibidas por WhatsApp", "mb": facturas_whatsapp_mb, "archivos": facturas_whatsapp_n},
+            {"carpeta": "Comprobantes de pago", "mb": comprobantes_mb, "archivos": comprobantes_n},
+        ],
+    })
+
+
 @app.route("/api/backup/locales/crear", methods=["POST"])
 @requiere_rol()
 def backup_locales_crear():
@@ -5946,6 +6022,38 @@ def backup_locales_crear():
     if not exito:
         return jsonify({"error": resultado}), 400
     return jsonify({"ok": True, "nombre": resultado})
+
+
+@app.route("/api/backup/locales/limpiar", methods=["POST"])
+@requiere_rol()
+def backup_locales_limpiar():
+    """Borra respaldos automáticos locales YA, sin esperar a la próxima
+    rotación (que solo pasa cuando se crea uno nuevo) -- pensado para
+    liberar espacio de urgencia si el disco se está por llenar (ver
+    incidente de julio 2026). Por defecto deja los 3 más recientes; se
+    puede pedir dejar más/menos con 'conservar' en el body."""
+    conservar = (request.get_json(silent=True) or {}).get("conservar", 3)
+    try:
+        conservar = max(0, int(conservar))
+    except (TypeError, ValueError):
+        conservar = 3
+    copias = _listar_respaldos_locales()
+    a_borrar = copias[conservar:]
+    borrados = 0
+    mb_liberados = 0.0
+    for copia in a_borrar:
+        try:
+            os.remove(os.path.join(RESPALDO_LOCAL_DIR, copia["nombre"]))
+            borrados += 1
+            mb_liberados += copia["tamano_kb"] / 1024
+        except OSError:
+            continue
+    return jsonify({
+        "ok": True,
+        "borrados": borrados,
+        "mb_liberados": round(mb_liberados, 1),
+        "copias_restantes": len(copias) - borrados,
+    })
 
 
 @app.route("/api/backup/locales/restaurar", methods=["POST"])

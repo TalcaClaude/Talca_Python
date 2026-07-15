@@ -1970,6 +1970,54 @@ document.getElementById("btn-respaldo").addEventListener("click", async () => {
   await cargarEstadoRespaldoAutomatico();
   await cargarEstadoAlertasStock();
   await cargarRespaldosLocales();
+  await cargarDiagnosticoDisco();
+});
+
+async function cargarDiagnosticoDisco() {
+  const cont = document.getElementById("disco-diagnostico");
+  cont.textContent = "Cargando…";
+  try {
+    const info = await api("/api/admin/diagnostico-disco");
+    const d = info.disco;
+    const clasePct = d.porcentaje_usado >= 90 ? "ayuda-inline--bloqueado" : "";
+    const filas = info.desglose
+      .slice()
+      .sort((a, b) => b.mb - a.mb)
+      .map(f => `
+        <div class="disco-fila">
+          <span>${escapeHtml(f.carpeta)}</span>
+          <span class="mono">${f.mb} MB${f.archivos ? ` (${f.archivos} archivo${f.archivos === 1 ? "" : "s"})` : ""}</span>
+        </div>
+      `).join("");
+    cont.innerHTML = `
+      <p class="${clasePct}" style="font-weight:600">
+        Disco: ${d.usado_mb} MB usados de ${d.total_mb} MB (${d.porcentaje_usado}%) — ${d.libre_mb} MB libres
+      </p>
+      <div class="disco-desglose">${filas}</div>
+    `;
+  } catch (e) {
+    cont.textContent = "No se pudo cargar: " + e.message;
+  }
+}
+
+document.getElementById("btn-refrescar-disco").addEventListener("click", cargarDiagnosticoDisco);
+
+document.getElementById("btn-limpiar-respaldos-urgencia").addEventListener("click", async () => {
+  if (!confirm("Esto borra TODOS los respaldos automáticos locales excepto los 3 más recientes, para liberar espacio ya. ¿Continuar?")) return;
+  const btn = document.getElementById("btn-limpiar-respaldos-urgencia");
+  btn.disabled = true;
+  btn.textContent = "Liberando espacio…";
+  try {
+    const resultado = await api("/api/backup/locales/limpiar", { method: "POST", body: JSON.stringify({ conservar: 3 }) });
+    toast(`Se borraron ${resultado.borrados} respaldos — ${resultado.mb_liberados} MB liberados.`);
+    await cargarRespaldosLocales();
+    await cargarDiagnosticoDisco();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Liberar espacio ahora (borra respaldos viejos, deja los 3 más recientes)";
+  }
 });
 
 async function cargarRespaldosLocales() {

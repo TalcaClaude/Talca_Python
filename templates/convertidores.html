@@ -30,6 +30,7 @@
       <a href="/administracion" class="btn btn-secundario">Administración</a>
       {% endif %}
       <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+      {% include "_notificaciones.html" %}
     </div>
   </header>
 
@@ -450,6 +451,7 @@
 <script src="/static/js/charts.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/convertidores.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
+<script src="/static/js/notificaciones.js?v={{ ASSET_VERSION }}"></script>
 </div>
 </div>
 </body>

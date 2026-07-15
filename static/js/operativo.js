@@ -274,6 +274,25 @@ function activarPestanaDesdeHash() {
 window.addEventListener("hashchange", activarPestanaDesdeHash);
 activarPestanaDesdeHash();
 
+// La campanita de notificaciones (ver _notificaciones.html) enlaza acá con
+// "?abrir_ot=<id>#ordenes" -- al llegar así, se abre directo el detalle de
+// esa OT en la pestaña Diagnóstico (donde vive el aviso de sugerencias), en
+// vez de dejar que la persona la busque a mano en el tablero.
+async function abrirOtDesdeQueryParam() {
+  const params = new URLSearchParams(location.search);
+  const otId = params.get("abrir_ot");
+  if (!otId) return;
+  await abrirDetalleOrden(parseInt(otId, 10));
+  const tabDiagnostico = document.querySelector('#modal-op-orden-detalle .op-tab[data-opod-tab="diagnostico"]');
+  if (tabDiagnostico) tabDiagnostico.click();
+  // Se limpia el query param para que recargar la página no vuelva a abrir
+  // el mismo modal solo, y para no dejar el ID de la OT visible en la URL.
+  const url = new URL(location.href);
+  url.searchParams.delete("abrir_ot");
+  history.replaceState(null, "", url.pathname + url.search + url.hash);
+}
+abrirOtDesdeQueryParam();
+
 // ---------------------------------------------------------------------------
 // Dashboard Operativo: KPIs
 // ---------------------------------------------------------------------------

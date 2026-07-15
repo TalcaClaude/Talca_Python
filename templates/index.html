@@ -31,6 +31,7 @@
       {% endif %}
       <button class="btn btn-secundario" id="btn-respaldo">Respaldo</button>
       <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+      {% include "_notificaciones.html" %}
       <button class="btn btn-secundario" id="btn-importar-excel" style="display:none">Importar Excel</button>
       <button class="btn btn-primary" id="btn-nuevo" style="display:none">+ Nuevo producto</button>
     </div>
@@ -1086,6 +1087,7 @@
 <script src="/static/js/charts.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/app.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
+<script src="/static/js/notificaciones.js?v={{ ASSET_VERSION }}"></script>
 </div>
 </div>
 </body>

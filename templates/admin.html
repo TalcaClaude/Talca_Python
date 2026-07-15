@@ -24,6 +24,7 @@
       <span class="sesion-usuario" id="sesion-usuario"></span>
       <a href="/" class="btn btn-secundario">← Módulos</a>
       <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+      {% include "_notificaciones.html" %}
     </div>
   </header>
 
@@ -165,5 +166,6 @@
 
 <script src="/static/js/admin.js?v={{ ASSET_VERSION }}"></script>
 <script src="/static/js/alerta_facturas_pendientes.js?v={{ ASSET_VERSION }}"></script>
+<script src="/static/js/notificaciones.js?v={{ ASSET_VERSION }}"></script>
 </body>
 </html>

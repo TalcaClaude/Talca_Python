@@ -1859,6 +1859,87 @@ svg .chart-punto-hover {
   margin-right: 4px;
 }
 
+/* ---------- Campanita de notificaciones (ver _notificaciones.html) ---------- */
+
+.notif-bell {
+  position: relative;
+  display: inline-flex;
+}
+.notif-bell-btn {
+  position: relative;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text);
+}
+.notif-bell-btn:hover {
+  border-color: var(--accent);
+}
+.notif-bell-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 1px 5px;
+  min-width: 16px;
+  text-align: center;
+}
+.notif-bell-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 340px;
+  max-height: 420px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  z-index: 60;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+}
+.notif-bell-panel h4 {
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  color: var(--text);
+}
+.notif-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.notif-item:last-child {
+  margin-bottom: 0;
+}
+.notif-item-ot a {
+  color: var(--accent-2);
+  font-weight: 600;
+  text-decoration: none;
+  font-size: 13px;
+}
+.notif-item-ot a:hover {
+  text-decoration: underline;
+}
+.notif-item-texto {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--text);
+}
+.notif-item-meta {
+  margin: 0 0 6px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ---------- Dashboard ---------- */
 
 .dash-grid {

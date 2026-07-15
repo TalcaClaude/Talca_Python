@@ -431,6 +431,32 @@ class TestPerfilMecanicoRestringido(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
+    def test_notificaciones_resumen_y_lista_ven_la_sugerencia_de_cualquier_ot(self):
+        # La campanita (ver /api/notificaciones/*) no está acotada a una OT
+        # -- tiene que juntar las sugerencias de TODAS las órdenes abiertas.
+        self._registrar_mecanico("Mecánico Restringido Siete", "+56900900007", tipo="mecanico")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PERF007")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        antes = self.client.get("/api/notificaciones/resumen").get_json()
+        self._mandar_texto("+56900900007", f"ot {orden['id']} correa floja")
+        despues = self.client.get("/api/notificaciones/resumen").get_json()
+        self.assertEqual(despues["sugerencias_diagnostico"], antes["sugerencias_diagnostico"] + 1)
+
+        lista = self.client.get("/api/notificaciones/sugerencias-diagnostico").get_json()
+        entrada = next(s for s in lista if s["ot_id"] == orden["id"])
+        self.assertEqual(entrada["cliente_nombre"], cliente["nombre"])
+        self.assertEqual(entrada["patente"], "PERF007")
+        self.assertIn("correa floja", entrada["texto"])
+
+        # Al atenderla, desaparece tanto del resumen como de la lista global.
+        self.client.post(f"/api/sugerencias-diagnostico/{entrada['id']}/atender")
+        lista_despues = self.client.get("/api/notificaciones/sugerencias-diagnostico").get_json()
+        self.assertFalse(any(s["id"] == entrada["id"] for s in lista_despues))
+        resumen_final = self.client.get("/api/notificaciones/resumen").get_json()
+        self.assertEqual(resumen_final["sugerencias_diagnostico"], antes["sugerencias_diagnostico"])
+
 
 if __name__ == "__main__":
     unittest.main()

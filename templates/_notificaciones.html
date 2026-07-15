@@ -1,0 +1,21 @@
+<!-- Campanita de notificaciones global (ver static/js/notificaciones.js).
+     Hoy solo avisa sugerencias de diagnóstico dejadas por mecánicos de
+     perfil restringido por WhatsApp (ver migración 16 en app.py), sin
+     revisar todavía -- pensada desde el principio para sumar más
+     categorías más adelante (una por rol: facturas para bodega, CxC/CxP
+     próximas para finanzas, stock crítico para logística), sin tener que
+     rehacer el mecanismo. El propio script decide si mostrarse u
+     ocultarse según el rol de la sesión (por ahora: admin/operativo, que
+     son quienes revisan diagnóstico) -- se incluye en todas las plantillas
+     autenticadas igual que _alerta_facturas_pendientes.html, para no
+     depender de en qué módulo esté parado quien tiene que verla. -->
+<div class="notif-bell" id="notif-bell" style="display:none">
+  <button type="button" class="notif-bell-btn" id="notif-bell-btn" title="Notificaciones">
+    <span>🔔</span>
+    <span class="notif-bell-badge" id="notif-bell-badge" style="display:none">0</span>
+  </button>
+  <div class="notif-bell-panel" id="notif-bell-panel" style="display:none">
+    <h4>Sugerencias de diagnóstico</h4>
+    <div id="notif-bell-lista"><p class="ayuda-inline">Cargando…</p></div>
+  </div>
+</div>

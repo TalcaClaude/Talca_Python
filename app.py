@@ -5009,6 +5009,31 @@ def _agente_listar_sugerencias_pendientes(db, ot_id):
     return [dict(f) for f in filas]
 
 
+def _agente_listar_todas_sugerencias_pendientes(db):
+    """Igual que _agente_listar_sugerencias_pendientes pero sin acotar a
+    una OT -- para la campanita de notificaciones (ver
+    /api/notificaciones/*), que muestra TODAS las sugerencias sin revisar
+    de cualquier OT, para que la parte operativa las vea sin tener que
+    entrar una por una. Se suma info de la OT (cliente, patente) para que
+    la lista sea legible sin otra llamada."""
+    filas = db.execute(
+        """
+        SELECT
+            s.*,
+            o.estado AS ot_estado,
+            c.nombre AS cliente_nombre,
+            e.identificador AS patente
+        FROM sugerencias_diagnostico s
+        JOIN ordenes_trabajo o ON o.id = s.ot_id
+        LEFT JOIN clientes c ON c.id = o.cliente_id
+        LEFT JOIN equipos e ON e.id = o.equipo_id
+        WHERE s.atendida = 0
+        ORDER BY s.creado_en DESC
+        """
+    ).fetchall()
+    return [dict(f) for f in filas]
+
+
 def _agente_ejecutar_una_accion(db, mecanico, accion):
     """Ejecuta UNA acción ya interpretada (un elemento de la lista
     'acciones' que devuelve _llamar_claude_interpretar_mensaje_agente) y
@@ -5547,6 +5572,30 @@ def atender_sugerencia_diagnostico(sugerencia_id):
     db.commit()
     actualizada = db.execute("SELECT * FROM sugerencias_diagnostico WHERE id = ?", (sugerencia_id,)).fetchone()
     return jsonify(dict(actualizada))
+
+
+# ---------------------------------------------------------------------------
+# Notificaciones globales — campanita en el topbar (ver
+# templates/_notificaciones.html y static/js/notificaciones.js). Hoy solo
+# cubre las sugerencias de diagnóstico de mecánicos restringidos (ver
+# migración 16), pensada desde el principio para sumar más categorías más
+# adelante (una por rol, ej. bodega con facturas, finanzas con CxC/CxP
+# próximas, logística con stock crítico) sin tener que rehacer el mecanismo
+# -- por eso 'resumen' ya devuelve un dict con una clave por categoría en
+# vez de un solo número suelto.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/notificaciones/resumen", methods=["GET"])
+def notificaciones_resumen():
+    db = get_db()
+    conteo = db.execute("SELECT COUNT(*) AS n FROM sugerencias_diagnostico WHERE atendida = 0").fetchone()["n"]
+    return jsonify({"sugerencias_diagnostico": conteo})
+
+
+@app.route("/api/notificaciones/sugerencias-diagnostico", methods=["GET"])
+def notificaciones_sugerencias_diagnostico():
+    db = get_db()
+    return jsonify(_agente_listar_todas_sugerencias_pendientes(db))
 
 
 @app.route("/api/agente/simular-mensaje", methods=["POST"])

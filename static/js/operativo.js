@@ -139,11 +139,20 @@ document.querySelectorAll(".input-monto").forEach(el => {
 // Días que lleva (o llevó) el vehículo en el taller: desde la recepción
 // hasta hoy, o hasta la entrega real si la orden ya se entregó (para que
 // el contador se congele en vez de seguir subiendo).
+// Cuenta días CALENDARIO (no horas exactas / 24) entre la recepción y hoy
+// (o la entrega real, si ya se cerró) -- se compara solo la fecha, sin la
+// hora, porque si no una OT recibida ayer a las 23:50 mostraba "0 días"
+// hasta pasadas casi 24 horas reales, en vez de "1 día" apenas cruzaba la
+// medianoche (que es como el taller cuenta los días: por fecha, no por
+// horas transcurridas).
 function diasEnTallerNumero(orden) {
+  if (!orden.fecha_recepcion) return null;
   const inicio = new Date(orden.fecha_recepcion);
   if (isNaN(inicio)) return null;
-  const fin = orden.fecha_entrega_real ? new Date(orden.fecha_entrega_real) : new Date();
-  return Math.max(0, Math.floor((fin - inicio) / 86400000));
+  const finRaw = orden.fecha_entrega_real ? new Date(orden.fecha_entrega_real) : new Date();
+  if (isNaN(finRaw)) return null;
+  const soloFecha = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  return Math.max(0, Math.round((soloFecha(finRaw) - soloFecha(inicio)) / 86400000));
 }
 
 function diasEnTaller(orden) {
@@ -801,16 +810,12 @@ function renderListadoOperativo() {
   contador.textContent = `${ordenes.length} OT${ordenes.length === 1 ? "" : "s"}`;
 
   if (ordenes.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="14" class="vacio">Sin órdenes que coincidan con el filtro.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" class="vacio">Sin órdenes que coincidan con el filtro.</td></tr>`;
     return;
   }
 
   tbody.innerHTML = ordenes.map(o => {
     const dias = diasEnTallerNumero(o);
-    const prioridad = o.prioridad || "media";
-    const badgePrioridad = prioridad === "media"
-      ? "Media"
-      : `<span class="badge-prioridad badge-prioridad--${prioridad}">${escapeHtml(prioridad)}</span>`;
     return `
       <tr data-id="${o.id}">
         <td class="mono">OT #${o.id}</td>
@@ -821,12 +826,9 @@ function renderListadoOperativo() {
         <td>${escapeHtml(o.equipo ? o.equipo.color : "") || "—"}</td>
         <td class="mono">${escapeHtml(o.equipo ? o.equipo.identificador : "") || "—"}</td>
         <td>${escapeHtml(OP_ESTADOS_LABEL[o.estado] || o.estado)}</td>
-        <td>${badgePrioridad}</td>
         <td class="num">${fmtMoney(o.valor_total || 0)}</td>
         <td class="num">${fmtMoney(o.total_pagado || 0)}</td>
-        <td class="num">${fmtMoney(o.total_por_pagar || 0)}</td>
         <td>${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</td>
-        <td>${o.fecha_entrega_estimada ? fmtFechaSolo(o.fecha_entrega_estimada.slice(0, 10)) : "—"}</td>
       </tr>`;
   }).join("");
 

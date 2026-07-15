@@ -82,7 +82,14 @@ body::before { content: none; }
 }
 
 .app {
-  max-width: 1180px;
+  /* Antes 1180px -- en monitores anchos eso dejaba franjas enormes de
+     espacio vacío a los costados sin usar (el sidebar ya ocupa su ancho
+     fijo aparte; esto es el límite del contenido dentro de shell-main).
+     Se subió a 1500px a pedido del taller, para que la tabla de Listado
+     (Operativo) entre sin tener que hacer scroll horizontal en pantallas
+     normales -- de paso le da más aire a cualquier otra tabla/dashboard
+     ancho del resto del sistema. */
+  max-width: 1500px;
   margin: 0 auto;
   padding: 28px 24px 80px;
 }

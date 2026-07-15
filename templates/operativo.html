@@ -241,11 +241,15 @@
        -- a diferencia del tablero (kanban), que agrupa por etapa. Usa la
        misma data ya cargada por cargarOperativo() (state.opOrdenes), así
        que muestra siempre las mismas OT que el tablero: todas las
-       abiertas + las cerradas del mes elegido. Los datos mostrados son
-       los que se pidieron como mínimo (nombre, marca/modelo, patente,
-       color, Nº de OT, fecha de ingreso, etapa actual) más algunos
-       adicionales que ya vive en el sistema (prioridad, días en taller,
-       valor, pagado/saldo) -- se ajusta con el taller una vez probada. -->
+       abiertas + las cerradas del mes elegido. Columnas: lo pedido como
+       mínimo (cliente, marca/modelo, patente, color, Nº de OT, fecha de
+       ingreso, etapa actual) + días en taller y valor/pagado -- se sacaron
+       prioridad, saldo y entrega estimada a pedido del taller para que
+       entre todo sin tener que hacer scroll horizontal (ver
+       .tabla-wrap--ancha en style.css, que le da más ancho a esta tabla
+       en particular). El filtro de prioridad se dejó en la barra de
+       arriba igual, por si sirve para acotar la búsqueda aunque ya no se
+       muestre como columna. -->
 
   <section class="toolbar">
     <input type="text" id="op-list-buscar" placeholder="Buscar por cliente, patente, marca o modelo…">
@@ -290,16 +294,13 @@
           <th>Color</th>
           <th>Patente</th>
           <th>Etapa actual</th>
-          <th>Prioridad</th>
           <th class="num">Valor</th>
           <th class="num">Pagado</th>
-          <th class="num">Saldo</th>
           <th>Ingreso</th>
-          <th>Entrega estimada</th>
         </tr>
       </thead>
       <tbody id="op-list-tbody">
-        <tr><td colspan="14" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="11" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>

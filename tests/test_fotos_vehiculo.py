@@ -92,9 +92,9 @@ class _BaseFotos(unittest.TestCase):
             content_type="multipart/form-data",
         )
 
-    def _subir_las_7_obligatorias(self, cliente, orden_id):
+    def _subir_las_7_obligatorias(self, cliente, orden_id, entidad="ordenes"):
         for cat, _ in FOTOS_CATEGORIAS_OBLIGATORIAS:
-            resp = self._subir_foto(cliente, orden_id, cat)
+            resp = self._subir_foto(cliente, orden_id, cat, entidad=entidad)
             self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
 
 
@@ -242,6 +242,74 @@ class TestFinalizarFotosIngreso(_BaseFotos):
 
         resp = cliente_bodega.post(f"/api/operativo/ordenes/{orden['id']}/fotos/finalizar")
         self.assertEqual(resp.status_code, 403)
+
+
+class TestFinalizarFotosGarantia(_BaseFotos):
+    """Fase 2: el mismo flujo de fotos obligatorias + PDF + correo, pero
+    para cuando el vehículo entra por garantía (la garantía tiene su propio
+    proceso, separado de la OT -- ver _finalizar_fotos_generico)."""
+
+    def test_finalizar_sin_las_7_obligatorias_da_400_con_el_detalle(self):
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "FT0006")
+        garantia = self._crear_garantia(cliente["id"], equipo["id"])
+        self._subir_foto(self.client, garantia["id"], "vin", entidad="garantias")
+
+        resp = self.client.post(f"/api/operativo/garantias/{garantia['id']}/fotos/finalizar")
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertIn("Frente", data["faltan_obligatorias"])
+
+    def test_finalizar_con_correo_de_cliente_intenta_enviar(self):
+        cliente = self._crear_cliente(nombre="Cliente Con Correo", email="cliente@ejemplo.cl")
+        equipo = self._crear_equipo(cliente["id"], "FT0007")
+        garantia = self._crear_garantia(cliente["id"], equipo["id"])
+        self._subir_las_7_obligatorias(self.client, garantia["id"], entidad="garantias")
+
+        resp = self.client.post(f"/api/operativo/garantias/{garantia['id']}/fotos/finalizar")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["destinatario"], "cliente@ejemplo.cl")
+        # Sin RESEND_API_KEY/SMTP configurado en el entorno de pruebas, el
+        # envío real falla -- lo que importa acá es que SÍ se intentó
+        # (armó el PDF, encontró el destinatario) y no bloqueó la respuesta.
+        self.assertFalse(data["correo_enviado"])
+
+    def test_finalizar_garantia_inexistente_da_404(self):
+        resp = self.client.post("/api/operativo/garantias/999999/fotos/finalizar")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_finalizar_exige_rol_operativo(self):
+        cliente_bodega = self._crear_usuario_con_rol("bod_fotos_gar", "bodega")
+        cli = self._crear_cliente()
+        equipo = self._crear_equipo(cli["id"], "FT0008")
+        garantia = self._crear_garantia(cli["id"], equipo["id"])
+        self._subir_las_7_obligatorias(self.client, garantia["id"], entidad="garantias")
+
+        resp = cliente_bodega.post(f"/api/operativo/garantias/{garantia['id']}/fotos/finalizar")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_fotos_de_orden_y_garantia_no_se_mezclan(self):
+        """Ambas usan la misma tabla fotos_vehiculo con entidad_tipo/entidad_id
+        -- este test confirma que subir fotos a una garantía no las cuenta
+        como obligatorias de una OT con el mismo id numérico, y viceversa.
+        Se usan dos vehículos distintos porque no se puede abrir una
+        garantía para un auto que todavía tiene una OT abierta (regla de
+        negocio ya existente, ver crear_garantia)."""
+        cliente = self._crear_cliente()
+        equipo_ot = self._crear_equipo(cliente["id"], "FT0009")
+        equipo_gar = self._crear_equipo(cliente["id"], "FT0010")
+        orden = self._crear_orden(cliente["id"], equipo_ot["id"])
+        garantia = self._crear_garantia(cliente["id"], equipo_gar["id"])
+
+        self._subir_las_7_obligatorias(self.client, orden["id"], entidad="ordenes")
+
+        # La garantía (que puede compartir el mismo id numérico que otra
+        # entidad en otra tabla) no debería heredar esas fotos.
+        listado_garantia = self.client.get(f"/api/operativo/garantias/{garantia['id']}/fotos").get_json()
+        self.assertEqual(len(listado_garantia["fotos"]), 0)
+        self.assertEqual(len(listado_garantia["faltan_obligatorias"]), 7)
 
 
 if __name__ == "__main__":

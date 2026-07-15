@@ -1965,12 +1965,12 @@ function _wireFotosGrid(gridEl, inputArchivoEl, onCambio) {
   });
 }
 
-async function _subirFotoOrden(ordenId, categoria, titulo, archivo) {
+async function _subirFotoEntidad(entidadTipo, entidadId, categoria, titulo, archivo) {
   const formData = new FormData();
   formData.append("archivo", archivo);
   formData.append("categoria", categoria);
   if (titulo) formData.append("titulo", titulo);
-  const res = await fetch(`/api/operativo/ordenes/${ordenId}/fotos`, { method: "POST", body: formData });
+  const res = await fetch(_urlFotosEntidad(entidadTipo, entidadId), { method: "POST", body: formData });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "No se pudo subir la foto");
   return data;
@@ -1988,28 +1988,43 @@ document.getElementById("opfz-img").addEventListener("click", (e) => {
   e.target.classList.toggle("op-foto-zoom-activo");
 });
 
-// ---- Flujo obligatorio al crear la orden ----
+// ---- Flujo obligatorio al crear la orden o la garantía ----
+// El mismo modal (modal-op-fotos-ingreso) sirve para las dos entidades --
+// "entidadTipo" ('orden' o 'garantia') decide qué endpoint usar y a qué
+// detalle volver al cerrar. Ver también _urlFotosEntidad más abajo, que
+// arma la URL base según el tipo (las OT usan "ordenes", las garantías
+// "garantias" -- mismo criterio que el resto de la API).
 
-async function abrirFotosIngreso(ordenId) {
-  document.getElementById("opfi-orden-id").value = ordenId;
+function _urlFotosEntidad(entidadTipo, entidadId) {
+  const segmento = entidadTipo === "garantia" ? "garantias" : "ordenes";
+  return `/api/operativo/${segmento}/${entidadId}/fotos`;
+}
+
+async function abrirFotosIngreso(entidadTipo, entidadId) {
+  document.getElementById("opfi-entidad-tipo").value = entidadTipo;
+  document.getElementById("opfi-orden-id").value = entidadId;
   await cargarFotosIngreso();
   abrirModal("modal-op-fotos-ingreso");
 }
 
 // Cerrar (X o "Completar después") también deja a la persona en el detalle
-// de la OT recién creada, en vez de devolverla al tablero sin más -- la
-// idea es que "cerrar" sea "lo dejo para después", no "perder el hilo".
+// de la OT/garantía recién creada, en vez de devolverla al tablero sin más
+// -- la idea es que "cerrar" sea "lo dejo para después", no "perder el hilo".
 document.querySelectorAll('#modal-op-fotos-ingreso [data-close="modal-op-fotos-ingreso"]').forEach(btn => {
   btn.addEventListener("click", () => {
-    const ordenId = document.getElementById("opfi-orden-id").value;
-    if (ordenId) abrirDetalleOrden(parseInt(ordenId, 10));
+    const entidadTipo = document.getElementById("opfi-entidad-tipo").value;
+    const entidadId = document.getElementById("opfi-orden-id").value;
+    if (!entidadId) return;
+    if (entidadTipo === "garantia") abrirDetalleGarantia(parseInt(entidadId, 10));
+    else abrirDetalleOrden(parseInt(entidadId, 10));
   });
 });
 
 async function cargarFotosIngreso() {
-  const ordenId = document.getElementById("opfi-orden-id").value;
+  const entidadTipo = document.getElementById("opfi-entidad-tipo").value;
+  const entidadId = document.getElementById("opfi-orden-id").value;
   try {
-    const data = await api(`/api/operativo/ordenes/${ordenId}/fotos`);
+    const data = await api(_urlFotosEntidad(entidadTipo, entidadId));
     const grid = document.getElementById("opfi-fotos-grid");
     _renderFotosGrid(grid, data.fotos);
     _wireFotosGrid(grid, document.getElementById("opfi-archivo-libre"), cargarFotosIngreso);
@@ -2028,10 +2043,11 @@ document.getElementById("btn-opfi-agregar-libre").addEventListener("click", () =
 
 document.getElementById("opfi-archivo-libre").addEventListener("change", async (e) => {
   const archivo = e.target.files[0];
-  const ordenId = document.getElementById("opfi-orden-id").value;
+  const entidadTipo = document.getElementById("opfi-entidad-tipo").value;
+  const entidadId = document.getElementById("opfi-orden-id").value;
   if (!archivo || !_opFotosCategoriaPendiente) { e.target.value = ""; return; }
   try {
-    await _subirFotoOrden(ordenId, _opFotosCategoriaPendiente, _opFotosTituloPendiente, archivo);
+    await _subirFotoEntidad(entidadTipo, entidadId, _opFotosCategoriaPendiente, _opFotosTituloPendiente, archivo);
     toast("Foto guardada.");
     await cargarFotosIngreso();
   } catch (err) {
@@ -2044,19 +2060,21 @@ document.getElementById("opfi-archivo-libre").addEventListener("change", async (
 });
 
 document.getElementById("btn-opfi-finalizar").addEventListener("click", async () => {
-  const ordenId = document.getElementById("opfi-orden-id").value;
+  const entidadTipo = document.getElementById("opfi-entidad-tipo").value;
+  const entidadId = document.getElementById("opfi-orden-id").value;
   const btn = document.getElementById("btn-opfi-finalizar");
   btn.disabled = true;
   btn.textContent = "Enviando…";
   try {
-    const data = await api(`/api/operativo/ordenes/${ordenId}/fotos/finalizar`, { method: "POST" });
+    const data = await api(`${_urlFotosEntidad(entidadTipo, entidadId)}/finalizar`, { method: "POST" });
     if (data.correo_enviado) {
       toast("Registro fotográfico enviado al cliente.");
     } else {
       toast("Fotos guardadas, pero no se pudo enviar el correo: " + (data.correo_detalle || "revisa el correo del cliente."), true);
     }
     cerrarModal("modal-op-fotos-ingreso");
-    abrirDetalleOrden(parseInt(ordenId, 10));
+    if (entidadTipo === "garantia") abrirDetalleGarantia(parseInt(entidadId, 10));
+    else abrirDetalleOrden(parseInt(entidadId, 10));
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -2101,7 +2119,7 @@ document.getElementById("opod-fotos-archivo-libre").addEventListener("change", a
   const ordenId = document.getElementById("opod-id").value;
   if (!archivo || !_opFotosCategoriaPendiente) { e.target.value = ""; return; }
   try {
-    await _subirFotoOrden(ordenId, _opFotosCategoriaPendiente, _opFotosTituloPendiente, archivo);
+    await _subirFotoEntidad("orden", ordenId, _opFotosCategoriaPendiente, _opFotosTituloPendiente, archivo);
     toast("Foto guardada.");
     await cargarFotosOrdenTab();
   } catch (err) {
@@ -2126,6 +2144,77 @@ document.getElementById("btn-opod-fotos-finalizar").addEventListener("click", as
       toast("Fotos guardadas, pero no se pudo enviar el correo: " + (data.correo_detalle || "revisa el correo del cliente."), true);
     }
     await cargarFotosOrdenTab();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Enviar registro fotográfico al cliente";
+  }
+});
+
+// ---- Sección "Fotos" dentro del detalle de la garantía -- mismo criterio
+// que la pestaña "Fotos" de la OT (ver arriba), solo que acá vive como una
+// sección más del modal en vez de una pestaña, porque el detalle de
+// garantía no está dividido en pestañas. ----
+
+async function cargarFotosGarantiaDetalle() {
+  const garantiaId = document.getElementById("gard-id").value;
+  try {
+    const data = await api(`/api/operativo/garantias/${garantiaId}/fotos`);
+    const grid = document.getElementById("gard-fotos-grid");
+    _renderFotosGrid(grid, data.fotos);
+    _wireFotosGrid(grid, document.getElementById("gard-fotos-archivo-libre"), cargarFotosGarantiaDetalle);
+
+    const aviso = document.getElementById("gard-fotos-faltan");
+    if (data.faltan_obligatorias.length) {
+      aviso.style.display = "";
+      aviso.textContent = `Faltan fotos obligatorias: ${data.faltan_obligatorias.join(", ")}.`;
+    } else {
+      aviso.style.display = "none";
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-gard-fotos-agregar").addEventListener("click", () => {
+  const titulo = (prompt("Título de la foto (ej: Rayón puerta trasera derecha)") || "").trim();
+  if (!titulo) return;
+  _opFotosCategoriaPendiente = "libre";
+  _opFotosTituloPendiente = titulo;
+  document.getElementById("gard-fotos-archivo-libre").click();
+});
+
+document.getElementById("gard-fotos-archivo-libre").addEventListener("change", async (e) => {
+  const archivo = e.target.files[0];
+  const garantiaId = document.getElementById("gard-id").value;
+  if (!archivo || !_opFotosCategoriaPendiente) { e.target.value = ""; return; }
+  try {
+    await _subirFotoEntidad("garantia", garantiaId, _opFotosCategoriaPendiente, _opFotosTituloPendiente, archivo);
+    toast("Foto guardada.");
+    await cargarFotosGarantiaDetalle();
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    e.target.value = "";
+    _opFotosCategoriaPendiente = null;
+    _opFotosTituloPendiente = "";
+  }
+});
+
+document.getElementById("btn-gard-fotos-finalizar").addEventListener("click", async () => {
+  const garantiaId = document.getElementById("gard-id").value;
+  const btn = document.getElementById("btn-gard-fotos-finalizar");
+  btn.disabled = true;
+  btn.textContent = "Enviando…";
+  try {
+    const data = await api(`/api/operativo/garantias/${garantiaId}/fotos/finalizar`, { method: "POST" });
+    if (data.correo_enviado) {
+      toast("Registro fotográfico enviado al cliente.");
+    } else {
+      toast("Fotos guardadas, pero no se pudo enviar el correo: " + (data.correo_detalle || "revisa el correo del cliente."), true);
+    }
+    await cargarFotosGarantiaDetalle();
   } catch (e) {
     toast(e.message, true);
   } finally {
@@ -2992,11 +3081,15 @@ document.getElementById("form-op-garantia-nueva").addEventListener("submit", asy
     return;
   }
   try {
-    await api("/api/operativo/garantias", { method: "POST", body: JSON.stringify(payload) });
+    const nueva = await api("/api/operativo/garantias", { method: "POST", body: JSON.stringify(payload) });
     cerrarModal("modal-op-garantia-nueva");
     toast("Garantía creada.");
-    cargarGarantiasTab();
+    await cargarGarantiasTab();
     cargarDashboardOperativo();
+    // Igual que al crear una OT: por obligación se piden las 7 fotos fijas
+    // del vehículo también cuando entra por garantía (spec explícita del
+    // usuario -- "este flujo también tiene que hacerse en las garantías").
+    abrirFotosIngreso("garantia", nueva.id);
   } catch (e2) {
     toast(e2.message, true);
     // Igual que en "Nueva orden": si el bloqueo apareció justo entre la
@@ -3054,6 +3147,8 @@ async function abrirDetalleGarantia(id) {
     document.getElementById("gari-producto-resultados").style.display = "none";
     document.getElementById("form-gar-item").reset();
     document.getElementById("gari-tipo").dispatchEvent(new Event("change"));
+
+    await cargarFotosGarantiaDetalle();
 
     abrirModal("modal-op-garantia-detalle");
   } catch (e) {

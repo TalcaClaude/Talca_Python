@@ -907,19 +907,24 @@ def eliminar_foto(foto_id):
     return jsonify({"ok": True})
 
 
-def _armar_pdf_fotos_ingreso(db, orden, cliente, fotos):
+def _armar_pdf_fotos_ingreso(db, entidad_tipo, entidad_id, equipo, cliente, fotos):
     """Arma (sin construir todavía -- eso lo hace el llamador con
     doc.build) el PDF de registro fotográfico que se manda al cliente al
     finalizar la recepción del vehículo. Mismo patrón que
-    _armar_presupuesto_pdf (reportlab, SimpleDocTemplate)."""
+    _armar_presupuesto_pdf (reportlab, SimpleDocTemplate).
+
+    'entidad_tipo' es 'orden' o 'garantia' -- ambos flujos (recepción de una
+    OT nueva, y recepción del vehículo cuando entra por garantía) usan el
+    mismo armado de PDF, solo cambia la etiqueta (OT vs Garantía) y de dónde
+    sale el cliente/equipo."""
     import io as _io
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 
-    orden_id = orden["id"]
-    equipo = orden.get("equipo") or {}
+    equipo = equipo or {}
+    etiqueta = "OT" if entidad_tipo == "orden" else "Garantía"
 
     buffer = _io.BytesIO()
     doc = SimpleDocTemplate(
@@ -935,7 +940,7 @@ def _armar_pdf_fotos_ingreso(db, orden, cliente, fotos):
     elementos = [
         Paragraph("Talleres Calificados", estilos["TituloFotosIng"]),
         Paragraph(
-            f"Registro fotográfico de recepción — OT{orden_id} · {datetime.now().strftime('%d-%m-%Y %H:%M')}",
+            f"Registro fotográfico de recepción — {etiqueta}{entidad_id} · {datetime.now().strftime('%d-%m-%Y %H:%M')}",
             estilos["SubtituloFotosIng"],
         ),
     ]
@@ -978,23 +983,66 @@ def _armar_pdf_fotos_ingreso(db, orden, cliente, fotos):
         _cerrar_fila()
 
     nombre_cliente = (cliente.get("nombre") or "").title()
-    nombre = _nombre_archivo_seguro(f"Fotos Recepcion Talleres Calificados OT{orden_id} {nombre_cliente}").strip()
+    nombre = _nombre_archivo_seguro(f"Fotos Recepcion Talleres Calificados {etiqueta}{entidad_id} {nombre_cliente}").strip()
     nombre = f"{nombre}.pdf"
     return buffer, doc, elementos, nombre
 
 
-@bp.route("/api/operativo/ordenes/<int:orden_id>/fotos/finalizar", methods=["POST"])
-@requiere_rol("operativo")
-def finalizar_fotos_orden(orden_id):
-    """Cierra la etapa de fotos de recepción: exige que estén las 7 fotos
-    obligatorias, arma un PDF con todas las fotos (obligatorias + libres) y
-    se lo manda por correo al cliente, con copia al taller
+def _finalizar_fotos_generico(db, entidad_tipo, entidad_id, equipo, cliente):
+    """Lógica compartida entre 'finalizar fotos de una OT' y 'finalizar
+    fotos de una garantía': arma el PDF con todas las fotos (obligatorias +
+    libres) y lo manda por correo al cliente, con copia al taller
     (PRESUPUESTO_COPIA_TALLER -- mismo listado de correos administrativos
     que ya se usaba para el envío de presupuestos, para no duplicar esa
     configuración). A propósito NO bloquea el ingreso del auto si el
     cliente no tiene correo registrado o el envío falla -- solo se informa
     en la respuesta, para que el personal pueda reenviarlo después a mano
     en vez de trabar la recepción física del vehículo."""
+    fotos = _listar_fotos_entidad(db, entidad_tipo, entidad_id)
+    from app import _enviar_correo, PRESUPUESTO_COPIA_TALLER
+
+    etiqueta = "OT" if entidad_tipo == "orden" else "Garantía"
+    destinatario = (cliente.get("email") or "").strip()
+    correo_enviado = False
+    correo_detalle = "Este cliente no tiene un correo registrado."
+    if destinatario:
+        pdf_bytes = None
+        try:
+            buffer, doc, elementos, nombre_pdf = _armar_pdf_fotos_ingreso(db, entidad_tipo, entidad_id, equipo, cliente, fotos)
+            doc.build(elementos)
+            buffer.seek(0)
+            pdf_bytes = buffer.getvalue()
+        except Exception as exc:
+            correo_detalle = f"No se pudo generar el PDF: {exc}"
+        if pdf_bytes:
+            nombre_cliente = (cliente.get("nombre") or "").title() or "cliente"
+            asunto = f"Recepción de tu vehículo — {etiqueta}{entidad_id} — Talleres Calificados"
+            cuerpo = (
+                f"Hola {nombre_cliente},\n\n"
+                f"Te confirmamos la recepción de tu vehículo ({etiqueta}{entidad_id}). Adjuntamos el registro "
+                f"fotográfico tomado al momento del ingreso.\n\n"
+                f"Ante cualquier consulta, contáctanos.\n\n"
+                f"Talleres Calificados"
+            )
+            correo_enviado, correo_detalle = _enviar_correo(
+                destinatario, asunto, cuerpo,
+                adjunto_bytes=pdf_bytes, adjunto_nombre=nombre_pdf, cc=PRESUPUESTO_COPIA_TALLER,
+            )
+
+    return {
+        "ok": True,
+        "correo_enviado": correo_enviado,
+        "correo_detalle": correo_detalle,
+        "destinatario": destinatario or None,
+    }
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/fotos/finalizar", methods=["POST"])
+@requiere_rol("operativo")
+def finalizar_fotos_orden(orden_id):
+    """Cierra la etapa de fotos de recepción de una OT: exige que estén las
+    7 fotos obligatorias antes de armar y mandar el registro fotográfico
+    (ver _finalizar_fotos_generico)."""
     db = get_db()
     row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     if row is None:
@@ -1009,43 +1057,34 @@ def finalizar_fotos_orden(orden_id):
 
     orden = _orden_dict_detalle(db, row)
     cliente = orden.get("cliente") or {}
-    fotos = _listar_fotos_entidad(db, "orden", orden_id)
+    equipo = orden.get("equipo") or {}
+    return jsonify(_finalizar_fotos_generico(db, "orden", orden_id, equipo, cliente))
 
-    from app import _enviar_correo, PRESUPUESTO_COPIA_TALLER
 
-    destinatario = (cliente.get("email") or "").strip()
-    correo_enviado = False
-    correo_detalle = "Este cliente no tiene un correo registrado."
-    if destinatario:
-        pdf_bytes = None
-        try:
-            buffer, doc, elementos, nombre_pdf = _armar_pdf_fotos_ingreso(db, orden, cliente, fotos)
-            doc.build(elementos)
-            buffer.seek(0)
-            pdf_bytes = buffer.getvalue()
-        except Exception as exc:
-            correo_detalle = f"No se pudo generar el PDF: {exc}"
-        if pdf_bytes:
-            nombre_cliente = (cliente.get("nombre") or "").title() or "cliente"
-            asunto = f"Recepción de tu vehículo — OT{orden_id} — Talleres Calificados"
-            cuerpo = (
-                f"Hola {nombre_cliente},\n\n"
-                f"Te confirmamos la recepción de tu vehículo (OT{orden_id}). Adjuntamos el registro "
-                f"fotográfico tomado al momento del ingreso.\n\n"
-                f"Ante cualquier consulta, contáctanos.\n\n"
-                f"Talleres Calificados"
-            )
-            correo_enviado, correo_detalle = _enviar_correo(
-                destinatario, asunto, cuerpo,
-                adjunto_bytes=pdf_bytes, adjunto_nombre=nombre_pdf, cc=PRESUPUESTO_COPIA_TALLER,
-            )
+@bp.route("/api/operativo/garantias/<int:garantia_id>/fotos/finalizar", methods=["POST"])
+@requiere_rol("operativo")
+def finalizar_fotos_garantia(garantia_id):
+    """Mismo flujo que finalizar_fotos_orden, pero para cuando el vehículo
+    entra por garantía -- la garantía tiene su propia OT/proceso (ver
+    docstring de 'Garantías como entidad propia' más abajo), así que este
+    registro fotográfico de recepción también se hace por separado, con las
+    mismas 7 fotos obligatorias."""
+    db = get_db()
+    row = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Garantía no encontrada"}), 404
 
-    return jsonify({
-        "ok": True,
-        "correo_enviado": correo_enviado,
-        "correo_detalle": correo_detalle,
-        "destinatario": destinatario or None,
-    })
+    faltantes = _fotos_obligatorias_faltantes(db, "garantia", garantia_id)
+    if faltantes:
+        return jsonify({
+            "error": "Faltan fotos obligatorias: " + ", ".join(faltantes),
+            "faltan_obligatorias": faltantes,
+        }), 400
+
+    garantia = _garantia_dict(db, row)
+    cliente = garantia.get("cliente") or {}
+    equipo = garantia.get("equipo") or {}
+    return jsonify(_finalizar_fotos_generico(db, "garantia", garantia_id, equipo, cliente))
 
 
 # ---------------------------------------------------------------------------
@@ -3296,7 +3335,12 @@ def actualizar_qc(orden_id):
 
 def _garantia_dict(db, row):
     d = dict(row)
-    cliente = db.execute("SELECT id, nombre, telefono FROM clientes WHERE id = ?", (d["cliente_id"],)).fetchone()
+    # Se agrega 'email' (no se seleccionaba antes) porque ahora también lo
+    # necesita finalizar_fotos_garantia() para saber a dónde mandar el
+    # registro fotográfico -- ver _finalizar_fotos_generico.
+    cliente = db.execute(
+        "SELECT id, nombre, telefono, email FROM clientes WHERE id = ?", (d["cliente_id"],)
+    ).fetchone()
     d["cliente"] = dict(cliente) if cliente else None
     equipo = None
     if d["equipo_id"]:

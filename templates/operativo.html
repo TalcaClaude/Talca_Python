@@ -522,6 +522,7 @@
       Toma las 7 fotos obligatorias del vehículo. Al terminar, se genera un registro fotográfico en PDF y se envía por correo al cliente (con copia al taller). Puedes agregar fotos adicionales de daños, rayones, etc. Si no alcanzas a terminar ahora, puedes cerrar esta ventana y completarlo después desde la pestaña "Fotos" de la OT.
     </p>
     <input type="hidden" id="opfi-orden-id">
+    <input type="hidden" id="opfi-entidad-tipo" value="orden">
     <div id="opfi-fotos-grid" class="op-fotos-grid"></div>
     <input type="file" id="opfi-archivo-libre" accept="image/*" capture="environment" style="display:none">
     <div class="modal-actions modal-actions--start">
@@ -1304,6 +1305,15 @@
     <div class="modal-actions modal-actions--start">
       <button type="button" class="btn btn-primary" id="btn-gard-guardar">Guardar cambios</button>
     </div>
+
+    <h3 class="subtitulo">Fotos</h3>
+    <div id="gard-fotos-faltan" class="ayuda-inline ayuda-inline--bloqueado" style="display:none"></div>
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-secundario" id="btn-gard-fotos-agregar">+ Agregar foto</button>
+      <button type="button" class="btn btn-primary" id="btn-gard-fotos-finalizar">Enviar registro fotográfico al cliente</button>
+    </div>
+    <input type="file" id="gard-fotos-archivo-libre" accept="image/*" capture="environment" style="display:none">
+    <div class="op-fotos-grid" id="gard-fotos-grid"></div>
 
     <h3 class="subtitulo">Ítems (repuestos / mano de obra)</h3>
     <div class="tabla-wrap">

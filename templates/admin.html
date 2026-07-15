@@ -44,7 +44,7 @@
         <tr>
           <th>Usuario</th>
           <th>Nombre</th>
-          <th>Rol</th>
+          <th>Acceso</th>
           <th>Estado</th>
           <th>Creado</th>
           <th></th>
@@ -150,15 +150,19 @@
         <label>Contraseña inicial * (mínimo 6 caracteres)</label>
         <input type="password" id="nu-password" required minlength="6">
       </div>
-      <div class="campo">
-        <label>Rol *</label>
-        <select id="nu-rol" required>
-          <option value="admin">Admin — puede todo</option>
-          <option value="finanzas">Finanzas</option>
-          <option value="bodega">Bodega</option>
-          <option value="operativo" selected>Operativo</option>
-          <option value="convertidores">Convertidores</option>
-        </select>
+      <label class="toggle-critico">
+        <input type="checkbox" id="nu-es-admin">
+        Administrador (acceso a todo, incluyendo este panel)
+      </label>
+      <div class="campo" id="nu-modulos-campo">
+        <label>Módulos a los que tiene acceso *</label>
+        <div class="checkbox-group">
+          <label><input type="checkbox" class="nu-modulo" value="operativo" checked> Operativo</label>
+          <label><input type="checkbox" class="nu-modulo" value="bodega"> Bodega / Logística</label>
+          <label><input type="checkbox" class="nu-modulo" value="finanzas"> Finanzas</label>
+          <label><input type="checkbox" class="nu-modulo" value="convertidores"> Convertidores</label>
+        </div>
+        <p class="ayuda-inline">Puedes marcar más de uno — el usuario verá y podrá usar todos los módulos que marques.</p>
       </div>
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-nuevo-usuario">Cancelar</button>
@@ -181,15 +185,19 @@
         <label>Nombre completo</label>
         <input type="text" id="eu-nombre">
       </div>
-      <div class="campo">
-        <label>Rol</label>
-        <select id="eu-rol">
-          <option value="admin">Admin — puede todo</option>
-          <option value="finanzas">Finanzas</option>
-          <option value="bodega">Bodega</option>
-          <option value="operativo">Operativo</option>
-          <option value="convertidores">Convertidores</option>
-        </select>
+      <label class="toggle-critico">
+        <input type="checkbox" id="eu-es-admin">
+        Administrador (acceso a todo, incluyendo este panel)
+      </label>
+      <div class="campo" id="eu-modulos-campo">
+        <label>Módulos a los que tiene acceso</label>
+        <div class="checkbox-group">
+          <label><input type="checkbox" class="eu-modulo" value="operativo"> Operativo</label>
+          <label><input type="checkbox" class="eu-modulo" value="bodega"> Bodega / Logística</label>
+          <label><input type="checkbox" class="eu-modulo" value="finanzas"> Finanzas</label>
+          <label><input type="checkbox" class="eu-modulo" value="convertidores"> Convertidores</label>
+        </div>
+        <p class="ayuda-inline">Puedes agregar o quitar módulos cuando quieras — se aplica de inmediato la próxima vez que la persona cargue una página.</p>
       </div>
       <label class="toggle-critico">
         <input type="checkbox" id="eu-activo">

@@ -75,7 +75,7 @@ async function afpApi(path, options = {}) {
 async function afpCargarRol() {
   try {
     const s = await afpApi("/api/sesion");
-    afpPuedeBodega = s.rol === "admin" || s.rol === "bodega";
+    afpPuedeBodega = s.rol === "admin" || (s.modulos || []).includes("bodega");
   } catch (e) {
     // Sin sesión válida (ej. venimos de /login) — no hay nada que sondear.
   }

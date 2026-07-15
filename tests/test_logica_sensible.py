@@ -2813,7 +2813,11 @@ class TestCuentasPorPagarManual(unittest.TestCase):
     def _crear_usuario(self, username, password, rol):
         resp = self.admin_client.post(
             "/api/admin/usuarios",
-            json={"username": username, "password": password, "nombre": username, "rol": rol},
+            json={
+                "username": username, "password": password, "nombre": username,
+                "es_admin": rol == "admin",
+                "modulos": [] if rol == "admin" else [rol],
+            },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         return resp.get_json()
@@ -3140,7 +3144,11 @@ class TestRolesYPermisos(unittest.TestCase):
     def _crear_usuario(self, username, password, rol):
         resp = self.admin_client.post(
             "/api/admin/usuarios",
-            json={"username": username, "password": password, "nombre": username, "rol": rol},
+            json={
+                "username": username, "password": password, "nombre": username,
+                "es_admin": rol == "admin",
+                "modulos": [] if rol == "admin" else [rol],
+            },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         return resp.get_json()

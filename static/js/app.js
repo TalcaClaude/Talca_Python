@@ -1958,8 +1958,15 @@ async function cargarSesion() {
     state.sesion = s;
     state.rol = s.rol;
     state.esAdmin = s.rol === "admin";
-    state.puedeFinanzas = state.esAdmin || s.rol === "finanzas";
-    state.puedeBodega = state.esAdmin || s.rol === "bodega";
+    // Desde que un usuario puede tener más de un módulo asignado a la vez
+    // (ver migración 17), esto se decide mirando la lista 'modulos' (ver
+    // /api/sesion), no comparando 'rol' contra un único valor -- alguien
+    // con ["bodega", "finanzas"] sigue teniendo rol="bodega" (el primer
+    // módulo elegido, solo representativo) pero SÍ tiene que ver lo de
+    // finanzas acá igual.
+    const modulos = s.modulos || [];
+    state.puedeFinanzas = state.esAdmin || modulos.includes("finanzas");
+    state.puedeBodega = state.esAdmin || modulos.includes("bodega");
     document.getElementById("sesion-usuario").textContent = s.nombre ? `👤 ${s.nombre}` : "";
     document.getElementById("m-usuario").value = s.nombre || s.username || "";
     aplicarVisibilidadPorRol();

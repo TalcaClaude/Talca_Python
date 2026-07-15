@@ -69,10 +69,12 @@ from core import (  # noqa: E402
     fmt_money_pdf,
     usuario_actual,
     usuario_rol,
+    usuario_modulos,
     requiere_rol,
     requiere_modulo,
     home_del_rol,
     ROLES_VALIDOS,
+    MODULOS_VALIDOS,
     formatear_rut,
     _estimar_lead_time_dias,
     _consumo_diario_stats,
@@ -139,6 +141,18 @@ def _inyectar_rol_usuario():
     # misma función para que las plantillas usen exactamente la misma
     # regla que ya se aplica en el servidor.
     return {"rol_usuario": usuario_rol() if session.get("user_id") else None}
+
+
+@app.context_processor
+def _inyectar_modulos_usuario():
+    # Mismo criterio que _inyectar_rol_usuario de arriba: expone
+    # usuario_modulos() (ver migración 17 / core.py) para que la barra
+    # lateral pueda mostrar cada módulo según el CONJUNTO real de módulos
+    # de la sesión, no un único rol -- un usuario admin no necesita esto
+    # (rol_usuario == "admin" ya destrapa todo en las plantillas), así que
+    # para admin se manda un set vacío en vez de forzar a cada plantilla a
+    # acordarse de chequear rol_usuario primero.
+    return {"modulos_usuario": usuario_modulos() if session.get("user_id") else set()}
 
 
 logging.basicConfig(level=logging.INFO)
@@ -1080,6 +1094,35 @@ def init_db():
     )
     db.commit()
 
+    # ---- Migración 17: acceso a más de un módulo por usuario. Hasta acá
+    # cada usuario no-admin quedaba encerrado en el único módulo que su
+    # 'rol' representaba (ver migración 14 y requiere_modulo) -- pedido
+    # explícito del taller para cuando una persona necesita trabajar en más
+    # de un módulo (ej. alguien que hace Logística Y Finanzas a la vez).
+    # 'modulos_json' guarda la lista de módulos permitidos como JSON (ej.
+    # '["bodega","finanzas"]'). 'rol' se sigue guardando tal cual --
+    # 'admin' sigue significando acceso total (modulos_json no se usa para
+    # esa cuenta), y para cualquier usuario no-admin queda con el PRIMER
+    # módulo elegido, solo por compatibilidad/legado (ver comentario en
+    # core.py: ningún chequeo de permisos debería mirar 'rol' directo para
+    # un usuario no-admin, siempre usuario_modulos()).
+    #
+    # Backfill: todo usuario no-admin que ya existiera ANTES de esta
+    # migración queda con modulos_json = el único módulo que su 'rol'
+    # anterior representaba -- nadie pierde ni gana acceso de un día para
+    # otro solo por este despliegue.
+    columnas_usuarios_v17 = [c[1] for c in db.execute("PRAGMA table_info(usuarios)").fetchall()]
+    if "modulos_json" not in columnas_usuarios_v17:
+        db.execute("ALTER TABLE usuarios ADD COLUMN modulos_json TEXT NOT NULL DEFAULT '[]'")
+        db.commit()
+        for fila_usuario in db.execute("SELECT id, rol FROM usuarios").fetchall():
+            if fila_usuario["rol"] and fila_usuario["rol"] != "admin":
+                db.execute(
+                    "UPDATE usuarios SET modulos_json = ? WHERE id = ?",
+                    (json.dumps([fila_usuario["rol"]]), fila_usuario["id"]),
+                )
+        db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -1234,6 +1277,15 @@ def login():
     session["username"] = usuario["username"]
     session["nombre"] = usuario["nombre"] or usuario["username"]
     session["rol"] = usuario["rol"] or "admin"
+    # 'admin' no necesita módulos (ya puede todo); para cualquier otro
+    # usuario se recalcula acá, en cada login, a partir de la columna real
+    # -- así un cambio de módulos hecho desde Administración se refleja
+    # recién en el próximo inicio de sesión de esa persona, nunca a mitad
+    # de una sesión ya abierta (mismo criterio que 'rol' ya tenía).
+    try:
+        session["modulos"] = [] if session["rol"] == "admin" else json.loads(usuario["modulos_json"] or "[]")
+    except (TypeError, ValueError):
+        session["modulos"] = []
     session.permanent = True
     return redirect(url_for("inicio"))
 
@@ -1257,7 +1309,29 @@ def logout():
 def _usuario_admin_dict(row):
     d = dict(row)
     d.pop("password_hash", None)
+    d["es_admin"] = d.get("rol") == "admin"
+    try:
+        d["modulos"] = [] if d["es_admin"] else json.loads(d.get("modulos_json") or "[]")
+    except (TypeError, ValueError):
+        d["modulos"] = []
     return d
+
+
+def _validar_modulos_usuario(modulos):
+    """Valida la lista de módulos que llega del formulario de usuario (ver
+    crear_usuario_admin/editar_usuario_admin) -- debe ser una lista de
+    strings, cada uno un módulo real (MODULOS_VALIDOS, ver core.py).
+    Devuelve (modulos_limpios, error_o_None)."""
+    if not isinstance(modulos, list) or any(not isinstance(m, str) for m in modulos):
+        return None, f"Los módulos deben ser una lista. Usa alguno de: {', '.join(MODULOS_VALIDOS)}"
+    limpios = []
+    for m in modulos:
+        m = m.strip().lower()
+        if m not in MODULOS_VALIDOS:
+            return None, f"Módulo inválido '{m}'. Usa alguno de: {', '.join(MODULOS_VALIDOS)}"
+        if m not in limpios:
+            limpios.append(m)
+    return limpios, None
 
 
 @app.route("/api/admin/usuarios", methods=["GET"])
@@ -1271,26 +1345,37 @@ def listar_usuarios_admin():
 @app.route("/api/admin/usuarios", methods=["POST"])
 @requiere_rol()
 def crear_usuario_admin():
+    # A partir de la migración 17 (acceso a más de un módulo por usuario),
+    # ya no se elige un único 'rol' desde el formulario -- se elige
+    # es_admin (acceso total) o una lista de 'modulos' (uno o más). 'rol'
+    # se sigue guardando en la fila por compatibilidad/legado (ver core.py)
+    # pero se calcula acá mismo a partir de esos dos campos, nunca se
+    # recibe directo del cliente.
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
     nombre = (data.get("nombre") or "").strip()
-    rol = (data.get("rol") or "").strip().lower()
+    es_admin = bool(data.get("es_admin"))
+    modulos, error = _validar_modulos_usuario(data.get("modulos") or [])
+    if error:
+        return jsonify({"error": error}), 400
 
     if not username:
         return jsonify({"error": "El nombre de usuario es obligatorio"}), 400
     if len(password) < 6:
         return jsonify({"error": "La contraseña debe tener al menos 6 caracteres"}), 400
-    if rol not in ROLES_VALIDOS:
-        return jsonify({"error": f"Rol inválido. Usa uno de: {', '.join(ROLES_VALIDOS)}"}), 400
+    if not es_admin and not modulos:
+        return jsonify({"error": "Selecciona al menos un módulo para este usuario, o márcalo como administrador."}), 400
 
     db = get_db()
     if db.execute("SELECT id FROM usuarios WHERE username = ?", (username,)).fetchone():
         return jsonify({"error": f"Ya existe un usuario con el nombre '{username}'"}), 400
 
+    rol = "admin" if es_admin else modulos[0]
+    modulos_json = "[]" if es_admin else json.dumps(modulos)
     cur = db.execute(
-        "INSERT INTO usuarios (username, password_hash, nombre, rol, activo, creado_en) VALUES (?, ?, ?, ?, 1, ?)",
-        (username, generate_password_hash(password), nombre or username, rol, now_iso()),
+        "INSERT INTO usuarios (username, password_hash, nombre, rol, modulos_json, activo, creado_en) VALUES (?, ?, ?, ?, ?, 1, ?)",
+        (username, generate_password_hash(password), nombre or username, rol, modulos_json, now_iso()),
     )
     db.commit()
     nuevo = db.execute("SELECT * FROM usuarios WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -1308,31 +1393,42 @@ def editar_usuario_admin(usuario_id):
     data = request.get_json(force=True, silent=True) or {}
     nombre = fila["nombre"]
     rol = fila["rol"]
+    modulos_json = fila["modulos_json"] or "[]"
     activo = fila["activo"]
 
     if "nombre" in data:
         nombre = (data.get("nombre") or "").strip() or fila["username"]
-    if "rol" in data:
-        rol = (data.get("rol") or "").strip().lower()
-        if rol not in ROLES_VALIDOS:
-            return jsonify({"error": f"Rol inválido. Usa uno de: {', '.join(ROLES_VALIDOS)}"}), 400
-        if rol != "admin" and fila["rol"] == "admin" and fila["id"] == session.get("user_id"):
-            # No te puedes sacar a ti mismo el rol admin — si lo hicieras y
-            # fueras el único admin, nadie más podría volver a entrar al
+
+    # es_admin y modulos se editan juntos -- si viene cualquiera de los
+    # dos, se recalculan los dos (si solo viniera 'modulos' sin tocar
+    # es_admin, se usa el es_admin actual de la fila; y viceversa).
+    if "es_admin" in data or "modulos" in data:
+        es_admin_nuevo = bool(data.get("es_admin")) if "es_admin" in data else (fila["rol"] == "admin")
+        modulos_nuevo, error = _validar_modulos_usuario(data.get("modulos") if "modulos" in data else json.loads(modulos_json))
+        if error:
+            return jsonify({"error": error}), 400
+        if not es_admin_nuevo and not modulos_nuevo:
+            return jsonify({"error": "Selecciona al menos un módulo, o márcalo como administrador."}), 400
+        if not es_admin_nuevo and fila["rol"] == "admin" and fila["id"] == session.get("user_id"):
+            # No te puedes sacar a ti mismo el acceso admin — si lo hicieras
+            # y fueras el único admin, nadie más podría volver a entrar al
             # panel de Administración a revertirlo.
             otros_admin = db.execute(
                 "SELECT COUNT(*) FROM usuarios WHERE rol = 'admin' AND activo = 1 AND id != ?", (usuario_id,)
             ).fetchone()[0]
             if otros_admin == 0:
-                return jsonify({"error": "No puedes quitarte el rol admin: eres el único usuario admin activo."}), 400
+                return jsonify({"error": "No puedes quitarte el acceso admin: eres el único usuario admin activo."}), 400
+        rol = "admin" if es_admin_nuevo else modulos_nuevo[0]
+        modulos_json = "[]" if es_admin_nuevo else json.dumps(modulos_nuevo)
+
     if "activo" in data:
         activo = 1 if data.get("activo") else 0
         if not activo and fila["id"] == session.get("user_id"):
             return jsonify({"error": "No puedes desactivar tu propia cuenta."}), 400
 
     db.execute(
-        "UPDATE usuarios SET nombre = ?, rol = ?, activo = ? WHERE id = ?",
-        (nombre, rol, activo, usuario_id),
+        "UPDATE usuarios SET nombre = ?, rol = ?, modulos_json = ?, activo = ? WHERE id = ?",
+        (nombre, rol, modulos_json, activo, usuario_id),
     )
     db.commit()
     actualizado = db.execute("SELECT * FROM usuarios WHERE id = ?", (usuario_id,)).fetchone()
@@ -1380,6 +1476,18 @@ def inicio():
     return render_template("inicio.html", modulo_activo="panel")
 
 
+@app.route("/sin-acceso")
+def vista_sin_acceso():
+    # Caso raro (ver home_del_rol en core.py): un usuario no-admin al que
+    # le quitaron todos los módulos asignados. En vez de dejarlo en un
+    # loop de redirects hacia "/", se le explica la situación y se le da
+    # la salida de cerrar sesión mientras un admin le vuelve a asignar
+    # algún módulo desde Administración.
+    if usuario_rol() == "admin" or usuario_modulos():
+        return redirect(url_for("inicio"))
+    return render_template("sin_acceso.html")
+
+
 @app.route("/logistica")
 @requiere_modulo("bodega")
 def vista_logistica():
@@ -1419,7 +1527,18 @@ def vista_administracion():
 
 @app.route("/api/sesion", methods=["GET"])
 def sesion_actual():
-    return jsonify({"username": session.get("username"), "nombre": session.get("nombre"), "rol": usuario_rol()})
+    # 'rol' se mantiene tal cual por compatibilidad (ver core.py: 'admin'
+    # sigue significando acceso total; para un usuario no-admin queda con
+    # el primer módulo elegido, solo representativo). 'modulos' es la
+    # lista real de módulos a los que tiene acceso (ver migración 17) --
+    # el frontend debería usar SIEMPRE 'modulos' (o 'rol' == "admin") para
+    # decidir qué mostrar, nunca comparar 'rol' contra un módulo puntual.
+    return jsonify({
+        "username": session.get("username"),
+        "nombre": session.get("nombre"),
+        "rol": usuario_rol(),
+        "modulos": sorted(usuario_modulos()),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -2738,7 +2857,7 @@ def crear_usuario():
         return jsonify({"error": f"Ya existe un usuario '{username}'"}), 400
 
     cur = db.execute(
-        "INSERT INTO usuarios (username, password_hash, nombre, rol, activo, creado_en) VALUES (?, ?, ?, 'operativo', 1, ?)",
+        "INSERT INTO usuarios (username, password_hash, nombre, rol, modulos_json, activo, creado_en) VALUES (?, ?, ?, 'operativo', '[\"operativo\"]', 1, ?)",
         (username, generate_password_hash(password), nombre, now_iso()),
     )
     db.commit()

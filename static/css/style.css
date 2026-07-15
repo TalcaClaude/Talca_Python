@@ -546,6 +546,23 @@ svg .chart-punto-hover {
   white-space: nowrap;
 }
 
+.checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 4px;
+}
+
+.checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text);
+  white-space: nowrap;
+}
+
 .contador-badge {
   background: var(--danger-soft);
   color: var(--danger);

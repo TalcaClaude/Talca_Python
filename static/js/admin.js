@@ -79,7 +79,14 @@ async function cargarSesion() {
 // Listado de usuarios
 // ---------------------------------------------------------------------------
 
-const ROL_LABEL = { admin: "Admin", finanzas: "Finanzas", bodega: "Bodega", operativo: "Operativo" };
+const MODULO_LABEL = { finanzas: "Finanzas", bodega: "Bodega", operativo: "Operativo", convertidores: "Convertidores" };
+
+function etiquetaAccesoUsuario(u) {
+  if (u.es_admin) return "Admin (todo)";
+  const modulos = u.modulos || [];
+  if (!modulos.length) return "Sin módulos";
+  return modulos.map(m => MODULO_LABEL[m] || m).join(", ");
+}
 
 async function cargarUsuarios() {
   const tbody = document.getElementById("tbody-usuarios");
@@ -94,7 +101,7 @@ async function cargarUsuarios() {
       <tr data-id="${u.id}" class="fila-clicable">
         <td class="mono">${escapeHtml(u.username)}</td>
         <td>${escapeHtml(u.nombre) || "—"}</td>
-        <td>${ROL_LABEL[u.rol] || u.rol}</td>
+        <td>${escapeHtml(etiquetaAccesoUsuario(u))}</td>
         <td><span class="mov-tipo mov-tipo--${u.activo ? "entrada" : "perdida"}">${u.activo ? "Activa" : "Desactivada"}</span></td>
         <td class="mono">${fmtFecha(u.creado_en)}</td>
         <td><button type="button" class="btn btn-secundario" data-editar="${u.id}">Editar</button></td>
@@ -107,10 +114,37 @@ async function cargarUsuarios() {
   }
 }
 
+// ---- Checkboxes de módulos (compartido entre nuevo/editar) ----
+
+function leerModulosMarcados(claseCheckbox) {
+  return [...document.querySelectorAll(`.${claseCheckbox}:checked`)].map(c => c.value);
+}
+
+function marcarModulos(claseCheckbox, modulos) {
+  document.querySelectorAll(`.${claseCheckbox}`).forEach(c => {
+    c.checked = (modulos || []).includes(c.value);
+  });
+}
+
+function actualizarVisibilidadModulos(campoId, esAdminCheckboxId) {
+  const campo = document.getElementById(campoId);
+  const esAdmin = document.getElementById(esAdminCheckboxId).checked;
+  campo.style.display = esAdmin ? "none" : "";
+}
+
+document.getElementById("nu-es-admin").addEventListener("change", () => {
+  actualizarVisibilidadModulos("nu-modulos-campo", "nu-es-admin");
+});
+document.getElementById("eu-es-admin").addEventListener("change", () => {
+  actualizarVisibilidadModulos("eu-modulos-campo", "eu-es-admin");
+});
+
 // ---- Nuevo usuario ----
 
 document.getElementById("btn-nuevo-usuario").addEventListener("click", () => {
   document.getElementById("form-nuevo-usuario").reset();
+  marcarModulos("nu-modulo", ["operativo"]);
+  actualizarVisibilidadModulos("nu-modulos-campo", "nu-es-admin");
   abrirModal("modal-nuevo-usuario");
 });
 
@@ -123,7 +157,8 @@ document.getElementById("form-nuevo-usuario").addEventListener("submit", async (
         username: document.getElementById("nu-username").value,
         nombre: document.getElementById("nu-nombre").value,
         password: document.getElementById("nu-password").value,
-        rol: document.getElementById("nu-rol").value,
+        es_admin: document.getElementById("nu-es-admin").checked,
+        modulos: leerModulosMarcados("nu-modulo"),
       }),
     });
     toast("Usuario creado");
@@ -143,7 +178,9 @@ function abrirEdicionUsuario(id) {
   document.getElementById("eu-titulo").textContent = `Editar — ${u.username}`;
   document.getElementById("eu-id").value = u.id;
   document.getElementById("eu-nombre").value = u.nombre || "";
-  document.getElementById("eu-rol").value = u.rol;
+  document.getElementById("eu-es-admin").checked = !!u.es_admin;
+  marcarModulos("eu-modulo", u.modulos);
+  actualizarVisibilidadModulos("eu-modulos-campo", "eu-es-admin");
   document.getElementById("eu-activo").checked = !!u.activo;
   document.getElementById("eu-password-nueva").value = "";
   abrirModal("modal-editar-usuario");
@@ -157,7 +194,8 @@ document.getElementById("form-editar-usuario").addEventListener("submit", async 
       method: "PUT",
       body: JSON.stringify({
         nombre: document.getElementById("eu-nombre").value,
-        rol: document.getElementById("eu-rol").value,
+        es_admin: document.getElementById("eu-es-admin").checked,
+        modulos: leerModulosMarcados("eu-modulo"),
         activo: document.getElementById("eu-activo").checked,
       }),
     });

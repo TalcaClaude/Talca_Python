@@ -13,6 +13,7 @@
 
 const NOTIF_INTERVALO_SONDEO_MS = 25000;
 let notifRolActual = null;
+let notifModulosActuales = [];
 let notifPanelAbierto = false;
 
 function notifEscapeHtml(str) {
@@ -46,16 +47,18 @@ async function notifApi(path, options = {}) {
 }
 
 function notifPuedeVer() {
-  return notifRolActual === "admin" || notifRolActual === "operativo";
+  return notifRolActual === "admin" || notifModulosActuales.includes("operativo");
 }
 
 async function notifCargarRol() {
   try {
     const s = await notifApi("/api/sesion");
     notifRolActual = s.rol;
+    notifModulosActuales = s.modulos || [];
   } catch (e) {
     // Sin sesión válida (ej. venimos de /login) — no hay nada que sondear.
     notifRolActual = null;
+    notifModulosActuales = [];
   }
 }
 

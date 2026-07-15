@@ -357,49 +357,75 @@ def usuario_actual():
 
 
 # ---------------------------------------------------------------------------
-# Roles — usuarios.rol (ver migración en app.py). 'admin' puede todo
-# siempre; los demás roles solo lo que su rol tenga permitido en cada
-# endpoint (ver requiere_rol). Sesiones que ya estaban iniciadas ANTES de
-# este cambio no tienen 'rol' guardado en la sesión (se hizo login antes de
-# que existiera la columna) — se tratan como 'admin' mientras no vuelvan a
-# iniciar sesión, para no dejar a nadie bloqueado de un día para otro por
-# un despliegue; en el próximo login ya les queda su rol real.
+# Roles y módulos — usuarios.rol / usuarios.modulos_json (ver migraciones 14
+# y 17 en app.py). 'admin' puede todo siempre, sin importar qué haya en
+# modulos_json. Para cualquier otro usuario, el acceso real lo define el
+# CONJUNTO de módulos en modulos_json (puede ser más de uno — ver migración
+# 17, "un usuario tenga acceso a más de un módulo"), no un único rol como
+# antes. 'rol' se sigue guardando para usuarios no-admin (queda con el
+# primer módulo elegido) solo por compatibilidad/legado y para casos donde
+# hace falta UN valor representativo (ej. mensajes de error) — pero NINGÚN
+# chequeo de permisos debería comparar contra 'rol' directamente para un
+# usuario no-admin; siempre se usa usuario_modulos(). Sesiones que ya
+# estaban iniciadas ANTES de estos cambios no tienen 'rol'/'modulos'
+# guardado en la sesión (se hizo login antes de que existieran) — se tratan
+# como 'admin' mientras no vuelvan a iniciar sesión, para no dejar a nadie
+# bloqueado de un día para otro por un despliegue; en el próximo login ya
+# les queda su acceso real.
 # ---------------------------------------------------------------------------
 
 ROLES_VALIDOS = ["admin", "finanzas", "bodega", "operativo", "convertidores"]
+
+# Módulos asignables a un usuario no-admin (todo ROLES_VALIDOS menos
+# 'admin', que no es un módulo sino "acceso a todo"). Usado para validar
+# 'modulos' al crear/editar un usuario (ver app.py) y para el orden fijo de
+# preferencia en home_del_rol() más abajo.
+MODULOS_VALIDOS = [r for r in ROLES_VALIDOS if r != "admin"]
 
 
 def usuario_rol():
     return session.get("rol") or "admin"
 
 
+def usuario_modulos():
+    """Conjunto de módulos a los que la sesión activa tiene acceso (aparte
+    de 'admin', que siempre puede todo y no necesita aparecer acá). Se
+    completa en login() a partir de usuarios.modulos_json de esa fila —
+    ver migración 17. Una sesión admin no necesita consultar esto (los
+    decoradores de abajo dejan pasar a 'admin' antes de mirar módulos)."""
+    return set(session.get("modulos") or [])
+
+
 def requiere_rol(*roles_permitidos):
-    """Decorador para endpoints sensibles: exige que la sesión activa tenga
-    uno de los roles indicados (o sea 'admin', que siempre puede todo).
-    Devuelve 403 con un mensaje claro si no corresponde — a diferencia de
-    solo ocultar el botón en la interfaz, esto se cumple aunque alguien
-    llame al endpoint directamente sin pasar por la pantalla. Sin
-    argumentos (requiere_rol()) significa "solo admin"."""
+    """Decorador para endpoints sensibles: exige que la sesión activa sea
+    'admin' (que siempre puede todo) o tenga acceso a AL MENOS UNO de los
+    módulos indicados (ver usuario_modulos() — un usuario puede tener más
+    de un módulo asignado desde la migración 17). Devuelve 403 con un
+    mensaje claro si no corresponde — a diferencia de solo ocultar el botón
+    en la interfaz, esto se cumple aunque alguien llame al endpoint
+    directamente sin pasar por la pantalla. Sin argumentos
+    (requiere_rol()) significa "solo admin"."""
     def decorador(vista):
         @wraps(vista)
         def envoltura(*args, **kwargs):
-            rol = usuario_rol()
-            if rol != "admin" and rol not in roles_permitidos:
+            if usuario_rol() == "admin":
+                return vista(*args, **kwargs)
+            if not (set(roles_permitidos) & usuario_modulos()):
                 permitidos = ", ".join(roles_permitidos) or "admin"
-                return jsonify({"error": f"Esta acción es solo para el rol {permitidos}. Tu rol actual es '{rol}'."}), 403
+                return jsonify({"error": f"Esta acción es solo para los módulos: {permitidos}. No tienes acceso a ninguno de ellos."}), 403
             return vista(*args, **kwargs)
         return envoltura
     return decorador
 
 
-# Cada rol no-admin queda encerrado en UN solo módulo -- hasta esta
-# migración, requiere_rol() solo protegía acciones puntuales (guardar,
-# aprobar, eliminar), pero las PÁGINAS en sí (/logistica, /operativo,
-# /finanzas, /convertidores, /agente-ia) no tenían ningún control: cualquier
-# usuario con sesión iniciada podía entrar a cualquier módulo con solo
-# escribir la URL, y la barra lateral se los mostraba todos. Se detectó
-# porque un usuario 'bodega' podía ver el resto de los módulos igual, cuando
-# la idea de ese rol siempre fue que solo tuviera acceso a Logística.
+# Hasta la migración 14, requiere_rol() solo protegía acciones puntuales
+# (guardar, aprobar, eliminar), pero las PÁGINAS en sí (/logistica,
+# /operativo, /finanzas, /convertidores, /agente-ia) no tenían ningún
+# control: cualquier usuario con sesión iniciada podía entrar a cualquier
+# módulo con solo escribir la URL, y la barra lateral se los mostraba
+# todos. Se detectó porque un usuario 'bodega' podía ver el resto de los
+# módulos igual, cuando la idea de ese rol siempre fue que solo tuviera
+# acceso a Logística.
 ROL_MODULO_HOME = {
     "finanzas": "/finanzas",
     "bodega": "/logistica",
@@ -407,28 +433,43 @@ ROL_MODULO_HOME = {
     "convertidores": "/convertidores",
 }
 
+# Orden fijo de preferencia para decidir a qué módulo aterriza alguien con
+# más de uno asignado (ver migración 17) al pedir "/" o una página a la que
+# no tiene acceso -- Operativo primero por ser, en general, el módulo de
+# uso más diario en un taller; después Logística, Finanzas y Convertidores.
+# La barra lateral igual lo deja moverse a cualquiera de sus otros módulos
+# desde ahí, esto solo decide DÓNDE aterriza primero.
+ORDEN_PREFERENCIA_MODULOS = ["operativo", "bodega", "finanzas", "convertidores"]
+
 
 def home_del_rol():
-    """A dónde mandar a alguien que pidió una página a la que su rol no
-    tiene acceso: admin (o cualquier rol no contemplado arriba) va al
-    selector de módulos ('/'); cualquier otro rol va derecho al único
-    módulo que sí le corresponde -- así, aunque escriba la URL de otro
-    módulo a mano, nunca llega a verla."""
-    return ROL_MODULO_HOME.get(usuario_rol(), "/")
+    """A dónde mandar a alguien que pidió una página a la que no tiene
+    acceso (o la home '/' si no es admin): al primer módulo, en el orden
+    de ORDEN_PREFERENCIA_MODULOS, que tenga asignado. Si no tiene NINGÚN
+    módulo asignado (caso raro -- un admin se los quitó todos y la persona
+    tampoco es admin), va a '/sin-acceso' en vez de esconder el problema
+    con un redirect en loop hacia '/'."""
+    modulos = usuario_modulos()
+    for modulo in ORDEN_PREFERENCIA_MODULOS:
+        if modulo in modulos:
+            return ROL_MODULO_HOME[modulo]
+    return "/sin-acceso"
 
 
 def requiere_modulo(*roles_permitidos):
     """Decorador para las páginas de cada módulo (ej. /operativo,
-    /logistica): si la sesión activa no es 'admin' ni tiene uno de los
-    roles indicados, la redirige a home_del_rol() en vez de mostrar la
-    página. A diferencia de requiere_rol() (pensado para endpoints de API,
-    que devuelve 403 en JSON), esto es para vistas HTML completas, así que
-    redirige en vez de devolver un error."""
+    /logistica): si la sesión activa no es 'admin' ni tiene acceso a
+    NINGUNO de los módulos indicados (ver usuario_modulos()), la redirige
+    a home_del_rol() en vez de mostrar la página. A diferencia de
+    requiere_rol() (pensado para endpoints de API, que devuelve 403 en
+    JSON), esto es para vistas HTML completas, así que redirige en vez de
+    devolver un error."""
     def decorador(vista):
         @wraps(vista)
         def envoltura(*args, **kwargs):
-            rol = usuario_rol()
-            if rol != "admin" and rol not in roles_permitidos:
+            if usuario_rol() == "admin":
+                return vista(*args, **kwargs)
+            if not (set(roles_permitidos) & usuario_modulos()):
                 return redirect(home_del_rol())
             return vista(*args, **kwargs)
         return envoltura

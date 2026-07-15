@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sin acceso — Inventario Taller</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .sinacceso-box {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 32px;
+    width: 100%;
+    max-width: 420px;
+    text-align: center;
+  }
+  .sinacceso-box h1 { font-family: var(--font-display); text-transform: uppercase; font-size: 20px; margin: 0 0 14px; }
+  .sinacceso-box p { margin: 0 0 20px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<!-- Caso raro (ver home_del_rol en core.py / vista_sin_acceso en app.py):
+     un usuario no-admin sin ningún módulo asignado -- normalmente pasa
+     solo si un admin le quitó todos los módulos por error. Se explica la
+     situación en vez de dejarlo en un loop de redirects, y se le da la
+     única salida posible (cerrar sesión) mientras un admin le reasigna
+     acceso desde Administración → Usuarios. -->
+<div class="sinacceso-box">
+  <h1>Sin módulos asignados</h1>
+  <p>Tu cuenta todavía no tiene ningún módulo asignado, así que no hay nada que mostrarte por ahora. Pídele a un administrador que te asigne acceso desde Administración → Usuarios.</p>
+  <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+</div>
+
+</body>
+</html>

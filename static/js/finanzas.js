@@ -114,10 +114,13 @@ async function cargarSesion() {
     const s = await api("/api/sesion");
     state.sesion = s;
     document.getElementById("sesion-usuario").textContent = s.nombre ? `👤 ${s.nombre}` : "";
-    // El backend siempre rechaza esto si el rol no es finanzas/admin (ver
-    // @requiere_rol en app.py) — acá solo se evita mostrar un botón que de
-    // todas formas iba a fallar.
-    const puedeFinanzas = s.rol === "admin" || s.rol === "finanzas";
+    // El backend siempre rechaza esto si no se tiene acceso al módulo
+    // finanzas (ver @requiere_rol en app.py) — acá solo se evita mostrar
+    // un botón que de todas formas iba a fallar. Se mira 'modulos' (no
+    // 'rol') porque desde la migración 17 alguien puede tener finanzas
+    // como módulo SECUNDARIO (ej. rol="bodega" con modulos=["bodega",
+    // "finanzas"]) y aun así tener que ver este botón.
+    const puedeFinanzas = s.rol === "admin" || (s.modulos || []).includes("finanzas");
     const btnNuevaFacturaPendiente = document.getElementById("btn-nueva-factura-pendiente");
     if (btnNuevaFacturaPendiente) btnNuevaFacturaPendiente.style.display = puedeFinanzas ? "" : "none";
     const btnNuevaCxpManual = document.getElementById("btn-nueva-cxp-manual");
@@ -909,7 +912,7 @@ async function cargarCxp() {
 
     tbody.innerHTML = data.cuentas.map(c => {
       const puedePagar = c.estado !== "pagada" && c.estado !== "anulada";
-      const puedeFinanzas = state.sesion && (state.sesion.rol === "admin" || state.sesion.rol === "finanzas");
+      const puedeFinanzas = state.sesion && (state.sesion.rol === "admin" || (state.sesion.modulos || []).includes("finanzas"));
       const puedeAnular = puedeFinanzas && !c.factura_id && c.estado === "pendiente" && Number(c.total_pagado) === 0;
       const acciones = [
         puedePagar ? `<button type="button" class="btn btn-secundario" data-pagar-cxp="${c.id}">Registrar pago</button>` : "",

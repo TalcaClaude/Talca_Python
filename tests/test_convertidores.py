@@ -691,7 +691,11 @@ class TestConvertidoresSeguridad(_BaseConvertidores):
         username = self._nuevo_username(f"conv_rol_{rol}")
         resp = self.client.post(
             "/api/admin/usuarios",
-            json={"username": username, "password": "clave123456", "nombre": username, "rol": rol},
+            json={
+                "username": username, "password": "clave123456", "nombre": username,
+                "es_admin": rol == "admin",
+                "modulos": [] if rol == "admin" else [rol],
+            },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         return username

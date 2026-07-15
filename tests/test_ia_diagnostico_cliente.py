@@ -36,7 +36,11 @@ class TestIaDiagnosticoCliente(unittest.TestCase):
     def _crear_usuario_con_rol(self, username, rol):
         resp = self.admin.post(
             "/api/admin/usuarios",
-            json={"username": username, "password": "123456", "rol": rol},
+            json={
+                "username": username, "password": "123456",
+                "es_admin": rol == "admin",
+                "modulos": [] if rol == "admin" else [rol],
+            },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         cliente = taller_app.app.test_client()

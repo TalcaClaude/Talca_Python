@@ -7,11 +7,15 @@
   script de cada página puede abrir directamente esa pestaña si quiere.
 
   Cada bloque de módulo abajo está envuelto en un IF de Jinja sobre
-  rol_usuario (admin o el rol dueño de ese módulo) -- un rol no-admin ya no
-  puede ENTRAR a otro módulo (ver requiere_modulo() en core.py, aplicado a
-  cada página en app.py/modulos/convertidores.py), pero mostrarle el link
-  igual invitaba a hacer clic para toparse con una redirección confusa. Si
-  el rol no tiene acceso, directamente no ve el módulo en la barra lateral.
+  rol_usuario == "admin" (acceso total) o "<modulo>" in modulos_usuario --
+  desde la migración 17, un usuario no-admin puede tener MÁS de un módulo
+  asignado a la vez (ver usuario_modulos() en core.py), así que ya no
+  alcanza con comparar rol_usuario contra un único valor. Alguien sin
+  acceso a un módulo ya no puede ENTRAR a él igual (ver requiere_modulo()
+  en core.py, aplicado a cada página en app.py/modulos/convertidores.py),
+  pero mostrarle el link igual invitaba a hacer clic para toparse con una
+  redirección confusa. Si no tiene acceso, directamente no ve el módulo en
+  la barra lateral.
 -->
 <nav class="sidebar">
   <div class="sidebar-brand">
@@ -28,7 +32,7 @@
   </div>
   {% endif %}
 
-  {% if rol_usuario == "admin" or rol_usuario == "bodega" %}
+  {% if rol_usuario == "admin" or "bodega" in modulos_usuario %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'logistica' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">01</span>
@@ -49,7 +53,7 @@
   </div>
   {% endif %}
 
-  {% if rol_usuario == "admin" or rol_usuario == "operativo" %}
+  {% if rol_usuario == "admin" or "operativo" in modulos_usuario %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'operativo' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">02</span>
@@ -66,7 +70,7 @@
   </div>
   {% endif %}
 
-  {% if rol_usuario == "admin" or rol_usuario == "convertidores" %}
+  {% if rol_usuario == "admin" or "convertidores" in modulos_usuario %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'convertidores' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">03</span>
@@ -81,7 +85,7 @@
   </div>
   {% endif %}
 
-  {% if rol_usuario == "admin" or rol_usuario == "finanzas" %}
+  {% if rol_usuario == "admin" or "finanzas" in modulos_usuario %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'finanzas' else '' }}">
     <button type="button" class="sidebar-modulo-header" data-modulo-toggle>
       <span class="sidebar-modulo-tag">04</span>
@@ -98,7 +102,7 @@
   </div>
   {% endif %}
 
-  {% if rol_usuario == "admin" or rol_usuario == "operativo" %}
+  {% if rol_usuario == "admin" or "operativo" in modulos_usuario %}
   <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'agente' else '' }}">
     <a class="sidebar-modulo-header" href="/agente-ia" style="text-decoration:none; display:flex;">
       <span class="sidebar-modulo-tag">05</span>

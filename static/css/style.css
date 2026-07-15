@@ -1940,6 +1940,43 @@ svg .chart-punto-hover {
   color: var(--text-muted);
 }
 
+/* ---------- Sugerencias de diagnóstico (ver opdi-sugerencias-*) ---------- */
+
+.op-sugerencia-diagnostico {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+.op-sugerencia-texto {
+  margin: 0 0 6px 0;
+}
+.op-sugerencia-foto {
+  position: relative;
+  display: inline-block;
+  cursor: zoom-in;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+.op-sugerencia-foto img {
+  display: block;
+  max-width: 180px;
+  max-height: 130px;
+  object-fit: cover;
+}
+.op-sugerencia-foto-zoom {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, .6);
+  color: #fff;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
 /* ---------- Dashboard ---------- */
 
 .dash-grid {

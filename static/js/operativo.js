@@ -2307,18 +2307,52 @@ async function cargarSugerenciasDiagnostico(ordenId) {
     }
     wrap.style.display = "block";
     lista.innerHTML = sugerencias.map(s => `
-      <div class="op-sugerencia-diagnostico" data-id="${s.id}" style="border:1px solid var(--borde, #333); border-radius:8px; padding:10px; margin-bottom:8px">
-        <p style="margin:0 0 6px 0">${escapeHtml(s.texto)}</p>
+      <div class="op-sugerencia-diagnostico" data-id="${s.id}">
+        ${s.foto_id ? `
+        <div class="op-sugerencia-foto" data-foto-url="/api/operativo/fotos/${s.foto_id}/archivo" data-foto-titulo="Foto de ${escapeHtml(s.mecanico_nombre)}">
+          <img src="/api/operativo/fotos/${s.foto_id}/archivo" alt="Foto adjunta" loading="lazy">
+          <span class="op-sugerencia-foto-zoom">🔍 Ampliar</span>
+        </div>` : ""}
+        <p class="op-sugerencia-texto">${escapeHtml(s.texto)}</p>
         <p class="ayuda-inline" style="margin:0 0 8px 0">Por: ${escapeHtml(s.mecanico_nombre)} — ${fmtFecha(s.creado_en)}</p>
-        <button type="button" class="btn btn-secundario btn-chico" data-atender-sugerencia="${s.id}">Marcar como revisada</button>
+        <div class="modal-actions modal-actions--start">
+          <button type="button" class="btn btn-primary btn-chico" data-agregar-sugerencia="${s.id}">Agregar al diagnóstico</button>
+          <button type="button" class="btn btn-secundario btn-chico" data-atender-sugerencia="${s.id}">Descartar sin agregar</button>
+        </div>
       </div>
     `).join("");
+    lista.querySelectorAll(".op-sugerencia-foto").forEach(el => {
+      el.addEventListener("click", () => abrirFotoZoom(el.dataset.fotoUrl, el.dataset.fotoTitulo));
+    });
+    lista.querySelectorAll("[data-agregar-sugerencia]").forEach(btn => {
+      const s = sugerencias.find(x => x.id === parseInt(btn.dataset.agregarSugerencia, 10));
+      btn.addEventListener("click", () => agregarSugerenciaAlDiagnostico(s, ordenId));
+    });
     lista.querySelectorAll("[data-atender-sugerencia]").forEach(btn => {
       btn.addEventListener("click", () => atenderSugerenciaDiagnostico(parseInt(btn.dataset.atenderSugerencia, 10), ordenId));
     });
   } catch (e) {
     wrap.style.display = "none";
   }
+}
+
+// "Agregar al diagnóstico" NO guarda solo -- deja el texto de la sugerencia
+// cargado en el campo de Diagnóstico técnico (agregándolo al final si ya
+// había algo escrito, para no perder lo que hubiera) y hace foco ahí, para
+// que la parte operativa lo revise/ajuste y recién guarde con el botón
+// "Guardar diagnóstico" de siempre -- así el diagnóstico oficial SIEMPRE
+// queda con el responsable real (quien tiene la sesión iniciada), nunca se
+// escribe solo con la sugerencia sin que nadie la haya mirado.
+async function agregarSugerenciaAlDiagnostico(sugerencia, ordenId) {
+  if (!sugerencia) return;
+  const campo = document.getElementById("opdi-diagnostico-tecnico");
+  const previo = campo.value.trim();
+  const aporte = `${sugerencia.texto} (sugerido por ${sugerencia.mecanico_nombre})`;
+  campo.value = previo ? `${previo}\n${aporte}` : aporte;
+  campo.focus();
+  campo.scrollIntoView({ behavior: "smooth", block: "center" });
+  toast("Sugerencia agregada al diagnóstico técnico — revisa y guarda cuando quede lista.");
+  await atenderSugerenciaDiagnostico(sugerencia.id, ordenId);
 }
 
 async function atenderSugerenciaDiagnostico(sugerenciaId, ordenId) {

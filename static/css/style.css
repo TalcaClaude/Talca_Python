@@ -1003,11 +1003,27 @@ svg .chart-punto-hover {
   .op-equipamiento-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
+.op-fotos-secciones {
+  margin: 10px 0;
+}
+
+.op-fotos-seccion-titulo {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  margin: 18px 0 8px;
+}
+
+.op-fotos-seccion-titulo:first-child {
+  margin-top: 0;
+}
+
 .op-fotos-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 12px;
-  margin: 14px 0;
+  margin: 0 0 14px;
 }
 
 @media (max-width: 760px) {
@@ -1060,6 +1076,15 @@ svg .chart-punto-hover {
 .op-foto-tile-titulo--lista::before {
   content: "✓ ";
   color: var(--success);
+}
+
+.op-foto-tile-responsable {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.op-foto-tile-responsable::before {
+  content: "Por: ";
 }
 
 .op-foto-tile-borrar {

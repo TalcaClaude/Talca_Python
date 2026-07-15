@@ -1911,10 +1911,15 @@ let _opFotosTituloPendiente = "";
 
 function _renderFotosTile(categoria, label, foto) {
   if (foto) {
+    // El responsable (quién la tomó/mandó) va siempre visible -- si llega
+    // por WhatsApp es el mecánico que la mandó; si se sube desde el
+    // sistema es quien tenía la sesión iniciada (ver 'usuario' en
+    // fotos_vehiculo, modulos/operativo.py).
     return `
       <div class="op-foto-tile op-foto-tile--lista" data-foto-id="${foto.id}" data-foto-url="/api/operativo/fotos/${foto.id}/archivo" data-foto-titulo="${escapeHtml(label)}">
         <div class="op-foto-tile-preview"><img src="/api/operativo/fotos/${foto.id}/archivo" alt="${escapeHtml(label)}" loading="lazy"></div>
         <div class="op-foto-tile-titulo op-foto-tile-titulo--lista">${escapeHtml(label)}</div>
+        <div class="op-foto-tile-responsable">${escapeHtml(foto.usuario || "—")}</div>
         <button type="button" class="op-foto-tile-borrar" data-borrar-foto="${foto.id}">Eliminar</button>
       </div>`;
   }
@@ -1926,13 +1931,35 @@ function _renderFotosTile(categoria, label, foto) {
     </div>`;
 }
 
+// Las fotos se dividen en dos secciones: "de ingreso" (las obligatorias +
+// las libres agregadas desde el sistema al recibir el auto o después) y
+// "de desarme/armado" (las que llegan por WhatsApp mientras se trabaja el
+// vehículo -- ver 'origen' en fotos_vehiculo y la rama 'vehiculo' de
+// _agente_procesar_mensaje en app.py, que es lo único que hoy genera
+// origen='desarme_armado'). Se separan porque son momentos distintos del
+// proceso y quién las toma también suele ser distinto (recepción vs.
+// mecánico en terreno).
 function _renderFotosGrid(gridEl, fotos) {
-  const porCategoria = {};
-  (fotos || []).forEach(f => { if (f.categoria !== "libre") porCategoria[f.categoria] = f; });
-  const libres = (fotos || []).filter(f => f.categoria === "libre");
+  const todas = fotos || [];
+  const fotosDesarme = todas.filter(f => f.origen === "desarme_armado");
+  const fotosIngreso = todas.filter(f => f.origen !== "desarme_armado");
 
-  let html = FOTOS_CATEGORIAS_OBLIGATORIAS.map(([cat, label]) => _renderFotosTile(cat, label, porCategoria[cat])).join("");
-  html += libres.map(f => _renderFotosTile("libre", f.titulo || "Foto adicional", f)).join("");
+  const porCategoria = {};
+  fotosIngreso.forEach(f => { if (f.categoria !== "libre") porCategoria[f.categoria] = f; });
+  const libresIngreso = fotosIngreso.filter(f => f.categoria === "libre");
+
+  let html = `<h4 class="op-fotos-seccion-titulo">Fotos de ingreso</h4><div class="op-fotos-grid">`;
+  html += FOTOS_CATEGORIAS_OBLIGATORIAS.map(([cat, label]) => _renderFotosTile(cat, label, porCategoria[cat])).join("");
+  html += libresIngreso.map(f => _renderFotosTile("libre", f.titulo || "Foto adicional", f)).join("");
+  html += `</div>`;
+
+  html += `<h4 class="op-fotos-seccion-titulo">Fotos de desarme / armado</h4>`;
+  if (fotosDesarme.length === 0) {
+    html += `<p class="ayuda-inline">Todavía no hay fotos de desarme/armado. Llegan automáticamente cuando un mecánico manda una foto por WhatsApp indicando la OT o patente.</p>`;
+  } else {
+    html += `<div class="op-fotos-grid">` + fotosDesarme.map(f => _renderFotosTile("libre", f.titulo || "Foto adicional", f)).join("") + `</div>`;
+  }
+
   gridEl.innerHTML = html;
 }
 

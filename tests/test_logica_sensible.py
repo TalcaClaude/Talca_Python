@@ -2284,6 +2284,18 @@ class TestAgenteWhatsApp(unittest.TestCase):
     # /api/facturas/escanear-foto (ver TestEscanearFotoFactura), mockeada
     # acá también para no depender de ANTHROPIC_API_KEY en los tests. --
 
+    def _imagen_jpeg_valida(self):
+        """JPEG real y chico (a diferencia del contenido falso que usan los
+        tests de factura, que nunca pasa por un decodificador de imágenes
+        de verdad): las fotos de tipo 'vehiculo' SÍ se procesan con Pillow
+        de verdad ahora (se archivan en fotos_vehiculo, ver
+        _agente_procesar_mensaje / Fase 3), así que necesitan bytes
+        decodificables."""
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (60, 40), (10, 20, 30)).save(buf, format="JPEG")
+        return buf.getvalue()
+
     def _subir_foto_por_agente(self, telefono, filename="factura.jpg", contenido=b"contenido-falso-de-una-foto", texto=""):
         data = {"telefono": telefono, "foto": (io.BytesIO(contenido), filename)}
         if texto:
@@ -2369,7 +2381,7 @@ class TestAgenteWhatsApp(unittest.TestCase):
         with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp", return_value=clasificacion), \
              patch.object(taller_app, "_llamar_claude_interpretar_mensaje_agente", return_value=respuesta_ia):
             resp = self._subir_foto_por_agente(
-                "+56900771122", filename="auto.jpg", texto="listo para probar",
+                "+56900771122", filename="auto.jpg", contenido=self._imagen_jpeg_valida(), texto="listo para probar",
             )
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         data = resp.get_json()
@@ -2377,6 +2389,10 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(data["ot_id"], orden["id"])
         self.assertEqual(data["estado_nuevo"], "control_calidad")
         self.assertEqual(data["origen"], "foto_vehiculo")
+        # Fase 3: además de mover la OT, la foto queda archivada -- ver los
+        # tests de TestFotosPorWhatsAppFase3 más abajo para el detalle del
+        # archivado en sí (categoría, origen='desarme_armado', responsable).
+        self.assertIn("archivada", data["respuesta_texto"])
 
         actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
         self.assertEqual(actual["estado"], "control_calidad")
@@ -2393,7 +2409,12 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(data["accion"], "foto_vehiculo_sin_patente")
         self.assertIn("no logré leer la patente", data["respuesta_texto"])
 
-    def test_foto_de_vehiculo_sin_pie_de_foto_pide_la_accion(self):
+    def test_foto_de_vehiculo_sin_ot_abierta_para_esa_patente_avisa(self):
+        # Fase 3: ya no existe "foto_vehiculo_sin_accion" -- una foto sin
+        # texto también se intenta archivar (ver
+        # test_foto_sin_texto_igual_se_archiva_si_hay_ot en
+        # TestFotosPorWhatsAppFase3). Acá lo que falla es que la patente que
+        # lee la IA no corresponde a ninguna OT abierta.
         self._registrar_mecanico("Mecánico Foto Sin Texto", "+56900771144")
         with patch.object(
             taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
@@ -2402,7 +2423,7 @@ class TestAgenteWhatsApp(unittest.TestCase):
             resp = self._subir_foto_por_agente("+56900771144", filename="auto.jpg")
         data = resp.get_json()
         self.assertFalse(data["exito"])
-        self.assertEqual(data["accion"], "foto_vehiculo_sin_accion")
+        self.assertEqual(data["accion"], "foto_vehiculo_ot_no_encontrada")
         self.assertIn("SINTX01", data["respuesta_texto"])
 
     def test_foto_que_no_es_factura_ni_vehiculo_no_se_procesa(self):

@@ -4587,6 +4587,15 @@ def _normalizar_telefono(valor):
     return ("+" if con_signo else "") + solo_digitos
 
 
+def _normalizar_patente(valor):
+    """Deja solo letras/números en mayúscula, para poder comparar patentes
+    aunque vengan con guiones o espacios distintos (ej. 'AB-12-CD' vs
+    'ab12cd') -- usado por el archivado automático de fotos de WhatsApp
+    (ver _agente_procesar_mensaje, rama 'vehiculo') para matchear la
+    patente que lee la IA de la foto contra 'identificador' en equipos."""
+    return re.sub(r"[^A-Z0-9]", "", (valor or "").upper())
+
+
 def _agente_listar_ordenes_abiertas(db):
     """Lista liviana (sin ítems/pagos/costos, a diferencia de _orden_dict)
     de las OT que todavía admiten cambios de estado — cliente + datos del
@@ -5066,16 +5075,23 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
     primero se clasifica la foto (ver
     _llamar_claude_vision_clasificar_foto_whatsapp): si es una factura, se
     procesa como tal (ver _procesar_foto_factura_whatsapp) y ahí termina.
-    Si es un vehículo, se lee la patente y se combina con
-    'texto_mensaje' (el pie de foto, ej. "listo para probar") para que siga
-    el mismo camino de interpretación de texto de más abajo — así el
-    mecánico puede identificar la OT por patente en vez de tener que
-    escribir el número, reutilizando la misma lógica de
-    _llamar_claude_interpretar_mensaje_agente que ya sabe matchear por
-    patente (ver 'ordenes_abiertas')."""
+    Si es un vehículo, se resuelve la OT (por número explícito en el
+    mensaje, ej. "OT 3321", o si no por la patente que lee la IA de la
+    foto) y la foto se ARCHIVA de una vez en la carpeta de fotos de esa OT
+    (fotos_vehiculo, origen='desarme_armado' -- así se distingue en la
+    pestaña "Fotos" de las fotos obligatorias que se toman al ingresar el
+    auto). Esto es lo que permite que un mecánico, que solo tiene acceso al
+    WhatsApp y no al sistema, mande una foto de un daño encontrado durante
+    el desarme/armado (ej. un cable cortado) con la OT o patente en el pie
+    de foto, y quede guardada automáticamente sin que nadie tenga que
+    entrar al sistema a subirla a mano. Si además el mensaje trae una
+    acción de texto (ej. "OT 3321 listo para probar"), esa parte se sigue
+    procesando con el intérprete de texto de más abajo, igual que antes."""
     telefono = _normalizar_telefono(telefono_crudo)
     texto_mensaje = (texto_mensaje or "").strip()
     ts = now_iso()
+    nota_foto_archivada = None
+    ot_id_foto_archivada = None
 
     def _registrar(mecanico_nombre, accion, ot_id, estado_anterior, estado_nuevo, exito, respuesta_texto):
         db.execute(
@@ -5129,25 +5145,80 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
         if tipo_foto == "vehiculo":
             origen = "foto_vehiculo"
             patente = clasificacion.get("patente") or ""
-            if not patente:
-                return _registrar(
-                    mecanico["nombre"], "foto_vehiculo_sin_patente", None, "", "", False,
-                    "Recibí la foto del vehículo, pero no logré leer la patente con claridad. Manda una foto "
-                    "donde se vea mejor, o escribe el número de OT junto con el mensaje.",
+
+            ordenes_abiertas_foto = _agente_listar_ordenes_abiertas(db)
+            match_ot_numero = re.search(r"\bot\s*#?\s*(\d+)\b", texto_mensaje, re.IGNORECASE)
+            ot_resuelta = None
+            if match_ot_numero:
+                ot_id_deseado = int(match_ot_numero.group(1))
+                ot_resuelta = next((o for o in ordenes_abiertas_foto if o["ot_id"] == ot_id_deseado), None)
+                if ot_resuelta is None:
+                    return _registrar(
+                        mecanico["nombre"], "foto_vehiculo_ot_no_encontrada", None, "", "", False,
+                        f"Recibí la foto, pero no encontré ninguna OT abierta con el número {ot_id_deseado}. "
+                        f"Revisa el número, o manda la foto de nuevo para que lea la patente.",
+                    )
+            elif patente:
+                patente_norm = _normalizar_patente(patente)
+                ot_resuelta = next(
+                    (o for o in ordenes_abiertas_foto
+                     if o.get("patente") and _normalizar_patente(o["patente"]) == patente_norm),
+                    None,
                 )
-            if not texto_mensaje:
+
+            if ot_resuelta is None:
+                if not patente:
+                    return _registrar(
+                        mecanico["nombre"], "foto_vehiculo_sin_patente", None, "", "", False,
+                        "Recibí la foto del vehículo, pero no logré leer la patente con claridad ni encontré "
+                        "un número de OT en el mensaje. Manda una foto donde se vea mejor la patente, o "
+                        "escribe el número de OT (ej. \"OT 3321\") junto con la foto.",
+                    )
                 return _registrar(
-                    mecanico["nombre"], "foto_vehiculo_sin_accion", None, "", "", False,
-                    f"Recibí la foto del vehículo (patente {patente}), pero el mensaje no traía ninguna "
-                    f"acción. Manda de nuevo la foto junto con un texto que diga qué pasó (ej. \"listo para "
-                    f"probar\").",
+                    mecanico["nombre"], "foto_vehiculo_ot_no_encontrada", None, "", "", False,
+                    f"Recibí la foto (patente {patente}), pero no encontré ninguna OT abierta para ese "
+                    f"vehículo. Escribe el número de OT junto con la foto.",
                 )
-            # Se combina con el pie de foto para que el mismo intérprete de
-            # texto (_llamar_claude_interpretar_mensaje_agente) pueda
-            # identificar la OT por patente, igual que ya hace con
-            # descripciones de vehículo/cliente — no hace falta resolver la
-            # OT acá, se reutiliza esa lógica ya probada.
-            texto_mensaje = f"{texto_mensaje} (patente detectada en la foto adjunta: {patente})"
+
+            # Se archiva de una vez, tenga o no el mensaje una acción de
+            # texto además -- así el mecánico no tiene que mandar nada más
+            # que la foto con la OT/patente para que quede guardada.
+            # 'origen="desarme_armado"' es lo que separa estas fotos de las
+            # obligatorias de ingreso en la pestaña "Fotos" de la OT (ver
+            # modulos/operativo.py, _renderFotosGrid en operativo.js).
+            titulo_foto = texto_mensaje.strip() or "Foto enviada por WhatsApp"
+            try:
+                _guardar_foto_entidad(
+                    db, "orden", ot_resuelta["ot_id"], "libre", titulo_foto, imagen_bytes,
+                    mecanico["nombre"], origen="desarme_armado",
+                )
+                nota_foto_archivada = (
+                    f"📷 Foto archivada en la OT #{ot_resuelta['ot_id']} "
+                    f"({ot_resuelta['cliente_nombre']} — {ot_resuelta.get('patente') or 'sin patente'})."
+                )
+                ot_id_foto_archivada = ot_resuelta["ot_id"]
+            except ValueError as e:
+                return _registrar(
+                    mecanico["nombre"], "error", ot_resuelta["ot_id"], "", "", False,
+                    f"Encontré la OT #{ot_resuelta['ot_id']}, pero no pude guardar la foto: {e}",
+                )
+
+            # El resto del mensaje (sacando la referencia al número de OT,
+            # si la traía) puede tener además una acción normal de texto
+            # (ej. "OT 3321 listo para probar") -- si no queda nada más que
+            # decir, se corta acá con la confirmación del archivado; si
+            # queda algo, sigue el camino normal de interpretación de texto
+            # de más abajo, reutilizando la misma lógica que ya sabe
+            # matchear por patente/descripción (ver 'ordenes_abiertas').
+            texto_resto = texto_mensaje
+            if match_ot_numero:
+                texto_resto = (texto_resto[:match_ot_numero.start()] + texto_resto[match_ot_numero.end():]).strip()
+            if not texto_resto:
+                return _registrar(
+                    mecanico["nombre"], "foto_vehiculo_archivada", ot_resuelta["ot_id"], "", "", True,
+                    nota_foto_archivada,
+                )
+            texto_mensaje = f"{texto_resto} (OT identificada por la foto adjunta: OT #{ot_resuelta['ot_id']})"
         else:
             return _registrar(
                 mecanico["nombre"], "foto_no_reconocida", None, "", "", False,
@@ -5181,10 +5252,22 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
 
     if all(a.get("tipo") == "no_reconocida" for a in acciones_ordenadas):
         motivo = interpretado.get("resumen") or "no reconocí una acción concreta en tu mensaje"
+        mensaje_no_reconocida = (
+            f"No pude identificar una acción clara ({motivo}). Si querías mover una OT o contar un "
+            f"diagnóstico, indica el número (ej. \"OT 4012\") y qué pasó."
+        )
+        if nota_foto_archivada:
+            # La foto sí se archivó (ver rama 'vehiculo' más arriba) aunque
+            # el texto que la acompañaba no se haya reconocido como una
+            # acción -- esto NO es un error para el mecánico, así que se
+            # reporta como éxito con las dos noticias juntas.
+            return _registrar(
+                mecanico["nombre"], "foto_vehiculo_archivada", ot_id_foto_archivada, "", "", True,
+                f"{nota_foto_archivada}\n{mensaje_no_reconocida}",
+            )
         return _registrar(
             mecanico["nombre"], "no_reconocida", None, "", "", False,
-            f"No pude identificar una acción clara ({motivo}). Si querías mover una OT o contar un "
-            f"diagnóstico, indica el número (ej. \"OT 4012\") y qué pasó.",
+            mensaje_no_reconocida,
         )
 
     resultados = [_agente_ejecutar_una_accion(db, mecanico, a) for a in acciones_ordenadas]
@@ -5195,8 +5278,13 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
     # que se ejecutó.
     exito_general = any(r["exito"] for r in resultados)
     respuesta_texto = "\n".join(r["mensaje"] for r in resultados)
+    if nota_foto_archivada:
+        respuesta_texto = f"{nota_foto_archivada}\n{respuesta_texto}"
+        exito_general = True  # la foto ya quedó archivada aunque la acción de texto fallara
     accion_registro = "+".join(dict.fromkeys(r["codigo"] for r in resultados))
-    ot_id_registro = next((r["ot_id"] for r in resultados if r["ot_id"] is not None), None)
+    if nota_foto_archivada:
+        accion_registro = f"foto_vehiculo_archivada+{accion_registro}"
+    ot_id_registro = next((r["ot_id"] for r in resultados if r["ot_id"] is not None), None) or ot_id_foto_archivada
     cambio_estado = next((r for r in resultados if r["tipo"] == "cambiar_estado_ot" and r["exito"]), None)
     estado_anterior = cambio_estado["estado_anterior"] if cambio_estado else ""
     estado_nuevo = cambio_estado["estado_nuevo"] if cambio_estado else ""
@@ -7651,6 +7739,7 @@ from modulos.operativo import (  # noqa: E402
     _actualizar_estado_orden_por_agente,
     _actualizar_campos_orden_por_agente,
     resumen_utilidad_mes,
+    _guardar_foto_entidad,
 )
 app.register_blueprint(bp_operativo)
 

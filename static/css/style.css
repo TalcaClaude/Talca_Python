@@ -594,6 +594,7 @@ svg .chart-punto-hover {
 }
 
 .toolbar input[type="text"],
+.toolbar input[type="date"],
 .toolbar select {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -602,6 +603,14 @@ svg .chart-punto-hover {
   padding: 9px 12px;
   font-family: var(--font-body);
   font-size: 14px;
+}
+
+.toolbar .campo-rango {
+  align-items: center;
+}
+.toolbar .campo-rango input[type="date"] {
+  flex: 1;
+  min-width: 0;
 }
 
 #buscar, #buscar-bodega { flex: 1; min-width: 220px; }
@@ -1576,6 +1585,17 @@ svg .chart-punto-hover {
 }
 
 .modal-actions--start { justify-content: flex-start; }
+
+.op-fotos-filtro-envio {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 9px 11px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  max-width: 260px;
+}
 .modal-actions--split { justify-content: space-between; margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
 
 /* ---------- Detalle ---------- */

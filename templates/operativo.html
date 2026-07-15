@@ -37,6 +37,7 @@
   <nav class="tabs">
     <button class="tab activo" data-vista="dashboard">Dashboard</button>
     <button class="tab" data-vista="ordenes">Órdenes de Trabajo</button>
+    <button class="tab" data-vista="listado">Listado</button>
     <button class="tab" data-vista="garantias">Garantías</button>
     <button class="tab" data-vista="clientes">Clientes</button>
     <button class="tab" data-vista="reportes">Reportes</button>
@@ -230,6 +231,78 @@
     </div>
   </section>
   </div>
+
+  </section>
+
+  <section class="vista" id="vista-listado" style="display:none">
+
+  <!-- Versión de prueba: vista de las OT en líneas, correlativo (Nº = OT
+       más reciente arriba), pensada para tener un vistazo general rápido
+       -- a diferencia del tablero (kanban), que agrupa por etapa. Usa la
+       misma data ya cargada por cargarOperativo() (state.opOrdenes), así
+       que muestra siempre las mismas OT que el tablero: todas las
+       abiertas + las cerradas del mes elegido. Los datos mostrados son
+       los que se pidieron como mínimo (nombre, marca/modelo, patente,
+       color, Nº de OT, fecha de ingreso, etapa actual) más algunos
+       adicionales que ya vive en el sistema (prioridad, días en taller,
+       valor, pagado/saldo) -- se ajusta con el taller una vez probada. -->
+
+  <section class="toolbar">
+    <input type="text" id="op-list-buscar" placeholder="Buscar por cliente, patente, marca o modelo…">
+    <select id="op-list-filtro-estado">
+      <option value="">Todas las etapas (excepto cancelado)</option>
+      <option value="recibido">Recibido</option>
+      <option value="diagnostico">Diagnóstico</option>
+      <option value="presupuesto">Presupuesto</option>
+      <option value="esperando_aprobacion">Esperando aprobación</option>
+      <option value="reparacion">Reparación</option>
+      <option value="esperando_repuesto">Esperando repuesto</option>
+      <option value="control_calidad">Pruebas de ruta</option>
+      <option value="listo">Listo</option>
+      <option value="entregado">Entregado</option>
+      <option value="cancelado">Cancelado</option>
+    </select>
+    <select id="op-list-filtro-prioridad">
+      <option value="">Toda prioridad</option>
+      <option value="baja">Baja</option>
+      <option value="media">Media</option>
+      <option value="alta">Alta</option>
+      <option value="urgente">Urgente</option>
+    </select>
+    <div class="campo-rango" style="max-width:280px;">
+      <input type="date" id="op-list-fecha-desde" title="Ingreso desde">
+      <span>–</span>
+      <input type="date" id="op-list-fecha-hasta" title="Ingreso hasta">
+    </div>
+    <span style="flex:1"></span>
+    <span class="chart-sub" id="op-list-contador" style="align-self:center;">0 OT</span>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla" id="op-list-tabla">
+      <thead>
+        <tr>
+          <th>Nº OT</th>
+          <th>Días</th>
+          <th>Cliente</th>
+          <th>Marca</th>
+          <th>Modelo</th>
+          <th>Color</th>
+          <th>Patente</th>
+          <th>Etapa actual</th>
+          <th>Prioridad</th>
+          <th class="num">Valor</th>
+          <th class="num">Pagado</th>
+          <th class="num">Saldo</th>
+          <th>Ingreso</th>
+          <th>Entrega estimada</th>
+        </tr>
+      </thead>
+      <tbody id="op-list-tbody">
+        <tr><td colspan="14" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
 
   </section>
 
@@ -531,6 +604,11 @@
     </div>
     <div class="modal-actions">
       <button type="button" class="btn btn-secundario" data-close="modal-op-fotos-ingreso">Completar después</button>
+      <select id="opfi-fotos-filtro-envio" class="op-fotos-filtro-envio" title="Qué fotos incluir en el correo al cliente">
+        <option value="ambas" selected>Ambas (ingreso + desarme/armado)</option>
+        <option value="ingreso">Solo fotos de ingreso</option>
+        <option value="desarme_armado">Solo fotos de desarme/armado</option>
+      </select>
       <button type="button" class="btn btn-primary" id="btn-opfi-finalizar">Enviar registro fotográfico al cliente</button>
     </div>
   </div>
@@ -933,6 +1011,11 @@
       <div id="opod-fotos-faltan" class="ayuda-inline ayuda-inline--bloqueado" style="display:none"></div>
       <div class="modal-actions modal-actions--start">
         <button type="button" class="btn btn-secundario" id="btn-opod-fotos-agregar">+ Agregar foto</button>
+        <select id="opod-fotos-filtro-envio" class="op-fotos-filtro-envio" title="Qué fotos incluir en el correo al cliente">
+          <option value="ambas" selected>Ambas (ingreso + desarme/armado)</option>
+          <option value="ingreso">Solo fotos de ingreso</option>
+          <option value="desarme_armado">Solo fotos de desarme/armado</option>
+        </select>
         <button type="button" class="btn btn-primary" id="btn-opod-fotos-finalizar">Enviar registro fotográfico al cliente</button>
       </div>
       <input type="file" id="opod-fotos-archivo-libre" accept="image/*" capture="environment" style="display:none">
@@ -1316,6 +1399,11 @@
     <div id="gard-fotos-faltan" class="ayuda-inline ayuda-inline--bloqueado" style="display:none"></div>
     <div class="modal-actions modal-actions--start">
       <button type="button" class="btn btn-secundario" id="btn-gard-fotos-agregar">+ Agregar foto</button>
+      <select id="gard-fotos-filtro-envio" class="op-fotos-filtro-envio" title="Qué fotos incluir en el correo al cliente">
+        <option value="ambas" selected>Ambas (ingreso + desarme/armado)</option>
+        <option value="ingreso">Solo fotos de ingreso</option>
+        <option value="desarme_armado">Solo fotos de desarme/armado</option>
+      </select>
       <button type="button" class="btn btn-primary" id="btn-gard-fotos-finalizar">Enviar registro fotográfico al cliente</button>
     </div>
     <input type="file" id="gard-fotos-archivo-libre" accept="image/*" capture="environment" style="display:none">

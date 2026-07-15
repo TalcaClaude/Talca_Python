@@ -139,11 +139,16 @@ document.querySelectorAll(".input-monto").forEach(el => {
 // Días que lleva (o llevó) el vehículo en el taller: desde la recepción
 // hasta hoy, o hasta la entrega real si la orden ya se entregó (para que
 // el contador se congele en vez de seguir subiendo).
-function diasEnTaller(orden) {
+function diasEnTallerNumero(orden) {
   const inicio = new Date(orden.fecha_recepcion);
-  if (isNaN(inicio)) return "—";
+  if (isNaN(inicio)) return null;
   const fin = orden.fecha_entrega_real ? new Date(orden.fecha_entrega_real) : new Date();
-  const dias = Math.max(0, Math.floor((fin - inicio) / 86400000));
+  return Math.max(0, Math.floor((fin - inicio) / 86400000));
+}
+
+function diasEnTaller(orden) {
+  const dias = diasEnTallerNumero(orden);
+  if (dias === null) return "—";
   return `${dias} día${dias === 1 ? "" : "s"} en el taller`;
 }
 
@@ -239,12 +244,14 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     const vista = tabBtn.dataset.vista;
     document.getElementById("vista-dashboard").style.display = vista === "dashboard" ? "block" : "none";
     document.getElementById("vista-ordenes").style.display = vista === "ordenes" ? "block" : "none";
+    document.getElementById("vista-listado").style.display = vista === "listado" ? "block" : "none";
     document.getElementById("vista-clientes").style.display = vista === "clientes" ? "block" : "none";
     document.getElementById("vista-garantias").style.display = vista === "garantias" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
       dashboard: "Operativo — Dashboard",
       ordenes: "Operativo — Órdenes de Trabajo",
+      listado: "Operativo — Listado",
       clientes: "Operativo — Clientes",
       garantias: "Operativo — Garantías",
       reportes: "Operativo — Reportes",
@@ -252,7 +259,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     document.getElementById("brand-sub").textContent = titulos[vista];
     detenerPollingOrdenes();
     if (vista === "dashboard") cargarDashboardOperativo();
-    if (vista === "ordenes") {
+    if (vista === "ordenes" || vista === "listado") {
       cargarOperativo();
       iniciarPollingOrdenes();
     }
@@ -434,6 +441,7 @@ async function cargarOperativo(silencioso = false) {
     state.opClientes = dataClientes.clientes;
     state.opProductos = dataProductos.productos;
     renderTableroOperativo();
+    renderListadoOperativo();
     await cargarCatalogoVehiculos();
     poblarDatalistsOperativo();
   } catch (e) {
@@ -755,6 +763,82 @@ function renderTableroOperativo() {
 
   updateKanbanFades();
 }
+
+// ---------------------------------------------------------------------------
+// Vista "Listado": las mismas OT del tablero (state.opOrdenes -- ver
+// cargarOperativo), pero en líneas por orden correlativo (Nº de OT más
+// reciente arriba) en vez de agrupadas por etapa. Pensada para tener un
+// vistazo general rápido con filtros propios, independientes de los del
+// tablero (op-filtro-estado/op-buscar) -- así se puede tener un filtro
+// distinto en cada pestaña sin que se pisen entre sí.
+// ---------------------------------------------------------------------------
+
+function renderListadoOperativo() {
+  const tbody = document.getElementById("op-list-tbody");
+  const contador = document.getElementById("op-list-contador");
+  if (!tbody) return; // la pestaña "Listado" puede no estar en el DOM todavía
+
+  const filtroEstado = document.getElementById("op-list-filtro-estado").value;
+  const filtroPrioridad = document.getElementById("op-list-filtro-prioridad").value;
+  const busqueda = document.getElementById("op-list-buscar").value.trim().toLowerCase();
+  const fechaDesde = document.getElementById("op-list-fecha-desde").value;
+  const fechaHasta = document.getElementById("op-list-fecha-hasta").value;
+
+  const coincide = (orden) => coincideBusqueda(
+    busqueda,
+    orden.cliente ? orden.cliente.nombre : "",
+    orden.equipo ? `${orden.equipo.marca} ${orden.equipo.modelo} ${orden.equipo.identificador}` : "",
+  );
+
+  const ordenes = (state.opOrdenes || [])
+    .filter(o => filtroEstado ? o.estado === filtroEstado : o.estado !== "cancelado")
+    .filter(o => !filtroPrioridad || (o.prioridad || "media") === filtroPrioridad)
+    .filter(o => !fechaDesde || (o.fecha_recepcion || "").slice(0, 10) >= fechaDesde)
+    .filter(o => !fechaHasta || (o.fecha_recepcion || "").slice(0, 10) <= fechaHasta)
+    .filter(coincide)
+    .sort((a, b) => b.id - a.id);
+
+  contador.textContent = `${ordenes.length} OT${ordenes.length === 1 ? "" : "s"}`;
+
+  if (ordenes.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="14" class="vacio">Sin órdenes que coincidan con el filtro.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = ordenes.map(o => {
+    const dias = diasEnTallerNumero(o);
+    const prioridad = o.prioridad || "media";
+    const badgePrioridad = prioridad === "media"
+      ? "Media"
+      : `<span class="badge-prioridad badge-prioridad--${prioridad}">${escapeHtml(prioridad)}</span>`;
+    return `
+      <tr data-id="${o.id}">
+        <td class="mono">OT #${o.id}</td>
+        <td>${dias === null ? "—" : dias}</td>
+        <td>${escapeHtml(o.cliente ? o.cliente.nombre : "—")}</td>
+        <td>${escapeHtml(o.equipo ? o.equipo.marca : "") || "—"}</td>
+        <td>${escapeHtml(o.equipo ? o.equipo.modelo : "") || "—"}</td>
+        <td>${escapeHtml(o.equipo ? o.equipo.color : "") || "—"}</td>
+        <td class="mono">${escapeHtml(o.equipo ? o.equipo.identificador : "") || "—"}</td>
+        <td>${escapeHtml(OP_ESTADOS_LABEL[o.estado] || o.estado)}</td>
+        <td>${badgePrioridad}</td>
+        <td class="num">${fmtMoney(o.valor_total || 0)}</td>
+        <td class="num">${fmtMoney(o.total_pagado || 0)}</td>
+        <td class="num">${fmtMoney(o.total_por_pagar || 0)}</td>
+        <td>${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</td>
+        <td>${o.fecha_entrega_estimada ? fmtFechaSolo(o.fecha_entrega_estimada.slice(0, 10)) : "—"}</td>
+      </tr>`;
+  }).join("");
+
+  tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+    tr.addEventListener("click", () => abrirDetalleOrden(parseInt(tr.dataset.id, 10)));
+  });
+}
+
+["op-list-buscar"].forEach(id => document.getElementById(id).addEventListener("input", renderListadoOperativo));
+["op-list-filtro-estado", "op-list-filtro-prioridad", "op-list-fecha-desde", "op-list-fecha-hasta"].forEach(id => {
+  document.getElementById(id).addEventListener("change", renderListadoOperativo);
+});
 
 // El tablero (kanban) tiene más columnas de las que caben en una pantalla
 // normal, así que hace scroll horizontal — estas dos franjas con flecha
@@ -2108,11 +2192,12 @@ document.getElementById("opfi-archivo-libre").addEventListener("change", async (
 document.getElementById("btn-opfi-finalizar").addEventListener("click", async () => {
   const entidadTipo = document.getElementById("opfi-entidad-tipo").value;
   const entidadId = document.getElementById("opfi-orden-id").value;
+  const incluir = document.getElementById("opfi-fotos-filtro-envio").value;
   const btn = document.getElementById("btn-opfi-finalizar");
   btn.disabled = true;
   btn.textContent = "Enviando…";
   try {
-    const data = await api(`${_urlFotosEntidad(entidadTipo, entidadId)}/finalizar`, { method: "POST" });
+    const data = await api(`${_urlFotosEntidad(entidadTipo, entidadId)}/finalizar?incluir=${incluir}`, { method: "POST" });
     if (data.correo_enviado) {
       toast("Registro fotográfico enviado al cliente.");
     } else {
@@ -2179,11 +2264,12 @@ document.getElementById("opod-fotos-archivo-libre").addEventListener("change", a
 
 document.getElementById("btn-opod-fotos-finalizar").addEventListener("click", async () => {
   const ordenId = document.getElementById("opod-id").value;
+  const incluir = document.getElementById("opod-fotos-filtro-envio").value;
   const btn = document.getElementById("btn-opod-fotos-finalizar");
   btn.disabled = true;
   btn.textContent = "Enviando…";
   try {
-    const data = await api(`/api/operativo/ordenes/${ordenId}/fotos/finalizar`, { method: "POST" });
+    const data = await api(`/api/operativo/ordenes/${ordenId}/fotos/finalizar?incluir=${incluir}`, { method: "POST" });
     if (data.correo_enviado) {
       toast("Registro fotográfico enviado al cliente.");
     } else {
@@ -2250,11 +2336,12 @@ document.getElementById("gard-fotos-archivo-libre").addEventListener("change", a
 
 document.getElementById("btn-gard-fotos-finalizar").addEventListener("click", async () => {
   const garantiaId = document.getElementById("gard-id").value;
+  const incluir = document.getElementById("gard-fotos-filtro-envio").value;
   const btn = document.getElementById("btn-gard-fotos-finalizar");
   btn.disabled = true;
   btn.textContent = "Enviando…";
   try {
-    const data = await api(`/api/operativo/garantias/${garantiaId}/fotos/finalizar`, { method: "POST" });
+    const data = await api(`/api/operativo/garantias/${garantiaId}/fotos/finalizar?incluir=${incluir}`, { method: "POST" });
     if (data.correo_enviado) {
       toast("Registro fotográfico enviado al cliente.");
     } else {

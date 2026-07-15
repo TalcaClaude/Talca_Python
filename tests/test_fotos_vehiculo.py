@@ -316,5 +316,79 @@ class TestFinalizarFotosGarantia(_BaseFotos):
         self.assertEqual(len(listado_garantia["faltan_obligatorias"]), 7)
 
 
+class TestFiltroEnvioFotos(_BaseFotos):
+    """Filtro '?incluir=' de /fotos/finalizar (ingreso / desarme_armado /
+    ambas, ver FILTROS_ENVIO_FOTOS): las fotos de desarme/armado solo
+    llegan por WhatsApp (origen='desarme_armado', ver app.py), así que acá
+    se insertan directo con _guardar_foto_entidad en vez de por el endpoint
+    HTTP de subida (que siempre las guarda como origen='ingreso' -- a
+    propósito, ver _subir_foto_generico)."""
+
+    def _agregar_foto_desarme_armado(self, orden_id, titulo="Foto desarme"):
+        from modulos.operativo import _guardar_foto_entidad
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            _guardar_foto_entidad(
+                db, "orden", orden_id, "libre", titulo, _imagen_de_prueba().getvalue(),
+                "mecanico_whatsapp", origen="desarme_armado",
+            )
+
+    def test_incluir_invalido_da_400(self):
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "FT0011")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+        resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/fotos/finalizar?incluir=cualquier_cosa")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Filtro inválido", resp.get_json()["error"])
+
+    def test_incluir_desarme_armado_no_exige_las_7_obligatorias(self):
+        # Las 7 obligatorias son siempre de ingreso -- pedir solo
+        # desarme/armado no debería bloquearse por fotos de ingreso que ni
+        # se van a mandar.
+        cliente = self._crear_cliente(email="cliente@ejemplo.cl")
+        equipo = self._crear_equipo(cliente["id"], "FT0012")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+        self._agregar_foto_desarme_armado(orden["id"])
+
+        resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/fotos/finalizar?incluir=desarme_armado")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertTrue(resp.get_json()["ok"])
+
+    def test_incluir_desarme_armado_sin_fotos_de_ese_tipo_no_manda_nada(self):
+        cliente = self._crear_cliente(email="cliente@ejemplo.cl")
+        equipo = self._crear_equipo(cliente["id"], "FT0013")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+        self._subir_las_7_obligatorias(self.client, orden["id"])  # solo fotos de ingreso
+
+        resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/fotos/finalizar?incluir=desarme_armado")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertFalse(data["correo_enviado"])
+        self.assertIsNone(data["destinatario"])
+        self.assertIn("No hay fotos", data["correo_detalle"])
+
+    def test_incluir_ingreso_sigue_exigiendo_las_7_obligatorias(self):
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "FT0014")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+        self._agregar_foto_desarme_armado(orden["id"])  # hay fotos, pero no de ingreso
+
+        resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/fotos/finalizar?incluir=ingreso")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("faltan_obligatorias", resp.get_json())
+
+    def test_incluir_ambas_es_el_default_y_manda_con_solo_ingreso_completo(self):
+        cliente = self._crear_cliente(email="cliente@ejemplo.cl")
+        equipo = self._crear_equipo(cliente["id"], "FT0015")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+        self._subir_las_7_obligatorias(self.client, orden["id"])
+        self._agregar_foto_desarme_armado(orden["id"])
+
+        # Sin '?incluir=' -- debe comportarse igual que 'ambas' (default).
+        resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/fotos/finalizar")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertTrue(resp.get_json()["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

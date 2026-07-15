@@ -179,6 +179,14 @@ FOTOS_CATEGORIA_LABEL = dict(FOTOS_CATEGORIAS_OBLIGATORIAS)
 FOTOS_CATEGORIA_LABEL["libre"] = "Foto adicional"
 FOTOS_ENTIDADES_VALIDAS = {"orden", "garantia"}
 
+# Qué subconjunto de fotos mandar al cliente al presionar "Enviar registro
+# fotográfico" (ver _finalizar_fotos_generico) -- por defecto se mandan
+# ambas tandas (comportamiento histórico, antes de que existiera este
+# filtro), pero el personal puede pedir solo una si, por ejemplo, ya se
+# mandaron las de ingreso hace días y ahora solo quiere reenviar las de
+# desarme/armado que llegaron por WhatsApp mientras se trabajaba el auto.
+FILTROS_ENVIO_FOTOS = ["ingreso", "desarme_armado", "ambas"]
+
 # Convertidores de torque ahora es su propio módulo (ver
 # modulos/convertidores.py) -- lo único que queda acá es el enganche hacia
 # orden_items (convertidor_id, ver init_operativo_db más abajo y
@@ -988,17 +996,39 @@ def _armar_pdf_fotos_ingreso(db, entidad_tipo, entidad_id, equipo, cliente, foto
     return buffer, doc, elementos, nombre
 
 
-def _finalizar_fotos_generico(db, entidad_tipo, entidad_id, equipo, cliente):
+def _finalizar_fotos_generico(db, entidad_tipo, entidad_id, equipo, cliente, incluir_origen="ambas"):
     """Lógica compartida entre 'finalizar fotos de una OT' y 'finalizar
-    fotos de una garantía': arma el PDF con todas las fotos (obligatorias +
-    libres) y lo manda por correo al cliente, con copia al taller
-    (PRESUPUESTO_COPIA_TALLER -- mismo listado de correos administrativos
-    que ya se usaba para el envío de presupuestos, para no duplicar esa
-    configuración). A propósito NO bloquea el ingreso del auto si el
-    cliente no tiene correo registrado o el envío falla -- solo se informa
-    en la respuesta, para que el personal pueda reenviarlo después a mano
-    en vez de trabar la recepción física del vehículo."""
+    fotos de una garantía': arma el PDF con las fotos elegidas y lo manda
+    por correo al cliente, con copia al taller (PRESUPUESTO_COPIA_TALLER --
+    mismo listado de correos administrativos que ya se usaba para el envío
+    de presupuestos, para no duplicar esa configuración). A propósito NO
+    bloquea el ingreso del auto si el cliente no tiene correo registrado o
+    el envío falla -- solo se informa en la respuesta, para que el personal
+    pueda reenviarlo después a mano en vez de trabar la recepción física
+    del vehículo.
+
+    'incluir_origen' filtra qué tanda de fotos va en el PDF (ver
+    FILTROS_ENVIO_FOTOS y 'origen' en fotos_vehiculo):
+      - "ingreso": las obligatorias + libres tomadas al recibir el auto
+        (todo lo que NO sea origen == 'desarme_armado').
+      - "desarme_armado": solo las que llegaron por WhatsApp mientras se
+        trabajaba el vehículo.
+      - "ambas" (default): todas, igual que el comportamiento histórico
+        antes de que existiera este filtro."""
     fotos = _listar_fotos_entidad(db, entidad_tipo, entidad_id)
+    if incluir_origen == "ingreso":
+        fotos = [f for f in fotos if f.get("origen") != "desarme_armado"]
+    elif incluir_origen == "desarme_armado":
+        fotos = [f for f in fotos if f.get("origen") == "desarme_armado"]
+
+    if not fotos:
+        return {
+            "ok": False,
+            "correo_enviado": False,
+            "correo_detalle": "No hay fotos de ese tipo todavía -- no se mandó nada.",
+            "destinatario": None,
+        }
+
     from app import _enviar_correo, PRESUPUESTO_COPIA_TALLER
 
     etiqueta = "OT" if entidad_tipo == "orden" else "Garantía"
@@ -1042,23 +1072,32 @@ def _finalizar_fotos_generico(db, entidad_tipo, entidad_id, equipo, cliente):
 def finalizar_fotos_orden(orden_id):
     """Cierra la etapa de fotos de recepción de una OT: exige que estén las
     7 fotos obligatorias antes de armar y mandar el registro fotográfico
-    (ver _finalizar_fotos_generico)."""
+    (ver _finalizar_fotos_generico). '?incluir=' elige qué tanda mandar
+    (ver FILTROS_ENVIO_FOTOS) -- las 7 obligatorias son siempre fotos de
+    ingreso, así que ese chequeo no aplica si se pidió mandar solo
+    desarme/armado (no tendría sentido bloquear el envío de esas por fotos
+    de ingreso que ni se van a mandar)."""
     db = get_db()
     row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     if row is None:
         return jsonify({"error": "Orden no encontrada"}), 404
 
-    faltantes = _fotos_obligatorias_faltantes(db, "orden", orden_id)
-    if faltantes:
-        return jsonify({
-            "error": "Faltan fotos obligatorias: " + ", ".join(faltantes),
-            "faltan_obligatorias": faltantes,
-        }), 400
+    incluir = (request.args.get("incluir") or "ambas").strip().lower()
+    if incluir not in FILTROS_ENVIO_FOTOS:
+        return jsonify({"error": f"Filtro inválido. Usa uno de: {', '.join(FILTROS_ENVIO_FOTOS)}"}), 400
+
+    if incluir != "desarme_armado":
+        faltantes = _fotos_obligatorias_faltantes(db, "orden", orden_id)
+        if faltantes:
+            return jsonify({
+                "error": "Faltan fotos obligatorias: " + ", ".join(faltantes),
+                "faltan_obligatorias": faltantes,
+            }), 400
 
     orden = _orden_dict_detalle(db, row)
     cliente = orden.get("cliente") or {}
     equipo = orden.get("equipo") or {}
-    return jsonify(_finalizar_fotos_generico(db, "orden", orden_id, equipo, cliente))
+    return jsonify(_finalizar_fotos_generico(db, "orden", orden_id, equipo, cliente, incluir))
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>/fotos/finalizar", methods=["POST"])
@@ -1068,23 +1107,28 @@ def finalizar_fotos_garantia(garantia_id):
     entra por garantía -- la garantía tiene su propia OT/proceso (ver
     docstring de 'Garantías como entidad propia' más abajo), así que este
     registro fotográfico de recepción también se hace por separado, con las
-    mismas 7 fotos obligatorias."""
+    mismas 7 fotos obligatorias. '?incluir=' -- ver finalizar_fotos_orden."""
     db = get_db()
     row = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
     if row is None:
         return jsonify({"error": "Garantía no encontrada"}), 404
 
-    faltantes = _fotos_obligatorias_faltantes(db, "garantia", garantia_id)
-    if faltantes:
-        return jsonify({
-            "error": "Faltan fotos obligatorias: " + ", ".join(faltantes),
-            "faltan_obligatorias": faltantes,
-        }), 400
+    incluir = (request.args.get("incluir") or "ambas").strip().lower()
+    if incluir not in FILTROS_ENVIO_FOTOS:
+        return jsonify({"error": f"Filtro inválido. Usa uno de: {', '.join(FILTROS_ENVIO_FOTOS)}"}), 400
+
+    if incluir != "desarme_armado":
+        faltantes = _fotos_obligatorias_faltantes(db, "garantia", garantia_id)
+        if faltantes:
+            return jsonify({
+                "error": "Faltan fotos obligatorias: " + ", ".join(faltantes),
+                "faltan_obligatorias": faltantes,
+            }), 400
 
     garantia = _garantia_dict(db, row)
     cliente = garantia.get("cliente") or {}
     equipo = garantia.get("equipo") or {}
-    return jsonify(_finalizar_fotos_generico(db, "garantia", garantia_id, equipo, cliente))
+    return jsonify(_finalizar_fotos_generico(db, "garantia", garantia_id, equipo, cliente, incluir))
 
 
 # ---------------------------------------------------------------------------

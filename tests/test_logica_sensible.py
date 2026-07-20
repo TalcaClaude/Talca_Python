@@ -3786,6 +3786,71 @@ class TestEstadoResultados(unittest.TestCase):
         coincidencias = [i for i in data["items"] if i["monto"] == 77000.0 and str(orden["id"]) in i["etiqueta"]]
         self.assertEqual(len(coincidencias), 1, data["items"])
 
+    def test_detalle_de_costo_repuestos_muestra_la_ot_y_el_nombre_del_repuesto(self):
+        """El detalle de costo de repuestos debe listarse a nivel de ítem
+        (OT + nombre del repuesto), no agrupado por OT con solo el cliente
+        -- si no, no se entiende de qué repuesto se trata (pedido explícito
+        del dueño al ver el detalle en pantalla)."""
+        # /api/productos autogenera el nombre desde categoría+modelo, no
+        # acepta un "nombre" arbitrario por form -- para fijar un nombre
+        # elegido a mano (y así poder buscarlo en el detalle) se inserta
+        # directo en la DB, como ya hace _crear_producto() en otros tests.
+        db_setup = taller_app._conectar_db()
+        producto_id = _crear_producto(db_setup, "Filtro de Aceite ER", stock_disponible=10, costo_compra=5000)
+        db_setup.close()
+        cliente = self.client.post("/api/operativo/clientes", json={"nombre": "Cliente Detalle Repuesto"}).get_json()
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+        resp_item = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto_id, "cantidad": 2},
+        )
+        self.assertEqual(resp_item.status_code, 201, resp_item.get_data(as_text=True))
+
+        db = taller_app._conectar_db()
+        db.execute(
+            "UPDATE ordenes_trabajo SET estado = 'entregado', fecha_entrega_real = ? WHERE id = ?",
+            (f"{self.MES}-15T10:00:00", orden["id"]),
+        )
+        db.commit()
+        db.close()
+
+        resp = self.client.get(f"/api/finanzas/estado-resultados/detalle?mes={self.MES}&linea=costo_repuestos")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        coincidencias = [
+            i for i in data["items"]
+            if str(orden["id"]) in i["etiqueta"] and "Filtro de Aceite ER" in i["etiqueta"]
+        ]
+        self.assertEqual(len(coincidencias), 1, data["items"])
+        self.assertAlmostEqual(coincidencias[0]["monto"], 10000.0, delta=0.01)  # 2 x 5000
+
+    def test_detalle_de_costo_mano_obra_muestra_la_ot_y_la_descripcion_del_trabajo(self):
+        cliente = self.client.post("/api/operativo/clientes", json={"nombre": "Cliente Detalle Mano de Obra"}).get_json()
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+        resp_item = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "mano_obra", "cantidad": 1, "costo_unitario": 25000, "descripcion": "Cambio de embrague"},
+        )
+        self.assertEqual(resp_item.status_code, 201, resp_item.get_data(as_text=True))
+
+        db = taller_app._conectar_db()
+        db.execute(
+            "UPDATE ordenes_trabajo SET estado = 'entregado', fecha_entrega_real = ? WHERE id = ?",
+            (f"{self.MES}-16T10:00:00", orden["id"]),
+        )
+        db.commit()
+        db.close()
+
+        resp = self.client.get(f"/api/finanzas/estado-resultados/detalle?mes={self.MES}&linea=costo_mano_obra")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        coincidencias = [
+            i for i in data["items"]
+            if str(orden["id"]) in i["etiqueta"] and "CAMBIO DE EMBRAGUE" in i["etiqueta"]
+        ]
+        self.assertEqual(len(coincidencias), 1, data["items"])
+        self.assertAlmostEqual(coincidencias[0]["monto"], 25000.0, delta=0.01)
+
 
 if __name__ == "__main__":
     try:

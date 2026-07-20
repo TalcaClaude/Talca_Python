@@ -1824,73 +1824,215 @@ function erMoney(n) {
   return `${negativo ? "-" : ""}$${Math.round(Math.abs(n)).toLocaleString("es-CL")}`;
 }
 
-function erFila(label, valor, cls = "") {
+// Cada línea "hoja" (ventas, costo de ventas, GAV por rubro, y los 12
+// campos manuales) es clicable y abre el detalle vía /api/finanzas/estado-
+// resultados/detalle -- ver LINEAS_DETALLE_LISTA/MANUAL en
+// modulos/finanzas.py, las claves de acá tienen que coincidir con esas.
+// Las líneas de subtotal/total no pegan al servidor: se explican con la
+// aritmética que arma erExplicarFormula() a partir del mismo reporte que
+// ya está en memoria (state.erUltimoReporte).
+function erFila(label, valor, { cls = "", linea = null, seccionTitulo = null } = {}) {
   const negClase = valor < 0 ? " er-negativo" : "";
-  return `<tr class="${cls}"><td>${escapeHtml(label)}</td><td class="num${negClase}">${erMoney(valor)}</td></tr>`;
+  const clicable = linea ? ` data-clicable="1" data-linea="${escapeHtml(linea)}" tabindex="0" role="button"` : "";
+  return `<div class="er-fila ${cls}"${clicable}>
+    <span class="er-label">${escapeHtml(label)}</span>
+    <span class="er-monto${negClase}">${erMoney(valor)}</span>
+  </div>`;
 }
 
-function erFilaPct(label, valor, pct, cls = "") {
+function erFilaPct(label, valor, pct, opts = {}) {
   const negClase = valor < 0 ? " er-negativo" : "";
-  const pctTxt = pct === null || pct === undefined ? "" : ` <span class="er-pct">(${pct}%)</span>`;
-  return `<tr class="${cls}"><td>${escapeHtml(label)}</td><td class="num${negClase}">${erMoney(valor)}${pctTxt}</td></tr>`;
+  const clicable = opts.linea ? ` data-clicable="1" data-linea="${escapeHtml(opts.linea)}" tabindex="0" role="button"` : "";
+  const pctTxt = pct === null || pct === undefined ? "" : `<span class="er-pct">(${pct}%)</span>`;
+  return `<div class="er-fila ${opts.cls || ""}"${clicable}>
+    <span class="er-label">${escapeHtml(label)}</span>
+    <span class="er-monto${negClase}">${erMoney(valor)}${pctTxt}</span>
+  </div>`;
+}
+
+function erSeccion(titulo) {
+  return `<div class="er-seccion-titulo">${escapeHtml(titulo)}</div>`;
 }
 
 function renderEstadoResultados(d) {
   const filasGav = Object.entries(d.gav.por_rubro).map(
-    ([rubro, monto]) => erFila(RUBRO_GAV_LABEL[rubro] || rubro, monto)
+    ([rubro, monto]) => erFila(RUBRO_GAV_LABEL[rubro] || rubro, monto, { linea: `gav_${rubro}` })
   ).join("");
 
   const avisoSinClasificar = d.gav.sin_clasificar > 0
-    ? `<p class="ayuda-inline ayuda-inline--bloqueado">Hay ${fmtMoney(d.gav.sin_clasificar)} en gastos de Caja Chica de este mes sin rubro asignado — no están incluidos en el total de abajo. Edítalos en la pestaña "Caja Chica" y asígnales un rubro para que aparezcan acá.</p>`
+    ? `<div class="er-aviso-sin-clasificar">Hay ${fmtMoney(d.gav.sin_clasificar)} en gastos de Caja Chica de este mes sin rubro asignado — no están incluidos en el total. <a href="#" data-clicable="1" data-linea="gav_sin_clasificar" style="color:inherit">Ver cuáles son</a>, o edítalos desde la pestaña "Caja Chica" y asígnales un rubro.</div>`
     : "";
 
+  const [mesNum, anioNum] = [d.mes.slice(5, 7), d.mes.slice(0, 4)];
+  const nombreMes = new Date(`${d.mes}-01T00:00:00`).toLocaleDateString("es-CL", { month: "long", year: "numeric" });
+
   const html = `
-    <table class="tabla er-tabla">
-      <tbody>
-        <tr class="er-seccion"><td colspan="2">VENTAS</td></tr>
-        ${erFila("Ventas Operativo (OTs entregadas)", d.ventas.ventas_ot)}
-        ${erFila("Ventas Convertidores (directas)", d.ventas.ventas_ct)}
-        ${erFila("Otros ingresos", d.ventas.otros_ingresos)}
-        ${erFila("Total Ventas", d.ventas.total, "er-subtotal")}
+    <div class="er-papel-wrap">
+      <div class="er-papel">
+        <div class="er-papel-encabezado">
+          <h2>Estado de Resultados</h2>
+          <p>${escapeHtml(nombreMes.charAt(0).toUpperCase() + nombreMes.slice(1))}</p>
+        </div>
 
-        <tr class="er-seccion"><td colspan="2">COSTO DE VENTAS</td></tr>
-        ${erFila("Repuestos", d.costo_ventas.costo_repuestos)}
-        ${erFila("Mano de obra (con costo cargado)", d.costo_ventas.costo_mano_obra)}
-        ${erFila("Convertidores de torque internos", d.costo_ventas.costo_convertidores_internos)}
-        ${erFila("Costo de convertidores vendidos directo", d.costo_ventas.costo_ct_total)}
-        ${erFila("Total Costo de Ventas", d.costo_ventas.total, "er-subtotal")}
+        ${erSeccion("Ventas")}
+        ${erFila("Ventas Operativo (OTs entregadas)", d.ventas.ventas_ot, { linea: "ventas_ot" })}
+        ${erFila("Ventas Convertidores (directas)", d.ventas.ventas_ct, { linea: "ventas_ct" })}
+        ${erFila("Otros ingresos", d.ventas.otros_ingresos, { linea: "otros_ingresos" })}
+        ${erFila("Total Ventas", d.ventas.total, { cls: "er-subtotal" })}
 
-        ${erFilaPct("UTILIDAD BRUTA", d.utilidad_bruta, d.margen_bruto_pct, "er-total")}
+        ${erSeccion("Costo de Ventas")}
+        ${erFila("Repuestos", d.costo_ventas.costo_repuestos, { linea: "costo_repuestos" })}
+        ${erFila("Mano de obra (con costo cargado)", d.costo_ventas.costo_mano_obra, { linea: "costo_mano_obra" })}
+        ${erFila("Convertidores de torque internos", d.costo_ventas.costo_convertidores_internos, { linea: "costo_convertidores" })}
+        ${erFila("Costo de convertidores vendidos directo", d.costo_ventas.costo_ct_total, { linea: "costo_ct" })}
+        ${erFila("Total Costo de Ventas", d.costo_ventas.total, { cls: "er-subtotal" })}
 
-        <tr class="er-seccion"><td colspan="2">GASTOS DE ADMINISTRACIÓN Y VENTAS (GAV)</td></tr>
-        ${filasGav || `<tr><td colspan="2" class="vacio">Sin gastos de Caja Chica clasificados este mes</td></tr>`}
-        ${erFila("Remuneraciones", d.gav.remuneraciones)}
-        ${erFila("Bono remuneraciones", d.gav.bono_remuneraciones)}
-        ${erFila("Otras remuneraciones", d.gav.otras_remuneraciones)}
-        ${erFila("Previred", d.gav.previred)}
-        ${erFila("Arriendo", d.gav.arriendo)}
-        ${erFila("Seguros", d.gav.seguros)}
-        ${erFila("Total GAV", d.gav.total, "er-subtotal")}
+        ${erFilaPct("Utilidad Bruta", d.utilidad_bruta, d.margen_bruto_pct, { cls: "er-total", linea: "_formula:utilidad_bruta" })}
 
-        ${erFila("UTILIDAD DE OPERACIÓN", d.utilidad_operacional, "er-total")}
+        ${erSeccion("Gastos de Administración y Ventas (GAV)")}
+        ${filasGav || `<div class="er-fila er-vacio"><span class="er-label">Sin gastos de Caja Chica clasificados este mes</span><span class="er-monto">—</span></div>`}
+        ${erFila("Remuneraciones", d.gav.remuneraciones, { linea: "remuneraciones" })}
+        ${erFila("Bono remuneraciones", d.gav.bono_remuneraciones, { linea: "bono_remuneraciones" })}
+        ${erFila("Otras remuneraciones", d.gav.otras_remuneraciones, { linea: "otras_remuneraciones" })}
+        ${erFila("Previred", d.gav.previred, { linea: "previred" })}
+        ${erFila("Arriendo", d.gav.arriendo, { linea: "arriendo" })}
+        ${erFila("Seguros", d.gav.seguros, { linea: "seguros" })}
+        ${erFila("Total GAV", d.gav.total, { cls: "er-subtotal" })}
+        ${avisoSinClasificar}
 
-        <tr class="er-seccion"><td colspan="2">GASTOS FINANCIEROS</td></tr>
-        ${erFila("Intereses (préstamos)", d.gastos_financieros.intereses)}
-        ${erFila("Factoring", d.gastos_financieros.factoring)}
-        ${erFila("Comisiones bancarias", d.gastos_financieros.comisiones)}
-        ${erFila("Total Gastos Financieros", d.gastos_financieros.total, "er-subtotal")}
+        ${erFila("Utilidad de Operación", d.utilidad_operacional, { cls: "er-total", linea: "_formula:utilidad_operacional" })}
 
-        ${erFila("UTILIDAD ANTES DE IMPUESTO", d.utilidad_antes_impuesto, "er-total")}
-        ${erFila("Impuesto a la renta", d.impuesto_renta)}
-        ${erFilaPct("UTILIDAD NETA", d.utilidad_neta, d.margen_neto_pct, "er-total")}
-        ${erFila("Asignación de dividendos", d.dividendos)}
-        ${erFila("UTILIDAD RETENIDA", d.utilidad_retenida, "er-total")}
-      </tbody>
-    </table>
-    ${avisoSinClasificar}
+        ${erSeccion("Gastos Financieros")}
+        ${erFila("Intereses (préstamos)", d.gastos_financieros.intereses, { linea: "gf_intereses" })}
+        ${erFila("Factoring", d.gastos_financieros.factoring, { linea: "gf_factoring" })}
+        ${erFila("Comisiones bancarias", d.gastos_financieros.comisiones, { linea: "gf_comisiones" })}
+        ${erFila("Total Gastos Financieros", d.gastos_financieros.total, { cls: "er-subtotal" })}
+
+        ${erFila("Utilidad antes de Impuesto", d.utilidad_antes_impuesto, { cls: "er-total", linea: "_formula:utilidad_antes_impuesto" })}
+        ${erFila("Impuesto a la renta", d.impuesto_renta, { linea: "impuesto_renta" })}
+        ${erFilaPct("Utilidad Neta", d.utilidad_neta, d.margen_neto_pct, { cls: "er-total", linea: "_formula:utilidad_neta" })}
+        ${erFila("Asignación de dividendos", d.dividendos, { linea: "dividendos" })}
+        ${erFila("Utilidad Retenida", d.utilidad_retenida, { cls: "er-total", linea: "_formula:utilidad_retenida" })}
+      </div>
+    </div>
   `;
   document.getElementById("er-reporte").innerHTML = html;
 }
+
+// ---------------------------------------------------------------------------
+// Detalle de una línea ("¿cómo se llegó a este número?")
+// ---------------------------------------------------------------------------
+
+// Fórmulas de las líneas de subtotal/total -- se explican solas con los
+// componentes que YA están en el reporte cargado, sin pedir nada al
+// servidor (a diferencia de las líneas "hoja", que si necesitan ir a
+// buscar el detalle transaccional -- ver abrirDetalleEr).
+const ER_FORMULAS = {
+  utilidad_bruta: (d) => ({
+    titulo: "Utilidad Bruta",
+    pasos: [["Total Ventas", d.ventas.total], ["Total Costo de Ventas", -d.costo_ventas.total]],
+    resultado: d.utilidad_bruta,
+  }),
+  utilidad_operacional: (d) => ({
+    titulo: "Utilidad de Operación",
+    pasos: [["Utilidad Bruta", d.utilidad_bruta], ["Total GAV", -d.gav.total]],
+    resultado: d.utilidad_operacional,
+  }),
+  utilidad_antes_impuesto: (d) => ({
+    titulo: "Utilidad antes de Impuesto",
+    pasos: [["Utilidad de Operación", d.utilidad_operacional], ["Total Gastos Financieros", -d.gastos_financieros.total]],
+    resultado: d.utilidad_antes_impuesto,
+  }),
+  utilidad_neta: (d) => ({
+    titulo: "Utilidad Neta",
+    pasos: [["Utilidad antes de Impuesto", d.utilidad_antes_impuesto], ["Impuesto a la renta", -d.impuesto_renta]],
+    resultado: d.utilidad_neta,
+  }),
+  utilidad_retenida: (d) => ({
+    titulo: "Utilidad Retenida",
+    pasos: [["Utilidad Neta", d.utilidad_neta], ["Asignación de dividendos", -d.dividendos]],
+    resultado: d.utilidad_retenida,
+  }),
+};
+
+function erRenderFormula(formula) {
+  const filas = formula.pasos.map(([label, valor]) =>
+    `<div class="erd-items" style="max-height:none"><li style="border:none;padding:3px 0">
+      <span>${escapeHtml(label)}</span><span>${erMoney(valor)}</span>
+    </li></div>`
+  ).join("");
+  return `
+    <p class="ayuda-inline">Este número sale de sumar/restar otras líneas de este mismo reporte — no hay transacciones nuevas que listar acá, es aritmética directa.</p>
+    <div class="erd-formula">
+      ${formula.pasos.map(([label, valor]) => `${escapeHtml(label)}: ${erMoney(valor)}`).join("<br>")}
+    </div>
+    <div class="erd-total-fila"><span>${escapeHtml(formula.titulo)}</span><span>${erMoney(formula.resultado)}</span></div>
+  `;
+}
+
+async function abrirDetalleEr(linea) {
+  document.getElementById("erd-titulo").textContent = "Detalle";
+  document.getElementById("erd-contenido").innerHTML = "Cargando…";
+  abrirModal("modal-er-detalle");
+
+  if (linea.startsWith("_formula:")) {
+    const key = linea.slice("_formula:".length);
+    const formula = ER_FORMULAS[key] ? ER_FORMULAS[key](state.erUltimoReporte) : null;
+    document.getElementById("erd-titulo").textContent = formula ? formula.titulo : "Detalle";
+    document.getElementById("erd-contenido").innerHTML = formula
+      ? erRenderFormula(formula)
+      : `<p class="ayuda-inline">No se pudo calcular el detalle.</p>`;
+    return;
+  }
+
+  try {
+    const mes = document.getElementById("er-mes").value;
+    const data = await api(`/api/finanzas/estado-resultados/detalle?mes=${encodeURIComponent(mes)}&linea=${encodeURIComponent(linea)}`);
+    if (data.tipo === "manual") {
+      document.getElementById("erd-titulo").textContent = "Dato ingresado a mano";
+      document.getElementById("erd-contenido").innerHTML = `
+        <p class="ayuda-inline">${escapeHtml(data.mensaje)}</p>
+        <button type="button" class="btn btn-secundario" id="erd-btn-editar-desde-detalle">Editar datos del mes</button>
+      `;
+      document.getElementById("erd-btn-editar-desde-detalle").addEventListener("click", () => {
+        cerrarModal("modal-er-detalle");
+        document.getElementById("btn-er-editar-manual").click();
+      });
+      return;
+    }
+    document.getElementById("erd-titulo").textContent = `Detalle (${data.items.length} movimiento${data.items.length === 1 ? "" : "s"})`;
+    if (!data.items.length) {
+      document.getElementById("erd-contenido").innerHTML = `<p class="ayuda-inline">No hay movimientos de este mes que compongan esta línea.</p>`;
+      return;
+    }
+    const items = data.items.map(it => `
+      <li>
+        <span>${escapeHtml(it.etiqueta)}${it.fecha ? `<br><span class="erd-item-fecha">${fmtFecha(it.fecha)}</span>` : ""}</span>
+        <span>${erMoney(it.monto)}</span>
+      </li>
+    `).join("");
+    document.getElementById("erd-contenido").innerHTML = `
+      <ul class="erd-items">${items}</ul>
+      <div class="erd-total-fila"><span>Total</span><span>${erMoney(data.total)}</span></div>
+    `;
+  } catch (e) {
+    document.getElementById("erd-contenido").innerHTML = `<p class="ayuda-inline ayuda-inline--bloqueado">${escapeHtml(e.message)}</p>`;
+  }
+}
+
+document.getElementById("er-reporte").addEventListener("click", (e) => {
+  const fila = e.target.closest("[data-linea]");
+  if (!fila) return;
+  e.preventDefault();
+  abrirDetalleEr(fila.dataset.linea);
+});
+document.getElementById("er-reporte").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" && e.key !== " ") return;
+  const fila = e.target.closest("[data-linea]");
+  if (!fila) return;
+  e.preventDefault();
+  abrirDetalleEr(fila.dataset.linea);
+});
 
 async function cargarEstadoResultados() {
   const inputMes = document.getElementById("er-mes");

@@ -1000,6 +1000,50 @@ def init_db():
         db.execute("ALTER TABLE caja_rendiciones ADD COLUMN medio_pago TEXT NOT NULL DEFAULT 'efectivo_cajero'")
         db.commit()
 
+    # ---- Migración 19: Estado de Resultados mensual (Finanzas). Se agrega
+    # 'rubro_gav' a caja_movimientos -- una clasificación FIJA y separada de
+    # la 'categoria' de texto libre que ya existía (esa la sigue usando el
+    # taller como quiera, ej. "Aseo", "Ferretería"). rubro_gav solo se llena
+    # desde el desplegable nuevo del formulario de gasto (ver RUBROS_GAV en
+    # modulos/finanzas.py) y es lo que el Estado de Resultados suma para
+    # armar Gastos de Administración y Ventas -- queda vacío ('') para todo
+    # gasto ya cargado antes de esta migración o creado por otro camino
+    # (pago a proveedor desde caja chica, compra de emergencia), a propósito:
+    # el reporte los deja afuera del total y los muestra aparte como
+    # "sin clasificar" en vez de adivinar dónde van, para no inventar cifras.
+    columnas_caja_mov_v19 = [c[1] for c in db.execute("PRAGMA table_info(caja_movimientos)").fetchall()]
+    if "rubro_gav" not in columnas_caja_mov_v19:
+        db.execute("ALTER TABLE caja_movimientos ADD COLUMN rubro_gav TEXT NOT NULL DEFAULT ''")
+        db.commit()
+
+    # Datos manuales del Estado de Resultados por mes (rubros que no se
+    # registran en ningún otro lugar del sistema porque vienen de
+    # contabilidad/remuneraciones externas: sueldos, Previred, arriendo,
+    # seguros, gastos financieros, impuesto, dividendos). Un registro por
+    # mes ('YYYY-MM'), se sobrescribe completo cada vez que se guarda desde
+    # Finanzas -> Estado de Resultados -> Editar datos del mes.
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS estado_resultado_manual (
+            mes TEXT PRIMARY KEY,
+            otros_ingresos REAL NOT NULL DEFAULT 0,
+            remuneraciones REAL NOT NULL DEFAULT 0,
+            bono_remuneraciones REAL NOT NULL DEFAULT 0,
+            otras_remuneraciones REAL NOT NULL DEFAULT 0,
+            previred REAL NOT NULL DEFAULT 0,
+            arriendo REAL NOT NULL DEFAULT 0,
+            seguros REAL NOT NULL DEFAULT 0,
+            gastos_financieros_intereses REAL NOT NULL DEFAULT 0,
+            gastos_financieros_factoring REAL NOT NULL DEFAULT 0,
+            gastos_financieros_comisiones REAL NOT NULL DEFAULT 0,
+            impuesto_renta REAL NOT NULL DEFAULT 0,
+            dividendos REAL NOT NULL DEFAULT 0,
+            actualizado_en TEXT NOT NULL
+        );
+        """
+    )
+    db.commit()
+
     # ---- Índices de rendimiento: movimientos es la tabla que más va a
     # crecer con los años (cada entrada, salida y pérdida queda ahí para
     # siempre), y prácticamente todas las pantallas de análisis (Rotación,
@@ -1024,6 +1068,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_caja_movimientos_tipo ON caja_movimientos (tipo);
         CREATE INDEX IF NOT EXISTS idx_caja_movimientos_rendicion_id ON caja_movimientos (rendicion_id);
         CREATE INDEX IF NOT EXISTS idx_caja_movimientos_medio_pago ON caja_movimientos (medio_pago);
+        CREATE INDEX IF NOT EXISTS idx_caja_movimientos_rubro_gav ON caja_movimientos (rubro_gav);
 
         CREATE INDEX IF NOT EXISTS idx_merma_proveedores_producto_id ON merma_proveedores (producto_id);
 

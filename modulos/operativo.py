@@ -1625,17 +1625,19 @@ def limpiar_cxc_huerfanas():
     })
 
 
-def resumen_utilidad_mes(db):
-    """Versión liviana del cálculo de monto_cerradas_mes / utilidad_mes de
-    dashboard_operativo(), pensada para que Panel Principal (app.py) pueda
-    mostrar "venta total" y "utilidad estimada" del mes sin duplicar la
-    lógica de negocio (repuestos + mano de obra con costo + convertidores
-    internos se restan del monto cobrado). Debe mantenerse en sincronía con
-    dashboard_operativo() -- mismo criterio "mes en curso" para todo.
-    """
-    hoy = datetime.now()
-    prefijo_mes = f"{hoy.year:04d}-{hoy.month:02d}"
+def ventas_y_costo_ot_mes(db, prefijo_mes):
+    """Ventas y costo de ventas de Operativo (órdenes de trabajo) para UN mes
+    cualquiera ('YYYY-MM'), no solo el mes en curso -- es la versión
+    parametrizada de lo que antes calculaba resumen_utilidad_mes() solo para
+    "hoy". La usan tanto resumen_utilidad_mes() (mes actual, para Panel
+    Principal) como el Estado de Resultados de Finanzas (cualquier mes que
+    el dueño elija revisar).
 
+    Devuelve monto_cerradas_mes (ventas, Neto + IVA si aplica), y el costo de
+    ventas desglosado en sus 3 componentes (repuestos, mano de obra con costo
+    cargado, convertidores de torque internos) además del total, para que el
+    Estado de Resultados pueda mostrarlos por separado si quiere.
+    """
     cerradas_mes = db.execute(
         "SELECT id, precio_referencial, precio_iva FROM ordenes_trabajo "
         "WHERE estado = 'entregado' AND substr(fecha_entrega_real, 1, 7) = ?",
@@ -1651,7 +1653,11 @@ def resumen_utilidad_mes(db):
     monto_cerradas_mes = round(sum(_valor_total_orden(r) for r in cerradas_mes), 2)
 
     if not ids_cerradas_mes:
-        return {"monto_cerradas_mes": monto_cerradas_mes, "utilidad_mes": 0.0}
+        return {
+            "monto_cerradas_mes": monto_cerradas_mes,
+            "costo_repuestos": 0.0, "costo_mano_obra": 0.0, "costo_convertidores": 0.0,
+            "costo_total": 0.0, "utilidad_mes": 0.0,
+        }
 
     _iva_case = f"(CASE WHEN aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)"
     placeholders = ", ".join("?" for _ in ids_cerradas_mes)
@@ -1672,10 +1678,30 @@ def resumen_utilidad_mes(db):
         ids_cerradas_mes,
     ).fetchone()["total"] or 0
 
-    utilidad_mes = round(
-        monto_cerradas_mes - costo_repuestos - costo_mano_obra - costo_convertidores, 2
-    )
-    return {"monto_cerradas_mes": monto_cerradas_mes, "utilidad_mes": utilidad_mes}
+    costo_total = round(costo_repuestos + costo_mano_obra + costo_convertidores, 2)
+    utilidad_mes = round(monto_cerradas_mes - costo_total, 2)
+    return {
+        "monto_cerradas_mes": monto_cerradas_mes,
+        "costo_repuestos": round(costo_repuestos, 2),
+        "costo_mano_obra": round(costo_mano_obra, 2),
+        "costo_convertidores": round(costo_convertidores, 2),
+        "costo_total": costo_total,
+        "utilidad_mes": utilidad_mes,
+    }
+
+
+def resumen_utilidad_mes(db):
+    """Versión liviana del cálculo de monto_cerradas_mes / utilidad_mes de
+    dashboard_operativo(), pensada para que Panel Principal (app.py) pueda
+    mostrar "venta total" y "utilidad estimada" del mes sin duplicar la
+    lógica de negocio (repuestos + mano de obra con costo + convertidores
+    internos se restan del monto cobrado). Debe mantenerse en sincronía con
+    dashboard_operativo() -- mismo criterio "mes en curso" para todo.
+    """
+    hoy = datetime.now()
+    prefijo_mes = f"{hoy.year:04d}-{hoy.month:02d}"
+    r = ventas_y_costo_ot_mes(db, prefijo_mes)
+    return {"monto_cerradas_mes": r["monto_cerradas_mes"], "utilidad_mes": r["utilidad_mes"]}
 
 
 @bp.route("/api/operativo/dashboard", methods=["GET"])

@@ -3018,18 +3018,11 @@ async function eliminarItemOrden(itemId) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Control de Calidad — cada punto queda con fecha y persona
-// ---------------------------------------------------------------------------
-
-const OPQC_RESULTADO_LABEL = { ok: "OK", falla: "Falla", na: "N/A" };
-
 async function abrirQcModal() {
   const ordenId = document.getElementById("opod-id").value;
   try {
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderPruebasRuta(orden);
-    renderQcChecklist(orden);
   } catch (e) {
     toast(e.message, true);
   }
@@ -3116,83 +3109,6 @@ async function eliminarPruebaRuta(pruebaId) {
     toast(e.message, true);
   }
 }
-
-function renderQcChecklist(orden) {
-  const cont = document.getElementById("op-qc-checklist");
-  if (!orden.qc_checklist || orden.qc_checklist.length === 0) {
-    cont.innerHTML = `<p class="vacio-inline">Sin puntos de control todavía.</p>`;
-  } else {
-    cont.innerHTML = orden.qc_checklist.map(it => `
-      <div class="op-checklist-row">
-        <span class="op-checklist-item">${escapeHtml(it.item)}${it.observacion ? " — " + escapeHtml(it.observacion) : ""}</span>
-        <span class="op-checklist-meta">${it.usuario ? escapeHtml(it.usuario) + " · " : ""}${fmtFecha(it.creado_en)}</span>
-        <span class="badge-urgencia ${it.resultado === "falla" ? "badge-urgencia--critico" : ""}">${OPQC_RESULTADO_LABEL[it.resultado] || it.resultado}</span>
-        <button type="button" class="btn-link btn-link--peligro" data-eliminar-qc-item="${it.id}">Eliminar</button>
-      </div>
-    `).join("");
-    cont.querySelectorAll("[data-eliminar-qc-item]").forEach(btn => {
-      btn.addEventListener("click", () => eliminarItemQc(parseInt(btn.dataset.eliminarQcItem, 10)));
-    });
-  }
-  document.getElementById("opqc-veredicto").value = orden.qc_resultado || "pendiente";
-  document.getElementById("opqc-inspector").value = orden.qc_inspector || "";
-  document.getElementById("opqc-observaciones-generales").value = orden.qc_observaciones || "";
-}
-
-document.getElementById("form-op-qc-item").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const ordenId = document.getElementById("opod-id").value;
-  const payload = {
-    item: document.getElementById("opqc-item").value.trim(),
-    resultado: document.getElementById("opqc-resultado").value,
-    observacion: document.getElementById("opqc-observacion").value.trim(),
-  };
-  if (!payload.item) {
-    toast("Describe el punto a revisar.", true);
-    return;
-  }
-  try {
-    await api(`/api/operativo/ordenes/${ordenId}/qc/items`, { method: "POST", body: JSON.stringify(payload) });
-    toast("Punto de control agregado.");
-    document.getElementById("form-op-qc-item").reset();
-    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
-    renderQcChecklist(orden);
-  } catch (e2) {
-    toast(e2.message, true);
-  }
-});
-
-async function eliminarItemQc(itemId) {
-  if (!confirm("¿Eliminar este punto de control?")) return;
-  const ordenId = document.getElementById("opod-id").value;
-  try {
-    await api(`/api/operativo/ordenes/${ordenId}/qc/items/${itemId}`, { method: "DELETE" });
-    toast("Punto de control eliminado.");
-    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
-    renderQcChecklist(orden);
-  } catch (e) {
-    toast(e.message, true);
-  }
-}
-
-document.getElementById("btn-opqc-guardar").addEventListener("click", async () => {
-  const ordenId = document.getElementById("opod-id").value;
-  // "inspector" no se manda: es de solo lectura, el servidor siempre lo
-  // pisa con quien tiene la sesión iniciada (ver actualizar_qc() en
-  // modulos/operativo.py).
-  const payload = {
-    resultado: document.getElementById("opqc-veredicto").value,
-    observaciones: document.getElementById("opqc-observaciones-generales").value.trim(),
-  };
-  try {
-    const actualizada = await api(`/api/operativo/ordenes/${ordenId}/qc`, { method: "PUT", body: JSON.stringify(payload) });
-    toast("Control de calidad actualizado.");
-    renderQcChecklist(actualizada);
-    await refrescarResumenHub(ordenId);
-  } catch (e) {
-    toast(e.message, true);
-  }
-});
 
 // ---------------------------------------------------------------------------
 // Historial de vehículo

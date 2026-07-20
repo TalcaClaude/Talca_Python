@@ -1284,58 +1284,6 @@
           <button type="submit" class="btn btn-secundario">+ Agregar entrada a la bitácora</button>
         </div>
       </form>
-
-      <hr class="op-divisor">
-
-      <h3 class="subtitulo">Control de calidad (veredicto formal)</h3>
-      <p class="ayuda-inline">Esto es aparte de la bitácora de arriba: es la aprobación formal que decide si la orden puede pasar a "Listo" o si vuelve a "Reparación".</p>
-      <div id="op-qc-checklist"></div>
-      <form id="form-op-qc-item">
-        <div class="grid-3">
-          <div class="campo">
-            <label>Punto a revisar</label>
-            <input type="text" id="opqc-item" placeholder="Ej: Frenos">
-          </div>
-          <div class="campo">
-            <label>Resultado</label>
-            <select id="opqc-resultado">
-              <option value="ok">OK</option>
-              <option value="falla">Falla</option>
-              <option value="na">N/A</option>
-            </select>
-          </div>
-          <div class="campo">
-            <label>Observación</label>
-            <input type="text" id="opqc-observacion">
-          </div>
-        </div>
-        <div class="modal-actions modal-actions--start">
-          <button type="submit" class="btn btn-secundario">+ Agregar punto de control</button>
-        </div>
-      </form>
-      <div class="grid-3" style="margin-top:10px">
-        <div class="campo">
-          <label>Veredicto general</label>
-          <select id="opqc-veredicto">
-            <option value="pendiente">Pendiente</option>
-            <option value="aprobado">Aprobado</option>
-            <option value="rechazado">Rechazado</option>
-          </select>
-        </div>
-        <div class="campo">
-          <label>Inspector</label>
-          <input type="text" id="opqc-inspector" readonly>
-        </div>
-      </div>
-      <div class="campo">
-        <label>Observaciones generales</label>
-        <textarea id="opqc-observaciones-generales" rows="2" placeholder="Notas del veredicto de control de calidad."></textarea>
-      </div>
-      <p class="ayuda-inline">El inspector se registra solo — siempre queda quien guardó el control de calidad, nunca se escribe a mano.</p>
-      <div class="modal-actions modal-actions--start">
-        <button type="button" class="btn btn-primary" id="btn-opqc-guardar">Guardar control de calidad</button>
-      </div>
-      <p class="ayuda-inline">"Rechazado" devuelve la orden a Reparación; "Aprobado" la pasa a Listo.</p>
     </div>
 
   </div>

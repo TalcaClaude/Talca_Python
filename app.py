@@ -1044,6 +1044,42 @@ def init_db():
     )
     db.commit()
 
+    # ---- Migración 20: bitácora de pruebas de ruta por OT. Antes, la
+    # pestaña "Pruebas de ruta" solo tenía un campo de texto
+    # (qc_observaciones) que se SOBRESCRIBÍA cada vez que se guardaba el
+    # control de calidad -- se perdía cualquier entrada anterior. Esta tabla
+    # es un historial de verdad: cada prueba de ruta queda como una entrada
+    # nueva con fecha y autor, sin pisar las anteriores. Se llena desde el
+    # formulario de la pestaña o automáticamente cuando un mecánico de
+    # perfil "probador_de_autos" manda el resultado por WhatsApp (ver
+    # Migración 21 / agente_mecanicos.tipo).
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS pruebas_ruta (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+            texto TEXT NOT NULL,
+            autor TEXT DEFAULT '',
+            origen TEXT NOT NULL DEFAULT 'web',
+            foto_id INTEGER REFERENCES fotos_vehiculo(id),
+            creado_en TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pruebas_ruta_orden_id ON pruebas_ruta (orden_id);
+        """
+    )
+    db.commit()
+
+    # ---- Migración 21: perfil "probador_de_autos" para el Agente de
+    # WhatsApp (ver migración 16, columna 'tipo' de agente_mecanicos). Este
+    # perfil, igual que 'mecanico', NO puede cambiar estado ni diagnóstico
+    # de una OT -- pero a diferencia de 'mecanico' (cuyos mensajes quedan
+    # como sugerencia de diagnóstico para que operativo la revise), lo que
+    # manda este perfil se guarda directo como una entrada nueva en la
+    # bitácora de pruebas de ruta (tabla pruebas_ruta de arriba), con
+    # origen='whatsapp'. No requiere columna nueva -- 'tipo' ya es TEXT
+    # libre, solo se agrega este tercer valor válido (ver
+    # TIPOS_MECANICO_VALIDOS en core.py).
+
     # ---- Índices de rendimiento: movimientos es la tabla que más va a
     # crecer con los años (cada entrada, salida y pérdida queda ahí para
     # siempre), y prácticamente todas las pantallas de análisis (Rotación,
@@ -5350,6 +5386,23 @@ def _agente_guardar_sugerencia_diagnostico(db, ot_id, foto_id, mecanico_nombre, 
     db.commit()
 
 
+def _agente_guardar_prueba_ruta(db, ot_id, foto_id, autor_nombre, texto):
+    """Guarda un comentario de un mecánico de perfil 'probador_de_autos'
+    (ver migración 21) como una entrada nueva en la bitácora de pruebas de
+    ruta de la OT (tabla pruebas_ruta, migración 20) -- NUNCA como
+    sugerencia de diagnóstico ni como acción de estado. A diferencia de
+    _agente_guardar_sugerencia_diagnostico, cada llamada agrega una fila
+    nueva (historial), no sobrescribe nada."""
+    db.execute(
+        """
+        INSERT INTO pruebas_ruta (orden_id, texto, autor, origen, foto_id, creado_en)
+        VALUES (?, ?, ?, 'whatsapp', ?, ?)
+        """,
+        (ot_id, texto, autor_nombre, foto_id, now_iso()),
+    )
+    db.commit()
+
+
 def _agente_listar_sugerencias_pendientes(db, ot_id):
     """Sugerencias de diagnóstico (ver _agente_guardar_sugerencia_diagnostico)
     aún no revisadas para una OT, más recientes primero."""
@@ -5579,15 +5632,20 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
             "\"Agente IA\" en Logística.",
         )
 
-    # Perfil restringido (ver migración 16, columna 'tipo' de
-    # agente_mecanicos): un mecánico 'mecanico' puede mandar fotos, que se
-    # archivan exactamente igual que a cualquier otro mecánico, pero NO
-    # tiene permiso para cambiar diagnóstico/estado de la OT por texto --
-    # cualquier comentario que mande (con o sin foto) se guarda como
-    # SUGERENCIA para que la parte operativa la revise, en vez de
-    # ejecutarse como una acción real. El permiso de escribir diagnóstico
-    # sigue existiendo tal cual para un mecánico de tipo 'completo'.
-    es_mecanico_restringido = (mecanico["tipo"] if "tipo" in mecanico.keys() else "completo") == "mecanico"
+    # Perfil restringido (ver migración 16/21, columna 'tipo' de
+    # agente_mecanicos): un mecánico 'mecanico' o 'probador_de_autos' puede
+    # mandar fotos, que se archivan exactamente igual que a cualquier otro
+    # mecánico, pero NO tiene permiso para cambiar diagnóstico/estado de la
+    # OT por texto. Lo que cambia entre los dos perfiles restringidos es
+    # DÓNDE queda el comentario: 'mecanico' -> sugerencia de diagnóstico
+    # (para que operativo la revise y decida); 'probador_de_autos' -> una
+    # entrada nueva en la bitácora de pruebas de ruta (queda directo, sin
+    # revisión, porque no es un diagnóstico, es un registro de lo que se
+    # probó). El permiso de escribir diagnóstico/estado sigue existiendo
+    # tal cual para un mecánico de tipo 'completo'.
+    tipo_mecanico = mecanico["tipo"] if "tipo" in mecanico.keys() else "completo"
+    es_probador_de_autos = tipo_mecanico == "probador_de_autos"
+    es_mecanico_restringido = tipo_mecanico in ("mecanico", "probador_de_autos")
 
     if imagen_bytes is not None:
         try:
@@ -5690,6 +5748,21 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                     nota_foto_archivada,
                 )
 
+            if es_probador_de_autos:
+                # Perfil "probador de autos": la foto ya quedó archivada
+                # arriba (eso NO cambia para nadie), y el comentario que la
+                # acompaña se guarda directo como una entrada nueva en la
+                # bitácora de pruebas de ruta, vinculada a la OT y a la foto
+                # recién archivada.
+                _agente_guardar_prueba_ruta(
+                    db, ot_resuelta["ot_id"], foto_archivada["id"], mecanico["nombre"], texto_resto,
+                )
+                return _registrar(
+                    mecanico["nombre"], "prueba_ruta_registrada", ot_resuelta["ot_id"], "", "", True,
+                    f"{nota_foto_archivada}\n🚗 Dejé tu prueba de ruta (\"{texto_resto}\") registrada en la "
+                    f"bitácora de la OT #{ot_resuelta['ot_id']}.",
+                )
+
             if es_mecanico_restringido:
                 # Perfil restringido: la foto ya quedó archivada arriba (eso
                 # NO cambia para nadie), pero el comentario que la acompaña
@@ -5720,8 +5793,9 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
         # Mensaje de puro texto (sin foto) de un mecánico restringido: no
         # tiene permiso para ejecutar acciones de diagnóstico/estado, así
         # que en vez de interpretarlo como una acción se intenta guardar
-        # como sugerencia -- para eso sí o sí necesita traer un número de OT
-        # explícito (sin foto no hay patente que leer para resolverla sola).
+        # como sugerencia o como prueba de ruta (según el perfil) -- para
+        # eso sí o sí necesita traer un número de OT explícito (sin foto no
+        # hay patente que leer para resolverla sola).
         ordenes_abiertas_texto = _agente_listar_ordenes_abiertas(db)
         match_ot_numero_texto = re.search(r"\bot\s*#?\s*(\d+)\b", texto_mensaje, re.IGNORECASE)
         ot_para_sugerencia = None
@@ -5731,11 +5805,24 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                 (o for o in ordenes_abiertas_texto if o["ot_id"] == ot_id_deseado_texto), None
             )
         if ot_para_sugerencia is None:
+            mensaje_perfil = (
+                "Tu perfil solo puede registrar pruebas de ruta, no cambiar el diagnóstico directamente."
+                if es_probador_de_autos else
+                "Tu perfil solo puede mandar fotos y comentarios para la OT, no cambiar el diagnóstico "
+                "directamente."
+            )
             return _registrar(
                 mecanico["nombre"], "sugerencia_sin_ot", None, "", "", False,
-                "Tu perfil solo puede mandar fotos y comentarios para la OT, no cambiar el diagnóstico "
-                "directamente. Indica el número de OT (ej. \"OT 3321\") junto con tu comentario para que "
-                "quede registrado como sugerencia.",
+                f"{mensaje_perfil} Indica el número de OT (ej. \"OT 3321\") junto con tu comentario para que "
+                f"quede registrado.",
+            )
+        if es_probador_de_autos:
+            _agente_guardar_prueba_ruta(
+                db, ot_para_sugerencia["ot_id"], None, mecanico["nombre"], texto_mensaje,
+            )
+            return _registrar(
+                mecanico["nombre"], "prueba_ruta_registrada", ot_para_sugerencia["ot_id"], "", "", True,
+                f"🚗 Dejé tu prueba de ruta registrada en la bitácora de la OT #{ot_para_sugerencia['ot_id']}.",
             )
         _agente_guardar_sugerencia_diagnostico(
             db, ot_para_sugerencia["ot_id"], None, mecanico["nombre"], texto_mensaje,
@@ -5833,6 +5920,19 @@ def _validar_firma_twilio(req):
     return hmac.compare_digest(firma_calculada, firma_recibida)
 
 
+# Perfiles válidos para un mecánico registrado en el Agente de WhatsApp:
+#   - 'completo': puede cambiar estado/diagnóstico de la OT por WhatsApp
+#     (ver _agente_ejecutar_una_accion).
+#   - 'mecanico': perfil restringido -- lo que manda queda como SUGERENCIA
+#     de diagnóstico para que operativo la revise (migración 16).
+#   - 'probador_de_autos': perfil restringido -- tampoco puede cambiar
+#     estado/diagnóstico, pero a diferencia de 'mecanico' lo que manda se
+#     guarda directo como una entrada nueva en la bitácora de pruebas de
+#     ruta de la OT (tabla pruebas_ruta, migración 20/21), no como
+#     sugerencia de diagnóstico.
+TIPOS_MECANICO_VALIDOS = ("completo", "mecanico", "probador_de_autos")
+
+
 @app.route("/api/agente/mecanicos", methods=["GET"])
 def listar_mecanicos_agente():
     db = get_db()
@@ -5854,8 +5954,8 @@ def crear_mecanico_agente():
     if existente:
         return jsonify({"error": "Ya hay un mecánico registrado con ese teléfono"}), 400
     tipo = (data.get("tipo") or "completo").strip()
-    if tipo not in ("completo", "mecanico"):
-        return jsonify({"error": "El tipo de mecánico debe ser 'completo' o 'mecanico'"}), 400
+    if tipo not in TIPOS_MECANICO_VALIDOS:
+        return jsonify({"error": f"El tipo de mecánico debe ser uno de: {', '.join(TIPOS_MECANICO_VALIDOS)}"}), 400
     cur = db.execute(
         "INSERT INTO agente_mecanicos (nombre, telefono, activo, tipo, creado_en) VALUES (?, ?, 1, ?, ?)",
         (nombre.upper(), telefono, tipo, now_iso()),
@@ -5878,8 +5978,8 @@ def editar_mecanico_agente(mecanico_id):
     tipo = fila["tipo"] if "tipo" in fila.keys() else "completo"
     if "tipo" in data:
         tipo_nuevo = (data.get("tipo") or "completo").strip()
-        if tipo_nuevo not in ("completo", "mecanico"):
-            return jsonify({"error": "El tipo de mecánico debe ser 'completo' o 'mecanico'"}), 400
+        if tipo_nuevo not in TIPOS_MECANICO_VALIDOS:
+            return jsonify({"error": f"El tipo de mecánico debe ser uno de: {', '.join(TIPOS_MECANICO_VALIDOS)}"}), 400
         tipo = tipo_nuevo
     db.execute("UPDATE agente_mecanicos SET activo = ?, tipo = ? WHERE id = ?", (activo, tipo, mecanico_id))
     db.commit()

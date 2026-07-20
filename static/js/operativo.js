@@ -3028,7 +3028,90 @@ async function abrirQcModal() {
   const ordenId = document.getElementById("opod-id").value;
   try {
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPruebasRuta(orden);
     renderQcChecklist(orden);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bitácora de pruebas de ruta — historial de entradas (fecha + autor +
+// texto + foto opcional), nunca se sobrescribe una entrada anterior. Se
+// llena desde el formulario de acá abajo o, automáticamente, cuando un
+// mecánico de perfil "probador_de_autos" manda el resultado por WhatsApp
+// (ver _agente_guardar_prueba_ruta en app.py) — en ese caso "origen" llega
+// como 'whatsapp' en vez de 'web', y se muestra distinto para que se note
+// de dónde vino.
+// ---------------------------------------------------------------------------
+
+function renderPruebasRuta(orden) {
+  const lista = document.getElementById("op-pruebas-ruta-lista");
+  const pruebas = orden.pruebas_ruta || [];
+  if (!pruebas.length) {
+    lista.innerHTML = `<p class="vacio-inline">Todavía no hay pruebas de ruta registradas para esta OT.</p>`;
+  } else {
+    lista.innerHTML = pruebas.map(p => `
+      <div class="op-prueba-ruta-item" data-id="${p.id}">
+        ${p.foto_id ? `
+        <div class="op-sugerencia-foto" data-foto-url="/api/operativo/fotos/${p.foto_id}/archivo" data-foto-titulo="Foto de prueba de ruta">
+          <img src="/api/operativo/fotos/${p.foto_id}/archivo" alt="Foto de la prueba de ruta" loading="lazy">
+          <span class="op-sugerencia-foto-zoom">🔍 Ampliar</span>
+        </div>` : ""}
+        <p class="op-sugerencia-texto">${escapeHtml(p.texto)}</p>
+        <p class="ayuda-inline" style="margin:0 0 8px 0">
+          ${p.origen === "whatsapp" ? "📱 Por WhatsApp — " : ""}${escapeHtml(p.autor || "—")} — ${fmtFecha(p.creado_en)}
+        </p>
+        <div class="modal-actions modal-actions--start">
+          <button type="button" class="btn-link btn-link--peligro" data-eliminar-prueba-ruta="${p.id}">Eliminar</button>
+        </div>
+      </div>
+    `).join("");
+    lista.querySelectorAll(".op-sugerencia-foto").forEach(el => {
+      el.addEventListener("click", () => abrirFotoZoom(el.dataset.fotoUrl, el.dataset.fotoTitulo));
+    });
+    lista.querySelectorAll("[data-eliminar-prueba-ruta]").forEach(btn => {
+      btn.addEventListener("click", () => eliminarPruebaRuta(parseInt(btn.dataset.eliminarPruebaRuta, 10)));
+    });
+  }
+}
+
+document.getElementById("form-op-prueba-ruta").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ordenId = document.getElementById("opod-id").value;
+  const texto = document.getElementById("oppr-texto").value.trim();
+  if (!texto) {
+    toast("Escribe el resultado de la prueba de ruta.", true);
+    return;
+  }
+  const archivoInput = document.getElementById("oppr-foto");
+  const archivo = archivoInput.files[0];
+  try {
+    let fotoId = null;
+    if (archivo) {
+      const foto = await _subirFotoEntidad("orden", ordenId, "libre", "Prueba de ruta", archivo);
+      fotoId = foto.id;
+    }
+    await api(`/api/operativo/ordenes/${ordenId}/pruebas-ruta`, {
+      method: "POST", body: JSON.stringify({ texto, foto_id: fotoId }),
+    });
+    toast("Prueba de ruta agregada a la bitácora.");
+    document.getElementById("form-op-prueba-ruta").reset();
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPruebasRuta(orden);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function eliminarPruebaRuta(pruebaId) {
+  if (!confirm("¿Eliminar esta entrada de la bitácora de pruebas de ruta?")) return;
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/pruebas-ruta/${pruebaId}`, { method: "DELETE" });
+    toast("Entrada eliminada.");
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPruebasRuta(orden);
   } catch (e) {
     toast(e.message, true);
   }

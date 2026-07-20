@@ -1268,12 +1268,33 @@
     </div>
 
     <div class="op-tab-panel" id="opod-panel-qc" style="display:none">
+      <h3 class="subtitulo">Bitácora de pruebas de ruta</h3>
+      <p class="ayuda-inline">Historial de cada prueba de ruta hecha a este vehículo — cada entrada queda con fecha y quién la hizo, ninguna pisa a la anterior. Se llena desde acá o automáticamente cuando un "Probador de autos" manda el resultado por WhatsApp.</p>
+      <div id="op-pruebas-ruta-lista"></div>
+      <form id="form-op-prueba-ruta">
+        <div class="campo">
+          <label>Resultado de la prueba</label>
+          <textarea id="oppr-texto" rows="2" placeholder="Ej: Se probó en ruta, vibración leve a 80 km/h, dirección responde bien, sin ruidos." required></textarea>
+        </div>
+        <div class="campo">
+          <label>Foto (opcional)</label>
+          <input type="file" id="oppr-foto" accept="image/*">
+        </div>
+        <div class="modal-actions modal-actions--start">
+          <button type="submit" class="btn btn-secundario">+ Agregar entrada a la bitácora</button>
+        </div>
+      </form>
+
+      <hr class="op-divisor">
+
+      <h3 class="subtitulo">Control de calidad (veredicto formal)</h3>
+      <p class="ayuda-inline">Esto es aparte de la bitácora de arriba: es la aprobación formal que decide si la orden puede pasar a "Listo" o si vuelve a "Reparación".</p>
       <div id="op-qc-checklist"></div>
       <form id="form-op-qc-item">
         <div class="grid-3">
           <div class="campo">
             <label>Punto a revisar</label>
-            <input type="text" id="opqc-item" placeholder="Ej: Prueba de ruta">
+            <input type="text" id="opqc-item" placeholder="Ej: Frenos">
           </div>
           <div class="campo">
             <label>Resultado</label>
@@ -1308,9 +1329,9 @@
       </div>
       <div class="campo">
         <label>Observaciones generales</label>
-        <textarea id="opqc-observaciones-generales" rows="2" placeholder="Lo fundamental de la prueba de ruta — frenos, dirección, ruidos, etc."></textarea>
+        <textarea id="opqc-observaciones-generales" rows="2" placeholder="Notas del veredicto de control de calidad."></textarea>
       </div>
-      <p class="ayuda-inline">El inspector se registra solo — siempre queda quien guardó el control de calidad (o el mecánico que mandó el audio de WhatsApp), nunca se escribe a mano.</p>
+      <p class="ayuda-inline">El inspector se registra solo — siempre queda quien guardó el control de calidad, nunca se escribe a mano.</p>
       <div class="modal-actions modal-actions--start">
         <button type="button" class="btn btn-primary" id="btn-opqc-guardar">Guardar control de calidad</button>
       </div>

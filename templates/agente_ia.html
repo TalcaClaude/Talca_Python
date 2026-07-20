@@ -185,11 +185,15 @@
           <select id="mec-tipo">
             <option value="completo">Completo — puede mandar fotos y cambiar diagnóstico/estado de la OT</option>
             <option value="mecanico">Mecánico (restringido) — solo puede mandar fotos; su comentario queda como sugerencia</option>
+            <option value="probador_de_autos">Probador de autos — sus mensajes quedan en la bitácora de pruebas de ruta</option>
           </select>
           <p class="ayuda-inline">
             Un mecánico de perfil restringido puede mandar fotos igual que cualquiera (quedan archivadas en la
             OT), pero no puede cambiar el diagnóstico ni el estado por WhatsApp — si manda un comentario junto
             con la foto (o solo texto), queda guardado como sugerencia para que la parte operativa lo revise.
+            Un "Probador de autos" tampoco puede cambiar diagnóstico ni estado, pero su comentario NO es una
+            sugerencia: queda directo como una entrada nueva en la bitácora de "Pruebas de ruta" de la OT, con
+            fecha y su nombre — para eso siempre debe indicar el número de OT en su mensaje.
           </p>
         </div>
         <div class="modal-actions">

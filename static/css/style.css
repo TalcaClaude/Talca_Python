@@ -2084,7 +2084,8 @@ svg .chart-punto-hover {
 
 /* ---------- Sugerencias de diagnóstico (ver opdi-sugerencias-*) ---------- */
 
-.op-sugerencia-diagnostico {
+.op-sugerencia-diagnostico,
+.op-prueba-ruta-item {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;

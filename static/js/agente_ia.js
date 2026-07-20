@@ -126,15 +126,24 @@ function renderTablaMecanicosAgente() {
     <tr data-id="${m.id}">
       <td>${escapeHtml(m.nombre)}</td>
       <td class="mono">${escapeHtml(m.telefono)}</td>
-      <td>${m.tipo === "mecanico" ? "Mecánico (restringido)" : "Completo"}</td>
+      <td>
+        <select class="input-chico" data-cambiar-tipo-mecanico="${m.id}">
+          <option value="completo" ${m.tipo === "completo" ? "selected" : ""}>Completo</option>
+          <option value="mecanico" ${m.tipo === "mecanico" ? "selected" : ""}>Mecánico (restringido)</option>
+          <option value="probador_de_autos" ${m.tipo === "probador_de_autos" ? "selected" : ""}>Probador de autos</option>
+        </select>
+      </td>
       <td><span class="badge-urgencia ${m.activo ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${m.activo ? "Activo" : "Inactivo"}</span></td>
       <td>
-        <button type="button" class="btn btn-secundario btn-chico" data-toggle-tipo-mecanico="${m.id}">${m.tipo === "mecanico" ? "Dar permiso completo" : "Restringir a solo fotos"}</button>
         <button type="button" class="btn btn-secundario btn-chico" data-toggle-mecanico="${m.id}">${m.activo ? "Desactivar" : "Activar"}</button>
         <button type="button" class="btn btn-danger btn-chico" data-eliminar-mecanico="${m.id}">Eliminar</button>
       </td>
     </tr>
   `).join("");
+
+  tbody.querySelectorAll("[data-cambiar-tipo-mecanico]").forEach(sel => {
+    sel.addEventListener("change", () => cambiarTipoMecanicoAgente(parseInt(sel.dataset.cambiarTipoMecanico, 10), sel.value, sel));
+  });
 
   tbody.querySelectorAll("[data-toggle-mecanico]").forEach(btn => {
     btn.addEventListener("click", () => alternarActivoMecanicoAgente(parseInt(btn.dataset.toggleMecanico, 10)));
@@ -179,19 +188,32 @@ async function alternarActivoMecanicoAgente(id) {
   }
 }
 
-async function alternarTipoMecanicoAgente(id) {
+const MEC_TIPO_LABEL = {
+  completo: "Completo",
+  mecanico: "Mecánico (restringido)",
+  probador_de_autos: "Probador de autos",
+};
+
+const MEC_TIPO_AVISO = {
+  completo: (nombre) => `¿Dar permiso completo a "${nombre}"? Va a poder cambiar diagnóstico y estado de la OT por WhatsApp.`,
+  mecanico: (nombre) => `¿Cambiar a "${nombre}" a perfil "Mecánico (restringido)"? Ya no va a poder cambiar diagnóstico ni estado — su comentario quedará como sugerencia para que operativo lo revise.`,
+  probador_de_autos: (nombre) => `¿Cambiar a "${nombre}" a perfil "Probador de autos"? Ya no va a poder cambiar diagnóstico ni estado — sus mensajes van a quedar directo en la bitácora de "Pruebas de ruta" de la OT que indique.`,
+};
+
+async function cambiarTipoMecanicoAgente(id, nuevoTipo, selectEl) {
   const m = state.agenteMecanicos.find(x => x.id === id);
   if (!m) return;
-  const nuevoTipo = m.tipo === "mecanico" ? "completo" : "mecanico";
-  const confirmacion = nuevoTipo === "mecanico"
-    ? `¿Restringir a "${m.nombre}" a solo mandar fotos? Ya no va a poder cambiar diagnóstico ni estado de la OT por WhatsApp — su comentario quedará como sugerencia.`
-    : `¿Dar permiso completo a "${m.nombre}"? Va a poder volver a cambiar diagnóstico y estado de la OT por WhatsApp.`;
-  if (!confirm(confirmacion)) return;
+  if (nuevoTipo === m.tipo) return;
+  if (!confirm(MEC_TIPO_AVISO[nuevoTipo](m.nombre))) {
+    selectEl.value = m.tipo;  // revertir el <select> si se cancela
+    return;
+  }
   try {
     await api(`/api/agente/mecanicos/${id}`, { method: "PUT", body: JSON.stringify({ tipo: nuevoTipo }) });
-    toast("Perfil del mecánico actualizado");
+    toast(`Perfil actualizado a "${MEC_TIPO_LABEL[nuevoTipo]}"`);
     await cargarMecanicosAgente();
   } catch (e) {
+    selectEl.value = m.tipo;
     toast(e.message, true);
   }
 }

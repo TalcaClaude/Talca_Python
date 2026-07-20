@@ -2350,6 +2350,12 @@ def _orden_dict_detalle(db, row):
     d["qc_checklist"] = [dict(i) for i in db.execute(
         "SELECT * FROM qc_checklist_items WHERE orden_id = ? ORDER BY creado_en ASC", (row["id"],)
     ).fetchall()]
+    # Bitácora de pruebas de ruta (migración 20) -- historial de entradas,
+    # más reciente primero, cada una con fecha/autor propios. A diferencia
+    # de qc_checklist, ninguna entrada se sobrescribe ni se resume.
+    d["pruebas_ruta"] = [dict(i) for i in db.execute(
+        "SELECT * FROM pruebas_ruta WHERE orden_id = ? ORDER BY creado_en DESC", (row["id"],)
+    ).fetchall()]
     return d
 
 
@@ -3573,6 +3579,65 @@ def actualizar_qc(orden_id):
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     return jsonify(_orden_dict_detalle(db, actualizada))
+
+
+# ---------------------------------------------------------------------------
+# Bitácora de pruebas de ruta (migración 20) -- historial de entradas por
+# OT, cada una con fecha y autor propios, sin sobrescribir a las anteriores.
+# Se llena desde acá (formulario web) o automáticamente cuando un mecánico
+# de perfil "probador_de_autos" manda el resultado por WhatsApp (ver
+# _agente_guardar_prueba_ruta en app.py). Deliberadamente separada del
+# control de calidad (qc_*): esto es solo un registro interno, no un
+# veredicto que mueva el estado de la OT.
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/pruebas-ruta", methods=["POST"])
+def agregar_prueba_ruta(orden_id):
+    db = get_db()
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    texto = (data.get("texto") or "").strip()
+    if not texto:
+        return jsonify({"error": "Escribe el resultado de la prueba de ruta"}), 400
+
+    foto_id = data.get("foto_id") or None
+    if foto_id:
+        try:
+            foto_id = int(foto_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Foto inválida"}), 400
+        foto = db.execute(
+            "SELECT id FROM fotos_vehiculo WHERE id = ? AND entidad_tipo = 'orden' AND entidad_id = ?",
+            (foto_id, orden_id),
+        ).fetchone()
+        if foto is None:
+            return jsonify({"error": "La foto indicada no corresponde a esta orden"}), 400
+
+    ts = now_iso()
+    cur = db.execute(
+        "INSERT INTO pruebas_ruta (orden_id, texto, autor, origen, foto_id, creado_en) "
+        "VALUES (?, ?, ?, 'web', ?, ?)",
+        (orden_id, texto, usuario_actual(), foto_id, ts),
+    )
+    db.commit()
+    nueva = db.execute("SELECT * FROM pruebas_ruta WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nueva)), 201
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/pruebas-ruta/<int:prueba_id>", methods=["DELETE"])
+def eliminar_prueba_ruta(orden_id, prueba_id):
+    db = get_db()
+    fila = db.execute(
+        "SELECT * FROM pruebas_ruta WHERE id = ? AND orden_id = ?", (prueba_id, orden_id)
+    ).fetchone()
+    if fila is None:
+        return jsonify({"error": "Entrada no encontrada"}), 404
+    db.execute("DELETE FROM pruebas_ruta WHERE id = ?", (prueba_id,))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------

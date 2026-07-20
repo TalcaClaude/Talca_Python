@@ -458,5 +458,175 @@ class TestPerfilMecanicoRestringido(unittest.TestCase):
         self.assertEqual(resumen_final["sugerencias_diagnostico"], antes["sugerencias_diagnostico"])
 
 
+class TestPerfilProbadorDeAutos(unittest.TestCase):
+    """Perfil 'probador_de_autos' (ver migración 20/21 / agente_mecanicos.tipo):
+    igual que 'mecanico', puede mandar fotos (se archivan igual) y NO tiene
+    permiso para cambiar diagnóstico/estado por WhatsApp -- pero a diferencia
+    de 'mecanico', su texto NO queda como sugerencia de diagnóstico: se
+    guarda directo como una entrada nueva en la bitácora de pruebas de ruta
+    (tabla pruebas_ruta), sin pasar por revisión."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre="Cliente Probador"):
+        resp = self.client.post("/api/operativo/clientes", json={"nombre": nombre})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_equipo(self, cliente_id, identificador):
+        resp = self.client.post(
+            "/api/operativo/equipos",
+            json={"cliente_id": cliente_id, "identificador": identificador, "marca": "Marca", "modelo": "Modelo"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden(self, cliente_id, equipo_id):
+        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id, "equipo_id": equipo_id})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _registrar_mecanico(self, nombre, telefono, tipo="completo"):
+        resp = self.client.post(
+            "/api/agente/mecanicos", json={"nombre": nombre, "telefono": telefono, "tipo": tipo}
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _subir_foto(self, telefono, texto=""):
+        data = {"telefono": telefono, "foto": (io.BytesIO(_imagen_jpeg_valida()), "foto.jpg")}
+        if texto:
+            data["texto"] = texto
+        return self.client.post("/api/agente/simular-mensaje-foto", data=data, content_type="multipart/form-data")
+
+    def _mandar_texto(self, telefono, texto):
+        return self.client.post("/api/agente/simular-mensaje", json={"telefono": telefono, "texto": texto})
+
+    def _pruebas_ruta_de(self, orden_id):
+        resp = self.client.get(f"/api/operativo/ordenes/{orden_id}")
+        return resp.get_json()["pruebas_ruta"]
+
+    def test_registrar_mecanico_con_tipo_invalido_es_rechazado(self):
+        resp = self.client.post(
+            "/api/agente/mecanicos",
+            json={"nombre": "Tipo Invalido", "telefono": "+56900900099", "tipo": "no_existe"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_probador_manda_solo_texto_con_ot_queda_en_bitacora_no_en_sugerencias(self):
+        self._registrar_mecanico("Probador Uno", "+56900900010", tipo="probador_de_autos")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PROB001")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto(
+            "+56900900010", f"ot {orden['id']} probé el auto, vibración leve a 80 km/h, dirección ok"
+        )
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "prueba_ruta_registrada")
+        self.assertEqual(data["ot_id"], orden["id"])
+
+        pruebas = self._pruebas_ruta_de(orden["id"])
+        self.assertEqual(len(pruebas), 1)
+        self.assertIn("vibración leve", pruebas[0]["texto"])
+        self.assertEqual(pruebas[0]["autor"], "PROBADOR UNO")
+        self.assertEqual(pruebas[0]["origen"], "whatsapp")
+        self.assertIsNone(pruebas[0]["foto_id"])
+
+        # NO debe haber quedado como sugerencia de diagnóstico -- es un
+        # perfil distinto, con un destino distinto.
+        sugerencias = self.client.get(f"/api/ordenes/{orden['id']}/sugerencias-diagnostico").get_json()
+        self.assertEqual(len(sugerencias), 0)
+
+        # El diagnóstico real de la OT tampoco se tocó.
+        orden_actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(orden_actual.get("diagnostico_tecnico") or "", "")
+
+    def test_probador_manda_foto_con_comentario_queda_en_bitacora_vinculada_a_la_foto(self):
+        self._registrar_mecanico("Probador Dos", "+56900900011", tipo="probador_de_autos")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PROB002")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+                           return_value={"tipo": "otro", "patente": ""}):
+            resp = self._subir_foto(
+                "+56900900011", texto=f"ot {orden['id']} frenos responden bien en la prueba"
+            )
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "prueba_ruta_registrada")
+
+        pruebas = self._pruebas_ruta_de(orden["id"])
+        self.assertEqual(len(pruebas), 1)
+        self.assertIn("frenos responden bien", pruebas[0]["texto"])
+        self.assertIsNotNone(pruebas[0]["foto_id"])
+
+        # La foto también quedó archivada igual que a cualquier mecánico.
+        fotos = self.client.get(f"/api/operativo/ordenes/{orden['id']}/fotos").get_json()["fotos"]
+        self.assertEqual(len(fotos), 1)
+
+    def test_probador_manda_texto_sin_ot_pide_el_numero(self):
+        self._registrar_mecanico("Probador Tres", "+56900900012", tipo="probador_de_autos")
+        resp = self._mandar_texto("+56900900012", "el auto responde bien en la prueba de ruta")
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "sugerencia_sin_ot")
+        self.assertIn("prueba", data["respuesta_texto"].lower())
+
+    def test_varias_pruebas_de_ruta_de_la_misma_ot_se_acumulan_sin_pisarse(self):
+        self._registrar_mecanico("Probador Cuatro", "+56900900013", tipo="probador_de_autos")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PROB004")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        self._mandar_texto("+56900900013", f"ot {orden['id']} primera prueba, ruido en el eje delantero")
+        self._mandar_texto("+56900900013", f"ot {orden['id']} segunda prueba post reparación, sin ruido")
+
+        pruebas = self._pruebas_ruta_de(orden["id"])
+        self.assertEqual(len(pruebas), 2)
+        textos = {p["texto"] for p in pruebas}
+        self.assertTrue(any("primera prueba" in t for t in textos))
+        self.assertTrue(any("segunda prueba" in t for t in textos))
+
+    def test_prueba_de_ruta_se_puede_agregar_tambien_desde_la_web(self):
+        # El mismo destino (tabla pruebas_ruta) se llena desde el
+        # formulario de la pestaña "Pruebas de ruta" en Operativo, no solo
+        # desde WhatsApp -- ver POST /api/operativo/ordenes/<id>/pruebas-ruta.
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PROB005")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/pruebas-ruta",
+            json={"texto": "Prueba cargada manualmente desde el sistema"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        creada = resp.get_json()
+        self.assertEqual(creada["origen"], "web")
+        self.assertIsNone(creada["foto_id"])
+
+        pruebas = self._pruebas_ruta_de(orden["id"])
+        self.assertEqual(len(pruebas), 1)
+
+        # Y se puede eliminar.
+        resp_del = self.client.delete(f"/api/operativo/ordenes/{orden['id']}/pruebas-ruta/{creada['id']}")
+        self.assertEqual(resp_del.status_code, 200)
+        self.assertEqual(len(self._pruebas_ruta_de(orden["id"])), 0)
+
+    def test_prueba_de_ruta_sin_texto_es_rechazada(self):
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PROB006")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+        resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/pruebas-ruta", json={"texto": "  "})
+        self.assertEqual(resp.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

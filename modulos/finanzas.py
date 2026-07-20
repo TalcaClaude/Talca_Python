@@ -56,7 +56,43 @@ from core import (
 # abonos" de Finanzas — ver finanzas_listar_cxc_abonos más abajo.
 ESTADOS_CXC_ABONO = {"reparacion", "esperando_repuesto", "control_calidad"}
 
+# ---------------------------------------------------------------------------
+# Medios de pago de Caja Chica (migración 18 en app.py) — antes todo era un
+# solo pozo de plata sin distinguir cómo salió; el taller la maneja en
+# realidad por 3 caminos separados, cada uno con su propia dinámica:
+#   - 'efectivo_cajero': retiro de cajero automático del taller, se contrasta
+#     contra boletas y el vuelto que sobra queda disponible para el próximo
+#     gasto. Es el default (y el único medio que existía antes de esto).
+#   - 'tarjeta_empresa': la tarjeta genera un movimiento en el banco aparte
+#     y se rinde con la boleta/factura física.
+#   - 'cristian': el encargado de logística. Los trabajadores le pasan
+#     boletas de compras propias, él (o idealmente el taller directo) les
+#     transfiere para saldar rápido esa cuenta, y después el taller le rinde
+#     cuentas a él: puede terminar debiéndole plata o al revés. Por eso es
+#     el único medio cuyo saldo tiene sentido en negativo (ver
+#     _caja_resumen_medio: negativo = el taller le debe a Cristian).
+# El saldo (aportado - gastado) se calcula igual para los 3 -- lo único que
+# cambia es cómo se interpreta en la UI (ver finanzas.js).
+# ---------------------------------------------------------------------------
+MEDIOS_PAGO_CAJA = ("efectivo_cajero", "tarjeta_empresa", "cristian")
+MEDIO_PAGO_CAJA_DEFECTO = "efectivo_cajero"
+
 bp = Blueprint("finanzas", __name__)
+
+
+def _medio_pago_valido(valor, permitir_vacio=False):
+    """Normaliza y valida un medio_pago recibido del cliente. Devuelve el
+    valor normalizado, o None si viene vacío y permitir_vacio=True (para
+    filtros opcionales). Lanza ValueError con mensaje en español si no es
+    uno de los 3 medios reconocidos."""
+    v = (valor or "").strip()
+    if not v:
+        if permitir_vacio:
+            return None
+        return MEDIO_PAGO_CAJA_DEFECTO
+    if v not in MEDIOS_PAGO_CAJA:
+        raise ValueError(f"Medio de pago inválido. Debe ser uno de: {', '.join(MEDIOS_PAGO_CAJA)}")
+    return v
 
 
 def _guardar_comprobante(archivo):
@@ -97,32 +133,50 @@ def _caja_movimiento_dict(row):
     return d
 
 
-@bp.route("/api/caja/resumen", methods=["GET"])
-def caja_resumen():
-    db = get_db()
+def _caja_resumen_medio(db, medio_pago):
+    """Mismo cálculo que antes (aportado/gastado/pendiente/mes), pero
+    acotado a un solo medio_pago -- ver comentario de MEDIOS_PAGO_CAJA más
+    arriba. saldo_disponible = aportado - gastado; para 'cristian' este
+    número puede quedar negativo con sentido (el taller le debe esa
+    diferencia), para los otros 2 medios un negativo indicaría que se
+    gastó más de lo aportado/retirado, lo cual no debería pasar en uso
+    normal pero no se bloquea a nivel de datos (cada gasto se valida solo,
+    no contra el saldo -- igual que el comportamiento de siempre)."""
     total_aportado = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'aporte'"
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'aporte' AND medio_pago = ?",
+        (medio_pago,),
     ).fetchone()[0]
     total_gastado = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto'"
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND medio_pago = ?",
+        (medio_pago,),
     ).fetchone()[0]
     pendiente_rendir = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL"
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL AND medio_pago = ?",
+        (medio_pago,),
     ).fetchone()[0]
 
     inicio_mes = datetime.now().strftime("%Y-%m") + "-01"
     gastado_mes = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND fecha >= ?",
-        (inicio_mes,),
+        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND fecha >= ? AND medio_pago = ?",
+        (inicio_mes, medio_pago),
     ).fetchone()[0]
 
-    return jsonify({
-        "saldo_disponible": total_aportado - total_gastado,
+    return {
+        "saldo_disponible": round(total_aportado - total_gastado, 2),
         "total_aportado": total_aportado,
         "total_gastado": total_gastado,
         "pendiente_rendir": pendiente_rendir,
         "gastado_mes": gastado_mes,
-    })
+    }
+
+
+@bp.route("/api/caja/resumen", methods=["GET"])
+def caja_resumen():
+    """Devuelve el resumen desglosado por medio_pago (antes era un solo
+    bloque para toda Caja Chica). El frontend arma 3 tarjetas a partir de
+    esto -- ver cargarCajaResumen en finanzas.js."""
+    db = get_db()
+    return jsonify({medio: _caja_resumen_medio(db, medio) for medio in MEDIOS_PAGO_CAJA})
 
 
 # ---------------------------------------------------------------------------
@@ -279,12 +333,19 @@ def caja_listar_movimientos():
     desde = request.args.get("desde", "").strip()
     hasta = request.args.get("hasta", "").strip()
     q = request.args.get("q", "").strip()
+    try:
+        medio_pago = _medio_pago_valido(request.args.get("medio_pago", ""), permitir_vacio=True)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     sql = "SELECT * FROM caja_movimientos WHERE 1=1"
     params = []
     if tipo:
         sql += " AND tipo = ?"
         params.append(tipo)
+    if medio_pago:
+        sql += " AND medio_pago = ?"
+        params.append(medio_pago)
     if estado == "pendiente":
         sql += " AND tipo = 'gasto' AND rendicion_id IS NULL"
     elif estado == "rendido":
@@ -327,6 +388,11 @@ def caja_crear_gasto():
             raise ValueError
     except (TypeError, ValueError):
         return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
+
+    try:
+        medio_pago = _medio_pago_valido(data.get("medio_pago"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
     fecha = (data.get("fecha") or "").strip()
     fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
@@ -375,11 +441,11 @@ def caja_crear_gasto():
     cur = db.execute(
         """
         INSERT INTO caja_movimientos (
-            tipo, fecha, monto, categoria, descripcion, proveedor, usuario,
+            tipo, medio_pago, fecha, monto, categoria, descripcion, proveedor, usuario,
             comprobante_archivo, producto_id, movimiento_inventario_id, creado_en
-        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (fecha, monto, categoria, descripcion, proveedor, usuario_actual(),
+        (medio_pago, fecha, monto, categoria, descripcion, proveedor, usuario_actual(),
          comprobante, producto_id, movimiento_inventario_id, ts),
     )
     db.commit()
@@ -399,6 +465,11 @@ def caja_crear_aporte():
     except (TypeError, ValueError):
         return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
 
+    try:
+        medio_pago = _medio_pago_valido(data.get("medio_pago"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     fecha = (data.get("fecha") or "").strip()
     fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
     descripcion = (data.get("descripcion") or "").strip().upper()
@@ -411,10 +482,10 @@ def caja_crear_aporte():
     ts = now_iso()
     cur = db.execute(
         """
-        INSERT INTO caja_movimientos (tipo, fecha, monto, descripcion, usuario, comprobante_archivo, creado_en)
-        VALUES ('aporte', ?, ?, ?, ?, ?, ?)
+        INSERT INTO caja_movimientos (tipo, medio_pago, fecha, monto, descripcion, usuario, comprobante_archivo, creado_en)
+        VALUES ('aporte', ?, ?, ?, ?, ?, ?, ?)
         """,
-        (fecha, monto, descripcion, usuario_actual(), comprobante, ts),
+        (medio_pago, fecha, monto, descripcion, usuario_actual(), comprobante, ts),
     )
     db.commit()
     nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -470,11 +541,19 @@ def caja_editar_movimiento(mov_id):
     except (TypeError, ValueError):
         return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
 
+    # Si no viene medio_pago en el request, se mantiene el que ya tenía la
+    # fila -- a diferencia de crear (donde vacío = 'efectivo_cajero' por
+    # defecto), acá vacío NO debe pisar silenciosamente el medio original.
+    try:
+        medio_pago = _medio_pago_valido(data.get("medio_pago"), permitir_vacio=True) or row["medio_pago"]
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     fecha_nueva = (data.get("fecha") or "").strip()
     fecha_final = f"{fecha_nueva}T{datetime.now().strftime('%H:%M:%S')}" if fecha_nueva else row["fecha"]
     descripcion = (data.get("descripcion") or "").strip().upper()
 
-    campos = {"monto": monto, "fecha": fecha_final, "descripcion": descripcion}
+    campos = {"monto": monto, "medio_pago": medio_pago, "fecha": fecha_final, "descripcion": descripcion}
     if row["tipo"] == "gasto":
         campos["categoria"] = (data.get("categoria") or "").strip().upper()
         campos["proveedor"] = (data.get("proveedor") or "").strip().upper()
@@ -512,10 +591,23 @@ def caja_ver_comprobante(nombre_archivo):
 
 @bp.route("/api/caja/pendientes", methods=["GET"])
 def caja_gastos_pendientes():
+    """Lista gastos sin rendir. Acepta ?medio_pago= para acotar a un solo
+    medio -- una rendición solo puede juntar gastos de un mismo medio (ver
+    caja_crear_rendicion), así que el modal "Generar rendición" siempre
+    manda este filtro."""
     db = get_db()
-    rows = db.execute(
-        "SELECT * FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL ORDER BY fecha ASC"
-    ).fetchall()
+    try:
+        medio_pago = _medio_pago_valido(request.args.get("medio_pago", ""), permitir_vacio=True)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    sql = "SELECT * FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL"
+    params = []
+    if medio_pago:
+        sql += " AND medio_pago = ?"
+        params.append(medio_pago)
+    sql += " ORDER BY fecha ASC"
+    rows = db.execute(sql, params).fetchall()
     return jsonify({"gastos": [_caja_movimiento_dict(r) for r in rows]})
 
 
@@ -545,11 +637,22 @@ def caja_crear_rendicion():
     if any(g["rendicion_id"] is not None for g in gastos):
         return jsonify({"error": "Alguno de los gastos seleccionados ya fue rendido antes"}), 400
 
+    # Todos los gastos de una rendición tienen que ser del mismo medio_pago:
+    # una rendición es literalmente "estoy presentando este lote de
+    # boletas" para UN medio (ej. "las boletas de la tarjeta empresa de
+    # julio", o "lo que rindió Cristian esta semana") -- mezclar medios acá
+    # dejaría sin sentido la reposición automática de abajo, que solo puede
+    # inyectar el aporte a un saldo a la vez.
+    medios_en_seleccion = {g["medio_pago"] for g in gastos}
+    if len(medios_en_seleccion) > 1:
+        return jsonify({"error": "Todos los gastos de una rendición deben ser del mismo medio de pago"}), 400
+    medio_pago = medios_en_seleccion.pop()
+
     total = sum(g["monto"] for g in gastos)
     ts = now_iso()
     cur = db.execute(
-        "INSERT INTO caja_rendiciones (fecha, usuario, total, nota, creado_en) VALUES (?, ?, ?, ?, ?)",
-        (ts, usuario_actual(), total, nota, ts),
+        "INSERT INTO caja_rendiciones (fecha, usuario, total, nota, medio_pago, creado_en) VALUES (?, ?, ?, ?, ?, ?)",
+        (ts, usuario_actual(), total, nota, medio_pago, ts),
     )
     rendicion_id = cur.lastrowid
 
@@ -566,14 +669,15 @@ def caja_crear_rendicion():
     # solo cierra/reporta los gastos, sin agregar plata de más. Cuando sí se
     # crea, queda marcada con rendicion_origen_id para que no se pueda
     # borrar suelta y dejar el saldo descuadrado respecto a los gastos que
-    # ya quedaron marcados como rendidos.
+    # ya quedaron marcados como rendidos. Hereda el medio_pago de la
+    # rendición para que el saldo que repone sea el mismo que se gastó.
     if reponer_saldo:
         db.execute(
             """
-            INSERT INTO caja_movimientos (tipo, fecha, monto, descripcion, usuario, rendicion_origen_id, creado_en)
-            VALUES ('aporte', ?, ?, ?, ?, ?, ?)
+            INSERT INTO caja_movimientos (tipo, medio_pago, fecha, monto, descripcion, usuario, rendicion_origen_id, creado_en)
+            VALUES ('aporte', ?, ?, ?, ?, ?, ?, ?)
             """,
-            (ts, total, f"REPOSICIÓN AUTOMÁTICA - RENDICIÓN #{rendicion_id}", usuario_actual(), rendicion_id, ts),
+            (medio_pago, ts, total, f"REPOSICIÓN AUTOMÁTICA - RENDICIÓN #{rendicion_id}", usuario_actual(), rendicion_id, ts),
         )
 
     db.commit()

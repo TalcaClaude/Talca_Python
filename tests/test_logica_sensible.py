@@ -403,12 +403,15 @@ class TestCajaChica(unittest.TestCase):
         return resp.get_json()
 
     def test_saldo_disponible_es_aportado_menos_gastado(self):
-        antes = self.client.get("/api/caja/resumen").get_json()
+        # _crear_aporte/_crear_gasto no mandan medio_pago -> caen en el
+        # default 'efectivo_cajero' (ver MEDIO_PAGO_CAJA_DEFECTO), que es el
+        # único bloque que hay que mirar en el resumen desglosado por medio.
+        antes = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
 
         self._crear_aporte(10000)
         self._crear_gasto(3000)
 
-        despues = self.client.get("/api/caja/resumen").get_json()
+        despues = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         self.assertAlmostEqual(
             despues["saldo_disponible"] - antes["saldo_disponible"], 10000 - 3000, delta=0.01
         )
@@ -416,9 +419,9 @@ class TestCajaChica(unittest.TestCase):
         self.assertAlmostEqual(despues["total_gastado"] - antes["total_gastado"], 3000, delta=0.01)
 
     def test_pendiente_de_rendir_solo_cuenta_gastos_sin_rendicion(self):
-        antes = self.client.get("/api/caja/resumen").get_json()
+        antes = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         gasto = self._crear_gasto(1500)
-        despues = self.client.get("/api/caja/resumen").get_json()
+        despues = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
 
         self.assertAlmostEqual(
             despues["pendiente_rendir"] - antes["pendiente_rendir"], 1500, delta=0.01
@@ -430,9 +433,94 @@ class TestCajaChica(unittest.TestCase):
         resp = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]]})
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
 
-        final = self.client.get("/api/caja/resumen").get_json()
+        final = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         self.assertAlmostEqual(final["pendiente_rendir"], despues["pendiente_rendir"] - 1500, delta=0.01)
         self.assertAlmostEqual(final["total_gastado"], despues["total_gastado"], delta=0.01)
+
+    def test_resumen_desglosa_saldo_por_medio_de_pago_y_cristian_puede_quedar_negativo(self):
+        """El pedido explícito del taller: 3 medios con saldo separado
+        (efectivo cajero, tarjeta empresa, cristian), y el saldo de
+        'cristian' tiene que poder quedar negativo quedar (el taller le
+        debe esa plata) sin que el sistema lo bloquee."""
+        antes = self.client.get("/api/caja/resumen").get_json()
+        for medio in ("efectivo_cajero", "tarjeta_empresa", "cristian"):
+            self.assertIn(medio, antes)
+
+        # Cristian gasta (anticipa a un trabajador) 5000 antes de que el
+        # taller le haya transferido nada -> saldo negativo, el taller le
+        # debe esos 5000.
+        resp = self.client.post(
+            "/api/caja/gasto",
+            data={
+                "fecha": datetime.now().strftime("%Y-%m-%d"), "monto": "5000",
+                "categoria": "Repuesto", "descripcion": "boleta de un trabajador",
+                "medio_pago": "cristian",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+        despues = self.client.get("/api/caja/resumen").get_json()
+        self.assertAlmostEqual(
+            despues["cristian"]["saldo_disponible"] - antes["cristian"]["saldo_disponible"], -5000, delta=0.01
+        )
+        # Los otros medios no se tocaron.
+        self.assertAlmostEqual(
+            despues["efectivo_cajero"]["saldo_disponible"], antes["efectivo_cajero"]["saldo_disponible"], delta=0.01
+        )
+        self.assertAlmostEqual(
+            despues["tarjeta_empresa"]["saldo_disponible"], antes["tarjeta_empresa"]["saldo_disponible"], delta=0.01
+        )
+
+    def test_medio_pago_invalido_se_rechaza(self):
+        resp = self.client.post(
+            "/api/caja/gasto",
+            data={
+                "fecha": datetime.now().strftime("%Y-%m-%d"), "monto": "1000",
+                "descripcion": "test", "medio_pago": "billetera_bitcoin",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_rendicion_no_puede_mezclar_medios_de_pago(self):
+        gasto_efectivo = self._crear_gasto(2000)
+        resp_cristian = self.client.post(
+            "/api/caja/gasto",
+            data={
+                "fecha": datetime.now().strftime("%Y-%m-%d"), "monto": "3000",
+                "descripcion": "boleta de cristian", "medio_pago": "cristian",
+            },
+        )
+        gasto_cristian = resp_cristian.get_json()
+
+        resp = self.client.post(
+            "/api/caja/rendicion",
+            json={"gasto_ids": [gasto_efectivo["id"], gasto_cristian["id"]]},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_reposicion_automatica_de_rendicion_hereda_el_medio_de_pago(self):
+        resp_cristian = self.client.post(
+            "/api/caja/gasto",
+            data={
+                "fecha": datetime.now().strftime("%Y-%m-%d"), "monto": "7000",
+                "descripcion": "boleta de cristian", "medio_pago": "cristian",
+            },
+        )
+        gasto_cristian = resp_cristian.get_json()
+
+        antes = self.client.get("/api/caja/resumen").get_json()["cristian"]
+        resp = self.client.post(
+            "/api/caja/rendicion",
+            json={"gasto_ids": [gasto_cristian["id"]], "reponer_saldo": True},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["medio_pago"], "cristian")
+
+        despues = self.client.get("/api/caja/resumen").get_json()["cristian"]
+        # La reposición automática (un aporte 'cristian' por 7000) sube el
+        # saldo de vuelta -- si hubiera caído en 'efectivo_cajero' por
+        # defecto, este saldo no se habría movido.
+        self.assertAlmostEqual(despues["saldo_disponible"] - antes["saldo_disponible"], 7000, delta=0.01)
 
 
 class TestOperativo(unittest.TestCase):
@@ -2864,13 +2952,13 @@ class TestCuentasPorPagar(unittest.TestCase):
         factura = self._crear_factura("FACT-CXP-002", producto["id"], cantidad=2, precio_unitario=5000)
         cxp = self._cxp_de_factura(factura["id"])
 
-        antes = self.client.get("/api/caja/resumen").get_json()
+        antes = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         resp = self.client.post(
             f"/api/finanzas/cxp/{cxp['id']}/pagos",
             json={"monto": 4000, "metodo_pago": "transferencia"},
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
-        despues = self.client.get("/api/caja/resumen").get_json()
+        despues = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         self.assertEqual(antes["total_gastado"], despues["total_gastado"])
 
         actualizada = resp.get_json()
@@ -2882,13 +2970,13 @@ class TestCuentasPorPagar(unittest.TestCase):
         factura = self._crear_factura("FACT-CXP-003", producto["id"], cantidad=1, precio_unitario=8000)
         cxp = self._cxp_de_factura(factura["id"])
 
-        antes = self.client.get("/api/caja/resumen").get_json()
+        antes = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         resp = self.client.post(
             f"/api/finanzas/cxp/{cxp['id']}/pagos",
             json={"monto": 8000, "metodo_pago": "efectivo", "desde_caja_chica": True},
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
-        despues = self.client.get("/api/caja/resumen").get_json()
+        despues = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         self.assertEqual(despues["total_gastado"], antes["total_gastado"] + 8000)
 
         actualizada = resp.get_json()

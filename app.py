@@ -613,12 +613,14 @@ def init_db():
             usuario TEXT DEFAULT '',
             total REAL NOT NULL DEFAULT 0,
             nota TEXT DEFAULT '',
+            medio_pago TEXT NOT NULL DEFAULT 'efectivo_cajero',
             creado_en TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS caja_movimientos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tipo TEXT NOT NULL,               -- 'aporte' | 'gasto'
+            medio_pago TEXT NOT NULL DEFAULT 'efectivo_cajero',  -- 'efectivo_cajero' | 'tarjeta_empresa' | 'cristian' -- ver comentario de migración 18 en init_db()
             fecha TEXT NOT NULL,
             monto REAL NOT NULL,
             categoria TEXT DEFAULT '',        -- solo gasto; texto libre (a pedido del taller)
@@ -970,6 +972,33 @@ def init_db():
     # Productos → "Importar Excel", que sí reemplaza todo de una sola vez y
     # no se repite sola en cada arranque.
 
+    # ---- Migración 18: reestructuración de Caja Chica en 3 "medios de pago"
+    # separados (pedido del taller — antes todo era un solo pozo de plata sin
+    # distinguir cómo salió): 'efectivo_cajero' (retiro de cajero automático,
+    # se contrasta contra boletas + el vuelto que sobra queda disponible para
+    # el próximo gasto — comportamiento de siempre, por eso es el default),
+    # 'tarjeta_empresa' (la tarjeta genera un movimiento en el banco aparte y
+    # se rinde con la boleta/factura física) y 'cristian' (el encargado de
+    # logística: los trabajadores le pasan boletas, él las paga de su bolsillo
+    # o transferencia para saldar rápido, y después el taller le rinde cuentas
+    # a él — puede terminar debiéndole plata o al revés, por eso 'cristian' es
+    # el único medio cuyo saldo puede quedar negativo con sentido: negativo =
+    # el taller le debe a Cristian, ver _caja_resumen_medio en
+    # modulos/finanzas.py). Todo lo que ya existía en la base queda en
+    # 'efectivo_cajero' (el default de la columna), que es literalmente lo que
+    # era antes de esta migración -- no hace falta backfill manual. Va ANTES
+    # del bloque de índices de más abajo (que crea un índice sobre esta misma
+    # columna): si quedara después, una base existente sin la columna todavía
+    # rompería el CREATE INDEX.
+    columnas_caja_mov_v18 = [c[1] for c in db.execute("PRAGMA table_info(caja_movimientos)").fetchall()]
+    if "medio_pago" not in columnas_caja_mov_v18:
+        db.execute("ALTER TABLE caja_movimientos ADD COLUMN medio_pago TEXT NOT NULL DEFAULT 'efectivo_cajero'")
+        db.commit()
+    columnas_caja_rend_v18 = [c[1] for c in db.execute("PRAGMA table_info(caja_rendiciones)").fetchall()]
+    if "medio_pago" not in columnas_caja_rend_v18:
+        db.execute("ALTER TABLE caja_rendiciones ADD COLUMN medio_pago TEXT NOT NULL DEFAULT 'efectivo_cajero'")
+        db.commit()
+
     # ---- Índices de rendimiento: movimientos es la tabla que más va a
     # crecer con los años (cada entrada, salida y pérdida queda ahí para
     # siempre), y prácticamente todas las pantallas de análisis (Rotación,
@@ -993,6 +1022,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_caja_movimientos_fecha ON caja_movimientos (fecha);
         CREATE INDEX IF NOT EXISTS idx_caja_movimientos_tipo ON caja_movimientos (tipo);
         CREATE INDEX IF NOT EXISTS idx_caja_movimientos_rendicion_id ON caja_movimientos (rendicion_id);
+        CREATE INDEX IF NOT EXISTS idx_caja_movimientos_medio_pago ON caja_movimientos (medio_pago);
 
         CREATE INDEX IF NOT EXISTS idx_merma_proveedores_producto_id ON merma_proveedores (producto_id);
 

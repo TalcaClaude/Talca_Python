@@ -116,24 +116,79 @@
 
   <section class="vista" id="vista-caja" style="display:none">
 
-  <section class="summary" id="caja-summary">
-    <div class="summary-card">
-      <span class="summary-label">Saldo disponible</span>
-      <span class="summary-value" id="caja-saldo">—</span>
+  <!-- 3 medios de pago separados (antes era un solo pozo de plata) -- ver
+       comentario de MEDIOS_PAGO_CAJA en modulos/finanzas.py. Cada uno tiene
+       su propio saldo porque se maneja distinto en la vida real:
+       efectivo_cajero = retiro de cajero + vuelto disponible, tarjeta_empresa
+       = gasto directo contra el banco (no hay "saldo", solo lo pendiente de
+       rendir), cristian = cuenta corriente con el encargado de logística
+       (puede quedar negativa: el taller le debe). -->
+  <div class="chart-grid" id="caja-resumen-medios">
+    <div class="chart-card">
+      <h3>Efectivo (cajero)</h3>
+      <p class="chart-sub">Retiro de cajero automático, contra boletas — el vuelto queda disponible</p>
+      <section class="summary">
+        <div class="summary-card">
+          <span class="summary-label">Saldo disponible</span>
+          <span class="summary-value" id="caja-ef-saldo">—</span>
+        </div>
+        <div class="summary-card summary-card--warn">
+          <span class="summary-label">Pendiente de rendir</span>
+          <span class="summary-value" id="caja-ef-pendiente">—</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Gastado este mes</span>
+          <span class="summary-value" id="caja-ef-gastado-mes">—</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Total retirado</span>
+          <span class="summary-value" id="caja-ef-total-aportado">—</span>
+        </div>
+      </section>
     </div>
-    <div class="summary-card summary-card--warn">
-      <span class="summary-label">Pendiente de rendir</span>
-      <span class="summary-value" id="caja-pendiente">—</span>
+
+    <div class="chart-card">
+      <h3>Tarjeta empresa</h3>
+      <p class="chart-sub">Sale directo del banco — se rinde con la boleta o factura física</p>
+      <section class="summary">
+        <div class="summary-card summary-card--warn">
+          <span class="summary-label">Pendiente de rendir</span>
+          <span class="summary-value" id="caja-tj-pendiente">—</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Gastado este mes</span>
+          <span class="summary-value" id="caja-tj-gastado-mes">—</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Total gastado histórico</span>
+          <span class="summary-value" id="caja-tj-total-gastado">—</span>
+        </div>
+      </section>
     </div>
-    <div class="summary-card">
-      <span class="summary-label">Gastado este mes</span>
-      <span class="summary-value" id="caja-gastado-mes">—</span>
+
+    <div class="chart-card">
+      <h3>Cuenta con Cristian</h3>
+      <p class="chart-sub">Anticipa boletas de los trabajadores y después se le rinde cuentas</p>
+      <section class="summary">
+        <div class="summary-card" id="caja-cr-saldo-card">
+          <span class="summary-label" id="caja-cr-saldo-label">Saldo</span>
+          <span class="summary-value" id="caja-cr-saldo">—</span>
+        </div>
+        <div class="summary-card summary-card--warn">
+          <span class="summary-label">Pendiente de rendir</span>
+          <span class="summary-value" id="caja-cr-pendiente">—</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Gastado este mes</span>
+          <span class="summary-value" id="caja-cr-gastado-mes">—</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Total transferido a Cristian</span>
+          <span class="summary-value" id="caja-cr-total-aportado">—</span>
+        </div>
+      </section>
     </div>
-    <div class="summary-card">
-      <span class="summary-label">Total aportado</span>
-      <span class="summary-value" id="caja-total-aportado">—</span>
-    </div>
-  </section>
+  </div>
 
   <section class="toolbar">
     <input type="text" id="caja-buscar" placeholder="Buscar por categoría, descripción, lugar o responsable…">
@@ -141,6 +196,12 @@
       <option value="">Todos</option>
       <option value="gasto">Gastos</option>
       <option value="aporte">Aportes</option>
+    </select>
+    <select id="caja-filtro-medio">
+      <option value="">Todos los medios</option>
+      <option value="efectivo_cajero">Efectivo (cajero)</option>
+      <option value="tarjeta_empresa">Tarjeta empresa</option>
+      <option value="cristian">Cuenta con Cristian</option>
     </select>
     <select id="caja-filtro-estado">
       <option value="">Cualquier estado</option>
@@ -165,6 +226,7 @@
         <tr>
           <th>Fecha</th>
           <th>Tipo</th>
+          <th>Medio</th>
           <th>Categoría / Descripción</th>
           <th>Lugar / Proveedor</th>
           <th class="num">Monto</th>
@@ -175,7 +237,7 @@
         </tr>
       </thead>
       <tbody id="tbody-caja">
-        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="10" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -387,6 +449,14 @@
           <input type="date" id="cg-fecha">
         </div>
       </div>
+      <div class="campo">
+        <label>Medio de pago *</label>
+        <select id="cg-medio-pago" required>
+          <option value="efectivo_cajero">Efectivo (cajero)</option>
+          <option value="tarjeta_empresa">Tarjeta empresa</option>
+          <option value="cristian">Vía Cristian (logística)</option>
+        </select>
+      </div>
       <div class="grid-2">
         <div class="campo">
           <label>Categoría</label>
@@ -463,6 +533,14 @@
         </div>
       </div>
       <div class="campo">
+        <label>Medio de pago *</label>
+        <select id="ca-medio-pago" required>
+          <option value="efectivo_cajero">Efectivo (cajero) — retiro</option>
+          <option value="tarjeta_empresa">Tarjeta empresa</option>
+          <option value="cristian">Vía Cristian (logística) — transferencia al encargado</option>
+        </select>
+      </div>
+      <div class="campo">
         <label>Descripción / origen</label>
         <input type="text" id="ca-descripcion" placeholder="Ej: Reposición mensual desde caja general">
       </div>
@@ -515,7 +593,15 @@
       <h2>Generar rendición</h2>
       <button class="modal-close" data-close="modal-caja-rendicion">&times;</button>
     </div>
-    <p class="ayuda-inline">Marca los gastos que estás presentando para cerrarlos como rendidos.</p>
+    <p class="ayuda-inline">Marca los gastos que estás presentando para cerrarlos como rendidos. Una rendición solo puede juntar gastos de un mismo medio de pago.</p>
+    <div class="campo">
+      <label>Medio de pago</label>
+      <select id="cr-medio-pago">
+        <option value="efectivo_cajero">Efectivo (cajero)</option>
+        <option value="tarjeta_empresa">Tarjeta empresa</option>
+        <option value="cristian">Vía Cristian (logística)</option>
+      </select>
+    </div>
     <div id="cr-lista-pendientes" class="tabla-wrap">
       <p class="vacio">Cargando…</p>
     </div>
@@ -550,6 +636,7 @@
         <thead>
           <tr>
             <th>Fecha</th>
+            <th>Medio</th>
             <th>N° de gastos</th>
             <th class="num">Total</th>
             <th>Repuesto</th>
@@ -558,7 +645,7 @@
           </tr>
         </thead>
         <tbody id="tbody-caja-rendiciones">
-          <tr><td colspan="6" class="vacio">Cargando…</td></tr>
+          <tr><td colspan="7" class="vacio">Cargando…</td></tr>
         </tbody>
       </table>
     </div>

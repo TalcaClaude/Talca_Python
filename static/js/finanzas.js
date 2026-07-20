@@ -16,6 +16,13 @@ const state = {
 
 const ESTADO_CXX_LABEL = { pendiente: "Pendiente", parcial: "Parcial", pagada: "Pagada", anulada: "Anulada" };
 
+// 3 medios de pago de Caja Chica (ver MEDIOS_PAGO_CAJA en modulos/finanzas.py).
+const MEDIO_PAGO_LABEL = {
+  efectivo_cajero: "Efectivo (cajero)",
+  tarjeta_empresa: "Tarjeta empresa",
+  cristian: "Vía Cristian",
+};
+
 // ---------------------------------------------------------------------------
 // Utilidades compartidas (duplicadas de app.js/operativo.js: cada módulo
 // carga su propio JS — ver comentario equivalente en operativo.js).
@@ -289,10 +296,42 @@ async function cargarCaja() {
 async function cargarCajaResumen() {
   try {
     const d = await api("/api/caja/resumen");
-    document.getElementById("caja-saldo").textContent = fmtMoney(d.saldo_disponible);
-    document.getElementById("caja-pendiente").textContent = fmtMoney(d.pendiente_rendir);
-    document.getElementById("caja-gastado-mes").textContent = fmtMoney(d.gastado_mes);
-    document.getElementById("caja-total-aportado").textContent = fmtMoney(d.total_aportado);
+
+    const ef = d.efectivo_cajero;
+    document.getElementById("caja-ef-saldo").textContent = fmtMoney(ef.saldo_disponible);
+    document.getElementById("caja-ef-pendiente").textContent = fmtMoney(ef.pendiente_rendir);
+    document.getElementById("caja-ef-gastado-mes").textContent = fmtMoney(ef.gastado_mes);
+    document.getElementById("caja-ef-total-aportado").textContent = fmtMoney(ef.total_aportado);
+
+    const tj = d.tarjeta_empresa;
+    document.getElementById("caja-tj-pendiente").textContent = fmtMoney(tj.pendiente_rendir);
+    document.getElementById("caja-tj-gastado-mes").textContent = fmtMoney(tj.gastado_mes);
+    document.getElementById("caja-tj-total-gastado").textContent = fmtMoney(tj.total_gastado);
+
+    // El saldo de Cristian es una cuenta corriente, no una caja física: si
+    // queda negativo significa que el taller le debe esa plata (anticipó
+    // más de lo que se le ha transferido). Se lo dejamos explícito en vez
+    // de mostrar un número negativo pelado.
+    const cr = d.cristian;
+    const saldoCr = document.getElementById("caja-cr-saldo");
+    const labelCr = document.getElementById("caja-cr-saldo-label");
+    const cardCr = document.getElementById("caja-cr-saldo-card");
+    if (cr.saldo_disponible < -0.01) {
+      labelCr.textContent = "El taller le debe a Cristian";
+      saldoCr.textContent = fmtMoney(Math.abs(cr.saldo_disponible));
+      cardCr.classList.add("summary-card--warn");
+    } else if (cr.saldo_disponible > 0.01) {
+      labelCr.textContent = "Cristian tiene esto sin rendir";
+      saldoCr.textContent = fmtMoney(cr.saldo_disponible);
+      cardCr.classList.remove("summary-card--warn");
+    } else {
+      labelCr.textContent = "Cuenta al día";
+      saldoCr.textContent = fmtMoney(0);
+      cardCr.classList.remove("summary-card--warn");
+    }
+    document.getElementById("caja-cr-pendiente").textContent = fmtMoney(cr.pendiente_rendir);
+    document.getElementById("caja-cr-gastado-mes").textContent = fmtMoney(cr.gastado_mes);
+    document.getElementById("caja-cr-total-aportado").textContent = fmtMoney(cr.total_aportado);
   } catch (e) {
     toast(e.message, true);
   }
@@ -303,11 +342,13 @@ async function cargarCajaMovimientos() {
   const params = new URLSearchParams();
   const q = document.getElementById("caja-buscar").value.trim();
   const tipo = document.getElementById("caja-filtro-tipo").value;
+  const medio = document.getElementById("caja-filtro-medio").value;
   const estado = document.getElementById("caja-filtro-estado").value;
   const desde = document.getElementById("caja-filtro-desde").value;
   const hasta = document.getElementById("caja-filtro-hasta").value;
   if (q) params.set("q", q);
   if (tipo) params.set("tipo", tipo);
+  if (medio) params.set("medio_pago", medio);
   if (estado) params.set("estado", estado);
   if (desde) params.set("desde", desde);
   if (hasta) params.set("hasta", hasta);
@@ -324,7 +365,7 @@ async function cargarCajaMovimientos() {
     state.cajaMovimientos = data.movimientos;
 
     if (data.movimientos.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="9" class="vacio">No se encontraron movimientos con esos filtros.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="10" class="vacio">No se encontraron movimientos con esos filtros.</td></tr>`;
       return;
     }
 
@@ -339,6 +380,7 @@ async function cargarCajaMovimientos() {
       <tr data-id="${m.id}" data-tipo="${m.tipo}" class="fila-clicable">
         <td class="mono">${fmtFecha(m.fecha)}</td>
         <td><span class="mov-tipo mov-tipo--${esGasto ? "salida" : "entrada"}">${esGasto ? "gasto" : "aporte"}</span></td>
+        <td>${MEDIO_PAGO_LABEL[m.medio_pago] || m.medio_pago}</td>
         <td>${escapeHtml(catDesc)}</td>
         <td>${escapeHtml(m.proveedor) || "—"}</td>
         <td class="num mono">${esGasto ? "-" : "+"}${fmtMoney(m.monto)}</td>
@@ -358,7 +400,7 @@ async function cargarCajaMovimientos() {
       });
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar Caja Chica: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="vacio">Error al cargar Caja Chica: ${e.message}</td></tr>`;
   }
 }
 
@@ -368,12 +410,14 @@ document.getElementById("caja-buscar").addEventListener("input", () => {
   cajaBuscarTimeout = setTimeout(cargarCajaMovimientos, 250);
 });
 document.getElementById("caja-filtro-tipo").addEventListener("change", cargarCajaMovimientos);
+document.getElementById("caja-filtro-medio").addEventListener("change", cargarCajaMovimientos);
 document.getElementById("caja-filtro-estado").addEventListener("change", cargarCajaMovimientos);
 document.getElementById("caja-filtro-desde").addEventListener("change", cargarCajaMovimientos);
 document.getElementById("caja-filtro-hasta").addEventListener("change", cargarCajaMovimientos);
 document.getElementById("caja-limpiar-filtros").addEventListener("click", () => {
   document.getElementById("caja-buscar").value = "";
   document.getElementById("caja-filtro-tipo").value = "";
+  document.getElementById("caja-filtro-medio").value = "";
   document.getElementById("caja-filtro-estado").value = "";
   document.getElementById("caja-filtro-desde").value = "";
   document.getElementById("caja-filtro-hasta").value = "";
@@ -420,6 +464,7 @@ function abrirEdicionCajaGasto(id) {
   document.getElementById("cg-id").value = m.id;
   document.getElementById("cg-monto").value = m.monto;
   document.getElementById("cg-fecha").value = (m.fecha || "").slice(0, 10);
+  document.getElementById("cg-medio-pago").value = m.medio_pago || "efectivo_cajero";
   document.getElementById("cg-categoria").value = m.categoria || "";
   document.getElementById("cg-proveedor").value = m.proveedor || "";
   document.getElementById("cg-descripcion").value = m.descripcion || "";
@@ -467,6 +512,7 @@ document.getElementById("form-caja-gasto").addEventListener("submit", async (e) 
   const formData = new FormData();
   formData.append("monto", document.getElementById("cg-monto").value);
   formData.append("fecha", document.getElementById("cg-fecha").value);
+  formData.append("medio_pago", document.getElementById("cg-medio-pago").value);
   formData.append("categoria", document.getElementById("cg-categoria").value);
   formData.append("proveedor", document.getElementById("cg-proveedor").value);
   formData.append("descripcion", document.getElementById("cg-descripcion").value);
@@ -510,6 +556,7 @@ function abrirEdicionCajaAporte(id) {
   document.getElementById("ca-id").value = m.id;
   document.getElementById("ca-monto").value = m.monto;
   document.getElementById("ca-fecha").value = (m.fecha || "").slice(0, 10);
+  document.getElementById("ca-medio-pago").value = m.medio_pago || "efectivo_cajero";
   document.getElementById("ca-descripcion").value = m.descripcion || "";
   document.getElementById("ca-comprobante-actual").style.display = m.tiene_comprobante ? "block" : "none";
   document.getElementById("ca-comprobante-actual").innerHTML = m.tiene_comprobante
@@ -552,6 +599,7 @@ document.getElementById("form-caja-aporte").addEventListener("submit", async (e)
   const formData = new FormData();
   formData.append("monto", document.getElementById("ca-monto").value);
   formData.append("fecha", document.getElementById("ca-fecha").value);
+  formData.append("medio_pago", document.getElementById("ca-medio-pago").value);
   formData.append("descripcion", document.getElementById("ca-descripcion").value);
   const archivo = document.getElementById("ca-comprobante").files[0];
   if (archivo) formData.append("comprobante", archivo);
@@ -579,18 +627,16 @@ function actualizarTotalSeleccionadoRendicion() {
   document.getElementById("cr-total-seleccionado").textContent = fmtMoney(total);
 }
 
-document.getElementById("btn-generar-rendicion").addEventListener("click", async () => {
+async function cargarPendientesRendicion() {
   state.cajaPendientesSeleccionados = new Set();
-  document.getElementById("cr-nota").value = "";
-  document.getElementById("cr-reponer-saldo").checked = true;
   const cont = document.getElementById("cr-lista-pendientes");
   cont.innerHTML = `<p class="vacio">Cargando…</p>`;
-  abrirModal("modal-caja-rendicion");
+  const medio = document.getElementById("cr-medio-pago").value;
 
   try {
-    const data = await api("/api/caja/pendientes");
+    const data = await api("/api/caja/pendientes?medio_pago=" + encodeURIComponent(medio));
     if (data.gastos.length === 0) {
-      cont.innerHTML = `<p class="vacio">No hay gastos pendientes de rendir. 👍</p>`;
+      cont.innerHTML = `<p class="vacio">No hay gastos pendientes de rendir en ${MEDIO_PAGO_LABEL[medio] || medio}. 👍</p>`;
       actualizarTotalSeleccionadoRendicion();
       return;
     }
@@ -622,7 +668,17 @@ document.getElementById("btn-generar-rendicion").addEventListener("click", async
   } catch (e) {
     cont.innerHTML = `<p class="vacio">Error al cargar gastos pendientes: ${e.message}</p>`;
   }
+}
+
+document.getElementById("btn-generar-rendicion").addEventListener("click", async () => {
+  document.getElementById("cr-nota").value = "";
+  document.getElementById("cr-reponer-saldo").checked = true;
+  document.getElementById("cr-medio-pago").value = "efectivo_cajero";
+  abrirModal("modal-caja-rendicion");
+  await cargarPendientesRendicion();
 });
+
+document.getElementById("cr-medio-pago").addEventListener("change", cargarPendientesRendicion);
 
 document.getElementById("btn-confirmar-rendicion").addEventListener("click", async () => {
   const gastoIds = [...state.cajaPendientesSeleccionados];
@@ -652,17 +708,18 @@ document.getElementById("btn-confirmar-rendicion").addEventListener("click", asy
 
 document.getElementById("btn-ver-rendiciones").addEventListener("click", async () => {
   const tbody = document.getElementById("tbody-caja-rendiciones");
-  tbody.innerHTML = `<tr><td colspan="6" class="vacio">Cargando…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="7" class="vacio">Cargando…</td></tr>`;
   abrirModal("modal-caja-rendiciones-historial");
   try {
     const data = await api("/api/caja/rendiciones");
     if (data.rendiciones.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="6" class="vacio">Todavía no se ha generado ninguna rendición.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" class="vacio">Todavía no se ha generado ninguna rendición.</td></tr>`;
       return;
     }
     tbody.innerHTML = data.rendiciones.map(r => `
       <tr data-id="${r.id}">
         <td class="mono">${fmtFecha(r.fecha)}</td>
+        <td>${MEDIO_PAGO_LABEL[r.medio_pago] || r.medio_pago || "—"}</td>
         <td class="num mono">${r.n_gastos}</td>
         <td class="num mono">${fmtMoney(r.total)}</td>
         <td>${r.reposicion_automatica ? "Sí" : "No"}</td>
@@ -674,7 +731,7 @@ document.getElementById("btn-ver-rendiciones").addEventListener("click", async (
       tr.addEventListener("click", () => verDetalleRendicion(parseInt(tr.dataset.id, 10)));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
   }
 });
 
@@ -689,6 +746,7 @@ async function verDetalleRendicion(id) {
     const r = await api(`/api/caja/rendicion/${id}`);
     ficha.innerHTML = `
       <dt>Fecha</dt><dd>${fmtFecha(r.fecha)}</dd>
+      <dt>Medio de pago</dt><dd>${MEDIO_PAGO_LABEL[r.medio_pago] || r.medio_pago || "—"}</dd>
       <dt>Total</dt><dd class="mono">${fmtMoney(r.total)}</dd>
       <dt>N° de gastos</dt><dd class="mono">${r.gastos.length}</dd>
       <dt>¿Repuso el saldo?</dt><dd>${r.reposicion_automatica ? "Sí — se creó un aporte automático por el mismo total" : "No — estos gastos ya estaban cubiertos"}</dd>

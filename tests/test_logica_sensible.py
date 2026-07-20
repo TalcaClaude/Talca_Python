@@ -3742,6 +3742,50 @@ class TestEstadoResultados(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
+    def test_detalle_linea_invalida_da_400(self):
+        resp = self.client.get(f"/api/finanzas/estado-resultados/detalle?mes={self.MES}&linea=no_existe")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_detalle_de_linea_manual_devuelve_mensaje_no_lista(self):
+        resp = self.client.get(f"/api/finanzas/estado-resultados/detalle?mes={self.MES}&linea=arriendo")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["tipo"], "manual")
+        self.assertTrue(data["mensaje"])
+
+    def test_detalle_de_rubro_gav_lista_los_gastos_que_lo_componen(self):
+        gasto = self._crear_gasto(12345, rubro_gav="bancarios", dia="20")
+        resp = self.client.get(f"/api/finanzas/estado-resultados/detalle?mes={self.MES}&linea=gav_bancarios")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["tipo"], "lista")
+        montos = [i["monto"] for i in data["items"]]
+        self.assertIn(12345.0, montos)
+
+    def test_detalle_de_ventas_ot_lista_la_ot_que_la_compone(self):
+        """Extremo a extremo: crea un cliente + OT, la marca 'entregado' con
+        fecha de este mes de prueba (vía DB directa, como ya hace
+        TestCorrelativoYListadoOperativo para simular una OT cerrada de un
+        mes específico) y confirma que aparece en el detalle de ventas_ot
+        con el monto correcto (Neto, sin IVA en este caso)."""
+        cliente = self.client.post("/api/operativo/clientes", json={"nombre": "Cliente Detalle ER"}).get_json()
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+
+        db = taller_app._conectar_db()
+        db.execute(
+            "UPDATE ordenes_trabajo SET estado = 'entregado', fecha_entrega_real = ?, "
+            "precio_referencial = 77000, precio_iva = 0 WHERE id = ?",
+            (f"{self.MES}-22T10:00:00", orden["id"]),
+        )
+        db.commit()
+        db.close()
+
+        resp = self.client.get(f"/api/finanzas/estado-resultados/detalle?mes={self.MES}&linea=ventas_ot")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        coincidencias = [i for i in data["items"] if i["monto"] == 77000.0 and str(orden["id"]) in i["etiqueta"]]
+        self.assertEqual(len(coincidencias), 1, data["items"])
+
 
 if __name__ == "__main__":
     try:

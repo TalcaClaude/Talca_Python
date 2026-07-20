@@ -2412,32 +2412,115 @@ svg .chart-punto-hover {
 }
 
 /* ---------- Estado de Resultados (Finanzas) ---------- */
+/* Vista tipo "hoja impresa": una tarjeta clara flotando sobre el fondo
+   oscuro del sistema, en vez de una tabla con grilla completa -- el papel
+   de verdad no tiene una línea bajo cada renglón, solo algunos hairlines
+   donde corresponde (subtotales/totales) y jerarquía tipográfica. */
 
-.er-tabla tbody tr.er-seccion td {
-  padding-top: 18px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  font-size: 12px;
-  color: var(--text-muted);
-  border-bottom: none;
+.er-papel-wrap { display: flex; justify-content: center; padding: 8px 0 40px; }
+
+.er-papel {
+  width: 100%;
+  max-width: 760px;
+  background: #f7f5ef;
+  color: #262420;
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.35), 0 1px 0 rgba(255,255,255,0.04);
+  padding: 44px 48px 36px;
+  font-family: var(--font-body);
 }
-.er-tabla tbody tr.er-subtotal td {
-  font-weight: 600;
-  border-top: 1px solid var(--line);
+
+.er-papel-encabezado {
+  text-align: center;
+  margin-bottom: 28px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid rgba(38,36,32,0.15);
 }
-.er-tabla tbody tr.er-total td {
+.er-papel-encabezado h2 {
+  margin: 0 0 4px;
+  font-family: var(--font-display);
+  letter-spacing: 0.03em;
+  font-size: 20px;
+}
+.er-papel-encabezado p { margin: 0; color: #6b6558; font-size: 13px; }
+
+.er-seccion-titulo {
+  margin: 26px 0 4px;
+  font-size: 11px;
   font-weight: 700;
-  background: var(--panel-2);
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+  letter-spacing: 0.12em;
+  color: #8a8271;
+  text-transform: uppercase;
 }
-.er-tabla .er-negativo { color: var(--danger); }
-.er-tabla .er-pct { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+.er-seccion-titulo:first-child { margin-top: 0; }
+
+.er-fila {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 10px;
+  margin: 0 -10px;
+  border-radius: 4px;
+  cursor: default;
+  transition: background 0.12s ease;
+}
+.er-fila[data-clicable="1"] { cursor: pointer; }
+.er-fila[data-clicable="1"]:hover,
+.er-fila[data-clicable="1"]:focus-visible { background: rgba(38,36,32,0.06); outline: none; }
+.er-fila .er-label { font-size: 14px; }
+.er-fila .er-monto {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.er-fila.er-vacio .er-label { color: #9a9384; font-style: italic; }
+
+.er-fila.er-subtotal { border-top: 1px solid rgba(38,36,32,0.18); margin-top: 4px; padding-top: 10px; }
+.er-fila.er-subtotal .er-label, .er-fila.er-subtotal .er-monto { font-weight: 600; }
+
+.er-fila.er-total {
+  margin-top: 10px;
+  padding: 12px 14px;
+  background: rgba(38,36,32,0.08);
+  border-radius: 6px;
+  border-top: none;
+}
+.er-fila.er-total .er-label, .er-fila.er-total .er-monto { font-weight: 700; font-size: 15px; }
+
+.er-negativo { color: #a03a34; }
+.er-pct { font-size: 12px; color: #8a8271; font-weight: 400; margin-left: 6px; }
+
+.er-aviso-sin-clasificar {
+  margin-top: 18px;
+  font-size: 13px;
+  color: #8a5a1f;
+  background: rgba(196, 130, 30, 0.12);
+  border: 1px solid rgba(196, 130, 30, 0.28);
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+
+/* Modal de detalle: lista de transacciones que componen una línea */
+.erd-items { list-style: none; margin: 12px 0 0; padding: 0; max-height: 320px; overflow-y: auto; }
+.erd-items li {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.erd-items li:last-child { border-bottom: none; }
+.erd-items .erd-item-fecha { color: var(--text-muted); font-size: 11px; }
+.erd-total-fila {
+  display: flex; justify-content: space-between; margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--line); font-weight: 700;
+}
+.erd-formula { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); margin-top: 10px; }
 
 @media print {
   .sidebar, .sidebar-toggle-btn, .sidebar-backdrop,
   .topbar, .tabs, #er-toolbar-no-print, #er-toolbar-no-print-2,
   .toast, .notif-bell-panel { display: none !important; }
   .shell-main .app { padding: 0; }
-  .er-tabla tbody tr.er-total td { background: #eee; color: #000; }
+  .er-papel-wrap { padding: 0; }
+  .er-papel { box-shadow: none; max-width: none; }
 }

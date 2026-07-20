@@ -1632,3 +1632,128 @@ def finanzas_estado_resultados_guardar_manual():
     )
     db.commit()
     return jsonify({"ok": True, "mes": mes})
+
+
+# Líneas "hoja" del Estado de Resultados que se pueden desglosar en el
+# detalle transaccional que las compone (a diferencia de las líneas de
+# subtotal/total -- Utilidad Bruta, Total GAV, etc. -- que se explican solo
+# con aritmética sobre números que el frontend ya tiene, sin pedir nada
+# nuevo al servidor).
+LINEAS_DETALLE_GAV = {f"gav_{rubro}" for rubro in RUBROS_GAV}
+LINEAS_DETALLE_GAV.add("gav_sin_clasificar")
+LINEAS_DETALLE_LISTA = {"ventas_ot", "ventas_ct", "costo_repuestos", "costo_mano_obra", "costo_convertidores", "costo_ct"} | LINEAS_DETALLE_GAV
+LINEAS_DETALLE_MANUAL = {
+    "otros_ingresos": "Ingreso del mes que no viene de una OT ni de un convertidor vendido directo (ej. venta de un servicio puntual, chatarra, etc.) — se ingresa a mano cada mes.",
+    "remuneraciones": "Sueldos líquidos pagados este mes — se ingresa a mano, no se registra en ningún otro lugar del sistema.",
+    "bono_remuneraciones": "Bonos pagados a trabajadores este mes, aparte del sueldo base — se ingresa a mano.",
+    "otras_remuneraciones": "Otros pagos asociados a remuneraciones (ej. finiquitos, horas extra facturadas aparte) — se ingresa a mano.",
+    "previred": "Cotizaciones previsionales (AFP, salud, seguro de cesantía) pagadas este mes — se ingresa a mano.",
+    "arriendo": "Arriendo del local/taller de este mes — se ingresa a mano.",
+    "seguros": "Pólizas de seguro pagadas o devengadas este mes — se ingresa a mano.",
+    "gf_intereses": "Intereses de créditos o préstamos de este mes — se ingresa a mano.",
+    "gf_factoring": "Costo de factoring (venta de facturas a un tercero) de este mes — se ingresa a mano.",
+    "gf_comisiones": "Comisiones bancarias asociadas a financiamiento (no confundir con las comisiones de Caja Chica, que van en GAV) — se ingresa a mano.",
+    "impuesto_renta": "Estimación de impuesto a la renta del período — se ingresa a mano (tu contador es la fuente real).",
+    "dividendos": "Monto asignado a repartir a los socios/dueños este mes — se ingresa a mano.",
+}
+
+
+@bp.route("/api/finanzas/estado-resultados/detalle", methods=["GET"])
+@requiere_rol("finanzas")
+def finanzas_estado_resultados_detalle():
+    """Desglose transaccional de UNA línea del Estado de Resultados, para
+    el panel "¿cómo se llegó a este número?" que se abre al hacer click en
+    una fila del reporte. Cada línea "hoja" (ventas, costo de ventas, GAV
+    por rubro) devuelve la lista de movimientos que la componen; las líneas
+    manuales devuelven solo una explicación (no hay transacciones que
+    listar, es un número que el dueño cargó a mano)."""
+    db = get_db()
+    try:
+        mes = _mes_valido(request.args.get("mes"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    linea = (request.args.get("linea") or "").strip()
+
+    if linea in LINEAS_DETALLE_MANUAL:
+        return jsonify({"linea": linea, "tipo": "manual", "mensaje": LINEAS_DETALLE_MANUAL[linea]})
+
+    if linea not in LINEAS_DETALLE_LISTA:
+        return jsonify({"error": "Línea de detalle no reconocida"}), 400
+
+    items = []
+
+    if linea == "ventas_ot":
+        filas = db.execute(
+            "SELECT o.id, o.precio_referencial, o.precio_iva, o.fecha_entrega_real, c.nombre AS cliente "
+            "FROM ordenes_trabajo o JOIN clientes c ON c.id = o.cliente_id "
+            "WHERE o.estado = 'entregado' AND substr(o.fecha_entrega_real, 1, 7) = ? "
+            "ORDER BY o.fecha_entrega_real",
+            (mes,),
+        ).fetchall()
+        for f in filas:
+            neto = f["precio_referencial"] or 0
+            iva_monto = round(neto * IVA_PORCENTAJE, 2) if f["precio_iva"] else 0.0
+            items.append({
+                "etiqueta": f"OT #{f['id']} — {f['cliente']}",
+                "fecha": f["fecha_entrega_real"],
+                "monto": round(neto + iva_monto, 2),
+            })
+
+    elif linea in ("costo_repuestos", "costo_mano_obra", "costo_convertidores"):
+        tipo_item = {"costo_repuestos": "repuesto", "costo_mano_obra": "mano_obra", "costo_convertidores": "convertidor_torque"}[linea]
+        _iva_case = f"(CASE WHEN oi.aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)" if tipo_item == "mano_obra" else "1"
+        filas = db.execute(
+            f"SELECT o.id, o.fecha_entrega_real, c.nombre AS cliente, "
+            f"COALESCE(SUM(oi.cantidad * oi.costo_unitario * {_iva_case}), 0) AS total "
+            f"FROM ordenes_trabajo o "
+            f"JOIN clientes c ON c.id = o.cliente_id "
+            f"JOIN orden_items oi ON oi.orden_id = o.id AND oi.tipo = ? "
+            f"WHERE o.estado = 'entregado' AND substr(o.fecha_entrega_real, 1, 7) = ? "
+            f"GROUP BY o.id ORDER BY o.fecha_entrega_real",
+            (tipo_item, mes),
+        ).fetchall()
+        for f in filas:
+            items.append({"etiqueta": f"OT #{f['id']} — {f['cliente']}", "fecha": f["fecha_entrega_real"], "monto": round(f["total"], 2)})
+
+    elif linea in ("ventas_ct", "costo_ct"):
+        filas = db.execute(
+            "SELECT ct.id, ct.marca, ct.modelo, ct.precio_venta, ct.fecha_cierre, c.nombre AS cliente "
+            "FROM convertidores_torque ct LEFT JOIN clientes c ON c.id = ct.cliente_id "
+            "WHERE ct.origen_tipo = 'cliente_directo' AND ct.estado IN ({}) "
+            "AND substr(ct.fecha_cierre, 1, 7) = ? ORDER BY ct.fecha_cierre".format(
+                ", ".join("?" for _ in convertidores.ESTADOS_CONVERTIDOR_CERRADOS)
+            ),
+            list(convertidores.ESTADOS_CONVERTIDOR_CERRADOS) + [mes],
+        ).fetchall()
+        for f in filas:
+            costo_real = convertidores._convertidor_costo_total(db, f["id"]) or 0
+            monto = f["precio_venta"] if f["precio_venta"] not in (None, "") else costo_real
+            etiqueta = f"Convertidor #{f['id']} — {(f['marca'] or '').strip()} {(f['modelo'] or '').strip()}".strip()
+            if f["cliente"]:
+                etiqueta += f" ({f['cliente']})"
+            items.append({
+                "etiqueta": etiqueta, "fecha": f["fecha_cierre"],
+                "monto": round((monto if linea == "ventas_ct" else costo_real), 2),
+            })
+
+    elif linea in LINEAS_DETALLE_GAV:
+        if linea == "gav_sin_clasificar":
+            filtro_rubro = "AND rubro_gav = ''"
+            params = [mes]
+        else:
+            filtro_rubro = "AND rubro_gav = ?"
+            params = [mes, linea[len("gav_"):]]
+        filas = db.execute(
+            f"SELECT fecha, categoria, descripcion, proveedor, monto FROM caja_movimientos "
+            f"WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? {filtro_rubro} "
+            f"ORDER BY fecha",
+            params,
+        ).fetchall()
+        for f in filas:
+            etiqueta = f["descripcion"] or f["categoria"] or "Gasto de Caja Chica"
+            if f["proveedor"]:
+                etiqueta += f" — {f['proveedor']}"
+            items.append({"etiqueta": etiqueta, "fecha": f["fecha"], "monto": round(f["monto"], 2)})
+
+    total = round(sum(i["monto"] for i in items), 2)
+    return jsonify({"linea": linea, "tipo": "lista", "items": items, "total": total})

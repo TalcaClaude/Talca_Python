@@ -2550,13 +2550,23 @@ async function cargarSugerenciasDiagnostico(ordenId) {
 // que la parte operativa lo revise/ajuste y recién guarde con el botón
 // "Guardar diagnóstico" de siempre -- así el diagnóstico oficial SIEMPRE
 // queda con el responsable real (quien tiene la sesión iniciada), nunca se
-// escribe solo con la sugerencia sin que nadie la haya mirado.
+// escribe solo con la sugerencia sin que nadie la haya mirado. Ya no se
+// agrega "(sugerido por ...)" al texto -- el responsable de la sugerencia ya
+// se ve en la tarjeta de arriba, repetirlo acá era redundante (pedido del
+// taller).
 async function agregarSugerenciaAlDiagnostico(sugerencia, ordenId) {
   if (!sugerencia) return;
   const campo = document.getElementById("opdi-diagnostico-tecnico");
   const previo = campo.value.trim();
-  const aporte = `${sugerencia.texto} (sugerido por ${sugerencia.mecanico_nombre})`;
+  const aporte = sugerencia.texto;
   campo.value = previo ? `${previo}\n${aporte}` : aporte;
+  // campo.value = ... (asignación por script) NO dispara el evento "input"
+  // del que depende el autocompletado con IA del resumen para el cliente
+  // (ver _opdiGenerarDiagnosticoCliente más abajo) -- por eso antes, al
+  // "pegar" una sugerencia acá, la IA nunca se enteraba de que el campo
+  // había cambiado. Se dispara a mano para que el flujo sea idéntico a
+  // cuando alguien tipea directo en el campo.
+  campo.dispatchEvent(new Event("input", { bubbles: true }));
   campo.focus();
   campo.scrollIntoView({ behavior: "smooth", block: "center" });
   toast("Sugerencia agregada al diagnóstico técnico — revisa y guarda cuando quede lista.");

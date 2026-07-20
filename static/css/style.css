@@ -33,10 +33,11 @@ html, body {
 }
 
 body {
-  background-image:
-    linear-gradient(var(--line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--line) 1px, transparent 1px);
-  background-size: 48px 48px;
+  /* Antes esto era una cuadrícula (líneas cada 48px) cubriendo toda la
+     app -- el dueño la describió como "cuadriculado" y "fome". Se
+     reemplaza por un degradé radial casi imperceptible, mismo fondo
+     oscuro de base pero sin la sensación de grilla técnica. */
+  background-image: radial-gradient(1200px 640px at 12% -8%, rgba(42, 120, 214, 0.07), transparent 60%);
   background-attachment: fixed;
   background-color: var(--bg);
   opacity: 1;
@@ -366,18 +367,19 @@ body::before { content: none; }
 .summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 12px;
-  margin-bottom: 22px;
+  gap: 16px;
+  margin-bottom: 24px;
 }
 
 .summary-card {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 14px;
+  padding: 18px 18px 16px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  box-shadow: 0 8px 24px -10px rgba(0, 0, 0, 0.5);
 }
 
 .summary-card--warn {
@@ -444,8 +446,8 @@ body::before { content: none; }
 .chart-grid {
   display: grid;
   grid-template-columns: 1.6fr 1fr;
-  gap: 14px;
-  margin-bottom: 14px;
+  gap: 18px;
+  margin-bottom: 18px;
 }
 
 .chart-grid--par {
@@ -458,9 +460,10 @@ body::before { content: none; }
 
 .chart-card {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 18px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 14px;
+  padding: 20px 22px;
+  box-shadow: 0 8px 24px -10px rgba(0, 0, 0, 0.5);
 }
 
 .chart-card h3 {
@@ -1327,10 +1330,11 @@ svg .chart-punto-hover {
 
 .tabla-wrap {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 14px;
   overflow: hidden;
   overflow-x: auto;
+  box-shadow: 0 8px 24px -10px rgba(0, 0, 0, 0.5);
 }
 
 .tabla {

@@ -2410,3 +2410,34 @@ svg .chart-punto-hover {
   .brand { gap: 10px; }
   .wapd-foto { flex: 1 1 100%; }
 }
+
+/* ---------- Estado de Resultados (Finanzas) ---------- */
+
+.er-tabla tbody tr.er-seccion td {
+  padding-top: 18px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-size: 12px;
+  color: var(--text-muted);
+  border-bottom: none;
+}
+.er-tabla tbody tr.er-subtotal td {
+  font-weight: 600;
+  border-top: 1px solid var(--line);
+}
+.er-tabla tbody tr.er-total td {
+  font-weight: 700;
+  background: var(--panel-2);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.er-tabla .er-negativo { color: var(--danger); }
+.er-tabla .er-pct { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+
+@media print {
+  .sidebar, .sidebar-toggle-btn, .sidebar-backdrop,
+  .topbar, .tabs, #er-toolbar-no-print, #er-toolbar-no-print-2,
+  .toast, .notif-bell-panel { display: none !important; }
+  .shell-main .app { padding: 0; }
+  .er-tabla tbody tr.er-total td { background: #eee; color: #000; }
+}

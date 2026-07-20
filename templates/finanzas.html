@@ -41,6 +41,7 @@
     <button class="tab" data-vista="cxc">Cuentas por Cobrar</button>
     <button class="tab" data-vista="cxp">Cuentas por Pagar</button>
     <button class="tab" data-vista="facturas">Facturas</button>
+    <button class="tab" data-vista="estado-resultados">Estado de Resultados</button>
     <button class="tab" data-vista="reportes">Reportes</button>
   </nav>
 
@@ -428,6 +429,20 @@
 
   </section>
 
+  <section class="vista" id="vista-estado-resultados" style="display:none">
+
+    <section class="toolbar" id="er-toolbar-no-print">
+      <label class="toggle-critico">Mes <input type="month" id="er-mes"></label>
+      <span style="flex:1"></span>
+      <button class="btn btn-secundario" id="btn-er-imprimir">Imprimir / PDF</button>
+      <button class="btn btn-primary" id="btn-er-editar-manual">Editar datos del mes</button>
+    </section>
+    <p class="ayuda-inline" id="er-toolbar-no-print-2">Ventas, costo de ventas y los gastos de Caja Chica ya clasificados se calculan solos con la información del sistema. Remuneraciones, Previred, arriendo, seguros, gastos financieros, impuesto y dividendos se ingresan a mano cada mes con "Editar datos del mes" — son datos que vienen de tu contador/remuneraciones y no se registran en ningún otro lugar del sistema.</p>
+
+    <div id="er-reporte">Cargando…</div>
+
+  </section>
+
 </div>
 
 <!-- Modal: Nuevo gasto de Caja Chica -->
@@ -468,6 +483,19 @@
           <label>Lugar / Proveedor</label>
           <input type="text" id="cg-proveedor" placeholder="Ej: Ferretería El Tornillo">
         </div>
+      </div>
+      <div class="campo" id="cg-rubro-gav-wrap">
+        <label>Rubro (para el Estado de Resultados)</label>
+        <select id="cg-rubro-gav">
+          <option value="">Sin clasificar</option>
+          <option value="generales">Gastos generales</option>
+          <option value="servicios_basicos">Servicios básicos (agua, luz, gas, internet)</option>
+          <option value="combustible">Combustible</option>
+          <option value="bancarios">Gastos bancarios</option>
+          <option value="mantencion">Mantención y equipos</option>
+          <option value="otros">Otros gastos</option>
+        </select>
+        <p class="ayuda-inline">Distinto de la categoría de arriba: esto es lo que se suma en el Estado de Resultados mensual. Un gasto "Sin clasificar" no aparece en ese total hasta que le asignes un rubro.</p>
       </div>
       <div class="campo">
         <label>Descripción / motivo</label>
@@ -947,6 +975,88 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-cxc-ot-detalle">Cerrar</button>
         <button type="submit" class="btn btn-primary">Registrar pago</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Editar datos manuales del Estado de Resultados de un mes -->
+<div class="modal-overlay" id="modal-er-manual">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Editar datos del mes — <span id="erm-mes-titulo"></span></h2>
+      <button class="modal-close" data-close="modal-er-manual">&times;</button>
+    </div>
+    <p class="ayuda-inline">Estos rubros no se registran en ningún otro lugar del sistema (vienen de tu contador o de remuneraciones) — se guardan por mes y quedan disponibles la próxima vez que revises el Estado de Resultados de este mismo mes.</p>
+    <form id="form-er-manual">
+      <div class="campo">
+        <label>Otros ingresos del mes</label>
+        <input type="number" id="erm-otros-ingresos" min="0" step="1" value="0">
+      </div>
+
+      <h3 class="subtitulo">Remuneraciones</h3>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Remuneraciones</label>
+          <input type="number" id="erm-remuneraciones" min="0" step="1" value="0">
+        </div>
+        <div class="campo">
+          <label>Bono remuneraciones</label>
+          <input type="number" id="erm-bono-remuneraciones" min="0" step="1" value="0">
+        </div>
+        <div class="campo">
+          <label>Otras remuneraciones</label>
+          <input type="number" id="erm-otras-remuneraciones" min="0" step="1" value="0">
+        </div>
+        <div class="campo">
+          <label>Previred</label>
+          <input type="number" id="erm-previred" min="0" step="1" value="0">
+        </div>
+      </div>
+
+      <h3 class="subtitulo">Otros gastos de administración</h3>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Arriendo</label>
+          <input type="number" id="erm-arriendo" min="0" step="1" value="0">
+        </div>
+        <div class="campo">
+          <label>Seguros</label>
+          <input type="number" id="erm-seguros" min="0" step="1" value="0">
+        </div>
+      </div>
+
+      <h3 class="subtitulo">Gastos financieros</h3>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Intereses (préstamos)</label>
+          <input type="number" id="erm-gf-intereses" min="0" step="1" value="0">
+        </div>
+        <div class="campo">
+          <label>Factoring</label>
+          <input type="number" id="erm-gf-factoring" min="0" step="1" value="0">
+        </div>
+        <div class="campo">
+          <label>Comisiones bancarias (financiero)</label>
+          <input type="number" id="erm-gf-comisiones" min="0" step="1" value="0">
+        </div>
+      </div>
+
+      <h3 class="subtitulo">Impuesto y dividendos</h3>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Impuesto a la renta (estimado)</label>
+          <input type="number" id="erm-impuesto-renta" min="0" step="1" value="0">
+        </div>
+        <div class="campo">
+          <label>Asignación de dividendos</label>
+          <input type="number" id="erm-dividendos" min="0" step="1" value="0">
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-er-manual">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar datos del mes</button>
       </div>
     </form>
   </div>

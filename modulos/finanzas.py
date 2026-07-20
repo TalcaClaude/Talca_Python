@@ -47,6 +47,8 @@ from core import (
     requiere_rol,
     usuario_actual,
 )
+import modulos.operativo as operativo
+import modulos.convertidores as convertidores
 
 # Estados de una OT en los que ya se aprobó el presupuesto y el trabajo está
 # en curso, pero todavía no llega a 'listo'/'entregado' (ver
@@ -77,7 +79,39 @@ ESTADOS_CXC_ABONO = {"reparacion", "esperando_repuesto", "control_calidad"}
 MEDIOS_PAGO_CAJA = ("efectivo_cajero", "tarjeta_empresa", "cristian")
 MEDIO_PAGO_CAJA_DEFECTO = "efectivo_cajero"
 
+# ---------------------------------------------------------------------------
+# Rubros de Gastos de Administración y Ventas (GAV) — migración 19 en
+# app.py. Es una clasificación FIJA y separada de 'categoria' (que sigue
+# siendo texto libre, para que el taller la use como quiera). rubro_gav
+# solo se llena desde este desplegable, y es lo único que el Estado de
+# Resultados (ver finanzas_estado_resultados más abajo) suma para armar el
+# total de GAV -- un gasto sin rubro_gav asignado queda afuera del total y
+# se muestra aparte como "sin clasificar", nunca se adivina su categoría.
+# ---------------------------------------------------------------------------
+RUBROS_GAV = {
+    "generales": "Gastos generales",
+    "servicios_basicos": "Servicios básicos (agua, luz, gas, internet)",
+    "combustible": "Combustible",
+    "bancarios": "Gastos bancarios",
+    "mantencion": "Mantención y equipos",
+    "otros": "Otros gastos",
+}
+
 bp = Blueprint("finanzas", __name__)
+
+
+def _rubro_gav_valido(valor):
+    """Normaliza y valida un rubro_gav recibido del cliente. Devuelve '' si
+    viene vacío (gasto sin clasificar todavía, permitido) o el valor
+    normalizado si es uno de los rubros fijos. Lanza ValueError si viene
+    algo que no está en la lista -- a diferencia de 'categoria' (texto
+    libre de siempre), acá si hay valor tiene que ser uno de los fijos."""
+    v = (valor or "").strip().lower()
+    if not v:
+        return ""
+    if v not in RUBROS_GAV:
+        raise ValueError(f"Rubro GAV inválido. Debe ser uno de: {', '.join(RUBROS_GAV)}")
+    return v
 
 
 def _medio_pago_valido(valor, permitir_vacio=False):
@@ -394,6 +428,11 @@ def caja_crear_gasto():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    try:
+        rubro_gav = _rubro_gav_valido(data.get("rubro_gav"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     fecha = (data.get("fecha") or "").strip()
     fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
 
@@ -441,11 +480,11 @@ def caja_crear_gasto():
     cur = db.execute(
         """
         INSERT INTO caja_movimientos (
-            tipo, medio_pago, fecha, monto, categoria, descripcion, proveedor, usuario,
+            tipo, medio_pago, fecha, monto, categoria, rubro_gav, descripcion, proveedor, usuario,
             comprobante_archivo, producto_id, movimiento_inventario_id, creado_en
-        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (medio_pago, fecha, monto, categoria, descripcion, proveedor, usuario_actual(),
+        (medio_pago, fecha, monto, categoria, rubro_gav, descripcion, proveedor, usuario_actual(),
          comprobante, producto_id, movimiento_inventario_id, ts),
     )
     db.commit()
@@ -557,6 +596,14 @@ def caja_editar_movimiento(mov_id):
     if row["tipo"] == "gasto":
         campos["categoria"] = (data.get("categoria") or "").strip().upper()
         campos["proveedor"] = (data.get("proveedor") or "").strip().upper()
+        # Si no viene rubro_gav en el request, se mantiene el que ya tenía
+        # la fila -- mismo criterio que medio_pago un poco más arriba, para
+        # no perder la clasificación al editar solo otro campo.
+        try:
+            rubro_recibido = data.get("rubro_gav")
+            campos["rubro_gav"] = _rubro_gav_valido(rubro_recibido) if rubro_recibido is not None else row["rubro_gav"]
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
 
     if "comprobante" in request.files and request.files["comprobante"].filename:
         try:
@@ -1389,3 +1436,199 @@ def reporte_finanzas_resumen_pdf():
     sufijo = f"_{desde or 'inicio'}_a_{hasta or 'hoy'}"
     nombre = f"resumen_financiero{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     return _pdf_response(buffer, doc, elementos, nombre)
+
+
+# ---------------------------------------------------------------------------
+# Estado de Resultados mensual (migración 19 en app.py)
+# ---------------------------------------------------------------------------
+# Junta lo que el sistema SÍ sabe con certeza para el mes elegido (ventas de
+# Operativo y de Convertidores "cliente_directo", su costo de ventas real, y
+# los gastos de Caja Chica ya clasificados por rubro_gav) con los rubros que
+# vienen de contabilidad/remuneraciones externas y que nadie más registra acá
+# adentro (sueldos, Previred, arriendo, seguros, gastos financieros,
+# impuesto, dividendos) -- esos se guardan a mano por mes en
+# estado_resultado_manual y se editan desde Finanzas -> Estado de
+# Resultados -> "Editar datos del mes". A propósito, nunca se inventa un
+# número: lo que no se puede calcular con certeza se deja en 0 hasta que el
+# dueño lo cargue, y los gastos de caja chica sin rubro_gav asignado se
+# muestran aparte como "sin clasificar" en vez de sumarse a ciegas.
+
+MANUAL_CAMPOS_ESTADO_RESULTADO = (
+    "otros_ingresos", "remuneraciones", "bono_remuneraciones", "otras_remuneraciones",
+    "previred", "arriendo", "seguros", "gastos_financieros_intereses",
+    "gastos_financieros_factoring", "gastos_financieros_comisiones",
+    "impuesto_renta", "dividendos",
+)
+
+
+def _mes_valido(valor):
+    """Valida el formato 'YYYY-MM'. Devuelve el string tal cual si es
+    válido, o lanza ValueError con mensaje en español si no."""
+    v = (valor or "").strip()
+    try:
+        datetime.strptime(v, "%Y-%m")
+    except ValueError:
+        raise ValueError("El mes debe venir en formato YYYY-MM, ej: 2026-07")
+    return v
+
+
+def _datos_manuales_mes(db, mes):
+    """Devuelve los datos manuales guardados para ese mes, o todos en 0 si
+    todavía no se ha guardado nada (primera vez que se revisa ese mes)."""
+    fila = db.execute("SELECT * FROM estado_resultado_manual WHERE mes = ?", (mes,)).fetchone()
+    if fila is None:
+        return {campo: 0.0 for campo in MANUAL_CAMPOS_ESTADO_RESULTADO}
+    return {campo: fila[campo] or 0.0 for campo in MANUAL_CAMPOS_ESTADO_RESULTADO}
+
+
+@bp.route("/api/finanzas/estado-resultados", methods=["GET"])
+@requiere_rol("finanzas")
+def finanzas_estado_resultados():
+    db = get_db()
+    try:
+        mes = _mes_valido(request.args.get("mes") or datetime.now().strftime("%Y-%m"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    ot = operativo.ventas_y_costo_ot_mes(db, mes)
+    ct = convertidores.ventas_y_costo_ct_mes(db, mes)
+    manual = _datos_manuales_mes(db, mes)
+
+    # ---- Ventas
+    ventas_ot = ot["monto_cerradas_mes"]
+    ventas_ct = ct["ventas_ct"]
+    ventas_total = round(ventas_ot + ventas_ct + manual["otros_ingresos"], 2)
+
+    # ---- Costo de ventas
+    costo_ot_total = ot["costo_total"]
+    costo_ct_total = ct["costo_ct"]
+    costo_ventas_total = round(costo_ot_total + costo_ct_total, 2)
+
+    utilidad_bruta = round(ventas_total - costo_ventas_total, 2)
+    margen_bruto_pct = round((utilidad_bruta / ventas_total) * 100, 1) if ventas_total else None
+
+    # ---- GAV: gastos de Caja Chica ya clasificados por rubro_gav (nunca
+    # incluye producto_id IS NOT NULL -- esas son compras de inventario que
+    # ya se cuentan como costo de ventas cuando el repuesto se usa en una
+    # OT, ver ventas_y_costo_ot_mes; contarlas también acá sería duplicar
+    # el gasto).
+    filas_gav = db.execute(
+        "SELECT rubro_gav, COALESCE(SUM(monto), 0) AS total FROM caja_movimientos "
+        "WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? "
+        "AND rubro_gav != '' GROUP BY rubro_gav",
+        (mes,),
+    ).fetchall()
+    gav_por_rubro = {fila["rubro_gav"]: round(fila["total"], 2) for fila in filas_gav}
+    gav_caja_chica_total = round(sum(gav_por_rubro.values()), 2)
+
+    gav_sin_clasificar = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) AS total FROM caja_movimientos "
+        "WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? AND rubro_gav = ''",
+        (mes,),
+    ).fetchone()["total"] or 0
+
+    total_remuneraciones = round(
+        manual["remuneraciones"] + manual["bono_remuneraciones"]
+        + manual["otras_remuneraciones"] + manual["previred"], 2
+    )
+    gav_total = round(gav_caja_chica_total + total_remuneraciones + manual["arriendo"] + manual["seguros"], 2)
+
+    utilidad_operacional = round(utilidad_bruta - gav_total, 2)
+
+    # ---- Gastos financieros (manual)
+    total_gastos_financieros = round(
+        manual["gastos_financieros_intereses"] + manual["gastos_financieros_factoring"]
+        + manual["gastos_financieros_comisiones"], 2
+    )
+    utilidad_antes_impuesto = round(utilidad_operacional - total_gastos_financieros, 2)
+
+    utilidad_neta = round(utilidad_antes_impuesto - manual["impuesto_renta"], 2)
+    margen_neto_pct = round((utilidad_neta / ventas_total) * 100, 1) if ventas_total else None
+
+    utilidad_retenida = round(utilidad_neta - manual["dividendos"], 2)
+
+    return jsonify({
+        "mes": mes,
+        "ventas": {
+            "ventas_ot": round(ventas_ot, 2),
+            "ventas_ct": round(ventas_ct, 2),
+            "otros_ingresos": round(manual["otros_ingresos"], 2),
+            "total": ventas_total,
+        },
+        "costo_ventas": {
+            "costo_repuestos": ot["costo_repuestos"],
+            "costo_mano_obra": ot["costo_mano_obra"],
+            "costo_convertidores_internos": ot["costo_convertidores"],
+            "costo_ot_total": costo_ot_total,
+            "costo_ct_total": costo_ct_total,
+            "total": costo_ventas_total,
+        },
+        "utilidad_bruta": utilidad_bruta,
+        "margen_bruto_pct": margen_bruto_pct,
+        "gav": {
+            "por_rubro": gav_por_rubro,
+            "rubros_label": RUBROS_GAV,
+            "sin_clasificar": round(gav_sin_clasificar, 2),
+            "caja_chica_total": gav_caja_chica_total,
+            "remuneraciones": manual["remuneraciones"],
+            "bono_remuneraciones": manual["bono_remuneraciones"],
+            "otras_remuneraciones": manual["otras_remuneraciones"],
+            "previred": manual["previred"],
+            "total_remuneraciones": total_remuneraciones,
+            "arriendo": manual["arriendo"],
+            "seguros": manual["seguros"],
+            "total": gav_total,
+        },
+        "utilidad_operacional": utilidad_operacional,
+        "gastos_financieros": {
+            "intereses": manual["gastos_financieros_intereses"],
+            "factoring": manual["gastos_financieros_factoring"],
+            "comisiones": manual["gastos_financieros_comisiones"],
+            "total": total_gastos_financieros,
+        },
+        "utilidad_antes_impuesto": utilidad_antes_impuesto,
+        "impuesto_renta": manual["impuesto_renta"],
+        "utilidad_neta": utilidad_neta,
+        "margen_neto_pct": margen_neto_pct,
+        "dividendos": manual["dividendos"],
+        "utilidad_retenida": utilidad_retenida,
+        "manual": manual,
+    })
+
+
+@bp.route("/api/finanzas/estado-resultados/manual", methods=["POST"])
+@requiere_rol("finanzas")
+def finanzas_estado_resultados_guardar_manual():
+    """Guarda (crea o reemplaza) los datos manuales de un mes -- sueldos,
+    Previred, arriendo, seguros, gastos financieros, impuesto y dividendos.
+    Se sobrescribe completo cada vez (no hay historial de versiones; el
+    dueño edita el mismo mes las veces que necesite hasta dejarlo bien)."""
+    db = get_db()
+    data = request.get_json(silent=True) or {}
+    try:
+        mes = _mes_valido(data.get("mes"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    valores = {}
+    for campo in MANUAL_CAMPOS_ESTADO_RESULTADO:
+        crudo = data.get(campo, 0)
+        try:
+            monto = float(crudo or 0)
+            if monto < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"error": f"El campo '{campo}' debe ser un número mayor o igual a 0"}), 400
+        valores[campo] = monto
+
+    ts = now_iso()
+    columnas = ["mes"] + list(MANUAL_CAMPOS_ESTADO_RESULTADO) + ["actualizado_en"]
+    placeholders = ", ".join("?" for _ in columnas)
+    actualizaciones = ", ".join(f"{c} = excluded.{c}" for c in columnas if c != "mes")
+    db.execute(
+        f"INSERT INTO estado_resultado_manual ({', '.join(columnas)}) VALUES ({placeholders}) "
+        f"ON CONFLICT(mes) DO UPDATE SET {actualizaciones}",
+        [mes] + [valores[c] for c in MANUAL_CAMPOS_ESTADO_RESULTADO] + [ts],
+    )
+    db.commit()
+    return jsonify({"ok": True, "mes": mes})

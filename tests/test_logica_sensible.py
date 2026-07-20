@@ -3605,6 +3605,144 @@ class TestProveedoresDeduplicacion(unittest.TestCase):
         self.assertEqual(total_proveedores_con_ese_rut, 1)
 
 
+class TestEstadoResultados(unittest.TestCase):
+    """Estado de Resultados mensual de Finanzas: rubro_gav (clasificación
+    fija de gastos de Caja Chica), los datos manuales por mes, y que no se
+    duplique plata entre Costo de Ventas y GAV. Usa un mes bien alejado de
+    "hoy" (2031-01) para no mezclarse con gastos de fecha por defecto que
+    crean otros tests de esta misma clase o de otras clases del archivo."""
+
+    MES = "2031-01"
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_gasto(self, monto, rubro_gav=None, dia="10", **extra):
+        data = {"fecha": f"{self.MES}-{dia}", "monto": str(monto), "descripcion": "test estado resultados"}
+        if rubro_gav is not None:
+            data["rubro_gav"] = rubro_gav
+        data.update(extra)
+        resp = self.client.post("/api/caja/gasto", data=data)
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _reporte(self):
+        resp = self.client.get(f"/api/finanzas/estado-resultados?mes={self.MES}")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def test_rubro_gav_invalido_es_rechazado(self):
+        resp = self.client.post(
+            "/api/caja/gasto",
+            data={"fecha": f"{self.MES}-05", "monto": "1000", "rubro_gav": "no_existe_este_rubro"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_mes_con_formato_invalido_es_rechazado(self):
+        resp = self.client.get("/api/finanzas/estado-resultados?mes=enero-2031")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_gasto_clasificado_suma_en_su_rubro_y_sin_clasificar_queda_fuera_del_total(self):
+        antes = self._reporte()
+        total_antes = antes["gav"]["total"]
+        sin_clasificar_antes = antes["gav"]["sin_clasificar"]
+
+        self._crear_gasto(20000, rubro_gav="combustible", dia="12")
+        self._crear_gasto(7000, dia="13")  # sin rubro -> sin clasificar
+
+        despues = self._reporte()
+        self.assertAlmostEqual(
+            despues["gav"]["por_rubro"].get("combustible", 0)
+            - antes["gav"]["por_rubro"].get("combustible", 0),
+            20000, delta=0.01,
+        )
+        self.assertAlmostEqual(despues["gav"]["sin_clasificar"] - sin_clasificar_antes, 7000, delta=0.01)
+        # El gasto sin clasificar sumó a "sin_clasificar" pero NO al total
+        # de GAV -- solo el clasificado (20000) debe reflejarse en el total.
+        self.assertAlmostEqual(despues["gav"]["total"] - total_antes, 20000, delta=0.01)
+
+    def test_compra_de_emergencia_no_se_cuenta_como_gav_aunque_lleve_rubro(self):
+        """Una compra de emergencia (con producto_id) ingresa stock: su costo
+        ya se va a contar como costo de ventas el día que ese repuesto se
+        use en una OT, así que NO debe sumar también como gasto GAV -- eso
+        sería contar la misma plata dos veces."""
+        producto = self.client.post(
+            "/api/productos", json={"nombre": "Repuesto ER test", "stock_disponible": 0, "costo_compra": 0}
+        ).get_json()
+
+        antes = self._reporte()
+        total_gav_antes = antes["gav"]["total"]
+        sin_clasificar_antes = antes["gav"]["sin_clasificar"]
+
+        self._crear_gasto(
+            50000, rubro_gav="generales", dia="14",
+            producto_id=str(producto["id"]), cantidad="5",
+        )
+
+        despues = self._reporte()
+        self.assertAlmostEqual(despues["gav"]["total"], total_gav_antes, delta=0.01)
+        self.assertAlmostEqual(despues["gav"]["sin_clasificar"], sin_clasificar_antes, delta=0.01)
+
+    def test_datos_manuales_se_guardan_por_mes_y_entran_en_los_subtotales(self):
+        resp = self.client.post(
+            "/api/finanzas/estado-resultados/manual",
+            json={
+                "mes": self.MES, "otros_ingresos": 100000, "remuneraciones": 900000,
+                "arriendo": 200000, "gastos_financieros_intereses": 50000,
+                "impuesto_renta": 10000, "dividendos": 30000,
+            },
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        data = self._reporte()
+        self.assertAlmostEqual(data["ventas"]["otros_ingresos"], 100000, delta=0.01)
+        self.assertAlmostEqual(data["gav"]["remuneraciones"], 900000, delta=0.01)
+        self.assertAlmostEqual(data["gav"]["arriendo"], 200000, delta=0.01)
+        self.assertAlmostEqual(data["gastos_financieros"]["intereses"], 50000, delta=0.01)
+        self.assertAlmostEqual(data["impuesto_renta"], 10000, delta=0.01)
+        self.assertAlmostEqual(data["dividendos"], 30000, delta=0.01)
+
+        # Verifica que los subtotales realmente encadenen entre sí (no solo
+        # que cada campo manual se haya guardado suelto).
+        esperado_utilidad_bruta = data["ventas"]["total"] - data["costo_ventas"]["total"]
+        self.assertAlmostEqual(data["utilidad_bruta"], esperado_utilidad_bruta, delta=0.01)
+        esperado_operacional = data["utilidad_bruta"] - data["gav"]["total"]
+        self.assertAlmostEqual(data["utilidad_operacional"], esperado_operacional, delta=0.01)
+        esperado_antes_impuesto = data["utilidad_operacional"] - data["gastos_financieros"]["total"]
+        self.assertAlmostEqual(data["utilidad_antes_impuesto"], esperado_antes_impuesto, delta=0.01)
+        esperado_neta = data["utilidad_antes_impuesto"] - data["impuesto_renta"]
+        self.assertAlmostEqual(data["utilidad_neta"], esperado_neta, delta=0.01)
+        esperado_retenida = data["utilidad_neta"] - data["dividendos"]
+        self.assertAlmostEqual(data["utilidad_retenida"], esperado_retenida, delta=0.01)
+
+    def test_guardar_manual_de_nuevo_reemplaza_los_valores_del_mismo_mes(self):
+        self.client.post(
+            "/api/finanzas/estado-resultados/manual",
+            json={"mes": self.MES, "seguros": 15000},
+        )
+        primero = self._reporte()
+        self.assertAlmostEqual(primero["gav"]["seguros"], 15000, delta=0.01)
+
+        # Volver a guardar el mismo mes con seguros=0 debe REEMPLAZAR el
+        # valor anterior, no sumarse ni dejarlo como estaba.
+        self.client.post(
+            "/api/finanzas/estado-resultados/manual",
+            json={"mes": self.MES, "seguros": 0},
+        )
+        segundo = self._reporte()
+        self.assertAlmostEqual(segundo["gav"]["seguros"], 0, delta=0.01)
+
+    def test_manual_con_monto_negativo_es_rechazado(self):
+        resp = self.client.post(
+            "/api/finanzas/estado-resultados/manual",
+            json={"mes": self.MES, "arriendo": -1000},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

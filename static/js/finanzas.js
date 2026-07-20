@@ -164,6 +164,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     document.getElementById("vista-cxc").style.display = vista === "cxc" ? "block" : "none";
     document.getElementById("vista-cxp").style.display = vista === "cxp" ? "block" : "none";
     document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
+    document.getElementById("vista-estado-resultados").style.display = vista === "estado-resultados" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
       resumen: "Finanzas — Resumen",
@@ -171,6 +172,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
       cxc: "Finanzas — Cuentas por Cobrar",
       cxp: "Finanzas — Cuentas por Pagar",
       facturas: "Finanzas — Facturas",
+      "estado-resultados": "Finanzas — Estado de Resultados",
       reportes: "Finanzas — Reportes",
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
@@ -179,6 +181,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     if (vista === "cxc") { cargarCxc(); cargarCxcAbonos(); }
     if (vista === "cxp") cargarCxp();
     if (vista === "facturas") cargarFacturasPendientesRecepcion();
+    if (vista === "estado-resultados") cargarEstadoResultados();
   });
 });
 
@@ -430,6 +433,7 @@ document.getElementById("btn-nuevo-gasto").addEventListener("click", async () =>
   document.getElementById("form-caja-gasto").reset();
   document.getElementById("cg-id").value = "";
   document.getElementById("cg-emergencia-campos").style.display = "none";
+  document.getElementById("cg-rubro-gav-wrap").style.display = "block";
   document.getElementById("modal-caja-gasto-titulo").textContent = "Nuevo gasto";
   document.getElementById("cg-bloqueado-aviso").style.display = "none";
   document.getElementById("cg-comprobante-actual").style.display = "none";
@@ -449,6 +453,12 @@ document.getElementById("btn-nuevo-gasto").addEventListener("click", async () =>
 
 document.getElementById("cg-emergencia").addEventListener("change", (e) => {
   document.getElementById("cg-emergencia-campos").style.display = e.target.checked ? "block" : "none";
+  // Una compra de emergencia ingresa stock -- su costo ya se va a contar
+  // solo como costo de ventas cuando ese repuesto se use en una OT (ver
+  // ventas_y_costo_ot_mes en modulos/operativo.py), así que no tiene
+  // sentido clasificarla también como gasto GAV: se duplicaría la plata.
+  document.getElementById("cg-rubro-gav-wrap").style.display = e.target.checked ? "none" : "block";
+  if (e.target.checked) document.getElementById("cg-rubro-gav").value = "";
 });
 
 function habilitarFormularioCaja(prefijo, habilitado) {
@@ -468,6 +478,7 @@ function abrirEdicionCajaGasto(id) {
   document.getElementById("cg-categoria").value = m.categoria || "";
   document.getElementById("cg-proveedor").value = m.proveedor || "";
   document.getElementById("cg-descripcion").value = m.descripcion || "";
+  document.getElementById("cg-rubro-gav").value = m.rubro_gav || "";
   document.getElementById("cg-comprobante-actual").style.display = m.tiene_comprobante ? "block" : "none";
   document.getElementById("cg-comprobante-actual").innerHTML = m.tiene_comprobante
     ? `Ya tiene un comprobante cargado. <a href="/api/caja/comprobante/${encodeURIComponent(m.comprobante_archivo)}" target="_blank" rel="noopener">Verlo</a> — sube uno nuevo para reemplazarlo.`
@@ -475,6 +486,7 @@ function abrirEdicionCajaGasto(id) {
   // La compra de emergencia queda fija al crear el gasto (ya generó su
   // propio movimiento de inventario); no tiene sentido editarla después.
   document.getElementById("cg-emergencia-wrap").style.display = m.movimiento_inventario_id ? "none" : "block";
+  document.getElementById("cg-rubro-gav-wrap").style.display = m.movimiento_inventario_id ? "none" : "block";
   document.getElementById("modal-caja-gasto-titulo").textContent = "Editar gasto";
 
   const bloqueo = m.bloqueado_motivo;
@@ -515,6 +527,7 @@ document.getElementById("form-caja-gasto").addEventListener("submit", async (e) 
   formData.append("medio_pago", document.getElementById("cg-medio-pago").value);
   formData.append("categoria", document.getElementById("cg-categoria").value);
   formData.append("proveedor", document.getElementById("cg-proveedor").value);
+  formData.append("rubro_gav", document.getElementById("cg-rubro-gav").value);
   formData.append("descripcion", document.getElementById("cg-descripcion").value);
   const archivo = document.getElementById("cg-comprobante").files[0];
   if (archivo) formData.append("comprobante", archivo);
@@ -1780,6 +1793,170 @@ document.getElementById("btn-reporte-caja").addEventListener("click", () => {
 });
 document.getElementById("btn-reporte-caja-pdf").addEventListener("click", () => {
   window.location.href = `/api/reportes/caja-gastos/pdf?${rangoFechasParams("reportes-caja-desde", "reportes-caja-hasta")}`;
+});
+
+// ---------------------------------------------------------------------------
+// Estado de Resultados mensual
+// ---------------------------------------------------------------------------
+
+const RUBRO_GAV_LABEL = {
+  generales: "Gastos generales",
+  servicios_basicos: "Servicios básicos",
+  combustible: "Combustible",
+  bancarios: "Gastos bancarios",
+  mantencion: "Mantención y equipos",
+  otros: "Otros gastos",
+};
+
+state.erUltimoReporte = null;
+
+function mesActualInput() {
+  const hoy = new Date();
+  return `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// fmtMoney (compartido) antepone "$" incluso a números negativos (queda
+// "$-123") -- acá el signo importa mucho más (utilidades negativas son
+// esperables en un Estado de Resultados), así que se arma aparte con el
+// signo antes del "$", como se acostumbra a leer un balance.
+function erMoney(n) {
+  const negativo = n < 0;
+  return `${negativo ? "-" : ""}$${Math.round(Math.abs(n)).toLocaleString("es-CL")}`;
+}
+
+function erFila(label, valor, cls = "") {
+  const negClase = valor < 0 ? " er-negativo" : "";
+  return `<tr class="${cls}"><td>${escapeHtml(label)}</td><td class="num${negClase}">${erMoney(valor)}</td></tr>`;
+}
+
+function erFilaPct(label, valor, pct, cls = "") {
+  const negClase = valor < 0 ? " er-negativo" : "";
+  const pctTxt = pct === null || pct === undefined ? "" : ` <span class="er-pct">(${pct}%)</span>`;
+  return `<tr class="${cls}"><td>${escapeHtml(label)}</td><td class="num${negClase}">${erMoney(valor)}${pctTxt}</td></tr>`;
+}
+
+function renderEstadoResultados(d) {
+  const filasGav = Object.entries(d.gav.por_rubro).map(
+    ([rubro, monto]) => erFila(RUBRO_GAV_LABEL[rubro] || rubro, monto)
+  ).join("");
+
+  const avisoSinClasificar = d.gav.sin_clasificar > 0
+    ? `<p class="ayuda-inline ayuda-inline--bloqueado">Hay ${fmtMoney(d.gav.sin_clasificar)} en gastos de Caja Chica de este mes sin rubro asignado — no están incluidos en el total de abajo. Edítalos en la pestaña "Caja Chica" y asígnales un rubro para que aparezcan acá.</p>`
+    : "";
+
+  const html = `
+    <table class="tabla er-tabla">
+      <tbody>
+        <tr class="er-seccion"><td colspan="2">VENTAS</td></tr>
+        ${erFila("Ventas Operativo (OTs entregadas)", d.ventas.ventas_ot)}
+        ${erFila("Ventas Convertidores (directas)", d.ventas.ventas_ct)}
+        ${erFila("Otros ingresos", d.ventas.otros_ingresos)}
+        ${erFila("Total Ventas", d.ventas.total, "er-subtotal")}
+
+        <tr class="er-seccion"><td colspan="2">COSTO DE VENTAS</td></tr>
+        ${erFila("Repuestos", d.costo_ventas.costo_repuestos)}
+        ${erFila("Mano de obra (con costo cargado)", d.costo_ventas.costo_mano_obra)}
+        ${erFila("Convertidores de torque internos", d.costo_ventas.costo_convertidores_internos)}
+        ${erFila("Costo de convertidores vendidos directo", d.costo_ventas.costo_ct_total)}
+        ${erFila("Total Costo de Ventas", d.costo_ventas.total, "er-subtotal")}
+
+        ${erFilaPct("UTILIDAD BRUTA", d.utilidad_bruta, d.margen_bruto_pct, "er-total")}
+
+        <tr class="er-seccion"><td colspan="2">GASTOS DE ADMINISTRACIÓN Y VENTAS (GAV)</td></tr>
+        ${filasGav || `<tr><td colspan="2" class="vacio">Sin gastos de Caja Chica clasificados este mes</td></tr>`}
+        ${erFila("Remuneraciones", d.gav.remuneraciones)}
+        ${erFila("Bono remuneraciones", d.gav.bono_remuneraciones)}
+        ${erFila("Otras remuneraciones", d.gav.otras_remuneraciones)}
+        ${erFila("Previred", d.gav.previred)}
+        ${erFila("Arriendo", d.gav.arriendo)}
+        ${erFila("Seguros", d.gav.seguros)}
+        ${erFila("Total GAV", d.gav.total, "er-subtotal")}
+
+        ${erFila("UTILIDAD DE OPERACIÓN", d.utilidad_operacional, "er-total")}
+
+        <tr class="er-seccion"><td colspan="2">GASTOS FINANCIEROS</td></tr>
+        ${erFila("Intereses (préstamos)", d.gastos_financieros.intereses)}
+        ${erFila("Factoring", d.gastos_financieros.factoring)}
+        ${erFila("Comisiones bancarias", d.gastos_financieros.comisiones)}
+        ${erFila("Total Gastos Financieros", d.gastos_financieros.total, "er-subtotal")}
+
+        ${erFila("UTILIDAD ANTES DE IMPUESTO", d.utilidad_antes_impuesto, "er-total")}
+        ${erFila("Impuesto a la renta", d.impuesto_renta)}
+        ${erFilaPct("UTILIDAD NETA", d.utilidad_neta, d.margen_neto_pct, "er-total")}
+        ${erFila("Asignación de dividendos", d.dividendos)}
+        ${erFila("UTILIDAD RETENIDA", d.utilidad_retenida, "er-total")}
+      </tbody>
+    </table>
+    ${avisoSinClasificar}
+  `;
+  document.getElementById("er-reporte").innerHTML = html;
+}
+
+async function cargarEstadoResultados() {
+  const inputMes = document.getElementById("er-mes");
+  if (!inputMes.value) inputMes.value = mesActualInput();
+  const mes = inputMes.value;
+  document.getElementById("er-reporte").innerHTML = "Cargando…";
+  try {
+    const d = await api(`/api/finanzas/estado-resultados?mes=${encodeURIComponent(mes)}`);
+    state.erUltimoReporte = d;
+    renderEstadoResultados(d);
+  } catch (e) {
+    document.getElementById("er-reporte").innerHTML = `<p class="ayuda-inline ayuda-inline--bloqueado">${escapeHtml(e.message)}</p>`;
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("er-mes").addEventListener("change", cargarEstadoResultados);
+
+document.getElementById("btn-er-imprimir").addEventListener("click", () => window.print());
+
+document.getElementById("btn-er-editar-manual").addEventListener("click", () => {
+  const mes = document.getElementById("er-mes").value || mesActualInput();
+  const manual = (state.erUltimoReporte && state.erUltimoReporte.mes === mes) ? state.erUltimoReporte.manual : null;
+  document.getElementById("erm-mes-titulo").textContent = mes;
+  document.getElementById("form-er-manual").dataset.mes = mes;
+  document.getElementById("erm-otros-ingresos").value = manual ? manual.otros_ingresos : 0;
+  document.getElementById("erm-remuneraciones").value = manual ? manual.remuneraciones : 0;
+  document.getElementById("erm-bono-remuneraciones").value = manual ? manual.bono_remuneraciones : 0;
+  document.getElementById("erm-otras-remuneraciones").value = manual ? manual.otras_remuneraciones : 0;
+  document.getElementById("erm-previred").value = manual ? manual.previred : 0;
+  document.getElementById("erm-arriendo").value = manual ? manual.arriendo : 0;
+  document.getElementById("erm-seguros").value = manual ? manual.seguros : 0;
+  document.getElementById("erm-gf-intereses").value = manual ? manual.gastos_financieros_intereses : 0;
+  document.getElementById("erm-gf-factoring").value = manual ? manual.gastos_financieros_factoring : 0;
+  document.getElementById("erm-gf-comisiones").value = manual ? manual.gastos_financieros_comisiones : 0;
+  document.getElementById("erm-impuesto-renta").value = manual ? manual.impuesto_renta : 0;
+  document.getElementById("erm-dividendos").value = manual ? manual.dividendos : 0;
+  abrirModal("modal-er-manual");
+});
+
+document.getElementById("form-er-manual").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const mes = e.target.dataset.mes;
+  const payload = {
+    mes,
+    otros_ingresos: Number(document.getElementById("erm-otros-ingresos").value || 0),
+    remuneraciones: Number(document.getElementById("erm-remuneraciones").value || 0),
+    bono_remuneraciones: Number(document.getElementById("erm-bono-remuneraciones").value || 0),
+    otras_remuneraciones: Number(document.getElementById("erm-otras-remuneraciones").value || 0),
+    previred: Number(document.getElementById("erm-previred").value || 0),
+    arriendo: Number(document.getElementById("erm-arriendo").value || 0),
+    seguros: Number(document.getElementById("erm-seguros").value || 0),
+    gastos_financieros_intereses: Number(document.getElementById("erm-gf-intereses").value || 0),
+    gastos_financieros_factoring: Number(document.getElementById("erm-gf-factoring").value || 0),
+    gastos_financieros_comisiones: Number(document.getElementById("erm-gf-comisiones").value || 0),
+    impuesto_renta: Number(document.getElementById("erm-impuesto-renta").value || 0),
+    dividendos: Number(document.getElementById("erm-dividendos").value || 0),
+  };
+  try {
+    await api("/api/finanzas/estado-resultados/manual", { method: "POST", body: JSON.stringify(payload) });
+    toast("Datos del mes guardados");
+    cerrarModal("modal-er-manual");
+    await cargarEstadoResultados();
+  } catch (e2) {
+    toast(e2.message, true);
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -1353,6 +1353,38 @@ def eliminar_item_convertidor(convertidor_id, item_id):
 # Dashboard
 # ---------------------------------------------------------------------------
 
+def ventas_y_costo_ct_mes(db, prefijo_mes):
+    """Ventas y costo de ventas de convertidores 'cliente_directo' (el único
+    origen que genera venta propia, ver docstring del módulo más arriba)
+    para UN mes cualquiera ('YYYY-MM') -- versión parametrizada del mismo
+    cálculo que dashboard_convertidores() hace para "el mes en curso"
+    (valor_cerrado_mes / gasto_externos_mes). La usa el Estado de Resultados
+    de Finanzas para poder revisar cualquier mes, no solo el actual.
+
+    Los convertidores internos (desde_ot_auto/desde_garantia) NO se incluyen
+    acá a propósito -- ver la nota larga en dashboard_convertidores(): su
+    costo ya se cuenta como gasto dentro de Operativo/Garantías, incluirlo
+    también acá sería contar la misma plata dos veces."""
+    rows = db.execute(
+        "SELECT id FROM convertidores_torque WHERE origen_tipo = 'cliente_directo' "
+        "AND estado IN ({}) AND substr(fecha_cierre, 1, 7) = ?".format(
+            ", ".join("?" for _ in ESTADOS_CONVERTIDOR_CERRADOS)
+        ),
+        list(ESTADOS_CONVERTIDOR_CERRADOS) + [prefijo_mes],
+    ).fetchall()
+
+    ventas_ct = 0.0
+    costo_ct = 0.0
+    for r in rows:
+        conv = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (r["id"],)).fetchone()
+        costo_real = _convertidor_costo_total(db, r["id"]) or 0
+        precio_venta = conv["precio_venta"] if conv["precio_venta"] not in (None, "") else costo_real
+        ventas_ct += precio_venta or 0
+        costo_ct += costo_real
+
+    return {"ventas_ct": round(ventas_ct, 2), "costo_ct": round(costo_ct, 2)}
+
+
 @bp.route("/api/convertidores/dashboard", methods=["GET"])
 @requiere_rol("convertidores")
 def dashboard_convertidores():

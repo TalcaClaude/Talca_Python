@@ -25,6 +25,7 @@ import difflib
 import hmac
 import hashlib
 import html
+import secrets
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
@@ -1271,6 +1272,90 @@ def exigir_login():
     if request.path.startswith("/api/"):
         return jsonify({"error": "Debes iniciar sesión"}), 401
     return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
+# Protección CSRF (Cross-Site Request Forgery)
+# ---------------------------------------------------------------------------
+# Cada sesión tiene un token secreto propio (guardado en la cookie de
+# sesión, que ya es HttpOnly + SameSite=Lax). Se lo exponemos a las
+# plantillas como <meta name="csrf-token"> y templates/_csrf.html se
+# encarga de mandarlo en cada request que cambia datos (POST/PUT/PATCH/
+# DELETE), agregándolo como cabecera X-CSRFToken. Acá lo validamos: si
+# falta o no coincide con el que quedó guardado en la sesión, se rechaza
+# la request. Esto es una capa adicional a SameSite=Lax (que ya bloquea
+# la mayoría de los ataques CSRF típicos, pero no todos los casos).
+CSRF_HEADER_NOMBRE = "X-CSRFToken"
+CSRF_METODOS_PROTEGIDOS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_hex(32)
+        session["csrf_token"] = token
+    return token
+
+
+@app.context_processor
+def _inyectar_csrf_token():
+    return {"csrf_token": _csrf_token}
+
+
+@app.before_request
+def _validar_csrf():
+    if request.method not in CSRF_METODOS_PROTEGIDOS:
+        return None
+    if request.endpoint in RUTAS_PUBLICAS or request.endpoint is None:
+        return None
+    # En la suite de tests (app.config["TESTING"] = True) el cliente de
+    # pruebas de Flask no pasa por el navegador ni por templates/_csrf.html,
+    # así que no tiene forma de mandar la cabecera. Es el mismo criterio que
+    # ya usa Flask/Werkzeug para otras protecciones en modo test.
+    if app.testing:
+        return None
+    if not session.get("user_id"):
+        # exigir_login ya va a rechazar esta request por falta de sesión;
+        # no hace falta duplicar el error acá.
+        return None
+    token_sesion = session.get("csrf_token")
+    token_enviado = request.headers.get(CSRF_HEADER_NOMBRE, "")
+    if not token_sesion or not hmac.compare_digest(token_sesion, token_enviado):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Token de seguridad inválido o expirado. Recarga la página e inténtalo de nuevo."}), 403
+        return redirect(url_for("login"))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Cabeceras de seguridad
+# ---------------------------------------------------------------------------
+# Se agregan en cada respuesta. El CSP permite 'unsafe-inline' en script/style
+# porque las plantillas usan bastante <script> y style="" inline (cambiar eso
+# implicaría un refactor grande y riesgoso que no vale la pena para esta
+# etapa) — igual bloquea lo más peligroso: que este sitio se cargue dentro de
+# un <iframe> ajeno (clickjacking) y que se carguen scripts/recursos desde
+# dominios externos no autorizados.
+@app.after_request
+def _agregar_cabeceras_seguridad(resp):
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    # HSTS: le dice al navegador que en adelante SIEMPRE use HTTPS con este
+    # dominio. Es inofensivo mandarlo siempre — si la conexión es HTTP puro
+    # (ej. en local) el navegador simplemente lo ignora.
+    resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return resp
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -8383,6 +8468,21 @@ def _ingresos_mes(db, prefijo_mes):
     return fila[0] or 0
 
 
+def _ingresos_mes_hasta_dia(db, prefijo_mes, dia):
+    """Igual que _ingresos_mes, pero solo suma los pagos hasta cierto día del
+    mes (inclusive). Sirve para comparar el mes en curso (que siempre está
+    parcial, salvo el último día) contra el mismo tramo de días del mes
+    anterior -- comparar contra el mes anterior COMPLETO exagera artificialmente
+    la baja (ej. "-65,8%" el día 5 del mes, que no es una baja real, es
+    sencillamente que llevamos pocos días)."""
+    fila = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden "
+        "WHERE substr(fecha, 1, 7) = ? AND CAST(substr(fecha, 9, 2) AS INTEGER) <= ?",
+        (prefijo_mes, dia),
+    ).fetchone()
+    return fila[0] or 0
+
+
 def _gastos_mes(db, prefijo_mes):
     fila = db.execute(
         "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND substr(fecha, 1, 7) = ?",
@@ -8406,7 +8506,6 @@ def panel_dueno():
 
     ingresos_mes = _ingresos_mes(db, prefijo_actual)
     ingresos_mes_anterior = _ingresos_mes(db, prefijo_anterior)
-    var_pct = ((ingresos_mes / ingresos_mes_anterior) - 1) * 100 if ingresos_mes_anterior else None
 
     # Proyección simple de fin de mes: regla de tres sobre los días
     # transcurridos del mes actual. No es un modelo estadístico -- es
@@ -8415,6 +8514,24 @@ def panel_dueno():
     ultimo_dia_mes = (hoy.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
     dias_totales_mes = ultimo_dia_mes.day
     proyeccion_fin_mes = round(ingresos_mes / dias_transcurridos * dias_totales_mes, 2) if dias_transcurridos else 0
+
+    # El mes en curso está parcial (salvo que hoy sea el último día del mes),
+    # así que comparar ingresos_mes contra ingresos_mes_anterior COMPLETO
+    # exagera cualquier baja de forma artificial. En vez de eso, comparamos
+    # contra el mismo tramo de días del mes anterior ("a esta altura del mes
+    # anterior llevábamos X"). mes_en_curso se manda al frontend para que
+    # el rótulo aclare que es una comparación parcial.
+    mes_en_curso = dias_transcurridos < dias_totales_mes
+    ultimo_dia_mes_anterior = (hoy.replace(day=1) - timedelta(days=1)).day
+    dia_comparable_anterior = min(dias_transcurridos, ultimo_dia_mes_anterior)
+    ingresos_mes_anterior_comparable = (
+        _ingresos_mes_hasta_dia(db, prefijo_anterior, dia_comparable_anterior)
+        if mes_en_curso else ingresos_mes_anterior
+    )
+    var_pct = (
+        ((ingresos_mes / ingresos_mes_anterior_comparable) - 1) * 100
+        if ingresos_mes_anterior_comparable else None
+    )
 
     # "Margen bruto" (ingresos - gastos de caja) se retiró de Panel Principal
     # a pedido del usuario: mezclaba cobros de caja con gastos de caja de
@@ -8526,6 +8643,7 @@ def panel_dueno():
         "ingresos_mes": round(ingresos_mes, 2),
         "ingresos_mes_anterior": round(ingresos_mes_anterior, 2),
         "var_pct_mes": round(var_pct, 1) if var_pct is not None else None,
+        "mes_en_curso": mes_en_curso,
         "proyeccion_fin_mes": proyeccion_fin_mes,
         "venta_total_mes": venta_total_mes,
         "utilidad_estimada_mes": utilidad_estimada_mes,

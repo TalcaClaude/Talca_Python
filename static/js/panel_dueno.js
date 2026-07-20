@@ -31,7 +31,11 @@ async function cargarPanelDueno() {
       elVar.textContent = "sin datos del mes anterior";
     } else {
       const signo = d.var_pct_mes >= 0 ? "▲" : "▼";
-      elVar.textContent = `${signo} ${Math.abs(d.var_pct_mes)}% vs mes anterior`;
+      // Mientras el mes esté en curso, la comparación es contra el mismo
+      // tramo de días del mes anterior (no el mes anterior completo) para
+      // no mostrar una baja artificial solo porque llevamos pocos días.
+      const referencia = d.mes_en_curso ? "vs mismos días del mes anterior" : "vs mes anterior";
+      elVar.textContent = `${signo} ${Math.abs(d.var_pct_mes)}% ${referencia}`;
       elVar.classList.add(d.var_pct_mes >= 0 ? "kpi-delta--up" : "kpi-delta--down");
     }
 

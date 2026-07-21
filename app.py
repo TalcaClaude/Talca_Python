@@ -1131,6 +1131,23 @@ def init_db():
             )
         db.commit()
 
+    # ---- Migración 23: aviso de "pruebas de ruta por revisar" para
+    # Operativo -- mismo mecanismo que ya existe para las sugerencias de
+    # diagnóstico (sugerencias_diagnostico.atendida), aplicado a las
+    # entradas de la bitácora de pruebas de ruta que llegan por WhatsApp
+    # (perfil 'probador_de_autos', ver Migración 20/21). Marcar una entrada
+    # como atendida SOLO saca el aviso pendiente -- la entrada sigue
+    # apareciendo para siempre en la bitácora de la OT, igual que atender
+    # una sugerencia no borra nada del diagnóstico. Las entradas cargadas
+    # desde la web (origen='web') no generan aviso -- si alguien del taller
+    # la escribió a mano ahí mismo, no hace falta notificarle a él mismo.
+    columnas_pruebas_ruta = [c[1] for c in db.execute("PRAGMA table_info(pruebas_ruta)").fetchall()]
+    if "atendida" not in columnas_pruebas_ruta:
+        db.execute("ALTER TABLE pruebas_ruta ADD COLUMN atendida INTEGER NOT NULL DEFAULT 0")
+        db.execute("ALTER TABLE pruebas_ruta ADD COLUMN atendida_por TEXT NOT NULL DEFAULT ''")
+        db.execute("ALTER TABLE pruebas_ruta ADD COLUMN atendida_en TEXT NOT NULL DEFAULT ''")
+        db.commit()
+
     # ---- Índices de rendimiento: movimientos es la tabla que más va a
     # crecer con los años (cada entrada, salida y pérdida queda ahí para
     # siempre), y prácticamente todas las pantallas de análisis (Rotación,
@@ -5275,6 +5292,90 @@ def _llamar_claude_generar_diagnostico_cliente(sintoma, diagnostico_tecnico):
     raise RuntimeError("La IA no devolvió el resumen en el formato esperado.")
 
 
+def _llamar_claude_extraer_diagnostico_dictado(texto_transcrito):
+    """Separa una transcripción de audio dictado directo en la pestaña
+    Diagnóstico de una OT (ver /api/operativo/ia/dictado-diagnostico más
+    abajo) en los campos 'síntoma' y 'diagnóstico técnico' -- mismo tipo de
+    llamada puntual y acotada que _llamar_claude_generar_diagnostico_cliente
+    (una sola herramienta forzada, no el intérprete grande de WhatsApp
+    _llamar_claude_interpretar_mensaje_agente, que además identifica la OT y
+    ejecuta acciones -- acá la OT ya está abierta en pantalla, así que solo
+    hace falta separar el texto en los dos campos). Reusa las mismas
+    descripciones de campo que ya usa el agente de WhatsApp
+    (CAMPOS_DIAGNOSTICO_AGENTE) para que la redacción sea consistente sea
+    cual sea el camino. Devuelve un dict {"sintoma": ..., "diagnostico_tecnico": ...}
+    (strings vacíos para lo que el dictado no haya mencionado) o lanza
+    RuntimeError con un mensaje explicable para mostrar en la interfaz."""
+    if requests is None:
+        raise RuntimeError("Falta la librería 'requests' en el servidor.")
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("Falta la variable de entorno ANTHROPIC_API_KEY en el servidor.")
+
+    texto_transcrito = (texto_transcrito or "").strip()
+    if not texto_transcrito:
+        return {"sintoma": "", "diagnostico_tecnico": ""}
+
+    herramienta = {
+        "name": "completar_diagnostico",
+        "description": "Registra el síntoma y el diagnóstico técnico separados a partir de un dictado hablado.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sintoma": {"type": "string", "description": CAMPOS_DIAGNOSTICO_AGENTE["sintoma"]},
+                "diagnostico_tecnico": {"type": "string", "description": CAMPOS_DIAGNOSTICO_AGENTE["diagnostico_tecnico"]},
+            },
+            "required": ["sintoma", "diagnostico_tecnico"],
+        },
+    }
+    payload = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 500,
+        "tools": [herramienta],
+        "tool_choice": {"type": "tool", "name": "completar_diagnostico"},
+        "messages": [{
+            "role": "user",
+            "content": (
+                f"Transcripción de un audio dictado por un mecánico directo en el sistema, describiendo el "
+                f"diagnóstico de una orden de trabajo: \"{texto_transcrito}\"\n\n"
+                "Usa la herramienta completar_diagnostico para separar esta transcripción en 'sintoma' (lo que "
+                "el cliente reportó que le pasaba al vehículo, si el dictado lo menciona) y "
+                "'diagnostico_tecnico' (lo que el mecánico encontró: falla, componentes dañados, mediciones, "
+                "resultado de pruebas). Deja un campo como texto vacío \"\" si el dictado no menciona esa parte "
+                "-- no inventes contenido que no esté en la transcripción. No repitas la transcripción completa "
+                "en los dos campos si ya se puede distinguir cuál parte es cuál."
+            ),
+        }],
+    }
+    try:
+        resp = requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"No se pudo contactar al servicio de IA: {e}")
+
+    if resp.status_code >= 400:
+        detalle = resp.text[:300] if resp.text else f"HTTP {resp.status_code}"
+        raise RuntimeError(f"El servicio de IA respondió con error ({resp.status_code}): {detalle}")
+
+    data = resp.json()
+    for bloque in data.get("content", []):
+        if bloque.get("type") == "tool_use" and bloque.get("name") == "completar_diagnostico":
+            entrada = bloque.get("input") or {}
+            return {
+                "sintoma": entrada.get("sintoma", "") or "",
+                "diagnostico_tecnico": entrada.get("diagnostico_tecnico", "") or "",
+            }
+
+    raise RuntimeError("La IA no devolvió los campos en el formato esperado.")
+
+
 def _llamar_claude_interpretar_mensaje_agente(texto_mensaje, ordenes_abiertas):
     """Usa Claude (misma integración por HTTPS directo que
     _llamar_claude_vision_factura, más arriba) para traducir un mensaje de
@@ -5602,6 +5703,30 @@ def _agente_listar_todas_sugerencias_pendientes(db):
         LEFT JOIN equipos e ON e.id = o.equipo_id
         WHERE s.atendida = 0
         ORDER BY s.creado_en DESC
+        """
+    ).fetchall()
+    return [dict(f) for f in filas]
+
+
+def _operativo_listar_todas_pruebas_ruta_pendientes(db):
+    """Igual que _agente_listar_todas_sugerencias_pendientes, pero para la
+    bitácora de pruebas de ruta (tabla pruebas_ruta, Migración 20/23):
+    todas las entradas llegadas por WhatsApp (perfil 'probador_de_autos')
+    que todavía no se marcaron como revisadas, con la info de la OT para
+    que la lista sea legible sin otra llamada."""
+    filas = db.execute(
+        """
+        SELECT
+            pr.*,
+            o.estado AS ot_estado,
+            c.nombre AS cliente_nombre,
+            e.identificador AS patente
+        FROM pruebas_ruta pr
+        JOIN ordenes_trabajo o ON o.id = pr.orden_id
+        LEFT JOIN clientes c ON c.id = o.cliente_id
+        LEFT JOIN equipos e ON e.id = o.equipo_id
+        WHERE pr.atendida = 0 AND pr.origen = 'whatsapp'
+        ORDER BY pr.creado_en DESC
         """
     ).fetchall()
     return [dict(f) for f in filas]
@@ -6213,14 +6338,18 @@ def atender_sugerencia_diagnostico(sugerencia_id):
 @app.route("/api/notificaciones/resumen", methods=["GET"])
 @requiere_rol("operativo")
 def notificaciones_resumen():
-    # Hoy 'sugerencias_diagnostico' es la única categoría, así que basta con
-    # exigir 'operativo' acá -- si el día de mañana se suma una categoría de
-    # otro módulo (ver comentario de la sección de arriba), este endpoint va
-    # a necesitar volver a ser público y filtrar por categoría según el rol,
-    # en vez de un solo candado para todo.
+    # 'sugerencias_diagnostico' y 'pruebas_ruta' son ambas del mismo rol
+    # (operativo), así que basta con exigirlo una vez acá -- si el día de
+    # mañana se suma una categoría de otro módulo (ver comentario de la
+    # sección de arriba), este endpoint va a necesitar volver a ser público
+    # y filtrar por categoría según el rol, en vez de un solo candado para
+    # todo.
     db = get_db()
-    conteo = db.execute("SELECT COUNT(*) AS n FROM sugerencias_diagnostico WHERE atendida = 0").fetchone()["n"]
-    return jsonify({"sugerencias_diagnostico": conteo})
+    sugerencias = db.execute("SELECT COUNT(*) AS n FROM sugerencias_diagnostico WHERE atendida = 0").fetchone()["n"]
+    pruebas_ruta = db.execute(
+        "SELECT COUNT(*) AS n FROM pruebas_ruta WHERE atendida = 0 AND origen = 'whatsapp'"
+    ).fetchone()["n"]
+    return jsonify({"sugerencias_diagnostico": sugerencias, "pruebas_ruta": pruebas_ruta})
 
 
 @app.route("/api/notificaciones/sugerencias-diagnostico", methods=["GET"])
@@ -6228,6 +6357,33 @@ def notificaciones_resumen():
 def notificaciones_sugerencias_diagnostico():
     db = get_db()
     return jsonify(_agente_listar_todas_sugerencias_pendientes(db))
+
+
+@app.route("/api/notificaciones/pruebas-ruta", methods=["GET"])
+@requiere_rol("operativo")
+def notificaciones_pruebas_ruta():
+    db = get_db()
+    return jsonify(_operativo_listar_todas_pruebas_ruta_pendientes(db))
+
+
+@app.route("/api/operativo/pruebas-ruta/<int:prueba_id>/atender", methods=["POST"])
+@requiere_rol("operativo")
+def atender_prueba_ruta(prueba_id):
+    """Marca una entrada de la bitácora de pruebas de ruta como revisada --
+    igual que atender una sugerencia de diagnóstico, esto NO borra ni
+    modifica la entrada en sí (sigue apareciendo para siempre en la
+    bitácora de la OT), solo saca el aviso pendiente de la campanita."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM pruebas_ruta WHERE id = ?", (prueba_id,)).fetchone()
+    if not fila:
+        return jsonify({"error": "No existe esa entrada de la bitácora"}), 404
+    db.execute(
+        "UPDATE pruebas_ruta SET atendida = 1, atendida_por = ?, atendida_en = ? WHERE id = ?",
+        (usuario_actual(), now_iso(), prueba_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM pruebas_ruta WHERE id = ?", (prueba_id,)).fetchone()
+    return jsonify(dict(actualizada))
 
 
 @app.route("/api/operativo/ia/diagnostico-cliente", methods=["POST"])
@@ -6251,6 +6407,50 @@ def ia_diagnostico_cliente():
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 400
     return jsonify({"diagnostico_cliente": texto})
+
+
+@app.route("/api/operativo/ia/dictado-diagnostico", methods=["POST"])
+@requiere_rol("operativo")
+def ia_dictado_diagnostico():
+    """Transcribe un audio dictado directo desde la pestaña Diagnóstico de
+    una OT (multipart/form-data, campo 'audio') y separa la transcripción
+    en 'síntoma' y 'diagnóstico técnico' -- el mismo tipo de dictado que ya
+    se puede hacer por WhatsApp, pero ahora también manual, sin necesitar
+    el celular del mecánico (ver _transcribir_audio_whatsapp y
+    _llamar_claude_extraer_diagnostico_dictado arriba). Nunca guarda nada
+    solo: la pantalla recibe el texto y la persona decide si lo usa,
+    revisa y guarda con el botón "Guardar diagnóstico" de siempre -- mismo
+    criterio de autocompletar-sin-pisar que el resumen para el cliente.
+
+    Si la transcripción funciona pero falla la separación en campos (ej. la
+    IA de texto no responde), no se pierde el trabajo de grabar: se
+    devuelve igual la transcripción cruda en 'transcripcion' junto con un
+    'aviso', para que la persona pueda copiarla a mano."""
+    archivo = request.files.get("audio")
+    if not archivo or not archivo.filename:
+        return jsonify({"error": "Falta el archivo de audio"}), 400
+
+    audio_bytes = archivo.read()
+    try:
+        texto_transcrito = _transcribir_audio_whatsapp(audio_bytes, archivo.mimetype)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        campos = _llamar_claude_extraer_diagnostico_dictado(texto_transcrito)
+    except RuntimeError as e:
+        return jsonify({
+            "transcripcion": texto_transcrito,
+            "sintoma": "",
+            "diagnostico_tecnico": "",
+            "aviso": f"Se transcribió el audio pero no se pudo separar en campos automáticamente: {e}",
+        })
+
+    return jsonify({
+        "transcripcion": texto_transcrito,
+        "sintoma": campos["sintoma"],
+        "diagnostico_tecnico": campos["diagnostico_tecnico"],
+    })
 
 
 @app.route("/api/agente/simular-mensaje", methods=["POST"])

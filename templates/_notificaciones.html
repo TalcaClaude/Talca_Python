@@ -1,14 +1,22 @@
 <!-- Campanita de notificaciones global (ver static/js/notificaciones.js).
-     Hoy solo avisa sugerencias de diagnóstico dejadas por mecánicos de
-     perfil restringido por WhatsApp (ver migración 16 en app.py), sin
-     revisar todavía -- pensada desde el principio para sumar más
-     categorías más adelante (una por rol: facturas para bodega, CxC/CxP
-     próximas para finanzas, stock crítico para logística), sin tener que
-     rehacer el mecanismo. El propio script decide si mostrarse u
-     ocultarse según el rol de la sesión (por ahora: admin/operativo, que
-     son quienes revisan diagnóstico) -- se incluye en todas las plantillas
-     autenticadas igual que _alerta_facturas_pendientes.html, para no
-     depender de en qué módulo esté parado quien tiene que verla. -->
+     Avisa dos cosas para Operativo: sugerencias de diagnóstico dejadas por
+     mecánicos de perfil restringido por WhatsApp (ver migración 16 en
+     app.py) y entradas nuevas de la bitácora de pruebas de ruta dejadas
+     por el perfil 'probador_de_autos' (ver migración 20/21/23) -- ambas
+     sin revisar todavía. Pensada desde el principio para sumar más
+     categorías más adelante (una por rol: CxC/CxP próximas para finanzas,
+     stock crítico para logística), sin tener que rehacer el mecanismo. El
+     propio script decide si mostrarse u ocultarse según el rol de la
+     sesión (por ahora: admin/operativo, que son quienes revisan estas dos
+     cosas) -- se incluye en todas las plantillas autenticadas igual que
+     _alerta_facturas_pendientes.html, para no depender de en qué módulo
+     esté parado quien tiene que verla.
+
+     Además del ícono de campanita en el topbar, hay un botón flotante
+     abajo a la derecha (mismo estilo que el de facturas pendientes de
+     Bodega) que aparece mientras haya algo sin revisar de cualquiera de
+     las dos categorías -- para que Operativo lo note sin tener que
+     acordarse de mirar la campanita. -->
 <div class="notif-bell" id="notif-bell" style="display:none">
   <button type="button" class="notif-bell-btn" id="notif-bell-btn" title="Notificaciones">
     <span>🔔</span>
@@ -17,5 +25,14 @@
   <div class="notif-bell-panel" id="notif-bell-panel" style="display:none">
     <h4>Sugerencias de diagnóstico</h4>
     <div id="notif-bell-lista"><p class="ayuda-inline">Cargando…</p></div>
+    <h4>Pruebas de ruta</h4>
+    <div id="notif-bell-lista-pruebas-ruta"><p class="ayuda-inline">Cargando…</p></div>
   </div>
+</div>
+
+<div class="afp-flotante notif-flotante" id="notif-flotante" style="display:none">
+  <button type="button" id="notif-btn-flotante">
+    <span class="afp-flotante-icono">🔔</span>
+    <span id="notif-flotante-texto">0 novedades por revisar</span>
+  </button>
 </div>

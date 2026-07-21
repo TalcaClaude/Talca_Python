@@ -293,20 +293,23 @@ window.addEventListener("hashchange", activarPestanaDesdeHash);
 activarPestanaDesdeHash();
 
 // La campanita de notificaciones (ver _notificaciones.html) enlaza acá con
-// "?abrir_ot=<id>#ordenes" -- al llegar así, se abre directo el detalle de
-// esa OT en la pestaña Diagnóstico (donde vive el aviso de sugerencias), en
-// vez de dejar que la persona la busque a mano en el tablero.
+// "?abrir_ot=<id>&tab=<pestana>#ordenes" -- al llegar así, se abre directo
+// el detalle de esa OT en la pestaña indicada (por defecto "diagnostico",
+// donde vive el aviso de sugerencias; "qc" para la bitácora de pruebas de
+// ruta), en vez de dejar que la persona la busque a mano en el tablero.
 async function abrirOtDesdeQueryParam() {
   const params = new URLSearchParams(location.search);
   const otId = params.get("abrir_ot");
   if (!otId) return;
+  const pestana = params.get("tab") || "diagnostico";
   await abrirDetalleOrden(parseInt(otId, 10));
-  const tabDiagnostico = document.querySelector('#modal-op-orden-detalle .op-tab[data-opod-tab="diagnostico"]');
-  if (tabDiagnostico) tabDiagnostico.click();
+  const tabDestino = document.querySelector(`#modal-op-orden-detalle .op-tab[data-opod-tab="${pestana}"]`);
+  if (tabDestino) tabDestino.click();
   // Se limpia el query param para que recargar la página no vuelva a abrir
   // el mismo modal solo, y para no dejar el ID de la OT visible en la URL.
   const url = new URL(location.href);
   url.searchParams.delete("abrir_ot");
+  url.searchParams.delete("tab");
   history.replaceState(null, "", url.pathname + url.search + url.hash);
 }
 abrirOtDesdeQueryParam();
@@ -2493,6 +2496,8 @@ async function abrirDiagnostico() {
     // diagnóstico de cliente ya guardado que nadie pidió tocar.
     _opdiUltimoGeneradoIA = orden.diagnostico || "";
     _opdiMostrarEstadoIA("");
+    _opdiDetenerGrabacionSiEstaActiva();
+    _opdiMostrarEstadoDictado("");
     await cargarSugerenciasDiagnostico(ordenId);
   } catch (e) {
     toast(e.message, true);
@@ -2650,6 +2655,130 @@ async function _opdiGenerarDiagnosticoCliente() {
 document.getElementById("opdi-diagnostico-tecnico").addEventListener("input", () => {
   clearTimeout(_opdiDebounceTimer);
   _opdiDebounceTimer = setTimeout(_opdiGenerarDiagnosticoCliente, 1200);
+});
+
+// ---- Dictar diagnóstico (audio grabado directo en el navegador) ----
+// Mismo camino que ya existe para las notas de voz de WhatsApp
+// (_transcribir_audio_whatsapp) más una separación automática en
+// "síntoma" / "diagnóstico técnico" (ver /api/operativo/ia/dictado-diagnostico
+// y _llamar_claude_extraer_diagnostico_dictado en app.py) -- pensado para
+// que el mecánico pueda contar el diagnóstico hablado directo desde una OT
+// abierta en el sistema, sin necesitar mandarlo por WhatsApp. Nunca guarda
+// solo: rellena los campos y la persona revisa y guarda con el botón
+// "Guardar diagnóstico" de siempre, igual que el autocompletado del
+// resumen para el cliente de más arriba.
+let _opdiMediaRecorder = null;
+let _opdiChunksAudio = [];
+let _opdiGrabando = false;
+
+function _opdiMostrarEstadoDictado(texto, esError = false) {
+  const el = document.getElementById("opdi-dictado-estado");
+  if (!texto) {
+    el.style.display = "none";
+    el.textContent = "";
+    el.classList.remove("ayuda-inline--error");
+    return;
+  }
+  el.style.display = "block";
+  el.textContent = texto;
+  el.classList.toggle("ayuda-inline--error", esError);
+}
+
+function _opdiDetenerGrabacionSiEstaActiva() {
+  if (_opdiGrabando && _opdiMediaRecorder && _opdiMediaRecorder.state !== "inactive") {
+    // stop() dispara igual el evento "stop" y por lo tanto el envío al
+    // servidor -- para cortar de verdad sin transcribir (ej. al cambiar de
+    // OT a mitad de una grabación) hay que sacar los listeners antes.
+    _opdiMediaRecorder.onstop = null;
+    _opdiMediaRecorder.stream.getTracks().forEach(t => t.stop());
+    _opdiMediaRecorder.stop();
+  }
+  _opdiGrabando = false;
+  _opdiActualizarBotonDictado();
+}
+
+function _opdiActualizarBotonDictado() {
+  const btn = document.getElementById("btn-opdi-dictar");
+  if (_opdiGrabando) {
+    btn.textContent = "⏹ Detener grabación";
+    btn.classList.add("btn-danger");
+  } else {
+    btn.textContent = "🎤 Dictar diagnóstico";
+    btn.classList.remove("btn-danger");
+  }
+}
+
+async function _opdiIniciarGrabacion() {
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    _opdiMostrarEstadoDictado("Este navegador no permite grabar audio -- prueba desde Chrome o el WhatsApp del taller.", true);
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    _opdiChunksAudio = [];
+    _opdiMediaRecorder = new MediaRecorder(stream);
+    _opdiMediaRecorder.addEventListener("dataavailable", (ev) => {
+      if (ev.data && ev.data.size > 0) _opdiChunksAudio.push(ev.data);
+    });
+    _opdiMediaRecorder.addEventListener("stop", () => {
+      stream.getTracks().forEach(t => t.stop());
+      _opdiSubirDictado(new Blob(_opdiChunksAudio, { type: _opdiMediaRecorder.mimeType || "audio/webm" }));
+    });
+    _opdiMediaRecorder.start();
+    _opdiGrabando = true;
+    _opdiActualizarBotonDictado();
+    _opdiMostrarEstadoDictado("🔴 Grabando… presiona \"Detener grabación\" cuando termines de contar el diagnóstico.");
+  } catch (e) {
+    _opdiMostrarEstadoDictado("No se pudo acceder al micrófono: " + e.message, true);
+  }
+}
+
+async function _opdiSubirDictado(blob) {
+  _opdiMostrarEstadoDictado("✨ Transcribiendo y separando el dictado…");
+  const formData = new FormData();
+  formData.append("audio", blob, "dictado-diagnostico.webm");
+  try {
+    const res = await fetch("/api/operativo/ia/dictado-diagnostico", { method: "POST", body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "No se pudo procesar el audio");
+
+    // Nunca se pisa lo que ya esté escrito -- se agrega al final, igual
+    // que "agregarSugerenciaAlDiagnostico" más arriba, para no perder algo
+    // que la persona ya haya tipeado a mano antes de dictar.
+    const campoSintoma = document.getElementById("opdi-sintoma");
+    const campoTecnico = document.getElementById("opdi-diagnostico-tecnico");
+    if (data.sintoma) {
+      campoSintoma.value = campoSintoma.value.trim() ? `${campoSintoma.value.trim()}\n${data.sintoma}` : data.sintoma;
+    }
+    if (data.diagnostico_tecnico) {
+      campoTecnico.value = campoTecnico.value.trim() ? `${campoTecnico.value.trim()}\n${data.diagnostico_tecnico}` : data.diagnostico_tecnico;
+      // Dispara "input" a mano para que el autocompletado del resumen para
+      // el cliente se entere del cambio (ver comentario en
+      // agregarSugerenciaAlDiagnostico más arriba -- misma razón).
+      campoTecnico.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    if (data.aviso) {
+      _opdiMostrarEstadoDictado(data.aviso, true);
+    } else if (!data.sintoma && !data.diagnostico_tecnico) {
+      _opdiMostrarEstadoDictado("Se transcribió el audio pero no se detectó contenido para completar los campos.", true);
+    } else {
+      _opdiMostrarEstadoDictado("✓ Dictado agregado -- revisa el texto antes de guardar.");
+    }
+  } catch (e) {
+    _opdiMostrarEstadoDictado("No se pudo procesar el dictado: " + e.message, true);
+  } finally {
+    _opdiGrabando = false;
+    _opdiActualizarBotonDictado();
+  }
+}
+
+document.getElementById("btn-opdi-dictar").addEventListener("click", () => {
+  if (_opdiGrabando) {
+    _opdiMediaRecorder.stop();
+  } else {
+    _opdiIniciarGrabacion();
+  }
 });
 
 document.getElementById("btn-opdi-guardar").addEventListener("click", async () => {

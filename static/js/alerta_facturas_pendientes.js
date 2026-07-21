@@ -5,7 +5,11 @@
 // módulo en particular. Sondea el contador cada cierto tiempo y, mientras
 // haya al menos una pendiente, deja un botón flotante fijo en pantalla
 // (con una animación que llama la atención) que abre el listado desde
-// cualquier lugar de la app.
+// cualquier lugar de la app -- a propósito NUNCA se abre solo (antes sí lo
+// hacía la primera vez que detectaba pendientes; a pedido del taller se
+// sacó ese auto-apertura porque para Bodega, que vive con esto, era
+// demasiado invasivo -- ahora basta con el botón rojo parpadeando, se abre
+// solo con un clic).
 //
 // Deliberadamente NO depende de las utilidades del *.js de cada módulo
 // (api(), toast(), etc.) — inicio.html (el selector de módulos) no carga
@@ -17,7 +21,6 @@
 const AFP_INTERVALO_SONDEO_MS = 25000;
 let afpPendientesCache = [];
 let afpDetalleActivoId = null;
-let afpYaAbrioAutomaticamente = false;
 let afpPuedeBodega = true; // se corrige apenas resuelve afpCargarRol() — hasta entonces no se ocultan los botones para evitar parpadeo
 
 function afpEscapeHtml(str) {
@@ -91,13 +94,6 @@ async function afpSondear() {
     if (d.pendientes > 0) {
       flotante.style.display = "block";
       texto.textContent = d.pendientes === 1 ? "1 factura por revisar" : `${d.pendientes} facturas por revisar`;
-      // La primera vez que esta pestaña detecta pendientes, se abre sola
-      // el listado — después queda el botón flotante, para no ser tan
-      // invasivo como para no poder trabajar en otra cosa mientras tanto.
-      if (!afpYaAbrioAutomaticamente) {
-        afpYaAbrioAutomaticamente = true;
-        afpAbrirLista();
-      }
     } else {
       flotante.style.display = "none";
     }

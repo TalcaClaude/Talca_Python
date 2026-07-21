@@ -1835,6 +1835,10 @@ svg .chart-punto-hover {
   font-size: 12.5px;
 }
 
+.ayuda-inline--error {
+  color: var(--danger);
+}
+
 .ayuda-inline--bloqueado .btn-link {
   color: var(--danger);
   text-decoration: underline;
@@ -2376,6 +2380,13 @@ svg .chart-punto-hover {
   0%, 100% { box-shadow: 0 6px 24px rgba(217, 83, 79, 0.35); }
   50% { box-shadow: 0 6px 28px rgba(217, 83, 79, 0.75); }
 }
+
+/* Mismo botón flotante que el de facturas pendientes (arriba), reusado
+   para el aviso de Operativo (sugerencias de diagnóstico + pruebas de
+   ruta sin revisar, ver notificaciones.js). Se apila ARRIBA del de
+   facturas (bottom más alto) para que, en el caso de un admin que puede
+   ver ambos a la vez, no queden uno encima del otro. */
+.notif-flotante { bottom: 88px; }
 
 .afp-linea-recibido input {
   width: 90px;

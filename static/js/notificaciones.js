@@ -62,7 +62,7 @@ async function notifCargarRol() {
   }
 }
 
-async function notifCargarLista() {
+async function notifCargarListaSugerencias() {
   const lista = document.getElementById("notif-bell-lista");
   if (!lista) return;
   try {
@@ -74,7 +74,7 @@ async function notifCargarLista() {
     lista.innerHTML = sugerencias.map(s => `
       <div class="notif-item" data-id="${s.id}">
         <p class="notif-item-ot">
-          <a href="/operativo?abrir_ot=${s.ot_id}#ordenes">OT #${s.ot_id}${s.cliente_nombre ? " — " + notifEscapeHtml(s.cliente_nombre) : ""}${s.patente ? " · " + notifEscapeHtml(s.patente) : ""}</a>
+          <a href="/operativo?abrir_ot=${s.ot_id}&tab=diagnostico#ordenes">OT #${s.ot_id}${s.cliente_nombre ? " — " + notifEscapeHtml(s.cliente_nombre) : ""}${s.patente ? " · " + notifEscapeHtml(s.patente) : ""}</a>
         </p>
         <p class="notif-item-texto">${notifEscapeHtml(s.texto)}</p>
         <p class="notif-item-meta">Por: ${notifEscapeHtml(s.mecanico_nombre)} — ${notifFmtFecha(s.creado_en)}</p>
@@ -102,16 +102,72 @@ async function notifCargarLista() {
   }
 }
 
+async function notifCargarListaPruebasRuta() {
+  const lista = document.getElementById("notif-bell-lista-pruebas-ruta");
+  if (!lista) return;
+  try {
+    const pruebas = await notifApi("/api/notificaciones/pruebas-ruta");
+    if (!pruebas.length) {
+      lista.innerHTML = `<p class="ayuda-inline">Sin novedades.</p>`;
+      return;
+    }
+    lista.innerHTML = pruebas.map(p => `
+      <div class="notif-item" data-id="${p.id}">
+        <p class="notif-item-ot">
+          <a href="/operativo?abrir_ot=${p.orden_id}&tab=qc#ordenes">OT #${p.orden_id}${p.cliente_nombre ? " — " + notifEscapeHtml(p.cliente_nombre) : ""}${p.patente ? " · " + notifEscapeHtml(p.patente) : ""}</a>
+        </p>
+        <p class="notif-item-texto">${notifEscapeHtml(p.texto)}${p.foto_id ? " 📷" : ""}</p>
+        <p class="notif-item-meta">Por: ${notifEscapeHtml(p.autor)} — ${notifFmtFecha(p.creado_en)}</p>
+        <button type="button" class="btn btn-secundario btn-chico" data-notif-atender-prueba="${p.id}">Marcar como revisada</button>
+      </div>
+    `).join("");
+    lista.querySelectorAll("[data-notif-atender-prueba]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await notifApi(`/api/operativo/pruebas-ruta/${btn.dataset.notifAtenderPrueba}/atender`, { method: "POST" });
+          await notifSondear();
+        } catch (e) {
+          btn.disabled = false;
+        }
+      });
+    });
+  } catch (e) {
+    lista.innerHTML = `<p class="ayuda-inline">No se pudo cargar la lista.</p>`;
+  }
+}
+
+async function notifCargarLista() {
+  await Promise.all([notifCargarListaSugerencias(), notifCargarListaPruebasRuta()]);
+}
+
+async function notifAbrirPanel() {
+  const panel = document.getElementById("notif-bell-panel");
+  if (!panel) return;
+  notifPanelAbierto = true;
+  panel.style.display = "block";
+  // El panel siempre se despliega pegado a la campanita (arriba a la
+  // derecha), aunque se haya abierto desde el botón flotante de abajo --
+  // se deja la campanita a la vista para que no quede raro "aparecer"
+  // desconectado de donde se hizo clic.
+  document.getElementById("notif-bell")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  await notifCargarLista();
+}
+
 async function notifSondear() {
   const wrap = document.getElementById("notif-bell");
+  const flotante = document.getElementById("notif-flotante");
   if (!wrap) return;
   if (!notifPuedeVer()) {
     wrap.style.display = "none";
+    if (flotante) flotante.style.display = "none";
     return;
   }
   try {
     const resumen = await notifApi("/api/notificaciones/resumen");
-    const total = resumen.sugerencias_diagnostico || 0;
+    const sugerencias = resumen.sugerencias_diagnostico || 0;
+    const pruebasRuta = resumen.pruebas_ruta || 0;
+    const total = sugerencias + pruebasRuta;
     wrap.style.display = "";
     const badge = document.getElementById("notif-bell-badge");
     if (total > 0) {
@@ -119,6 +175,20 @@ async function notifSondear() {
       badge.style.display = "";
     } else {
       badge.style.display = "none";
+    }
+    // Botón flotante abajo a la derecha (mismo estilo que el de facturas
+    // pendientes de Bodega) -- a diferencia de ese, este NUNCA se abre
+    // solo: solo queda ahí parpadeando hasta que la persona hace clic,
+    // para no interrumpir a mitad de otra cosa cada vez que llega un
+    // mensaje nuevo por WhatsApp.
+    if (flotante) {
+      if (total > 0) {
+        flotante.style.display = "block";
+        document.getElementById("notif-flotante-texto").textContent =
+          total === 1 ? "1 novedad por revisar" : `${total} novedades por revisar`;
+      } else {
+        flotante.style.display = "none";
+      }
     }
     if (notifPanelAbierto) await notifCargarLista();
   } catch (e) {
@@ -129,14 +199,30 @@ async function notifSondear() {
 document.getElementById("notif-bell-btn")?.addEventListener("click", async (e) => {
   e.stopPropagation();
   const panel = document.getElementById("notif-bell-panel");
-  notifPanelAbierto = !notifPanelAbierto;
-  panel.style.display = notifPanelAbierto ? "block" : "none";
-  if (notifPanelAbierto) await notifCargarLista();
+  if (notifPanelAbierto) {
+    notifPanelAbierto = false;
+    panel.style.display = "none";
+  } else {
+    await notifAbrirPanel();
+  }
+});
+
+document.getElementById("notif-btn-flotante")?.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  const panel = document.getElementById("notif-bell-panel");
+  if (notifPanelAbierto) {
+    notifPanelAbierto = false;
+    panel.style.display = "none";
+  } else {
+    await notifAbrirPanel();
+  }
 });
 
 document.addEventListener("click", (e) => {
   const bell = document.getElementById("notif-bell");
-  if (bell && notifPanelAbierto && !bell.contains(e.target)) {
+  const flotante = document.getElementById("notif-flotante");
+  const dentroFlotante = flotante && flotante.contains(e.target);
+  if (bell && notifPanelAbierto && !bell.contains(e.target) && !dentroFlotante) {
     notifPanelAbierto = false;
     const panel = document.getElementById("notif-bell-panel");
     if (panel) panel.style.display = "none";

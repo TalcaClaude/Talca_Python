@@ -1062,6 +1062,25 @@ def init_db():
     )
     db.commit()
 
+    # ---- Migración 26: la Rendición ahora se genera por BOLETA
+    # (caja_gasto_detalles), no por gasto/retiro completo. Antes, rendir un
+    # gasto de $180.000 con una sola boleta de $90.000 marcaba TODO el
+    # retiro como "rendido" y desaparecía de la lista de pendientes, aunque
+    # solo se hubiera justificado la mitad -- confuso, y encima obligaba a
+    # exigir "listo para rendir" antes de poder generar la rendición (el
+    # taller pidió sacar esa traba, ver Migración 25). Ahora cada boleta se
+    # rinde por su propio monto: 'caja_gasto_detalles.rendicion_id' queda
+    # NULL hasta que esa boleta puntual se incluye en una rendición: el
+    # resto del retiro (lo que no tiene boleta todavía) sigue disponible
+    # para cargarle más boletas después y rendirlas en otro lote. La columna
+    # 'caja_movimientos.rendicion_id' (Migración 18) deja de usarse para
+    # gastos nuevos -- se mantiene en el esquema solo por compatibilidad,
+    # nunca se vuelve a escribir.
+    columnas_caja_detalle_v26 = [c[1] for c in db.execute("PRAGMA table_info(caja_gasto_detalles)").fetchall()]
+    if "rendicion_id" not in columnas_caja_detalle_v26:
+        db.execute("ALTER TABLE caja_gasto_detalles ADD COLUMN rendicion_id INTEGER REFERENCES caja_rendiciones(id)")
+        db.commit()
+
     # Datos manuales del Estado de Resultados por mes (rubros que no se
     # registran en ningún otro lugar del sistema porque vienen de
     # contabilidad/remuneraciones externas: sueldos, Previred, arriendo,

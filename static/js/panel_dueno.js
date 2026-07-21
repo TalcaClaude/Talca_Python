@@ -55,6 +55,8 @@ async function cargarPanelDueno() {
       (d.proyeccion_mensual || []).map(m => ({ mes: m.mes, valor: m.ingresos_proyectados }))
     );
 
+    document.getElementById("pd-chart-clientes-sub").textContent =
+      `Top 8 por monto referencial — ${PD_RANGO_LABEL[d.rango_aplicado] || "12 meses"}`;
     document.getElementById("pd-chart-clientes").innerHTML = buildBarChartH(
       (d.ranking_clientes_historico || []).map(c => ({ label: c.nombre, valor: c.monto, extra: pdFmtMoney(c.monto) })),
       { padL: 140 }

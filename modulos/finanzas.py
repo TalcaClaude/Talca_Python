@@ -95,7 +95,20 @@ RUBROS_GAV = {
     "bancarios": "Gastos bancarios",
     "mantencion": "Mantención y equipos",
     "otros": "Otros gastos",
+    # "Gastos por OT" (Migración 25) es distinto al resto: es un costo
+    # atribuible a una orden de trabajo puntual (ej. un repuesto comprado
+    # en efectivo para esa OT), no un gasto administrativo general -- por
+    # eso, a diferencia de los otros 6 rubros, éste se EXCLUYE del total de
+    # GAV en el Estado de Resultados (ver finanzas_estado_resultados más
+    # abajo, mismo criterio que ya se usa con las compras de emergencia
+    # ligadas a producto_id) y se reporta aparte. Sigue siendo un rubro
+    # válido del desplegable para poder clasificarlo y filtrarlo.
+    "gastos_por_ot": "Gastos por OT",
 }
+
+# Subconjunto de RUBROS_GAV que sí se suma al total de GAV del Estado de
+# Resultados -- ver comentario de 'gastos_por_ot' arriba.
+RUBROS_GAV_QUE_SUMAN_GAV = {k: v for k, v in RUBROS_GAV.items() if k != "gastos_por_ot"}
 
 bp = Blueprint("finanzas", __name__)
 
@@ -112,6 +125,25 @@ def _rubro_gav_valido(valor):
     if v not in RUBROS_GAV:
         raise ValueError(f"Rubro GAV inválido. Debe ser uno de: {', '.join(RUBROS_GAV)}")
     return v
+
+
+def _orden_id_valido(db, valor):
+    """Normaliza y valida el 'orden_id' opcional de un gasto de Caja Chica
+    (Migración 25, rubro 'gastos_por_ot'). Devuelve None si viene vacío
+    (permitido -- quien crea el gasto puede no saber todavía a qué OT
+    corresponde) o el id normalizado si la orden existe. Lanza ValueError
+    si viene un valor que no es un número o no corresponde a ninguna OT."""
+    v = (valor or "").strip() if isinstance(valor, str) else valor
+    if v in (None, ""):
+        return None
+    try:
+        orden_id = int(v)
+    except (TypeError, ValueError):
+        raise ValueError("La orden de trabajo relacionada debe ser un número de OT válido.")
+    existe = db.execute("SELECT 1 FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if not existe:
+        raise ValueError(f"No existe una orden de trabajo con el número {orden_id}.")
+    return orden_id
 
 
 def _medio_pago_valido(valor, permitir_vacio=False):
@@ -433,6 +465,17 @@ def caja_crear_gasto():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    # numero_documento y orden_id (Migración 25) quedan OPCIONALES al crear
+    # el gasto a propósito: quien lo registra muchas veces solo tiene el
+    # retiro del banco (el monto), sin la boleta ni el detalle a mano -- se
+    # completan después, al editar el gasto durante la rendición (ver
+    # caja_editar_movimiento más abajo).
+    numero_documento = (data.get("numero_documento") or "").strip().upper()
+    try:
+        orden_id = _orden_id_valido(db, data.get("orden_id"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     fecha = (data.get("fecha") or "").strip()
     fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
 
@@ -481,11 +524,11 @@ def caja_crear_gasto():
         """
         INSERT INTO caja_movimientos (
             tipo, medio_pago, fecha, monto, categoria, rubro_gav, descripcion, proveedor, usuario,
-            comprobante_archivo, producto_id, movimiento_inventario_id, creado_en
-        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            comprobante_archivo, producto_id, movimiento_inventario_id, numero_documento, orden_id, creado_en
+        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (medio_pago, fecha, monto, categoria, rubro_gav, descripcion, proveedor, usuario_actual(),
-         comprobante, producto_id, movimiento_inventario_id, ts),
+         comprobante, producto_id, movimiento_inventario_id, numero_documento, orden_id, ts),
     )
     db.commit()
     nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -602,6 +645,19 @@ def caja_editar_movimiento(mov_id):
         try:
             rubro_recibido = data.get("rubro_gav")
             campos["rubro_gav"] = _rubro_gav_valido(rubro_recibido) if rubro_recibido is not None else row["rubro_gav"]
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        # numero_documento y orden_id (Migración 25): este es el lugar
+        # donde normalmente se completan -- quien generó el gasto solo tenía
+        # el monto del banco, y quien rinde ya tiene la boleta a la vista.
+        # Mismo criterio que rubro_gav arriba: si no viene en el request, se
+        # mantiene lo que ya tenía la fila.
+        if "numero_documento" in data:
+            campos["numero_documento"] = (data.get("numero_documento") or "").strip().upper()
+        try:
+            orden_recibida = data.get("orden_id")
+            campos["orden_id"] = _orden_id_valido(db, orden_recibida) if orden_recibida is not None else row["orden_id"]
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
@@ -1511,15 +1567,25 @@ def finanzas_estado_resultados():
     # incluye producto_id IS NOT NULL -- esas son compras de inventario que
     # ya se cuentan como costo de ventas cuando el repuesto se usa en una
     # OT, ver ventas_y_costo_ot_mes; contarlas también acá sería duplicar
-    # el gasto).
+    # el gasto). El rubro "gastos_por_ot" (Migración 25) se excluye del
+    # mismo modo y por la misma razón: es un costo de una OT puntual, no un
+    # gasto administrativo -- se reporta aparte más abajo
+    # ('gastos_por_ot_total'), sin sumarse a gav_total, para no inflar GAV
+    # con algo que en realidad es costo asociado a una orden de trabajo.
     filas_gav = db.execute(
         "SELECT rubro_gav, COALESCE(SUM(monto), 0) AS total FROM caja_movimientos "
         "WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? "
-        "AND rubro_gav != '' GROUP BY rubro_gav",
+        "AND rubro_gav != '' AND rubro_gav != 'gastos_por_ot' GROUP BY rubro_gav",
         (mes,),
     ).fetchall()
     gav_por_rubro = {fila["rubro_gav"]: round(fila["total"], 2) for fila in filas_gav}
     gav_caja_chica_total = round(sum(gav_por_rubro.values()), 2)
+
+    gastos_por_ot_total = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) AS total FROM caja_movimientos "
+        "WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? AND rubro_gav = 'gastos_por_ot'",
+        (mes,),
+    ).fetchone()["total"] or 0
 
     gav_sin_clasificar = db.execute(
         "SELECT COALESCE(SUM(monto), 0) AS total FROM caja_movimientos "
@@ -1567,9 +1633,10 @@ def finanzas_estado_resultados():
         "margen_bruto_pct": margen_bruto_pct,
         "gav": {
             "por_rubro": gav_por_rubro,
-            "rubros_label": RUBROS_GAV,
+            "rubros_label": RUBROS_GAV_QUE_SUMAN_GAV,
             "sin_clasificar": round(gav_sin_clasificar, 2),
             "caja_chica_total": gav_caja_chica_total,
+            "gastos_por_ot_total": round(gastos_por_ot_total, 2),
             "remuneraciones": manual["remuneraciones"],
             "bono_remuneraciones": manual["bono_remuneraciones"],
             "otras_remuneraciones": manual["otras_remuneraciones"],

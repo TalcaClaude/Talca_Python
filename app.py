@@ -1018,6 +1018,26 @@ def init_db():
         db.execute("ALTER TABLE caja_movimientos ADD COLUMN rubro_gav TEXT NOT NULL DEFAULT ''")
         db.commit()
 
+    # ---- Migración 25: Caja Chica -- número de boleta/factura y OT
+    # relacionada (rubro "Gastos por OT") en caja_movimientos. Pedido del
+    # taller: quien registra el gasto muchas veces solo tiene el retiro del
+    # banco (el monto), sin la boleta física ni el detalle a mano -- esos
+    # datos se completan después, al generar la rendición, cuando alguien
+    # sí tiene el comprobante. Por eso ambas columnas quedan opcionales acá
+    # (se validan solo si vienen, ver _orden_id_valido en
+    # modulos/finanzas.py) en vez de exigirse al crear el gasto.
+    # 'orden_id' NO se usa para nada automático sobre la OT (no se suma a
+    # su costo ni aparece en su ficha) -- es solo trazabilidad de caja
+    # chica, a propósito, para no mezclar sistemas sin que el taller lo
+    # haya pedido explícitamente.
+    columnas_caja_mov_v25 = [c[1] for c in db.execute("PRAGMA table_info(caja_movimientos)").fetchall()]
+    if "numero_documento" not in columnas_caja_mov_v25:
+        db.execute("ALTER TABLE caja_movimientos ADD COLUMN numero_documento TEXT NOT NULL DEFAULT ''")
+        db.commit()
+    if "orden_id" not in columnas_caja_mov_v25:
+        db.execute("ALTER TABLE caja_movimientos ADD COLUMN orden_id INTEGER REFERENCES ordenes_trabajo(id)")
+        db.commit()
+
     # Datos manuales del Estado de Resultados por mes (rubros que no se
     # registran en ningún otro lugar del sistema porque vienen de
     # contabilidad/remuneraciones externas: sueldos, Previred, arriendo,
@@ -9224,10 +9244,17 @@ def panel_dueno():
     cxc_pendiente, cxc_vencido = _cxc_pendiente_y_vencido(db)
     cxp_pendiente, cxp_vencido = _cxp_pendiente_y_vencido(db)
 
-    # Ranking histórico de clientes (todo el tiempo, sin acotar por mes) --
-    # la versión mensual de este mismo gráfico vive en Operativo
-    # (/api/operativo/dashboard/graficos); acá es a propósito de largo plazo,
-    # para identificar clientes recurrentes/valiosos más allá de un mes puntual.
+    # Ranking de clientes por monto -- acotado al MISMO rango que el gráfico
+    # de tendencia de arriba (?rango=12|24|36|historico), a pedido del
+    # taller: antes era siempre "todo el tiempo" sin importar el selector de
+    # meses, lo que no calzaba con el resto del panel. Se filtra por
+    # o.fecha_recepcion (mismo campo que usa la versión mensual de este
+    # ranking en Operativo, ver ranking_clientes en
+    # /api/operativo/dashboard/graficos) desde el primer mes de la ventana
+    # ya calculada arriba (meses_cursor[0]) -- "historico" reusa el mismo
+    # n_meses ya resuelto (desde el primer pago), así que no hace falta
+    # duplicar esa lógica acá.
+    prefijo_desde_ranking = _prefijo(meses_cursor[0]) if meses_cursor else prefijo_actual
     ranking_clientes_historico = [
         {"nombre": r["nombre"], "cantidad": r["cantidad"], "monto": r["monto"]}
         for r in db.execute(
@@ -9235,8 +9262,10 @@ def panel_dueno():
             SELECT c.nombre AS nombre, COUNT(*) AS cantidad,
                    COALESCE(SUM(o.precio_referencial), 0) AS monto
             FROM ordenes_trabajo o JOIN clientes c ON c.id = o.cliente_id
+            WHERE substr(o.fecha_recepcion, 1, 7) >= ?
             GROUP BY c.id ORDER BY monto DESC LIMIT 8
-            """
+            """,
+            (prefijo_desde_ranking,),
         ).fetchall()
     ]
 

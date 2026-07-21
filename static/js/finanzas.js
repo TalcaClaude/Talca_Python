@@ -439,6 +439,7 @@ document.getElementById("btn-nuevo-gasto").addEventListener("click", async () =>
   document.getElementById("cg-comprobante-actual").style.display = "none";
   document.getElementById("cg-emergencia-wrap").style.display = "block";
   document.getElementById("cg-acciones-editar").style.display = "none";
+  resetearCampoOrdenGasto();
   habilitarFormularioCaja("cg", true);
   try {
     const data = await api("/api/productos");
@@ -458,7 +459,57 @@ document.getElementById("cg-emergencia").addEventListener("change", (e) => {
   // ventas_y_costo_ot_mes en modulos/operativo.py), así que no tiene
   // sentido clasificarla también como gasto GAV: se duplicaría la plata.
   document.getElementById("cg-rubro-gav-wrap").style.display = e.target.checked ? "none" : "block";
-  if (e.target.checked) document.getElementById("cg-rubro-gav").value = "";
+  if (e.target.checked) {
+    document.getElementById("cg-rubro-gav").value = "";
+    resetearCampoOrdenGasto();
+  }
+});
+
+// ---- Rubro "Gastos por OT" (Migración 25): pide la orden de trabajo
+// relacionada solo cuando se elige ese rubro -- mismo patrón de búsqueda
+// por número con vista previa que ya usa el campo de OT del formulario de
+// movimientos de inventario (ver buscarOrdenParaMovimiento en app.js),
+// pero namespaced "cg" (caja-gasto) porque este modal vive en un módulo
+// distinto y no comparte script con ese.
+function resetearCampoOrdenGasto() {
+  document.getElementById("cg-orden-id").value = "";
+  document.getElementById("cg-orden-preview").style.display = "none";
+  document.getElementById("cg-orden-wrap").style.display = "none";
+  state.cgOrdenEncontrada = null;
+}
+
+async function buscarOrdenParaGasto() {
+  const numero = document.getElementById("cg-orden-id").value.trim();
+  const preview = document.getElementById("cg-orden-preview");
+  state.cgOrdenEncontrada = null;
+
+  if (!numero) {
+    preview.style.display = "none";
+    return;
+  }
+  try {
+    const orden = await api(`/api/operativo/ordenes/${encodeURIComponent(numero)}`);
+    const cliente = orden.cliente ? orden.cliente.nombre : "";
+    const equipo = orden.equipo ? [orden.equipo.identificador, orden.equipo.anio].filter(Boolean).join(" · ") : "";
+    preview.textContent = `✓ OT #${orden.id}${cliente ? " — " + cliente : ""}${equipo ? " (" + equipo + ")" : ""} · estado: ${orden.estado}`;
+    preview.style.display = "block";
+    state.cgOrdenEncontrada = orden;
+  } catch (e) {
+    preview.textContent = e.message || `No existe una orden de trabajo con el número "${numero}".`;
+    preview.style.display = "block";
+  }
+}
+
+let cgOrdenLookupTimeout;
+document.getElementById("cg-orden-id").addEventListener("input", () => {
+  clearTimeout(cgOrdenLookupTimeout);
+  cgOrdenLookupTimeout = setTimeout(buscarOrdenParaGasto, 400);
+});
+
+document.getElementById("cg-rubro-gav").addEventListener("change", (e) => {
+  const esGastosPorOt = e.target.value === "gastos_por_ot";
+  document.getElementById("cg-orden-wrap").style.display = esGastosPorOt ? "flex" : "none";
+  if (!esGastosPorOt) resetearCampoOrdenGasto();
 });
 
 function habilitarFormularioCaja(prefijo, habilitado) {
@@ -479,6 +530,7 @@ function abrirEdicionCajaGasto(id) {
   document.getElementById("cg-proveedor").value = m.proveedor || "";
   document.getElementById("cg-descripcion").value = m.descripcion || "";
   document.getElementById("cg-rubro-gav").value = m.rubro_gav || "";
+  document.getElementById("cg-numero-documento").value = m.numero_documento || "";
   document.getElementById("cg-comprobante-actual").style.display = m.tiene_comprobante ? "block" : "none";
   document.getElementById("cg-comprobante-actual").innerHTML = m.tiene_comprobante
     ? `Ya tiene un comprobante cargado. <a href="/api/caja/comprobante/${encodeURIComponent(m.comprobante_archivo)}" target="_blank" rel="noopener">Verlo</a> — sube uno nuevo para reemplazarlo.`
@@ -488,6 +540,15 @@ function abrirEdicionCajaGasto(id) {
   document.getElementById("cg-emergencia-wrap").style.display = m.movimiento_inventario_id ? "none" : "block";
   document.getElementById("cg-rubro-gav-wrap").style.display = m.movimiento_inventario_id ? "none" : "block";
   document.getElementById("modal-caja-gasto-titulo").textContent = "Editar gasto";
+
+  resetearCampoOrdenGasto();
+  if (m.rubro_gav === "gastos_por_ot") {
+    document.getElementById("cg-orden-wrap").style.display = "flex";
+    if (m.orden_id) {
+      document.getElementById("cg-orden-id").value = m.orden_id;
+      buscarOrdenParaGasto();
+    }
+  }
 
   const bloqueo = m.bloqueado_motivo;
   const aviso = document.getElementById("cg-bloqueado-aviso");
@@ -521,13 +582,26 @@ document.getElementById("btn-eliminar-caja-gasto").addEventListener("click", asy
 document.getElementById("form-caja-gasto").addEventListener("submit", async (e) => {
   e.preventDefault();
   const id = document.getElementById("cg-id").value;
+  const rubroGav = document.getElementById("cg-rubro-gav").value;
+
+  // "Gastos por OT" exige una orden de trabajo válida resuelta por la
+  // búsqueda (ver buscarOrdenParaGasto) -- se valida en el navegador antes
+  // de mandar el formulario para no descubrir el error recién después de
+  // guardar; el servidor igual valida de nuevo por su cuenta.
+  if (rubroGav === "gastos_por_ot" && !state.cgOrdenEncontrada) {
+    toast("Indica una orden de trabajo válida para \"Gastos por OT\"", true);
+    return;
+  }
+
   const formData = new FormData();
   formData.append("monto", document.getElementById("cg-monto").value);
   formData.append("fecha", document.getElementById("cg-fecha").value);
   formData.append("medio_pago", document.getElementById("cg-medio-pago").value);
   formData.append("categoria", document.getElementById("cg-categoria").value);
   formData.append("proveedor", document.getElementById("cg-proveedor").value);
-  formData.append("rubro_gav", document.getElementById("cg-rubro-gav").value);
+  formData.append("rubro_gav", rubroGav);
+  formData.append("numero_documento", document.getElementById("cg-numero-documento").value);
+  formData.append("orden_id", rubroGav === "gastos_por_ot" && state.cgOrdenEncontrada ? state.cgOrdenEncontrada.id : "");
   formData.append("descripcion", document.getElementById("cg-descripcion").value);
   const archivo = document.getElementById("cg-comprobante").files[0];
   if (archivo) formData.append("comprobante", archivo);
@@ -544,23 +618,26 @@ document.getElementById("form-caja-gasto").addEventListener("submit", async (e) 
     toast(id ? "Gasto actualizado" : "Gasto registrado");
     cerrarModal("modal-caja-gasto");
     await cargarCaja();
+    // Si el gasto se estaba editando desde dentro de "Generar rendición"
+    // (ver data-completar-pendiente en cargarPendientesRendicion más
+    // abajo), esa lista también tiene que reflejar los datos recién
+    // completados.
+    if (document.getElementById("modal-caja-rendicion").classList.contains("abierto")) {
+      await cargarPendientesRendicion(true);
+    }
   } catch (e) {
     toast(e.message, true);
   }
 });
 
-// ---- Nuevo aporte ----
-
-document.getElementById("btn-nuevo-aporte").addEventListener("click", () => {
-  document.getElementById("form-caja-aporte").reset();
-  document.getElementById("ca-id").value = "";
-  document.getElementById("modal-caja-aporte-titulo").textContent = "Nuevo aporte / reposición";
-  document.getElementById("ca-bloqueado-aviso").style.display = "none";
-  document.getElementById("ca-comprobante-actual").style.display = "none";
-  document.getElementById("ca-acciones-editar").style.display = "none";
-  habilitarFormularioCaja("ca", true);
-  abrirModal("modal-caja-aporte");
-});
+// ---- Aporte ----
+// Se sacó el botón "+ Aporte" (a pedido del taller): un aporte manual
+// suelto ya no se puede crear desde acá -- los aportes ahora solo se
+// generan solos al "Reponer el saldo" en una rendición (ver
+// btn-confirmar-rendicion más abajo), para no tener dos caminos de
+// entrada distintos para la misma plata. Editar/eliminar un aporte ya
+// existente (clicando su fila en la tabla de movimientos) sigue
+// funcionando igual que siempre.
 
 function abrirEdicionCajaAporte(id) {
   const m = (state.cajaMovimientos || []).find(x => x.id === id);
@@ -640,7 +717,8 @@ function actualizarTotalSeleccionadoRendicion() {
   document.getElementById("cr-total-seleccionado").textContent = fmtMoney(total);
 }
 
-async function cargarPendientesRendicion() {
+async function cargarPendientesRendicion(preservarSeleccion) {
+  const seleccionPrevia = preservarSeleccion ? new Set(state.cajaPendientesSeleccionados) : new Set();
   state.cajaPendientesSeleccionados = new Set();
   const cont = document.getElementById("cr-lista-pendientes");
   cont.innerHTML = `<p class="vacio">Cargando…</p>`;
@@ -648,6 +726,17 @@ async function cargarPendientesRendicion() {
 
   try {
     const data = await api("/api/caja/pendientes?medio_pago=" + encodeURIComponent(medio));
+
+    // Guardamos también en state.cajaMovimientos (merge, sin duplicar) para
+    // que abrirEdicionCajaGasto() pueda encontrar el gasto por id cuando se
+    // usa el botón "Completar datos"/"Editar" desde esta misma lista.
+    state.cajaMovimientos = state.cajaMovimientos || [];
+    data.gastos.forEach(g => {
+      const idx = state.cajaMovimientos.findIndex(m => m.id === g.id);
+      if (idx >= 0) state.cajaMovimientos[idx] = g;
+      else state.cajaMovimientos.push(g);
+    });
+
     if (data.gastos.length === 0) {
       cont.innerHTML = `<p class="vacio">No hay gastos pendientes de rendir en ${MEDIO_PAGO_LABEL[medio] || medio}. 👍</p>`;
       actualizarTotalSeleccionadoRendicion();
@@ -656,25 +745,46 @@ async function cargarPendientesRendicion() {
     cont.innerHTML = `
       <table class="tabla">
         <thead>
-          <tr><th></th><th>Fecha</th><th>Categoría / Descripción</th><th class="num">Monto</th></tr>
+          <tr><th></th><th>Fecha</th><th>Categoría / Descripción</th><th>N° doc.</th><th>Rubro</th><th class="num">Monto</th><th></th></tr>
         </thead>
         <tbody>
-          ${data.gastos.map(g => `
+          ${data.gastos.map(g => {
+            const faltaDatos = !g.numero_documento || !g.rubro_gav;
+            const rubroTexto = g.rubro_gav
+              ? (RUBRO_GAV_LABEL[g.rubro_gav] || g.rubro_gav) + (g.rubro_gav === "gastos_por_ot" && g.orden_id ? ` · OT #${g.orden_id}` : "")
+              : `<span class="ayuda-inline ayuda-inline--error">sin rubro</span>`;
+            const docTexto = g.numero_documento
+              ? escapeHtml(g.numero_documento)
+              : `<span class="ayuda-inline ayuda-inline--error">sin N°</span>`;
+            return `
             <tr>
               <td><input type="checkbox" data-pendiente-id="${g.id}" data-monto="${g.monto}"></td>
               <td class="mono">${fmtFecha(g.fecha)}</td>
               <td>${escapeHtml([g.categoria, g.descripcion].filter(Boolean).join(" — ") || "—")}</td>
+              <td>${docTexto}</td>
+              <td>${rubroTexto}</td>
               <td class="num mono">${fmtMoney(g.monto)}</td>
-            </tr>`).join("")}
+              <td><button type="button" class="btn btn-texto" data-completar-pendiente="${g.id}">${faltaDatos ? "Completar datos" : "Editar"}</button></td>
+            </tr>`;
+          }).join("")}
         </tbody>
       </table>
     `;
     cont.querySelectorAll("[data-pendiente-id]").forEach(chk => {
+      if (seleccionPrevia.has(Number(chk.dataset.pendienteId))) {
+        chk.checked = true;
+        state.cajaPendientesSeleccionados.add(Number(chk.dataset.pendienteId));
+      }
       chk.addEventListener("change", () => {
         const id = Number(chk.dataset.pendienteId);
         if (chk.checked) state.cajaPendientesSeleccionados.add(id);
         else state.cajaPendientesSeleccionados.delete(id);
         actualizarTotalSeleccionadoRendicion();
+      });
+    });
+    cont.querySelectorAll("[data-completar-pendiente]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        abrirEdicionCajaGasto(Number(btn.dataset.completarPendiente));
       });
     });
     actualizarTotalSeleccionadoRendicion();
@@ -691,7 +801,7 @@ document.getElementById("btn-generar-rendicion").addEventListener("click", async
   await cargarPendientesRendicion();
 });
 
-document.getElementById("cr-medio-pago").addEventListener("change", cargarPendientesRendicion);
+document.getElementById("cr-medio-pago").addEventListener("change", () => cargarPendientesRendicion());
 
 document.getElementById("btn-confirmar-rendicion").addEventListener("click", async () => {
   const gastoIds = [...state.cajaPendientesSeleccionados];
@@ -753,7 +863,7 @@ async function verDetalleRendicion(id) {
   const ficha = document.getElementById("crd-ficha");
   const tbody = document.getElementById("tbody-caja-rendicion-detalle");
   ficha.innerHTML = "";
-  tbody.innerHTML = `<tr><td colspan="3" class="vacio">Cargando…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="5" class="vacio">Cargando…</td></tr>`;
   abrirModal("modal-caja-rendicion-detalle");
   try {
     const r = await api(`/api/caja/rendicion/${id}`);
@@ -771,9 +881,11 @@ async function verDetalleRendicion(id) {
         <tr>
           <td class="mono">${fmtFecha(g.fecha)}</td>
           <td>${escapeHtml([g.categoria, g.descripcion].filter(Boolean).join(" — ") || "—")}</td>
+          <td>${escapeHtml(g.numero_documento) || "—"}</td>
+          <td>${g.rubro_gav ? (RUBRO_GAV_LABEL[g.rubro_gav] || g.rubro_gav) + (g.rubro_gav === "gastos_por_ot" && g.orden_id ? ` · OT #${g.orden_id}` : "") : "—"}</td>
           <td class="num mono">${fmtMoney(g.monto)}</td>
         </tr>`).join("")
-      : `<tr><td colspan="3" class="vacio">Sin gastos asociados.</td></tr>`;
+      : `<tr><td colspan="5" class="vacio">Sin gastos asociados.</td></tr>`;
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="3" class="vacio">Error: ${e.message}</td></tr>`;
   }
@@ -1806,6 +1918,7 @@ const RUBRO_GAV_LABEL = {
   bancarios: "Gastos bancarios",
   mantencion: "Mantención y equipos",
   otros: "Otros gastos",
+  gastos_por_ot: "Gastos por OT",
 };
 
 state.erUltimoReporte = null;

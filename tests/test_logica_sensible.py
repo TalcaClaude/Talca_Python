@@ -3852,6 +3852,118 @@ class TestEstadoResultados(unittest.TestCase):
         self.assertAlmostEqual(coincidencias[0]["monto"], 25000.0, delta=0.01)
 
 
+class TestAccesoPorRolNotificaciones(unittest.TestCase):
+    """Las sugerencias de diagnóstico y las facturas pendientes de
+    recepción ya se ocultaban en la interfaz según el rol (la campanita y
+    el aviso flotante), pero los endpoints que las sirven no tenían
+    ningún candado del lado del servidor -- cualquier sesión iniciada
+    podía leerlas igual llamando la URL directo. Esto prueba que ahora sí
+    está cerrado: solo 'operativo' (sugerencias de mecánicos) y solo
+    'bodega' (aviso de facturas pendientes) reciben esas notificaciones;
+    admin siempre puede todo."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin_client = taller_app.app.test_client()
+        cls.admin_client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_usuario(self, username, rol):
+        resp = self.admin_client.post(
+            "/api/admin/usuarios",
+            json={
+                "username": username, "password": "clave12345", "nombre": username,
+                "es_admin": False, "modulos": [rol],
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _client_como(self, username):
+        client = taller_app.app.test_client()
+        resp = client.post("/login", data={"username": username, "password": "clave12345"})
+        self.assertEqual(resp.status_code, 302, resp.get_data(as_text=True))
+        return client
+
+    def _crear_orden_para_sugerencia(self):
+        cliente = self.admin_client.post(
+            "/api/operativo/clientes", json={"nombre": "Cliente Acceso Rol"}
+        ).get_json()
+        orden = self.admin_client.post(
+            "/api/operativo/ordenes", json={"cliente_id": cliente["id"]}
+        ).get_json()
+        return orden
+
+    def test_sugerencias_de_una_ot_solo_las_ve_operativo_o_admin(self):
+        orden = self._crear_orden_para_sugerencia()
+        self._crear_usuario("finanzas_acc1", "finanzas")
+        self._crear_usuario("operativo_acc1", "operativo")
+
+        resp_finanzas = self._client_como("finanzas_acc1").get(
+            f"/api/ordenes/{orden['id']}/sugerencias-diagnostico"
+        )
+        self.assertEqual(resp_finanzas.status_code, 403)
+
+        resp_operativo = self._client_como("operativo_acc1").get(
+            f"/api/ordenes/{orden['id']}/sugerencias-diagnostico"
+        )
+        self.assertEqual(resp_operativo.status_code, 200)
+
+        resp_admin = self.admin_client.get(f"/api/ordenes/{orden['id']}/sugerencias-diagnostico")
+        self.assertEqual(resp_admin.status_code, 200)
+
+    def test_resumen_y_lista_de_notificaciones_solo_operativo_o_admin(self):
+        self._crear_usuario("bodega_acc1", "bodega")
+        self._crear_usuario("operativo_acc2", "operativo")
+
+        cliente_bodega = self._client_como("bodega_acc1")
+        self.assertEqual(cliente_bodega.get("/api/notificaciones/resumen").status_code, 403)
+        self.assertEqual(cliente_bodega.get("/api/notificaciones/sugerencias-diagnostico").status_code, 403)
+
+        cliente_operativo = self._client_como("operativo_acc2")
+        self.assertEqual(cliente_operativo.get("/api/notificaciones/resumen").status_code, 200)
+        self.assertEqual(cliente_operativo.get("/api/notificaciones/sugerencias-diagnostico").status_code, 200)
+
+    def test_contador_de_facturas_pendientes_solo_bodega_o_admin(self):
+        self._crear_usuario("finanzas_acc2", "finanzas")
+        self._crear_usuario("bodega_acc2", "bodega")
+
+        resp_finanzas = self._client_como("finanzas_acc2").get("/api/facturas/pendientes-recepcion/contador")
+        self.assertEqual(resp_finanzas.status_code, 403)
+
+        resp_bodega = self._client_como("bodega_acc2").get("/api/facturas/pendientes-recepcion/contador")
+        self.assertEqual(resp_bodega.status_code, 200)
+
+        resp_admin = self.admin_client.get("/api/facturas/pendientes-recepcion/contador")
+        self.assertEqual(resp_admin.status_code, 200)
+
+    def test_listado_y_detalle_de_facturas_pendientes_finanzas_y_bodega_si_operativo_no(self):
+        # El listado/detalle SÍ lo necesita Finanzas (su propia pantalla de
+        # facturas que registró) además de Bodega (quien las aprueba) --
+        # a diferencia del contador/aviso flotante, que es solo Bodega.
+        self._crear_usuario("operativo_acc3", "operativo")
+        self._crear_usuario("finanzas_acc3", "finanzas")
+        self._crear_usuario("bodega_acc3", "bodega")
+
+        resp_operativo = self._client_como("operativo_acc3").get("/api/facturas/pendientes-recepcion")
+        self.assertEqual(resp_operativo.status_code, 403)
+
+        resp_finanzas = self._client_como("finanzas_acc3").get("/api/facturas/pendientes-recepcion")
+        self.assertEqual(resp_finanzas.status_code, 200)
+
+        resp_bodega = self._client_como("bodega_acc3").get("/api/facturas/pendientes-recepcion")
+        self.assertEqual(resp_bodega.status_code, 200)
+
+    def test_aprobar_factura_pendiente_sigue_siendo_solo_bodega(self):
+        # Regresión: esto ya estaba restringido antes de este cambio, no
+        # debería haberse tocado.
+        self._crear_usuario("finanzas_acc4", "finanzas")
+        resp = self._client_como("finanzas_acc4").post(
+            "/api/facturas/pendientes-recepcion/999999/aprobar", json={}
+        )
+        self.assertEqual(resp.status_code, 403)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

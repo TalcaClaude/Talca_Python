@@ -4450,6 +4450,7 @@ def _factura_pendiente_recepcion_dict(db, row):
 
 
 @app.route("/api/facturas/pendientes-recepcion", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
 def listar_facturas_pendientes_recepcion():
     db = get_db()
     estado = request.args.get("estado", "").strip()
@@ -4463,9 +4464,16 @@ def listar_facturas_pendientes_recepcion():
 
 
 @app.route("/api/facturas/pendientes-recepcion/contador", methods=["GET"])
+@requiere_rol("bodega")
 def contador_facturas_pendientes_recepcion():
-    """Endpoint liviano para el aviso global (se consulta seguido, desde
-    cualquier pantalla) — solo el número, no los datos completos."""
+    """Endpoint liviano para el aviso global flotante (se consulta seguido,
+    desde cualquier pantalla) — solo el número, no los datos completos.
+    Restringido a 'bodega' (o admin) a propósito: quien recibe físicamente
+    la mercadería y aprueba la recepción es Bodega, así que el aviso
+    flotante ('N facturas por revisar') es solo para ese perfil. Finanzas
+    sigue viendo sus propias facturas registradas desde su propia pantalla
+    en el módulo Finanzas (ver listar_facturas_pendientes_recepcion), eso
+    no es "notificación", es su propio trabajo pendiente."""
     db = get_db()
     n = db.execute(
         "SELECT COUNT(*) FROM facturas_finanzas_pendientes WHERE estado = 'pendiente'"
@@ -4474,6 +4482,7 @@ def contador_facturas_pendientes_recepcion():
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
 def detalle_factura_pendiente_recepcion(pendiente_id):
     db = get_db()
     fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
@@ -4794,6 +4803,7 @@ def rechazar_factura_pendiente_recepcion(pendiente_id):
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/foto", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
 def obtener_foto_factura_pendiente_recepcion(pendiente_id):
     """Sirve la foto original de un pendiente de recepción — hoy solo la
     tienen los que llegaron por WhatsApp (ver _procesar_foto_factura_whatsapp,
@@ -5996,11 +6006,16 @@ def eliminar_mecanico_agente(mecanico_id):
 
 
 @app.route("/api/ordenes/<int:ot_id>/sugerencias-diagnostico", methods=["GET"])
+@requiere_rol("operativo")
 def listar_sugerencias_diagnostico_ot(ot_id):
     """Sugerencias de diagnóstico pendientes de revisar para una OT (ver
     _agente_guardar_sugerencia_diagnostico) -- dejadas por un mecánico de
     perfil restringido vía WhatsApp. Se usa desde el detalle de la OT en
-    Operativo para mostrar el aviso a la parte operativa."""
+    Operativo para mostrar el aviso a la parte operativa. Restringido a
+    'operativo' (o admin) -- antes cualquier sesión iniciada podía leerlas
+    aunque la campanita ya las ocultaba en la interfaz para otros roles
+    (ver notifPuedeVer() en notificaciones.js); esto lo hace cumplir
+    también del lado del servidor."""
     db = get_db()
     return jsonify(_agente_listar_sugerencias_pendientes(db, ot_id))
 
@@ -6037,13 +6052,20 @@ def atender_sugerencia_diagnostico(sugerencia_id):
 # ---------------------------------------------------------------------------
 
 @app.route("/api/notificaciones/resumen", methods=["GET"])
+@requiere_rol("operativo")
 def notificaciones_resumen():
+    # Hoy 'sugerencias_diagnostico' es la única categoría, así que basta con
+    # exigir 'operativo' acá -- si el día de mañana se suma una categoría de
+    # otro módulo (ver comentario de la sección de arriba), este endpoint va
+    # a necesitar volver a ser público y filtrar por categoría según el rol,
+    # en vez de un solo candado para todo.
     db = get_db()
     conteo = db.execute("SELECT COUNT(*) AS n FROM sugerencias_diagnostico WHERE atendida = 0").fetchone()["n"]
     return jsonify({"sugerencias_diagnostico": conteo})
 
 
 @app.route("/api/notificaciones/sugerencias-diagnostico", methods=["GET"])
+@requiere_rol("operativo")
 def notificaciones_sugerencias_diagnostico():
     db = get_db()
     return jsonify(_agente_listar_todas_sugerencias_pendientes(db))

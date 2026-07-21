@@ -1018,25 +1018,49 @@ def init_db():
         db.execute("ALTER TABLE caja_movimientos ADD COLUMN rubro_gav TEXT NOT NULL DEFAULT ''")
         db.commit()
 
-    # ---- Migración 25: Caja Chica -- número de boleta/factura y OT
-    # relacionada (rubro "Gastos por OT") en caja_movimientos. Pedido del
-    # taller: quien registra el gasto muchas veces solo tiene el retiro del
-    # banco (el monto), sin la boleta física ni el detalle a mano -- esos
-    # datos se completan después, al generar la rendición, cuando alguien
-    # sí tiene el comprobante. Por eso ambas columnas quedan opcionales acá
-    # (se validan solo si vienen, ver _orden_id_valido en
-    # modulos/finanzas.py) en vez de exigirse al crear el gasto.
-    # 'orden_id' NO se usa para nada automático sobre la OT (no se suma a
-    # su costo ni aparece en su ficha) -- es solo trazabilidad de caja
-    # chica, a propósito, para no mezclar sistemas sin que el taller lo
-    # haya pedido explícitamente.
+    # ---- Migración 25: Caja Chica -- boletas parciales de rendición
+    # (caja_gasto_detalles) + cierre manual de un gasto (cerrado_manualmente).
+    # Pedido del taller: la persona que registra un "gasto" (retiro de
+    # banco/tarjeta/Cristian) solo ve el monto y la fecha -- no tiene la
+    # boleta física a mano. Quien SÍ rinde cuentas contra la boleta física
+    # (a veces otra persona, contrastando contra Cristian) va agregando una
+    # o más "boletas" (caja_gasto_detalles) contra ese mismo gasto, cada una
+    # con su propio N° de documento, monto (no necesariamente el 100% del
+    # retiro, sobre todo en efectivo), rubro GAV, detalle y, si corresponde,
+    # la OT relacionada (rubro "gastos_por_ot"). El gasto queda "listo para
+    # rendir" (ver _gasto_estado_boletas en modulos/finanzas.py) cuando la
+    # suma de sus boletas alcanza el monto del retiro, o cuando se cierra
+    # manualmente (cerrado_manualmente=1, para el caso de vuelto que queda
+    # en caja o una boleta chica que se perdió). Recién ahí puede
+    # incluirse en una Rendición (caja_rendiciones, sin cambios ahí: sigue
+    # siendo un lote de gastos ya listos, ver caja_crear_rendicion).
+    # 'orden_id' en caja_gasto_detalles NO se usa para nada automático sobre
+    # la OT (no se suma a su costo ni aparece en su ficha) -- es solo
+    # trazabilidad de caja chica, a propósito, para no mezclar sistemas sin
+    # que el taller lo haya pedido explícitamente.
     columnas_caja_mov_v25 = [c[1] for c in db.execute("PRAGMA table_info(caja_movimientos)").fetchall()]
-    if "numero_documento" not in columnas_caja_mov_v25:
-        db.execute("ALTER TABLE caja_movimientos ADD COLUMN numero_documento TEXT NOT NULL DEFAULT ''")
+    if "cerrado_manualmente" not in columnas_caja_mov_v25:
+        db.execute("ALTER TABLE caja_movimientos ADD COLUMN cerrado_manualmente INTEGER NOT NULL DEFAULT 0")
         db.commit()
-    if "orden_id" not in columnas_caja_mov_v25:
-        db.execute("ALTER TABLE caja_movimientos ADD COLUMN orden_id INTEGER REFERENCES ordenes_trabajo(id)")
-        db.commit()
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS caja_gasto_detalles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gasto_id INTEGER NOT NULL REFERENCES caja_movimientos(id),
+            numero_documento TEXT NOT NULL DEFAULT '',
+            monto REAL NOT NULL,
+            rubro_gav TEXT NOT NULL DEFAULT '',
+            categoria TEXT NOT NULL DEFAULT '',
+            proveedor TEXT NOT NULL DEFAULT '',
+            descripcion TEXT NOT NULL DEFAULT '',
+            orden_id INTEGER REFERENCES ordenes_trabajo(id),
+            comprobante_archivo TEXT NOT NULL DEFAULT '',
+            usuario TEXT NOT NULL DEFAULT '',
+            creado_en TEXT NOT NULL
+        );
+        """
+    )
+    db.commit()
 
     # Datos manuales del Estado de Resultados por mes (rubros que no se
     # registran en ningún otro lugar del sistema porque vienen de

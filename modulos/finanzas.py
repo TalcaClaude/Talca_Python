@@ -191,11 +191,38 @@ def _caja_bloqueo_motivo(row):
     return None
 
 
-def _caja_movimiento_dict(row):
+def _gasto_estado_boletas(db, gasto_id, monto_gasto, cerrado_manualmente):
+    """Boletas cargadas contra un gasto (Migración 25) + cuánto de su monto
+    ya quedó justificado. Un gasto queda "listo para rendir" cuando la suma
+    de sus boletas alcanza el monto del retiro, o cuando se cerró
+    manualmente (ver /api/caja/gasto/<id>/cerrar -- vuelto en caja, boleta
+    chica perdida, etc). Mientras no esté listo, no puede incluirse en una
+    Rendición (ver caja_crear_rendicion)."""
+    boletas = [dict(r) for r in db.execute(
+        "SELECT * FROM caja_gasto_detalles WHERE gasto_id = ? ORDER BY creado_en ASC, id ASC", (gasto_id,)
+    ).fetchall()]
+    for b in boletas:
+        b["tiene_comprobante"] = bool(b.get("comprobante_archivo"))
+    monto_justificado = round(sum(b["monto"] for b in boletas), 2)
+    monto_pendiente = round(max(monto_gasto - monto_justificado, 0), 2)
+    listo_para_rendir = bool(cerrado_manualmente) or monto_pendiente <= 0.009
+    return boletas, monto_justificado, monto_pendiente, listo_para_rendir
+
+
+def _caja_movimiento_dict(db, row):
     d = dict(row)
     d["tiene_comprobante"] = bool(d.get("comprobante_archivo"))
     d["rendido"] = d.get("rendicion_id") is not None
     d["bloqueado_motivo"] = _caja_bloqueo_motivo(row)
+    if d["tipo"] == "gasto":
+        boletas, justificado, pendiente, listo = _gasto_estado_boletas(
+            db, d["id"], d["monto"], d.get("cerrado_manualmente")
+        )
+        d["boletas"] = boletas
+        d["monto_justificado"] = justificado
+        d["monto_pendiente"] = pendiente
+        d["listo_para_rendir"] = listo
+        d["cerrado_manualmente"] = bool(d.get("cerrado_manualmente"))
     return d
 
 
@@ -307,12 +334,15 @@ def finanzas_resumen_graficos():
         ).fetchone()[0]
         tendencia.append({"mes": pref, "ingresos": ingresos, "gastos": gastos})
 
+    # Desde la Migración 25 el proveedor se registra en la boleta
+    # (caja_gasto_detalles), no en el gasto/retiro -- por eso este ranking
+    # sale de ahí en vez de caja_movimientos.
     gasto_por_proveedor = [
         {"proveedor": r["proveedor"] or "(sin especificar)", "monto": r["monto"]}
         for r in db.execute(
             """
             SELECT COALESCE(NULLIF(proveedor, ''), '(sin especificar)') AS proveedor, SUM(monto) AS monto
-            FROM caja_movimientos WHERE tipo = 'gasto'
+            FROM caja_gasto_detalles
             GROUP BY proveedor ORDER BY monto DESC LIMIT 8
             """
         ).fetchall()
@@ -429,7 +459,7 @@ def caja_listar_movimientos():
     # Y esa descripción, aunque sean campos separados).
     sql += " ORDER BY fecha DESC, id DESC"
     rows = db.execute(sql, params).fetchall()
-    movimientos = [_caja_movimiento_dict(r) for r in rows]
+    movimientos = [_caja_movimiento_dict(db, r) for r in rows]
 
     if q:
         movimientos = [
@@ -444,6 +474,13 @@ def caja_listar_movimientos():
 
 @bp.route("/api/caja/gasto", methods=["POST"])
 def caja_crear_gasto():
+    """Crea un "gasto" de Caja Chica -- ojo, esto es apenas el RETIRO (banco,
+    tarjeta o vía Cristian), no la rendición: a propósito solo pide monto,
+    medio de pago y fecha, porque quien lo registra viendo el banco no tiene
+    más información que esa a mano. El número de boleta/factura, el rubro,
+    el detalle y la OT relacionada se cargan después, boleta por boleta,
+    contra este mismo gasto (ver caja_agregar_boleta más abajo) -- puede
+    haber más de una boleta por gasto si el retiro cubrió varias compras."""
     db = get_db()
     _iniciar_transaccion_stock(db)  # puede incluir una "compra de emergencia" que ingresa stock
     data = request.form
@@ -460,38 +497,16 @@ def caja_crear_gasto():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    try:
-        rubro_gav = _rubro_gav_valido(data.get("rubro_gav"))
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    # numero_documento y orden_id (Migración 25) quedan OPCIONALES al crear
-    # el gasto a propósito: quien lo registra muchas veces solo tiene el
-    # retiro del banco (el monto), sin la boleta ni el detalle a mano -- se
-    # completan después, al editar el gasto durante la rendición (ver
-    # caja_editar_movimiento más abajo).
-    numero_documento = (data.get("numero_documento") or "").strip().upper()
-    try:
-        orden_id = _orden_id_valido(db, data.get("orden_id"))
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
     fecha = (data.get("fecha") or "").strip()
     fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
 
-    categoria = (data.get("categoria") or "").strip().upper()
-    descripcion = (data.get("descripcion") or "").strip().upper()
-    proveedor = (data.get("proveedor") or "").strip().upper()
-
-    try:
-        comprobante = _guardar_comprobante(request.files.get("comprobante"))
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-    # ---- Compra de emergencia asociada al inventario: si viene un producto
-    # y una cantidad, además de registrar el gasto se ingresa el stock como
-    # una entrada normal (igual que una factura), dejando ambos registros
+    # ---- Compra de emergencia asociada al inventario: caso especial, no es
+    # un simple retiro -- quien la registra SÍ sabe en el momento qué compró,
+    # así que además de registrar el gasto se ingresa el stock como una
+    # entrada normal (igual que una factura), dejando ambos registros
     # enlazados para que se pueda seguir el rastro del dinero al producto.
+    # De todas formas, igual que cualquier otro gasto, sigue necesitando su(s)
+    # boleta(s) para poder rendirse.
     producto_id = (data.get("producto_id") or "").strip()
     movimiento_inventario_id = None
     if producto_id:
@@ -508,9 +523,9 @@ def caja_crear_gasto():
             return jsonify({"error": "El producto seleccionado no existe"}), 400
 
         costo_unitario = monto / cantidad
-        nuevo_stock = _aplicar_entrada_stock(
+        _aplicar_entrada_stock(
             db, producto_row, cantidad, costo_unitario,
-            motivo=f"COMPRA DE EMERGENCIA (CAJA CHICA){' - ' + descripcion if descripcion else ''}",
+            motivo="COMPRA DE EMERGENCIA (CAJA CHICA)",
             usuario=usuario_actual(), factura=None, categoria="Compra",
         )
         movimiento_inventario_id = db.execute(
@@ -523,16 +538,190 @@ def caja_crear_gasto():
     cur = db.execute(
         """
         INSERT INTO caja_movimientos (
-            tipo, medio_pago, fecha, monto, categoria, rubro_gav, descripcion, proveedor, usuario,
-            comprobante_archivo, producto_id, movimiento_inventario_id, numero_documento, orden_id, creado_en
-        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tipo, medio_pago, fecha, monto, usuario, producto_id, movimiento_inventario_id, creado_en
+        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?)
         """,
-        (medio_pago, fecha, monto, categoria, rubro_gav, descripcion, proveedor, usuario_actual(),
-         comprobante, producto_id, movimiento_inventario_id, numero_documento, orden_id, ts),
+        (medio_pago, fecha, monto, usuario_actual(), producto_id, movimiento_inventario_id, ts),
     )
     db.commit()
     nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(_caja_movimiento_dict(nuevo)), 201
+    return jsonify(_caja_movimiento_dict(db, nuevo)), 201
+
+
+@bp.route("/api/caja/gasto/<int:gasto_id>/boleta", methods=["POST"])
+def caja_agregar_boleta(gasto_id):
+    """Agrega una boleta/factura (rendición parcial) contra un gasto ya
+    registrado. Puede llamarse varias veces sobre el mismo gasto -- ej. un
+    retiro de $200.000 en efectivo que se justifica con 3 boletas de $60.000,
+    $90.000 y $50.000. Cada boleta se guarda de inmediato (no se pierde si
+    se cierra el navegador), y el gasto queda "listo para rendir" recién
+    cuando la suma de sus boletas alcanza el monto del retiro (o se cierra
+    manualmente, ver caja_cerrar_gasto)."""
+    db = get_db()
+    gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ? AND tipo = 'gasto'", (gasto_id,)).fetchone()
+    if gasto is None:
+        return jsonify({"error": "Gasto no encontrado"}), 404
+    if gasto["rendicion_id"] is not None:
+        return jsonify({"error": "Este gasto ya fue incluido en una rendición y no se le pueden agregar más boletas."}), 409
+
+    data = request.form
+    try:
+        monto = float(data.get("monto"))
+        if monto <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto de la boleta debe ser un número mayor a 0"}), 400
+
+    try:
+        rubro_gav = _rubro_gav_valido(data.get("rubro_gav"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        orden_id = _orden_id_valido(db, data.get("orden_id"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if rubro_gav == "gastos_por_ot" and orden_id is None:
+        return jsonify({"error": "Para el rubro \"Gastos por OT\" indica la orden de trabajo relacionada."}), 400
+
+    numero_documento = (data.get("numero_documento") or "").strip().upper()
+    categoria = (data.get("categoria") or "").strip().upper()
+    proveedor = (data.get("proveedor") or "").strip().upper()
+    descripcion = (data.get("descripcion") or "").strip().upper()
+
+    try:
+        comprobante = _guardar_comprobante(request.files.get("comprobante"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    ts = now_iso()
+    db.execute(
+        """
+        INSERT INTO caja_gasto_detalles (
+            gasto_id, numero_documento, monto, rubro_gav, categoria, proveedor, descripcion,
+            orden_id, comprobante_archivo, usuario, creado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (gasto_id, numero_documento, monto, rubro_gav, categoria, proveedor, descripcion,
+         orden_id, comprobante, usuario_actual(), ts),
+    )
+    # Si el gasto se había cerrado manualmente (vuelto en caja, boleta chica
+    # perdida) y recién ahora aparece otra boleta, se reabre solo -- ya no
+    # tiene sentido seguir marcado como "cerrado sin justificar" si se está
+    # justificando más.
+    db.execute("UPDATE caja_movimientos SET cerrado_manualmente = 0 WHERE id = ?", (gasto_id,))
+    db.commit()
+
+    actualizado = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (gasto_id,)).fetchone()
+    return jsonify(_caja_movimiento_dict(db, actualizado)), 201
+
+
+@bp.route("/api/caja/boleta/<int:detalle_id>", methods=["PUT"])
+def caja_editar_boleta(detalle_id):
+    db = get_db()
+    detalle = db.execute("SELECT * FROM caja_gasto_detalles WHERE id = ?", (detalle_id,)).fetchone()
+    if detalle is None:
+        return jsonify({"error": "Boleta no encontrada"}), 404
+    gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (detalle["gasto_id"],)).fetchone()
+    if gasto["rendicion_id"] is not None:
+        return jsonify({"error": "El gasto de esta boleta ya fue rendido y no se puede modificar."}), 409
+
+    data = request.form
+    try:
+        monto = float(data.get("monto"))
+        if monto <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto de la boleta debe ser un número mayor a 0"}), 400
+
+    try:
+        rubro_gav = _rubro_gav_valido(data.get("rubro_gav"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    try:
+        orden_id = _orden_id_valido(db, data.get("orden_id"))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if rubro_gav == "gastos_por_ot" and orden_id is None:
+        return jsonify({"error": "Para el rubro \"Gastos por OT\" indica la orden de trabajo relacionada."}), 400
+
+    campos = {
+        "monto": monto,
+        "rubro_gav": rubro_gav,
+        "orden_id": orden_id,
+        "numero_documento": (data.get("numero_documento") or "").strip().upper(),
+        "categoria": (data.get("categoria") or "").strip().upper(),
+        "proveedor": (data.get("proveedor") or "").strip().upper(),
+        "descripcion": (data.get("descripcion") or "").strip().upper(),
+    }
+
+    if "comprobante" in request.files and request.files["comprobante"].filename:
+        try:
+            nuevo_comprobante = _guardar_comprobante(request.files.get("comprobante"))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if detalle["comprobante_archivo"]:
+            ruta_vieja = os.path.join(COMPROBANTES_DIR, detalle["comprobante_archivo"])
+            if os.path.exists(ruta_vieja):
+                try:
+                    os.remove(ruta_vieja)
+                except OSError:
+                    pass
+        campos["comprobante_archivo"] = nuevo_comprobante
+
+    set_clause = ", ".join(f"{k} = ?" for k in campos)
+    db.execute(f"UPDATE caja_gasto_detalles SET {set_clause} WHERE id = ?", (*campos.values(), detalle_id))
+    db.commit()
+
+    gasto_actualizado = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (gasto["id"],)).fetchone()
+    return jsonify(_caja_movimiento_dict(db, gasto_actualizado))
+
+
+@bp.route("/api/caja/boleta/<int:detalle_id>", methods=["DELETE"])
+def caja_eliminar_boleta(detalle_id):
+    db = get_db()
+    detalle = db.execute("SELECT * FROM caja_gasto_detalles WHERE id = ?", (detalle_id,)).fetchone()
+    if detalle is None:
+        return jsonify({"error": "Boleta no encontrada"}), 404
+    gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (detalle["gasto_id"],)).fetchone()
+    if gasto["rendicion_id"] is not None:
+        return jsonify({"error": "El gasto de esta boleta ya fue rendido y no se puede modificar."}), 409
+
+    if detalle["comprobante_archivo"]:
+        ruta = os.path.join(COMPROBANTES_DIR, detalle["comprobante_archivo"])
+        if os.path.exists(ruta):
+            try:
+                os.remove(ruta)
+            except OSError:
+                pass
+    db.execute("DELETE FROM caja_gasto_detalles WHERE id = ?", (detalle_id,))
+    db.commit()
+
+    gasto_actualizado = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (gasto["id"],)).fetchone()
+    return jsonify(_caja_movimiento_dict(db, gasto_actualizado))
+
+
+@bp.route("/api/caja/gasto/<int:gasto_id>/cerrar", methods=["PUT"])
+def caja_cerrar_gasto(gasto_id):
+    """Cierra (o reabre) un gasto manualmente aunque sus boletas no
+    justifiquen el 100% del monto -- para el vuelto que queda disponible en
+    caja o una boleta chica que se perdió. Con esto queda "listo para
+    rendir" (ver _gasto_estado_boletas) sin necesidad de más boletas."""
+    db = get_db()
+    gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ? AND tipo = 'gasto'", (gasto_id,)).fetchone()
+    if gasto is None:
+        return jsonify({"error": "Gasto no encontrado"}), 404
+    if gasto["rendicion_id"] is not None:
+        return jsonify({"error": "Este gasto ya fue rendido."}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    cerrado = bool(data.get("cerrado", True))
+    db.execute("UPDATE caja_movimientos SET cerrado_manualmente = ? WHERE id = ?", (1 if cerrado else 0, gasto_id))
+    db.commit()
+
+    actualizado = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (gasto_id,)).fetchone()
+    return jsonify(_caja_movimiento_dict(db, actualizado))
 
 
 @bp.route("/api/caja/aporte", methods=["POST"])
@@ -571,7 +760,7 @@ def caja_crear_aporte():
     )
     db.commit()
     nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(_caja_movimiento_dict(nuevo)), 201
+    return jsonify(_caja_movimiento_dict(db, nuevo)), 201
 
 
 @bp.route("/api/caja/movimiento/<int:mov_id>", methods=["DELETE"])
@@ -593,6 +782,20 @@ def caja_eliminar_movimiento(mov_id):
             except OSError:
                 pass
 
+    # Un gasto sin rendicion_id (garantizado por el bloqueo de arriba) puede
+    # tener boletas cargadas -- se borran junto con él para no dejar boletas
+    # huérfanas apuntando a un gasto inexistente (sus comprobantes también).
+    if row["tipo"] == "gasto":
+        for d in db.execute("SELECT * FROM caja_gasto_detalles WHERE gasto_id = ?", (mov_id,)).fetchall():
+            if d["comprobante_archivo"]:
+                ruta = os.path.join(COMPROBANTES_DIR, d["comprobante_archivo"])
+                if os.path.exists(ruta):
+                    try:
+                        os.remove(ruta)
+                    except OSError:
+                        pass
+        db.execute("DELETE FROM caja_gasto_detalles WHERE gasto_id = ?", (mov_id,))
+
     db.execute("DELETE FROM caja_movimientos WHERE id = ?", (mov_id,))
     db.commit()
     return jsonify({"ok": True})
@@ -600,11 +803,13 @@ def caja_eliminar_movimiento(mov_id):
 
 @bp.route("/api/caja/movimiento/<int:mov_id>", methods=["PUT"])
 def caja_editar_movimiento(mov_id):
-    """Editar un gasto o aporte (fecha, monto, categoría, descripción,
-    proveedor, y opcionalmente reemplazar el comprobante). Usa el mismo
-    candado que Eliminar: si ya está rendido, es una reposición automática,
-    o generó un ingreso de stock, no se puede tocar — para no descuadrar el
-    saldo ni la trazabilidad."""
+    """Editar un gasto o aporte. Desde la Migración 25, un "gasto" (retiro)
+    solo tiene monto/medio de pago/fecha propios -- categoría, proveedor,
+    rubro, N° de documento, detalle y OT relacionada ahora viven en sus
+    boletas (ver caja_editar_boleta), no acá. Usa el mismo candado que
+    Eliminar: si ya está rendido, es una reposición automática, o generó un
+    ingreso de stock, no se puede tocar — para no descuadrar el saldo ni la
+    trazabilidad."""
     db = get_db()
     row = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
     if row is None:
@@ -636,30 +841,6 @@ def caja_editar_movimiento(mov_id):
     descripcion = (data.get("descripcion") or "").strip().upper()
 
     campos = {"monto": monto, "medio_pago": medio_pago, "fecha": fecha_final, "descripcion": descripcion}
-    if row["tipo"] == "gasto":
-        campos["categoria"] = (data.get("categoria") or "").strip().upper()
-        campos["proveedor"] = (data.get("proveedor") or "").strip().upper()
-        # Si no viene rubro_gav en el request, se mantiene el que ya tenía
-        # la fila -- mismo criterio que medio_pago un poco más arriba, para
-        # no perder la clasificación al editar solo otro campo.
-        try:
-            rubro_recibido = data.get("rubro_gav")
-            campos["rubro_gav"] = _rubro_gav_valido(rubro_recibido) if rubro_recibido is not None else row["rubro_gav"]
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
-
-        # numero_documento y orden_id (Migración 25): este es el lugar
-        # donde normalmente se completan -- quien generó el gasto solo tenía
-        # el monto del banco, y quien rinde ya tiene la boleta a la vista.
-        # Mismo criterio que rubro_gav arriba: si no viene en el request, se
-        # mantiene lo que ya tenía la fila.
-        if "numero_documento" in data:
-            campos["numero_documento"] = (data.get("numero_documento") or "").strip().upper()
-        try:
-            orden_recibida = data.get("orden_id")
-            campos["orden_id"] = _orden_id_valido(db, orden_recibida) if orden_recibida is not None else row["orden_id"]
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
 
     if "comprobante" in request.files and request.files["comprobante"].filename:
         try:
@@ -680,7 +861,7 @@ def caja_editar_movimiento(mov_id):
     db.commit()
 
     actualizado = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
-    return jsonify(_caja_movimiento_dict(actualizado))
+    return jsonify(_caja_movimiento_dict(db, actualizado))
 
 
 @bp.route("/api/caja/comprobante/<path:nombre_archivo>", methods=["GET"])
@@ -711,7 +892,7 @@ def caja_gastos_pendientes():
         params.append(medio_pago)
     sql += " ORDER BY fecha ASC"
     rows = db.execute(sql, params).fetchall()
-    return jsonify({"gastos": [_caja_movimiento_dict(r) for r in rows]})
+    return jsonify({"gastos": [_caja_movimiento_dict(db, r) for r in rows]})
 
 
 @bp.route("/api/caja/rendicion", methods=["POST"])
@@ -739,6 +920,20 @@ def caja_crear_rendicion():
         return jsonify({"error": "Alguno de los gastos seleccionados no existe"}), 400
     if any(g["rendicion_id"] is not None for g in gastos):
         return jsonify({"error": "Alguno de los gastos seleccionados ya fue rendido antes"}), 400
+
+    # Migración 25: un gasto solo puede rendirse cuando sus boletas ya
+    # justifican el 100% del monto, o cuando se cerró manualmente (ver
+    # caja_cerrar_gasto) -- no tendría sentido "rendir" un retiro que
+    # todavía no se sabe en qué se gastó.
+    no_listos = [
+        g for g in gastos
+        if not _gasto_estado_boletas(db, g["id"], g["monto"], g["cerrado_manualmente"])[3]
+    ]
+    if no_listos:
+        detalle = ", ".join(f"#{g['id']} ({g['fecha'][:10]})" for g in no_listos)
+        return jsonify({
+            "error": f"Estos gastos todavía no están listos para rendir (les faltan boletas o cerrarlos manualmente): {detalle}"
+        }), 400
 
     # Todos los gastos de una rendición tienen que ser del mismo medio_pago:
     # una rendición es literalmente "estoy presentando este lote de
@@ -825,7 +1020,7 @@ def caja_detalle_rendicion(rendicion_id):
         "SELECT * FROM caja_movimientos WHERE rendicion_id = ? ORDER BY fecha ASC", (rendicion_id,)
     ).fetchall()
     d = dict(rendicion)
-    d["gastos"] = [_caja_movimiento_dict(g) for g in gastos]
+    d["gastos"] = [_caja_movimiento_dict(db, g) for g in gastos]
     d["reposicion_automatica"] = _rendicion_tuvo_reposicion(db, rendicion_id)
     return jsonify(d)
 
@@ -1206,7 +1401,22 @@ def _gastos_caja_para_reporte(desde, hasta):
         sql += " AND fecha <= ?"
         params.append(hasta + "T23:59:59")
     sql += " ORDER BY fecha DESC, id DESC"
-    return [_caja_movimiento_dict(r) for r in db.execute(sql, params).fetchall()]
+    return [_caja_movimiento_dict(db, r) for r in db.execute(sql, params).fetchall()]
+
+
+def _boletas_texto(g):
+    """Texto compacto con las boletas de un gasto (Migración 25 -- ya no
+    tiene categoría/descripción/proveedor propios, esos datos ahora viven
+    en sus boletas) para mostrar en los reportes exportables."""
+    boletas = g.get("boletas") or []
+    if not boletas:
+        return "(sin boletas)", ""
+    docs = "; ".join(b["numero_documento"] or "(sin N°)" for b in boletas)
+    rubros = "; ".join(
+        (RUBROS_GAV.get(b["rubro_gav"], b["rubro_gav"]) if b["rubro_gav"] else "Sin clasificar")
+        for b in boletas
+    )
+    return docs, rubros
 
 
 @bp.route("/api/reportes/caja-gastos", methods=["GET"])
@@ -1217,29 +1427,31 @@ def reporte_caja_gastos():
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Gastos Caja Chica"
-    ws.append(["Fecha", "Categoría", "Descripción", "Proveedor", "Monto", "Estado", "Responsable"])
+    ws.append(["Fecha", "N° de boleta(s)", "Rubro(s)", "Monto", "Estado", "Responsable"])
     total = 0
     for g in gastos:
         total += g["monto"]
+        docs, rubros = _boletas_texto(g)
         ws.append([
-            g["fecha"], g["categoria"] or "", g["descripcion"] or "", g["proveedor"] or "",
+            g["fecha"], docs, rubros,
             round(g["monto"], 2), "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "",
         ])
     ws.append([])
-    ws.append(["", "", "", "", round(total, 2), "", ""])
+    ws.append(["", "", "", round(total, 2), "", ""])
     _estilo_encabezado(ws)
     _autoancho(ws)
 
-    ws2 = wb.create_sheet("Por categoría")
-    ws2.append(["Categoría", "N° de gastos", "Total"])
-    por_categoria = {}
+    ws2 = wb.create_sheet("Por rubro GAV")
+    ws2.append(["Rubro", "N° de boletas", "Total"])
+    por_rubro = {}
     for g in gastos:
-        cat = g["categoria"] or "(sin categoría)"
-        acc = por_categoria.setdefault(cat, {"n": 0, "total": 0})
-        acc["n"] += 1
-        acc["total"] += g["monto"]
-    for cat, acc in sorted(por_categoria.items(), key=lambda kv: kv[1]["total"], reverse=True):
-        ws2.append([cat, acc["n"], round(acc["total"], 2)])
+        for b in g.get("boletas") or []:
+            rubro = RUBROS_GAV.get(b["rubro_gav"], "(sin clasificar)") if b["rubro_gav"] else "(sin clasificar)"
+            acc = por_rubro.setdefault(rubro, {"n": 0, "total": 0})
+            acc["n"] += 1
+            acc["total"] += b["monto"]
+    for rubro, acc in sorted(por_rubro.items(), key=lambda kv: kv[1]["total"], reverse=True):
+        ws2.append([rubro, acc["n"], round(acc["total"], 2)])
     _estilo_encabezado(ws2)
     _autoancho(ws2)
 
@@ -1257,14 +1469,16 @@ def reporte_caja_gastos_pdf():
     buffer, doc, elementos, estilos = _pdf_documento(f"Gastos de Caja Chica{rango_txt}")
 
     total = sum(g["monto"] for g in gastos)
-    filas = [
-        [g["fecha"][:10], g["categoria"] or "—", g["descripcion"] or "—", fmt_money_pdf(g["monto"]),
-         "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "—"]
-        for g in gastos
-    ]
+    filas = []
+    for g in gastos:
+        docs, rubros = _boletas_texto(g)
+        filas.append([
+            g["fecha"][:10], docs or "—", rubros or "—", fmt_money_pdf(g["monto"]),
+            "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "—",
+        ])
     _pdf_tabla(
         elementos, estilos, f"Total gastado: {fmt_money_pdf(total)} — {len(gastos)} gasto(s)",
-        ["Fecha", "Categoría", "Descripción", "Monto", "Estado", "Responsable"],
+        ["Fecha", "N° de boleta(s)", "Rubro(s)", "Monto", "Estado", "Responsable"],
         filas,
     )
 
@@ -1422,14 +1636,15 @@ def reporte_finanzas_resumen():
     _autoancho(ws2)
 
     ws3 = wb.create_sheet("Gastos (Caja Chica)")
-    ws3.append(["Fecha", "Categoría", "Descripción", "Proveedor", "Monto", "Estado", "Responsable"])
+    ws3.append(["Fecha", "N° de boleta(s)", "Rubro(s)", "Monto", "Estado", "Responsable"])
     for g in gastos:
+        docs, rubros = _boletas_texto(g)
         ws3.append([
-            g["fecha"], g["categoria"] or "", g["descripcion"] or "", g["proveedor"] or "",
+            g["fecha"], docs, rubros,
             round(g["monto"], 2), "Rendido" if g["rendido"] else "Pendiente", g["usuario"] or "",
         ])
     ws3.append([])
-    ws3.append(["", "", "", "Total", round(sum(g["monto"] for g in gastos), 2), "", ""])
+    ws3.append(["", "", "", "Total", round(sum(g["monto"] for g in gastos), 2), ""])
     _estilo_encabezado(ws3)
     _autoancho(ws3)
 
@@ -1478,14 +1693,16 @@ def reporte_finanzas_resumen_pdf():
         filas_ingresos,
     )
 
-    filas_gastos = [
-        [g["fecha"][:10], g["categoria"] or "—", g["descripcion"] or "—", fmt_money_pdf(g["monto"]),
-         "Rendido" if g["rendido"] else "Pendiente"]
-        for g in gastos
-    ]
+    filas_gastos = []
+    for g in gastos:
+        docs, rubros = _boletas_texto(g)
+        filas_gastos.append([
+            g["fecha"][:10], docs or "—", rubros or "—", fmt_money_pdf(g["monto"]),
+            "Rendido" if g["rendido"] else "Pendiente",
+        ])
     _pdf_tabla(
         elementos, estilos, f"Gastos de Caja Chica — {fmt_money_pdf(sum(g['monto'] for g in gastos))}",
-        ["Fecha", "Categoría", "Descripción", "Monto", "Estado"],
+        ["Fecha", "N° de boleta(s)", "Rubro(s)", "Monto", "Estado"],
         filas_gastos,
     )
 
@@ -1563,33 +1780,38 @@ def finanzas_estado_resultados():
     utilidad_bruta = round(ventas_total - costo_ventas_total, 2)
     margen_bruto_pct = round((utilidad_bruta / ventas_total) * 100, 1) if ventas_total else None
 
-    # ---- GAV: gastos de Caja Chica ya clasificados por rubro_gav (nunca
-    # incluye producto_id IS NOT NULL -- esas son compras de inventario que
-    # ya se cuentan como costo de ventas cuando el repuesto se usa en una
-    # OT, ver ventas_y_costo_ot_mes; contarlas también acá sería duplicar
-    # el gasto). El rubro "gastos_por_ot" (Migración 25) se excluye del
-    # mismo modo y por la misma razón: es un costo de una OT puntual, no un
-    # gasto administrativo -- se reporta aparte más abajo
-    # ('gastos_por_ot_total'), sin sumarse a gav_total, para no inflar GAV
-    # con algo que en realidad es costo asociado a una orden de trabajo.
+    # ---- GAV: boletas de Caja Chica ya clasificadas por rubro_gav (Migración
+    # 25 -- el rubro vive en la boleta, no en el gasto/retiro). Nunca incluye
+    # producto_id IS NOT NULL en el gasto -- esas son compras de inventario
+    # que ya se cuentan como costo de ventas cuando el repuesto se usa en una
+    # OT, ver ventas_y_costo_ot_mes; contarlas también acá sería duplicar el
+    # gasto. El rubro "gastos_por_ot" se excluye del mismo modo y por la
+    # misma razón: es un costo de una OT puntual, no un gasto administrativo
+    # -- se reporta aparte más abajo ('gastos_por_ot_total'), sin sumarse a
+    # gav_total, para no inflar GAV con algo que en realidad es costo
+    # asociado a una orden de trabajo. Se atribuye al mes de la FECHA del
+    # gasto (cuándo salió la plata de caja), no de cuándo se cargó la boleta.
     filas_gav = db.execute(
-        "SELECT rubro_gav, COALESCE(SUM(monto), 0) AS total FROM caja_movimientos "
-        "WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? "
-        "AND rubro_gav != '' AND rubro_gav != 'gastos_por_ot' GROUP BY rubro_gav",
+        "SELECT d.rubro_gav AS rubro_gav, COALESCE(SUM(d.monto), 0) AS total "
+        "FROM caja_gasto_detalles d JOIN caja_movimientos g ON g.id = d.gasto_id "
+        "WHERE g.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? "
+        "AND d.rubro_gav != '' AND d.rubro_gav != 'gastos_por_ot' GROUP BY d.rubro_gav",
         (mes,),
     ).fetchall()
     gav_por_rubro = {fila["rubro_gav"]: round(fila["total"], 2) for fila in filas_gav}
     gav_caja_chica_total = round(sum(gav_por_rubro.values()), 2)
 
     gastos_por_ot_total = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) AS total FROM caja_movimientos "
-        "WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? AND rubro_gav = 'gastos_por_ot'",
+        "SELECT COALESCE(SUM(d.monto), 0) AS total FROM caja_gasto_detalles d "
+        "JOIN caja_movimientos g ON g.id = d.gasto_id "
+        "WHERE g.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? AND d.rubro_gav = 'gastos_por_ot'",
         (mes,),
     ).fetchone()["total"] or 0
 
     gav_sin_clasificar = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) AS total FROM caja_movimientos "
-        "WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? AND rubro_gav = ''",
+        "SELECT COALESCE(SUM(d.monto), 0) AS total FROM caja_gasto_detalles d "
+        "JOIN caja_movimientos g ON g.id = d.gasto_id "
+        "WHERE g.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? AND d.rubro_gav = ''",
         (mes,),
     ).fetchone()["total"] or 0
 
@@ -1813,20 +2035,24 @@ def finanzas_estado_resultados_detalle():
             })
 
     elif linea in LINEAS_DETALLE_GAV:
+        # Migración 25: el rubro/descripción/proveedor viven en la boleta
+        # (caja_gasto_detalles), no en el gasto/retiro -- de ahí el JOIN.
         if linea == "gav_sin_clasificar":
-            filtro_rubro = "AND rubro_gav = ''"
+            filtro_rubro = "AND d.rubro_gav = ''"
             params = [mes]
         else:
-            filtro_rubro = "AND rubro_gav = ?"
+            filtro_rubro = "AND d.rubro_gav = ?"
             params = [mes, linea[len("gav_"):]]
         filas = db.execute(
-            f"SELECT fecha, categoria, descripcion, proveedor, monto FROM caja_movimientos "
-            f"WHERE tipo = 'gasto' AND producto_id IS NULL AND substr(fecha, 1, 7) = ? {filtro_rubro} "
-            f"ORDER BY fecha",
+            f"SELECT g.fecha AS fecha, d.categoria AS categoria, d.descripcion AS descripcion, "
+            f"d.proveedor AS proveedor, d.numero_documento AS numero_documento, d.monto AS monto "
+            f"FROM caja_gasto_detalles d JOIN caja_movimientos g ON g.id = d.gasto_id "
+            f"WHERE g.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? {filtro_rubro} "
+            f"ORDER BY g.fecha",
             params,
         ).fetchall()
         for f in filas:
-            etiqueta = f["descripcion"] or f["categoria"] or "Gasto de Caja Chica"
+            etiqueta = f["descripcion"] or f["categoria"] or (f"Boleta {f['numero_documento']}" if f["numero_documento"] else "Gasto de Caja Chica")
             if f["proveedor"]:
                 etiqueta += f" — {f['proveedor']}"
             items.append({"etiqueta": etiqueta, "fecha": f["fecha"], "monto": round(f["monto"], 2)})

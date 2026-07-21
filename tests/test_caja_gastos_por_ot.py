@@ -1,15 +1,25 @@
-"""Tests de Caja Chica -- Migración 25: número de boleta/factura
-(numero_documento) y orden de trabajo relacionada (orden_id) en
-caja_movimientos, más el nuevo rubro_gav "gastos_por_ot".
+"""Tests de Caja Chica -- Migración 25: rendición parcial por boletas.
 
-Cubre el flujo pedido por el taller: quien registra el "Nuevo gasto" solo
-tiene el retiro del banco (monto), sin boleta ni detalle a mano -- esos
-campos quedan opcionales al crear y se completan después, al editar el
-gasto durante "Generar rendición" (PUT /api/caja/movimiento/<id>).
+Antes, un "gasto" de Caja Chica era una sola cosa (el retiro Y su boleta a
+la vez). El taller pidió separarlo en dos pasos:
+  1. "Nuevo gasto": solo monto, medio de pago y fecha -- quien lo registra
+     viendo el banco no tiene más información que esa a mano.
+  2. Una o más "boletas" (caja_gasto_detalles) contra ese mismo gasto,
+     cargadas después por quien sí tiene la boleta física en mano (puede
+     ser otra persona, ej. Cristian contrastando contra el trabajador que
+     compró). Cada boleta tiene su propio N° de documento, monto (no
+     necesariamente el 100% del retiro -- sobre todo en efectivo), rubro
+     GAV, detalle y, si el rubro es "Gastos por OT", la orden de trabajo
+     relacionada.
+El gasto queda "listo para rendir" cuando la suma de sus boletas alcanza el
+monto del retiro, o cuando se cierra manualmente (vuelto en caja, boleta
+chica perdida). Solo ahí puede incluirse en una Rendición
+(POST /api/caja/rendicion, sin cambios en su forma -- sigue siendo un lote
+de gastos ya listos).
 
-También cubre que "Gastos por OT" (costo asociado a una OT puntual) se
-excluye del total de GAV en el Estado de Resultados -- no es gasto
-administrativo general -- pero se reporta aparte (gastos_por_ot_total).
+También cubre que "Gastos por OT" se excluye del total de GAV en el Estado
+de Resultados (no es gasto administrativo, es costo de una OT puntual) pero
+se reporta aparte.
 """
 import os
 import sys
@@ -48,117 +58,185 @@ class _Base(unittest.TestCase):
         base.update(campos)
         return self.client.post("/api/caja/gasto", data=base)
 
-    def _editar_movimiento(self, mov_id, **campos):
+    def _agregar_boleta(self, gasto_id, **campos):
         base = {"monto": "1000"}
         base.update(campos)
-        return self.client.put(f"/api/caja/movimiento/{mov_id}", data=base)
+        return self.client.post(f"/api/caja/gasto/{gasto_id}/boleta", data=base)
 
 
-class TestNumeroDocumentoYOrdenId(_Base):
-    def test_crear_gasto_sin_numero_documento_ni_orden_ni_rubro(self):
-        """Al crear, todos estos campos son opcionales -- el escenario
-        típico de quien solo saca la info del banco."""
+class TestNuevoGastoSimplificado(_Base):
+    def test_crear_gasto_solo_pide_monto_medio_y_fecha(self):
         resp = self._crear_gasto()
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         g = resp.get_json()
-        self.assertEqual(g["numero_documento"], "")
-        self.assertIsNone(g["orden_id"])
-        self.assertEqual(g["rubro_gav"], "")
+        self.assertEqual(g["monto"], 1000.0)
+        self.assertEqual(g["medio_pago"], "efectivo_cajero")
+        # Recién creado, sin boletas: no está listo para rendir.
+        self.assertEqual(g["monto_justificado"], 0)
+        self.assertEqual(g["monto_pendiente"], 1000.0)
+        self.assertFalse(g["listo_para_rendir"])
+        self.assertEqual(g["boletas"], [])
 
-    def test_crear_gasto_con_numero_documento(self):
-        resp = self._crear_gasto(numero_documento="  boleta-4521  ")
+    def test_gasto_sin_monto_es_rechazado(self):
+        resp = self.client.post(
+            "/api/caja/gasto", data={"medio_pago": "efectivo_cajero", "fecha": "2026-07-15"}
+        )
+        self.assertEqual(resp.status_code, 400)
+
+
+class TestBoletasParciales(_Base):
+    def test_una_boleta_por_el_monto_completo_deja_el_gasto_listo(self):
+        gasto = self._crear_gasto(monto="15000").get_json()
+        resp = self._agregar_boleta(gasto["id"], monto="15000", numero_documento="F-1", rubro_gav="otros")
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         g = resp.get_json()
-        self.assertEqual(g["numero_documento"], "BOLETA-4521")
+        self.assertEqual(g["monto_justificado"], 15000.0)
+        self.assertEqual(g["monto_pendiente"], 0)
+        self.assertTrue(g["listo_para_rendir"])
+        self.assertEqual(len(g["boletas"]), 1)
 
-    def test_crear_gasto_orden_id_invalido_no_numerico(self):
-        resp = self._crear_gasto(rubro_gav="gastos_por_ot", orden_id="abc")
+    def test_varias_boletas_parciales_van_reduciendo_el_pendiente(self):
+        """El caso central pedido por el taller: un retiro de $200.000 en
+        efectivo que se justifica con boletas parciales, sin perder la
+        información entre una y otra."""
+        gasto = self._crear_gasto(monto="200000").get_json()
+
+        r1 = self._agregar_boleta(gasto["id"], monto="60000", numero_documento="F-1", rubro_gav="otros")
+        self.assertEqual(r1.status_code, 201, r1.get_data(as_text=True))
+        self.assertEqual(r1.get_json()["monto_pendiente"], 140000.0)
+        self.assertFalse(r1.get_json()["listo_para_rendir"])
+
+        r2 = self._agregar_boleta(gasto["id"], monto="90000", numero_documento="F-2", rubro_gav="mantencion")
+        self.assertEqual(r2.get_json()["monto_pendiente"], 50000.0)
+
+        r3 = self._agregar_boleta(gasto["id"], monto="50000", numero_documento="F-3", rubro_gav="generales")
+        self.assertEqual(r3.get_json()["monto_pendiente"], 0)
+        self.assertTrue(r3.get_json()["listo_para_rendir"])
+        self.assertEqual(len(r3.get_json()["boletas"]), 3)
+
+    def test_boleta_rubro_gastos_por_ot_exige_orden_de_trabajo(self):
+        gasto = self._crear_gasto(monto="7000").get_json()
+        resp = self._agregar_boleta(gasto["id"], monto="7000", rubro_gav="gastos_por_ot")
         self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
-        self.assertIn("orden", resp.get_json()["error"].lower())
+        self.assertIn("orden de trabajo", resp.get_json()["error"].lower())
 
-    def test_crear_gasto_orden_id_inexistente(self):
-        resp = self._crear_gasto(rubro_gav="gastos_por_ot", orden_id="999999")
+    def test_boleta_gastos_por_ot_con_orden_valida_queda_ligada_a_la_ot(self):
+        cliente = self._crear_cliente("CLIENTE BOLETA OT")
+        orden = self._crear_orden(cliente["id"])
+        gasto = self._crear_gasto(monto="7000").get_json()
+
+        resp = self._agregar_boleta(
+            gasto["id"], monto="7000", rubro_gav="gastos_por_ot", orden_id=str(orden["id"]), numero_documento="F-9"
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        boleta = resp.get_json()["boletas"][0]
+        self.assertEqual(boleta["orden_id"], orden["id"])
+        self.assertEqual(boleta["rubro_gav"], "gastos_por_ot")
+
+    def test_boleta_con_orden_id_inexistente_es_rechazada(self):
+        gasto = self._crear_gasto(monto="7000").get_json()
+        resp = self._agregar_boleta(gasto["id"], monto="7000", rubro_gav="gastos_por_ot", orden_id="999999")
         self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
         self.assertIn("no existe", resp.get_json()["error"].lower())
 
-    def test_crear_gasto_orden_id_valido_con_rubro_gastos_por_ot(self):
-        cliente = self._crear_cliente("CLIENTE OT CAJA")
-        orden = self._crear_orden(cliente["id"])
-        resp = self._crear_gasto(rubro_gav="gastos_por_ot", orden_id=str(orden["id"]))
+    def test_agregar_boleta_a_gasto_ya_rendido_es_rechazado(self):
+        gasto = self._crear_gasto(monto="1000").get_json()
+        self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1")
+        rend = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]]})
+        self.assertEqual(rend.status_code, 201, rend.get_data(as_text=True))
+
+        resp = self._agregar_boleta(gasto["id"], monto="500", numero_documento="F-2")
+        self.assertEqual(resp.status_code, 409, resp.get_data(as_text=True))
+
+    def test_editar_boleta(self):
+        gasto = self._crear_gasto(monto="1000").get_json()
+        boleta = self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1", rubro_gav="otros")
+        boleta_id = boleta.get_json()["boletas"][0]["id"]
+
+        resp = self.client.put(f"/api/caja/boleta/{boleta_id}", data={
+            "monto": "1000", "numero_documento": "F-1-CORREGIDA", "rubro_gav": "otros",
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        boletas = resp.get_json()["boletas"]
+        self.assertEqual(boletas[0]["numero_documento"], "F-1-CORREGIDA")
+
+    def test_eliminar_boleta_reabre_el_gasto(self):
+        gasto = self._crear_gasto(monto="1000").get_json()
+        boleta = self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1", rubro_gav="otros")
+        boleta_id = boleta.get_json()["boletas"][0]["id"]
+        self.assertTrue(boleta.get_json()["listo_para_rendir"])
+
+        resp = self.client.delete(f"/api/caja/boleta/{boleta_id}")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["monto_pendiente"], 1000.0)
+        self.assertFalse(resp.get_json()["listo_para_rendir"])
+
+
+class TestCierreManual(_Base):
+    def test_cerrar_manualmente_deja_listo_para_rendir_aunque_falte_monto(self):
+        gasto = self._crear_gasto(monto="20000").get_json()
+        self._agregar_boleta(gasto["id"], monto="18000", numero_documento="F-1", rubro_gav="otros")
+
+        resp = self.client.put(f"/api/caja/gasto/{gasto['id']}/cerrar", json={"cerrado": True})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        g = resp.get_json()
+        self.assertEqual(g["monto_pendiente"], 2000.0)  # el pendiente real no cambia...
+        self.assertTrue(g["listo_para_rendir"])          # ...pero ya puede rendirse
+        self.assertTrue(g["cerrado_manualmente"])
+
+    def test_agregar_otra_boleta_reabre_el_cierre_manual(self):
+        gasto = self._crear_gasto(monto="20000").get_json()
+        self._agregar_boleta(gasto["id"], monto="18000", numero_documento="F-1", rubro_gav="otros")
+        self.client.put(f"/api/caja/gasto/{gasto['id']}/cerrar", json={"cerrado": True})
+
+        resp = self._agregar_boleta(gasto["id"], monto="2000", numero_documento="F-2", rubro_gav="otros")
+        g = resp.get_json()
+        self.assertFalse(g["cerrado_manualmente"])
+        self.assertEqual(g["monto_pendiente"], 0)
+        self.assertTrue(g["listo_para_rendir"])
+
+
+class TestRendicionRequiereGastoListo(_Base):
+    def test_rendir_gasto_sin_boletas_es_rechazado(self):
+        gasto = self._crear_gasto(monto="1000").get_json()
+        resp = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]]})
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("listos para rendir", resp.get_json()["error"])
+
+    def test_rendir_gasto_parcialmente_justificado_es_rechazado(self):
+        gasto = self._crear_gasto(monto="1000").get_json()
+        self._agregar_boleta(gasto["id"], monto="400", numero_documento="F-1")
+        resp = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]]})
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+
+    def test_rendir_gasto_listo_funciona_y_queda_fuera_de_pendientes(self):
+        gasto = self._crear_gasto(monto="1000", medio_pago="tarjeta_empresa").get_json()
+        self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1", rubro_gav="otros")
+
+        resp = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]], "medio_pago": "tarjeta_empresa"})
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
-        g = resp.get_json()
-        self.assertEqual(g["rubro_gav"], "gastos_por_ot")
-        self.assertEqual(g["orden_id"], orden["id"])
 
-    def test_completar_datos_via_put_despues_de_creacion_liviana(self):
-        """El flujo principal pedido: se crea "liviano" (solo banco) y se
-        completa después desde "Generar rendición"."""
-        cliente = self._crear_cliente("CLIENTE COMPLETAR")
-        orden = self._crear_orden(cliente["id"])
-        creado = self._crear_gasto().get_json()
+        pend = self.client.get("/api/caja/pendientes?medio_pago=tarjeta_empresa").get_json()["gastos"]
+        self.assertFalse(any(g["id"] == gasto["id"] for g in pend))
 
-        resp = self._editar_movimiento(
-            creado["id"],
-            numero_documento="F-1002",
-            rubro_gav="gastos_por_ot",
-            orden_id=str(orden["id"]),
-            descripcion="Repuesto urgente",
-        )
-        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
-        g = resp.get_json()
-        self.assertEqual(g["numero_documento"], "F-1002")
-        self.assertEqual(g["rubro_gav"], "gastos_por_ot")
-        self.assertEqual(g["orden_id"], orden["id"])
-
-    def test_editar_sin_orden_id_preserva_valor_existente(self):
-        cliente = self._crear_cliente("CLIENTE PRESERVA")
-        orden = self._crear_orden(cliente["id"])
-        creado = self._crear_gasto(rubro_gav="gastos_por_ot", orden_id=str(orden["id"])).get_json()
-
-        resp = self._editar_movimiento(creado["id"], numero_documento="F-9")
-        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
-        g = resp.get_json()
-        self.assertEqual(g["orden_id"], orden["id"])
-
-    def test_editar_con_orden_id_vacio_limpia_el_valor(self):
-        cliente = self._crear_cliente("CLIENTE LIMPIA")
-        orden = self._crear_orden(cliente["id"])
-        creado = self._crear_gasto(rubro_gav="gastos_por_ot", orden_id=str(orden["id"])).get_json()
-
-        resp = self._editar_movimiento(creado["id"], orden_id="", rubro_gav="otros")
-        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
-        g = resp.get_json()
-        self.assertIsNone(g["orden_id"])
-
-    def test_pendientes_incluye_numero_documento_y_orden_id(self):
-        cliente = self._crear_cliente("CLIENTE PENDIENTES")
-        orden = self._crear_orden(cliente["id"])
-        self._crear_gasto(
-            medio_pago="tarjeta_empresa", numero_documento="F-77",
-            rubro_gav="gastos_por_ot", orden_id=str(orden["id"]),
-        )
-        resp = self.client.get("/api/caja/pendientes?medio_pago=tarjeta_empresa")
-        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
-        gastos = resp.get_json()["gastos"]
-        encontrado = next(g for g in gastos if g["numero_documento"] == "F-77")
-        self.assertEqual(encontrado["orden_id"], orden["id"])
-        self.assertEqual(encontrado["rubro_gav"], "gastos_por_ot")
+        det = self.client.get(f"/api/caja/rendicion/{resp.get_json()['id']}").get_json()
+        self.assertEqual(len(det["gastos"]), 1)
+        self.assertEqual(det["gastos"][0]["boletas"][0]["numero_documento"], "F-1")
 
 
 class TestGastosPorOtExcluidoDelGav(_Base):
     def test_gastos_por_ot_no_suma_en_gav_total_pero_se_reporta_aparte(self):
         cliente = self._crear_cliente("CLIENTE ESTADO RESULTADOS")
         orden = self._crear_orden(cliente["id"])
-        # Mes distinto al resto de los tests de esta clase (que usan la
-        # fecha por defecto 2026-07-15) para que este total no se contamine
-        # con gastos "gastos_por_ot" creados en otros tests.
-        mes = "2031-07"
+        # Mes propio para no mezclarse con otros tests de este archivo.
+        mes = "2031-08"
 
-        self._crear_gasto(
-            monto="5000", fecha=f"{mes}-10", rubro_gav="otros", numero_documento="F-1",
-        )
-        self._crear_gasto(
-            monto="7000", fecha=f"{mes}-11", rubro_gav="gastos_por_ot",
+        g1 = self._crear_gasto(monto="5000", fecha=f"{mes}-10").get_json()
+        self._agregar_boleta(g1["id"], monto="5000", rubro_gav="otros", numero_documento="F-1")
+
+        g2 = self._crear_gasto(monto="7000", fecha=f"{mes}-11").get_json()
+        self._agregar_boleta(
+            g2["id"], monto="7000", rubro_gav="gastos_por_ot",
             orden_id=str(orden["id"]), numero_documento="F-2",
         )
 
@@ -168,11 +246,10 @@ class TestGastosPorOtExcluidoDelGav(_Base):
 
         self.assertNotIn("gastos_por_ot", gav["por_rubro"])
         self.assertEqual(gav["gastos_por_ot_total"], 7000.0)
-        # El total de GAV no debe incluir los 7000 del gasto por OT.
         self.assertNotIn("gastos_por_ot", gav["rubros_label"])
 
     def test_rubros_label_no_incluye_gastos_por_ot(self):
-        resp = self.client.get("/api/finanzas/estado-resultados?mes=2026-07")
+        resp = self.client.get("/api/finanzas/estado-resultados?mes=2031-08")
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         rubros_label = resp.get_json()["gav"]["rubros_label"]
         self.assertNotIn("gastos_por_ot", rubros_label)

@@ -228,8 +228,7 @@
           <th>Fecha</th>
           <th>Tipo</th>
           <th>Medio</th>
-          <th>Categoría / Descripción</th>
-          <th>Lugar / Proveedor</th>
+          <th>Boletas / Descripción</th>
           <th class="num">Monto</th>
           <th>Comprobante</th>
           <th>Estado</th>
@@ -238,7 +237,7 @@
         </tr>
       </thead>
       <tbody id="tbody-caja">
-        <tr><td colspan="10" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -452,7 +451,7 @@
       <button class="modal-close" data-close="modal-caja-gasto">&times;</button>
     </div>
     <p class="ayuda-inline" id="cg-bloqueado-aviso" style="display:none"></p>
-    <p class="ayuda-inline">Monto, fecha y medio de pago son lo único obligatorio al registrar el gasto — quien lo carga muchas veces solo tiene el retiro del banco a mano. Rubro, N° de boleta/factura, OT relacionada y Detalle se pueden completar después, al generar la rendición, cuando ya se tiene la boleta física.</p>
+    <p class="ayuda-inline">Monto, fecha y medio de pago — es todo lo que se necesita para registrar el retiro. El N° de boleta/factura, el rubro, el detalle y (si corresponde) la OT relacionada se agregan después, boleta por boleta, desde "Generar rendición" — pueden ser varias boletas para un mismo retiro.</p>
     <form id="form-caja-gasto">
       <input type="hidden" id="cg-id">
       <div class="grid-2">
@@ -472,49 +471,6 @@
           <option value="tarjeta_empresa">Tarjeta empresa</option>
           <option value="cristian">Vía Cristian (logística)</option>
         </select>
-      </div>
-      <div class="grid-2">
-        <div class="campo">
-          <label>Categoría</label>
-          <input type="text" id="cg-categoria" placeholder="Ej: Aseo, Colación, Ferretería…" list="cg-categorias-usadas">
-          <datalist id="cg-categorias-usadas"></datalist>
-        </div>
-        <div class="campo">
-          <label>Lugar / Proveedor</label>
-          <input type="text" id="cg-proveedor" placeholder="Ej: Ferretería El Tornillo">
-        </div>
-      </div>
-      <div class="campo" id="cg-rubro-gav-wrap">
-        <label>Rubro (para el Estado de Resultados)</label>
-        <select id="cg-rubro-gav">
-          <option value="">Sin clasificar</option>
-          <option value="generales">Gastos generales</option>
-          <option value="servicios_basicos">Servicios básicos (agua, luz, gas, internet)</option>
-          <option value="combustible">Combustible</option>
-          <option value="bancarios">Gastos bancarios</option>
-          <option value="mantencion">Mantención y equipos</option>
-          <option value="otros">Otros gastos</option>
-          <option value="gastos_por_ot">Gastos por OT</option>
-        </select>
-        <p class="ayuda-inline">Distinto de la categoría de arriba: esto es lo que se suma en el Estado de Resultados mensual. Un gasto "Sin clasificar" no aparece en ese total hasta que le asignes un rubro. "Gastos por OT" tampoco se suma ahí (es costo de una orden puntual, no un gasto administrativo) — se reporta aparte.</p>
-      </div>
-      <div class="campo" id="cg-orden-wrap" style="display:none">
-        <label>Orden de trabajo relacionada *</label>
-        <input type="text" id="cg-orden-id" placeholder="Ej: 123" inputmode="numeric">
-        <p class="ayuda-inline" id="cg-orden-preview" style="display:none"></p>
-      </div>
-      <div class="campo">
-        <label>N° de boleta o factura</label>
-        <input type="text" id="cg-numero-documento" placeholder="Ej: 4521 — déjalo vacío si todavía no la tienes a mano">
-      </div>
-      <div class="campo">
-        <label>Detalle</label>
-        <input type="text" id="cg-descripcion" placeholder="Ej: Pilas para el multímetro — déjalo vacío si todavía no lo sabes">
-      </div>
-      <div class="campo">
-        <label>Comprobante (foto o PDF de la boleta)</label>
-        <input type="file" id="cg-comprobante" accept=".jpg,.jpeg,.png,.webp,.heic,.pdf">
-        <p class="ayuda-inline" id="cg-comprobante-actual" style="display:none"></p>
       </div>
 
       <div id="cg-emergencia-wrap">
@@ -608,11 +564,11 @@
       <button class="modal-close" data-close="modal-caja-rendicion-detalle">&times;</button>
     </div>
     <dl id="crd-ficha"></dl>
-    <h3 class="subtitulo">Gastos incluidos</h3>
+    <h3 class="subtitulo">Boletas incluidas</h3>
     <div class="tabla-wrap">
       <table class="tabla">
         <thead>
-          <tr><th>Fecha</th><th>Categoría / Descripción</th><th>N° doc.</th><th>Rubro</th><th class="num">Monto</th></tr>
+          <tr><th>Fecha del retiro</th><th>N° doc.</th><th>Rubro</th><th>Detalle</th><th class="num">Monto</th></tr>
         </thead>
         <tbody id="tbody-caja-rendicion-detalle">
           <tr><td colspan="5" class="vacio">Cargando…</td></tr>
@@ -632,7 +588,7 @@
       <h2>Generar rendición</h2>
       <button class="modal-close" data-close="modal-caja-rendicion">&times;</button>
     </div>
-    <p class="ayuda-inline">Marca los gastos que estás presentando para cerrarlos como rendidos. Una rendición solo puede juntar gastos de un mismo medio de pago. Si a un gasto todavía le falta el N° de boleta/factura, el rubro, la OT relacionada o el detalle, usa "Completar datos" para agregarlo antes de rendir — el monto también se puede ajustar acá si el efectivo no calzó exacto.</p>
+    <p class="ayuda-inline">Pincha un retiro para desplegarlo y agregarle boletas (N° de documento, monto, rubro y detalle) — puedes agregar más de una si el retiro cubrió varias compras; cada boleta se guarda al tiro, sin cerrar esta ventana. Un retiro queda "listo" cuando sus boletas suman el monto completo (o lo cierras manualmente), y recién ahí se puede marcar para incluirlo en la rendición.</p>
     <div class="campo">
       <label>Medio de pago</label>
       <select id="cr-medio-pago">
@@ -641,7 +597,7 @@
         <option value="cristian">Vía Cristian (logística)</option>
       </select>
     </div>
-    <div id="cr-lista-pendientes" class="tabla-wrap">
+    <div id="cr-lista-pendientes" class="cr-lista-gastos">
       <p class="vacio">Cargando…</p>
     </div>
     <div class="campo">

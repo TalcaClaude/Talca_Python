@@ -281,6 +281,34 @@ document.getElementById("btn-limpiar-cxc-huerfanas").addEventListener("click", a
   }
 });
 
+// ---------------------------------------------------------------------------
+// Vaciar Caja Chica (solo pruebas) -- borra TODOS los movimientos, boletas,
+// aportes y rendiciones (ver /api/admin/caja/vaciar en modulos/finanzas.py).
+// Doble confirmación porque es irreversible salvo por un respaldo.
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-vaciar-caja-chica").addEventListener("click", async () => {
+  if (!confirm("Esto borra TODOS los retiros, boletas, aportes y rendiciones de Caja Chica de forma permanente. ¿Seguro que quieres continuar?")) return;
+  if (!confirm("Última confirmación: esta acción no se puede deshacer (salvo restaurando un respaldo). ¿Vaciar Caja Chica ahora?")) return;
+  const btn = document.getElementById("btn-vaciar-caja-chica");
+  const resultado = document.getElementById("resultado-vaciar-caja");
+  btn.disabled = true;
+  resultado.textContent = "Vaciando…";
+  try {
+    const data = await api("/api/admin/caja/vaciar", { method: "POST" });
+    resultado.textContent = `Se eliminaron ${data.movimientos_eliminados} movimiento(s), ${data.boletas_eliminadas} boleta(s) y ${data.rendiciones_eliminadas} rendición(es). Caja Chica quedó en $0.`;
+    if (data.avisos_stock && data.avisos_stock.length) {
+      resultado.textContent += ` — Ojo: ${data.avisos_stock.length} de esos gastos habían ingresado stock al inventario (compra de emergencia) y esa entrada de stock NO se revirtió; revisa el inventario a mano si corresponde.`;
+    }
+    toast("Caja Chica vaciada");
+  } catch (e) {
+    resultado.textContent = "";
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.getElementById("btn-migracion-garantias-items").addEventListener("click", async () => {
   const btn = document.getElementById("btn-migracion-garantias-items");
   const resultado = document.getElementById("resultado-migracion-garantias-items");

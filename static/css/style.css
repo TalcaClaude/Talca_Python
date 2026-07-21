@@ -1696,8 +1696,13 @@ svg .chart-punto-hover {
 /* ---------- Generar rendición: acordeón de gastos con boletas parciales
    (Migración 25) ---------- */
 .cr-lista-gastos {
-  max-height: 420px;
-  overflow-y: auto;
+  /* Sin max-height/overflow propio a propósito: antes quedaba "atrapado" un
+     scroll interno de altura fija y, al desplegar un gasto con el formulario
+     de boleta completo (sobre todo con "Gastos por OT", que agrega el campo
+     de OT), el contenido de esa tarjeta no alcanzaba a verse ni con scroll.
+     Ahora crece libre y el que scrollea es el modal completo (ver
+     .modal-overlay, que ya tiene overflow-y: auto), así que siempre se
+     puede bajar hasta el botón "Agregar boleta". */
   display: flex;
   flex-direction: column;
   gap: 8px;

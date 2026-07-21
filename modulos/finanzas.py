@@ -176,15 +176,28 @@ def _guardar_comprobante(archivo):
     return nombre_guardado
 
 
-def _caja_bloqueo_motivo(row):
+def _caja_bloqueo_motivo(db, row):
     """Explica por qué un gasto/aporte de Caja Chica NO se puede editar ni
     eliminar (para no descuadrar el saldo o la trazabilidad), o None si es
-    seguro modificarlo libremente."""
-    if row["rendicion_id"] is not None:
-        return "Este gasto ya fue incluido en una rendición y no se puede modificar."
+    seguro modificarlo libremente.
+
+    Desde la Migración 26, un gasto (retiro) se bloquea si ALGUNA de sus
+    boletas ya fue incluida en una rendición (no todo el retiro tiene que
+    estar rendido) -- si se dejara editar el monto o el medio de pago
+    después de eso, se descuadraría la rendición ya generada. Boletas
+    individuales todavía sin rendir se pueden seguir agregando/editando
+    normalmente (ver caja_agregar_boleta/caja_editar_boleta, que revisan la
+    boleta puntual, no el gasto completo)."""
+    if row["tipo"] == "gasto":
+        tiene_boleta_rendida = db.execute(
+            "SELECT 1 FROM caja_gasto_detalles WHERE gasto_id = ? AND rendicion_id IS NOT NULL LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        if tiene_boleta_rendida:
+            return "Este retiro tiene boletas ya incluidas en una rendición y no se puede modificar ni eliminar."
     if row["rendicion_origen_id"] is not None:
         return ("Este aporte lo generó automáticamente una rendición y no se puede modificar suelto "
-                "(dejaría el saldo descuadrado respecto a los gastos que ya quedaron marcados como rendidos).")
+                "(dejaría el saldo descuadrado respecto a las boletas que ya quedaron marcadas como rendidas).")
     if row["movimiento_inventario_id"] is not None:
         return ("Este gasto ingresó stock al inventario (compra de emergencia). "
                 "Ajusta el stock manualmente primero si corresponde, y luego edita o elimina el gasto.")
@@ -193,36 +206,47 @@ def _caja_bloqueo_motivo(row):
 
 def _gasto_estado_boletas(db, gasto_id, monto_gasto, cerrado_manualmente):
     """Boletas cargadas contra un gasto (Migración 25) + cuánto de su monto
-    ya quedó justificado. Un gasto queda "listo para rendir" cuando la suma
-    de sus boletas alcanza el monto del retiro, o cuando se cerró
-    manualmente (ver /api/caja/gasto/<id>/cerrar -- vuelto en caja, boleta
-    chica perdida, etc). Mientras no esté listo, no puede incluirse en una
-    Rendición (ver caja_crear_rendicion)."""
+    ya quedó justificado y cuánto de eso ya fue rendido. Desde la Migración
+    26 la Rendición se genera por boleta individual (ver caja_crear_rendicion),
+    así que un mismo gasto puede tener boletas ya rendidas y boletas
+    todavía pendientes de rendir al mismo tiempo -- por eso ya no existe un
+    estado binario "rendido" a nivel de gasto, solo a nivel de boleta
+    (boleta['rendido'])."""
     boletas = [dict(r) for r in db.execute(
         "SELECT * FROM caja_gasto_detalles WHERE gasto_id = ? ORDER BY creado_en ASC, id ASC", (gasto_id,)
     ).fetchall()]
     for b in boletas:
         b["tiene_comprobante"] = bool(b.get("comprobante_archivo"))
+        b["rendido"] = b.get("rendicion_id") is not None
     monto_justificado = round(sum(b["monto"] for b in boletas), 2)
     monto_pendiente = round(max(monto_gasto - monto_justificado, 0), 2)
+    monto_rendido = round(sum(b["monto"] for b in boletas if b["rendido"]), 2)
+    monto_por_rendir = round(max(monto_justificado - monto_rendido, 0), 2)
     listo_para_rendir = bool(cerrado_manualmente) or monto_pendiente <= 0.009
-    return boletas, monto_justificado, monto_pendiente, listo_para_rendir
+    return boletas, monto_justificado, monto_pendiente, monto_rendido, monto_por_rendir, listo_para_rendir
 
 
 def _caja_movimiento_dict(db, row):
     d = dict(row)
     d["tiene_comprobante"] = bool(d.get("comprobante_archivo"))
-    d["rendido"] = d.get("rendicion_id") is not None
-    d["bloqueado_motivo"] = _caja_bloqueo_motivo(row)
+    d["bloqueado_motivo"] = _caja_bloqueo_motivo(db, row)
     if d["tipo"] == "gasto":
-        boletas, justificado, pendiente, listo = _gasto_estado_boletas(
+        boletas, justificado, pendiente, rendido_monto, por_rendir, listo = _gasto_estado_boletas(
             db, d["id"], d["monto"], d.get("cerrado_manualmente")
         )
         d["boletas"] = boletas
         d["monto_justificado"] = justificado
         d["monto_pendiente"] = pendiente
+        d["monto_rendido"] = rendido_monto
+        d["monto_por_rendir"] = por_rendir
         d["listo_para_rendir"] = listo
         d["cerrado_manualmente"] = bool(d.get("cerrado_manualmente"))
+        # "Rendido" a nivel de gasto (para el filtro de la lista de
+        # movimientos y los reportes exportables) significa que YA NO
+        # QUEDA NADA por hacer con este retiro: todo su monto está
+        # justificado con boleta y todas esas boletas ya fueron incluidas
+        # en alguna rendición.
+        d["rendido"] = pendiente <= 0.009 and por_rendir <= 0.009
     return d
 
 
@@ -243,8 +267,16 @@ def _caja_resumen_medio(db, medio_pago):
         "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND medio_pago = ?",
         (medio_pago,),
     ).fetchone()[0]
+    # Desde la Migración 26 "pendiente de rendir" es la suma de las BOLETAS
+    # ya cargadas (documentadas) que todavía no se incluyeron en ninguna
+    # rendición -- es justo lo que aparece seleccionable en el modal
+    # "Generar rendición" para este medio de pago. El monto de un retiro que
+    # todavía no tiene boleta (monto_pendiente en _gasto_estado_boletas) es
+    # un concepto distinto: falta documentarlo, no falta rendirlo.
     pendiente_rendir = db.execute(
-        "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL AND medio_pago = ?",
+        "SELECT COALESCE(SUM(d.monto), 0) FROM caja_gasto_detalles d "
+        "JOIN caja_movimientos g ON g.id = d.gasto_id "
+        "WHERE d.rendicion_id IS NULL AND g.medio_pago = ?",
         (medio_pago,),
     ).fetchone()[0]
 
@@ -442,10 +474,6 @@ def caja_listar_movimientos():
     if medio_pago:
         sql += " AND medio_pago = ?"
         params.append(medio_pago)
-    if estado == "pendiente":
-        sql += " AND tipo = 'gasto' AND rendicion_id IS NULL"
-    elif estado == "rendido":
-        sql += " AND tipo = 'gasto' AND rendicion_id IS NOT NULL"
     if desde:
         sql += " AND fecha >= ?"
         params.append(desde)
@@ -460,6 +488,15 @@ def caja_listar_movimientos():
     sql += " ORDER BY fecha DESC, id DESC"
     rows = db.execute(sql, params).fetchall()
     movimientos = [_caja_movimiento_dict(db, r) for r in rows]
+
+    # El filtro 'estado' se aplica en Python (no en SQL) porque desde la
+    # Migración 26 "rendido" es un cálculo que combina varias boletas de
+    # caja_gasto_detalles, no una columna directa de caja_movimientos (ver
+    # _caja_movimiento_dict / _gasto_estado_boletas).
+    if estado == "pendiente":
+        movimientos = [m for m in movimientos if m["tipo"] == "gasto" and not m["rendido"]]
+    elif estado == "rendido":
+        movimientos = [m for m in movimientos if m["tipo"] == "gasto" and m["rendido"]]
 
     if q:
         movimientos = [
@@ -554,15 +591,15 @@ def caja_agregar_boleta(gasto_id):
     registrado. Puede llamarse varias veces sobre el mismo gasto -- ej. un
     retiro de $200.000 en efectivo que se justifica con 3 boletas de $60.000,
     $90.000 y $50.000. Cada boleta se guarda de inmediato (no se pierde si
-    se cierra el navegador), y el gasto queda "listo para rendir" recién
-    cuando la suma de sus boletas alcanza el monto del retiro (o se cierra
-    manualmente, ver caja_cerrar_gasto)."""
+    se cierra el navegador). Desde la Migración 26 la Rendición se genera por
+    boleta individual, así que siempre se puede seguir agregando boletas
+    nuevas a un gasto aunque otras boletas suyas ya se hayan rendido antes
+    -- lo único que no se puede tocar es una boleta que YA fue rendida (ver
+    caja_editar_boleta/caja_eliminar_boleta)."""
     db = get_db()
     gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ? AND tipo = 'gasto'", (gasto_id,)).fetchone()
     if gasto is None:
         return jsonify({"error": "Gasto no encontrado"}), 404
-    if gasto["rendicion_id"] is not None:
-        return jsonify({"error": "Este gasto ya fue incluido en una rendición y no se le pueden agregar más boletas."}), 409
 
     data = request.form
     try:
@@ -622,9 +659,9 @@ def caja_editar_boleta(detalle_id):
     detalle = db.execute("SELECT * FROM caja_gasto_detalles WHERE id = ?", (detalle_id,)).fetchone()
     if detalle is None:
         return jsonify({"error": "Boleta no encontrada"}), 404
+    if detalle["rendicion_id"] is not None:
+        return jsonify({"error": "Esta boleta ya fue incluida en una rendición y no se puede modificar."}), 409
     gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (detalle["gasto_id"],)).fetchone()
-    if gasto["rendicion_id"] is not None:
-        return jsonify({"error": "El gasto de esta boleta ya fue rendido y no se puede modificar."}), 409
 
     data = request.form
     try:
@@ -684,9 +721,9 @@ def caja_eliminar_boleta(detalle_id):
     detalle = db.execute("SELECT * FROM caja_gasto_detalles WHERE id = ?", (detalle_id,)).fetchone()
     if detalle is None:
         return jsonify({"error": "Boleta no encontrada"}), 404
+    if detalle["rendicion_id"] is not None:
+        return jsonify({"error": "Esta boleta ya fue incluida en una rendición y no se puede eliminar."}), 409
     gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (detalle["gasto_id"],)).fetchone()
-    if gasto["rendicion_id"] is not None:
-        return jsonify({"error": "El gasto de esta boleta ya fue rendido y no se puede modificar."}), 409
 
     if detalle["comprobante_archivo"]:
         ruta = os.path.join(COMPROBANTES_DIR, detalle["comprobante_archivo"])
@@ -706,14 +743,13 @@ def caja_eliminar_boleta(detalle_id):
 def caja_cerrar_gasto(gasto_id):
     """Cierra (o reabre) un gasto manualmente aunque sus boletas no
     justifiquen el 100% del monto -- para el vuelto que queda disponible en
-    caja o una boleta chica que se perdió. Con esto queda "listo para
-    rendir" (ver _gasto_estado_boletas) sin necesidad de más boletas."""
+    caja o una boleta chica que se perdió. Es puramente informativo (marca
+    'no busco más boletas para este retiro'): no bloquea ni condiciona la
+    Rendición, que desde la Migración 26 se genera boleta por boleta."""
     db = get_db()
     gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ? AND tipo = 'gasto'", (gasto_id,)).fetchone()
     if gasto is None:
         return jsonify({"error": "Gasto no encontrado"}), 404
-    if gasto["rendicion_id"] is not None:
-        return jsonify({"error": "Este gasto ya fue rendido."}), 409
 
     data = request.get_json(force=True, silent=True) or {}
     cerrado = bool(data.get("cerrado", True))
@@ -770,7 +806,7 @@ def caja_eliminar_movimiento(mov_id):
     if row is None:
         return jsonify({"error": "Movimiento no encontrado"}), 404
 
-    bloqueo = _caja_bloqueo_motivo(row)
+    bloqueo = _caja_bloqueo_motivo(db, row)
     if bloqueo:
         return jsonify({"error": bloqueo}), 409
 
@@ -815,7 +851,7 @@ def caja_editar_movimiento(mov_id):
     if row is None:
         return jsonify({"error": "Movimiento no encontrado"}), 404
 
-    bloqueo = _caja_bloqueo_motivo(row)
+    bloqueo = _caja_bloqueo_motivo(db, row)
     if bloqueo:
         return jsonify({"error": bloqueo}), 409
 
@@ -875,31 +911,54 @@ def caja_ver_comprobante(nombre_archivo):
 
 @bp.route("/api/caja/pendientes", methods=["GET"])
 def caja_gastos_pendientes():
-    """Lista gastos sin rendir. Acepta ?medio_pago= para acotar a un solo
-    medio -- una rendición solo puede juntar gastos de un mismo medio (ver
-    caja_crear_rendicion), así que el modal "Generar rendición" siempre
-    manda este filtro."""
+    """Lista los gastos (retiros) que todavía tienen algo por hacer -- les
+    falta documentar parte de su monto con una boleta, o ya tienen alguna
+    boleta cargada que todavía no se incluyó en ninguna rendición. Acepta
+    ?medio_pago= para acotar a un solo medio -- una rendición solo puede
+    juntar boletas de un mismo medio (ver caja_crear_rendicion), así que el
+    modal "Generar rendición" siempre manda este filtro.
+
+    Desde la Migración 26 un gasto YA NO desaparece de esta lista apenas se
+    genera una rendición con alguna de sus boletas: sigue apareciendo
+    mientras le quede monto sin boleta (para poder seguir documentándolo) o
+    boletas cargadas y aún no rendidas."""
     db = get_db()
     try:
         medio_pago = _medio_pago_valido(request.args.get("medio_pago", ""), permitir_vacio=True)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    sql = "SELECT * FROM caja_movimientos WHERE tipo = 'gasto' AND rendicion_id IS NULL"
+    sql = """
+        SELECT g.* FROM caja_movimientos g WHERE g.tipo = 'gasto' AND (
+            g.monto - COALESCE((SELECT SUM(d.monto) FROM caja_gasto_detalles d WHERE d.gasto_id = g.id), 0) > 0.009
+            OR EXISTS (
+                SELECT 1 FROM caja_gasto_detalles d
+                WHERE d.gasto_id = g.id AND d.rendicion_id IS NULL
+            )
+        )
+    """
     params = []
     if medio_pago:
-        sql += " AND medio_pago = ?"
+        sql += " AND g.medio_pago = ?"
         params.append(medio_pago)
-    sql += " ORDER BY fecha ASC"
+    sql += " ORDER BY g.fecha ASC"
     rows = db.execute(sql, params).fetchall()
     return jsonify({"gastos": [_caja_movimiento_dict(db, r) for r in rows]})
 
 
 @bp.route("/api/caja/rendicion", methods=["POST"])
 def caja_crear_rendicion():
+    """Genera una Rendición a partir de BOLETAS individuales (Migración 26,
+    ya cargadas contra algún gasto con caja_agregar_boleta) -- no de gastos
+    completos como antes. Así el monto rendido es exactamente lo que se está
+    documentando en ese momento: si un retiro de $200.000 solo tiene una
+    boleta de $90.000, la rendición queda en $90.000 y los $110.000
+    restantes del retiro siguen disponibles para cargarles boleta(s) después
+    y rendirlas en otro lote -- no quedan "perdidos" dentro de una rendición
+    que en realidad no los documentó."""
     db = get_db()
     data = request.get_json(force=True, silent=True) or {}
-    gasto_ids = data.get("gasto_ids") or []
+    detalle_ids = data.get("detalle_ids") or []
     nota = (data.get("nota") or "").strip().upper()
     # Por defecto True para no cambiar el comportamiento de siempre. Se pasa
     # False cuando los gastos que se están rindiendo ya se cubrieron antes
@@ -908,38 +967,40 @@ def caja_crear_rendicion():
     # realmente entró a la caja.
     reponer_saldo = data.get("reponer_saldo", True)
 
-    if not gasto_ids:
-        return jsonify({"error": "Selecciona al menos un gasto para rendir"}), 400
+    if not detalle_ids:
+        return jsonify({"error": "Selecciona al menos una boleta para rendir"}), 400
 
-    placeholders = ",".join("?" for _ in gasto_ids)
-    gastos = db.execute(
-        f"SELECT * FROM caja_movimientos WHERE id IN ({placeholders}) AND tipo = 'gasto'",
-        gasto_ids,
+    placeholders = ",".join("?" for _ in detalle_ids)
+    boletas = db.execute(
+        f"SELECT * FROM caja_gasto_detalles WHERE id IN ({placeholders})",
+        detalle_ids,
     ).fetchall()
-    if len(gastos) != len(gasto_ids):
-        return jsonify({"error": "Alguno de los gastos seleccionados no existe"}), 400
-    if any(g["rendicion_id"] is not None for g in gastos):
-        return jsonify({"error": "Alguno de los gastos seleccionados ya fue rendido antes"}), 400
+    if len(boletas) != len(detalle_ids):
+        return jsonify({"error": "Alguna de las boletas seleccionadas no existe"}), 400
+    if any(b["rendicion_id"] is not None for b in boletas):
+        return jsonify({"error": "Alguna de las boletas seleccionadas ya fue rendida antes"}), 400
 
-    # A propósito NO se exige que las boletas cubran el 100% del monto para
-    # poder rendir -- el taller pidió expresamente poder rendir con boletas
-    # parciales (puede quedar monto a favor, o simplemente perderse una
-    # boleta chica) sin tener que cerrar el gasto manualmente primero. El
-    # monto de la rendición sigue siendo el del retiro completo (lo que
-    # realmente salió de la caja), no la suma de boletas.
+    gastos_ids = list({b["gasto_id"] for b in boletas})
+    gastos_placeholders = ",".join("?" for _ in gastos_ids)
+    gastos = {
+        g["id"]: g for g in db.execute(
+            f"SELECT * FROM caja_movimientos WHERE id IN ({gastos_placeholders})", gastos_ids
+        ).fetchall()
+    }
 
-    # Todos los gastos de una rendición tienen que ser del mismo medio_pago:
-    # una rendición es literalmente "estoy presentando este lote de
-    # boletas" para UN medio (ej. "las boletas de la tarjeta empresa de
-    # julio", o "lo que rindió Cristian esta semana") -- mezclar medios acá
-    # dejaría sin sentido la reposición automática de abajo, que solo puede
-    # inyectar el aporte a un saldo a la vez.
-    medios_en_seleccion = {g["medio_pago"] for g in gastos}
+    # Todas las boletas de una rendición tienen que ser del mismo medio_pago
+    # (heredado del gasto/retiro al que pertenecen): una rendición es
+    # literalmente "estoy presentando este lote de boletas" para UN medio
+    # (ej. "las boletas de la tarjeta empresa de julio", o "lo que rindió
+    # Cristian esta semana") -- mezclar medios acá dejaría sin sentido la
+    # reposición automática de abajo, que solo puede inyectar el aporte a un
+    # saldo a la vez.
+    medios_en_seleccion = {gastos[b["gasto_id"]]["medio_pago"] for b in boletas}
     if len(medios_en_seleccion) > 1:
-        return jsonify({"error": "Todos los gastos de una rendición deben ser del mismo medio de pago"}), 400
+        return jsonify({"error": "Todas las boletas de una rendición deben ser del mismo medio de pago"}), 400
     medio_pago = medios_en_seleccion.pop()
 
-    total = sum(g["monto"] for g in gastos)
+    total = sum(b["monto"] for b in boletas)
     ts = now_iso()
     cur = db.execute(
         "INSERT INTO caja_rendiciones (fecha, usuario, total, nota, medio_pago, creado_en) VALUES (?, ?, ?, ?, ?, ?)",
@@ -948,8 +1009,8 @@ def caja_crear_rendicion():
     rendicion_id = cur.lastrowid
 
     db.execute(
-        f"UPDATE caja_movimientos SET rendicion_id = ? WHERE id IN ({placeholders})",
-        [rendicion_id] + gasto_ids,
+        f"UPDATE caja_gasto_detalles SET rendicion_id = ? WHERE id IN ({placeholders})",
+        [rendicion_id] + detalle_ids,
     )
 
     # Reposición automática (opcional, tildada por defecto): el saldo vuelve
@@ -995,8 +1056,10 @@ def caja_listar_rendiciones():
     rendiciones = []
     for r in rows:
         d = dict(r)
-        d["n_gastos"] = db.execute(
-            "SELECT COUNT(*) FROM caja_movimientos WHERE rendicion_id = ?", (r["id"],)
+        # Desde la Migración 26 una rendición junta BOLETAS, no gastos
+        # completos -- ver caja_crear_rendicion.
+        d["n_boletas"] = db.execute(
+            "SELECT COUNT(*) FROM caja_gasto_detalles WHERE rendicion_id = ?", (r["id"],)
         ).fetchone()[0]
         d["reposicion_automatica"] = _rendicion_tuvo_reposicion(db, r["id"])
         rendiciones.append(d)
@@ -1009,11 +1072,21 @@ def caja_detalle_rendicion(rendicion_id):
     rendicion = db.execute("SELECT * FROM caja_rendiciones WHERE id = ?", (rendicion_id,)).fetchone()
     if rendicion is None:
         return jsonify({"error": "Rendición no encontrada"}), 404
-    gastos = db.execute(
-        "SELECT * FROM caja_movimientos WHERE rendicion_id = ? ORDER BY fecha ASC", (rendicion_id,)
+    # Boletas incluidas en esta rendición, con la fecha del retiro (gasto) al
+    # que pertenece cada una -- Migración 26, ver caja_crear_rendicion.
+    boletas = db.execute(
+        "SELECT d.*, g.fecha AS fecha_retiro FROM caja_gasto_detalles d "
+        "JOIN caja_movimientos g ON g.id = d.gasto_id "
+        "WHERE d.rendicion_id = ? ORDER BY g.fecha ASC, d.id ASC",
+        (rendicion_id,),
     ).fetchall()
     d = dict(rendicion)
-    d["gastos"] = [_caja_movimiento_dict(db, g) for g in gastos]
+    boletas_dict = []
+    for b in boletas:
+        bd = dict(b)
+        bd["tiene_comprobante"] = bool(bd.get("comprobante_archivo"))
+        boletas_dict.append(bd)
+    d["boletas"] = boletas_dict
     d["reposicion_automatica"] = _rendicion_tuvo_reposicion(db, rendicion_id)
     return jsonify(d)
 

@@ -418,25 +418,31 @@ class TestCajaChica(unittest.TestCase):
         self.assertAlmostEqual(despues["total_aportado"] - antes["total_aportado"], 10000, delta=0.01)
         self.assertAlmostEqual(despues["total_gastado"] - antes["total_gastado"], 3000, delta=0.01)
 
-    def test_pendiente_de_rendir_solo_cuenta_gastos_sin_rendicion(self):
+    def test_pendiente_de_rendir_solo_cuenta_boletas_sin_rendicion(self):
+        """Migración 26: la Rendición se genera por boleta, no por gasto
+        completo -- "pendiente de rendir" solo cuenta lo ya DOCUMENTADO con
+        boleta y que todavía no se incluyó en una rendición. Un retiro
+        recién creado sin boleta todavía no aporta nada ahí (falta
+        documentarlo, no falta rendirlo)."""
         antes = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         gasto = self._crear_gasto(1500)
-        despues = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
 
-        self.assertAlmostEqual(
-            despues["pendiente_rendir"] - antes["pendiente_rendir"], 1500, delta=0.01
+        sin_boleta = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
+        self.assertAlmostEqual(sin_boleta["pendiente_rendir"], antes["pendiente_rendir"], delta=0.01)
+
+        resp_boleta = self.client.post(
+            f"/api/caja/gasto/{gasto['id']}/boleta", data={"monto": "1500", "numero_documento": "B-1"}
         )
+        self.assertEqual(resp_boleta.status_code, 201, resp_boleta.get_data(as_text=True))
+        boleta_id = resp_boleta.get_json()["boletas"][0]["id"]
 
-        # Migración 25: un gasto solo puede rendirse cuando está "listo"
-        # (boletas que justifiquen el 100%, o cerrado manualmente) -- acá se
-        # cierra manualmente para no desviar el test con boletas de más.
-        resp_cerrar = self.client.put(f"/api/caja/gasto/{gasto['id']}/cerrar", json={"cerrado": True})
-        self.assertEqual(resp_cerrar.status_code, 200, resp_cerrar.get_data(as_text=True))
+        despues = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
+        self.assertAlmostEqual(despues["pendiente_rendir"] - antes["pendiente_rendir"], 1500, delta=0.01)
 
-        # Al rendirlo, debería salir de "pendiente de rendir" sin afectar
-        # el total gastado (la plata ya se gastó, solo cambia su estado
-        # administrativo).
-        resp = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]]})
+        # Al rendir esa boleta, debería salir de "pendiente de rendir" sin
+        # afectar el total gastado (la plata ya se gastó, solo cambia su
+        # estado administrativo).
+        resp = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta_id]})
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
 
         final = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
@@ -489,6 +495,10 @@ class TestCajaChica(unittest.TestCase):
 
     def test_rendicion_no_puede_mezclar_medios_de_pago(self):
         gasto_efectivo = self._crear_gasto(2000)
+        boleta_efectivo = self.client.post(
+            f"/api/caja/gasto/{gasto_efectivo['id']}/boleta", data={"monto": "2000"}
+        ).get_json()["boletas"][0]
+
         resp_cristian = self.client.post(
             "/api/caja/gasto",
             data={
@@ -497,10 +507,13 @@ class TestCajaChica(unittest.TestCase):
             },
         )
         gasto_cristian = resp_cristian.get_json()
+        boleta_cristian = self.client.post(
+            f"/api/caja/gasto/{gasto_cristian['id']}/boleta", data={"monto": "3000"}
+        ).get_json()["boletas"][0]
 
         resp = self.client.post(
             "/api/caja/rendicion",
-            json={"gasto_ids": [gasto_efectivo["id"], gasto_cristian["id"]]},
+            json={"detalle_ids": [boleta_efectivo["id"], boleta_cristian["id"]]},
         )
         self.assertEqual(resp.status_code, 400)
 
@@ -513,13 +526,14 @@ class TestCajaChica(unittest.TestCase):
             },
         )
         gasto_cristian = resp_cristian.get_json()
-        resp_cerrar = self.client.put(f"/api/caja/gasto/{gasto_cristian['id']}/cerrar", json={"cerrado": True})
-        self.assertEqual(resp_cerrar.status_code, 200, resp_cerrar.get_data(as_text=True))
+        boleta_cristian = self.client.post(
+            f"/api/caja/gasto/{gasto_cristian['id']}/boleta", data={"monto": "7000"}
+        ).get_json()["boletas"][0]
 
         antes = self.client.get("/api/caja/resumen").get_json()["cristian"]
         resp = self.client.post(
             "/api/caja/rendicion",
-            json={"gasto_ids": [gasto_cristian["id"]], "reponer_saldo": True},
+            json={"detalle_ids": [boleta_cristian["id"]], "reponer_saldo": True},
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         self.assertEqual(resp.get_json()["medio_pago"], "cristian")

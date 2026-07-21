@@ -1,4 +1,4 @@
-"""Tests de Caja Chica -- Migración 25: rendición parcial por boletas.
+"""Tests de Caja Chica -- Migración 25/26: boletas parciales + rendición por boleta.
 
 Antes, un "gasto" de Caja Chica era una sola cosa (el retiro Y su boleta a
 la vez). El taller pidió separarlo en dos pasos:
@@ -11,11 +11,14 @@ la vez). El taller pidió separarlo en dos pasos:
      necesariamente el 100% del retiro -- sobre todo en efectivo), rubro
      GAV, detalle y, si el rubro es "Gastos por OT", la orden de trabajo
      relacionada.
-El gasto queda "listo para rendir" cuando la suma de sus boletas alcanza el
-monto del retiro, o cuando se cierra manualmente (vuelto en caja, boleta
-chica perdida). Solo ahí puede incluirse en una Rendición
-(POST /api/caja/rendicion, sin cambios en su forma -- sigue siendo un lote
-de gastos ya listos).
+
+Migración 26: la Rendición (POST /api/caja/rendicion) se genera por BOLETA
+individual, no por gasto completo -- el taller reportó que rendir un retiro
+de $180.000 con una sola boleta de $90.000 dejaba TODO el retiro marcado
+"rendido" aunque solo se hubiera documentado la mitad. Ahora el monto
+rendido es exactamente la suma de las boletas seleccionadas; el resto del
+retiro (sin boleta todavía) sigue disponible para más boletas y otra
+rendición después.
 
 También cubre que "Gastos por OT" se excluye del total de GAV en el Estado
 de Resultados (no es gasto administrativo, es costo de una OT puntual) pero
@@ -139,14 +142,36 @@ class TestBoletasParciales(_Base):
         self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
         self.assertIn("no existe", resp.get_json()["error"].lower())
 
-    def test_agregar_boleta_a_gasto_ya_rendido_es_rechazado(self):
-        gasto = self._crear_gasto(monto="1000").get_json()
-        self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1")
-        rend = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]]})
+    def test_se_puede_agregar_otra_boleta_aunque_una_anterior_ya_este_rendida(self):
+        """Migración 26: rendir una boleta ya NO bloquea el resto del gasto
+        -- se puede seguir agregando boletas nuevas contra el mismo retiro
+        (para documentar lo que falta) y rendirlas después en otro lote."""
+        gasto = self._crear_gasto(monto="2000").get_json()
+        r1 = self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1")
+        boleta1_id = r1.get_json()["boletas"][0]["id"]
+        rend = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta1_id]})
         self.assertEqual(rend.status_code, 201, rend.get_data(as_text=True))
 
-        resp = self._agregar_boleta(gasto["id"], monto="500", numero_documento="F-2")
-        self.assertEqual(resp.status_code, 409, resp.get_data(as_text=True))
+        resp = self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-2")
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        g = resp.get_json()
+        self.assertEqual(len(g["boletas"]), 2)
+        self.assertEqual(g["monto_pendiente"], 0)
+        self.assertEqual(g["monto_rendido"], 1000.0)
+        self.assertEqual(g["monto_por_rendir"], 1000.0)
+
+    def test_editar_o_eliminar_una_boleta_ya_rendida_es_rechazado(self):
+        gasto = self._crear_gasto(monto="1000").get_json()
+        r1 = self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1")
+        boleta_id = r1.get_json()["boletas"][0]["id"]
+        rend = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta_id]})
+        self.assertEqual(rend.status_code, 201, rend.get_data(as_text=True))
+
+        resp_edit = self.client.put(f"/api/caja/boleta/{boleta_id}", data={"monto": "500"})
+        self.assertEqual(resp_edit.status_code, 409, resp_edit.get_data(as_text=True))
+
+        resp_del = self.client.delete(f"/api/caja/boleta/{boleta_id}")
+        self.assertEqual(resp_del.status_code, 409, resp_del.get_data(as_text=True))
 
     def test_editar_boleta(self):
         gasto = self._crear_gasto(monto="1000").get_json()
@@ -196,39 +221,84 @@ class TestCierreManual(_Base):
         self.assertTrue(g["listo_para_rendir"])
 
 
-class TestRendicionPermiteBoletasParciales(_Base):
-    """El taller pidió expresamente NO exigir que las boletas cubran el 100%
-    del retiro para poder rendir -- puede quedar plata a favor, o perderse
-    una boleta chica, y aun así hay que poder cerrar la rendición sin tener
-    que "cerrar manualmente" el gasto primero."""
+class TestRendicionPorBoleta(_Base):
+    """Migración 26: la Rendición se genera seleccionando BOLETAS
+    individuales (ya cargadas con caja_agregar_boleta), no gastos/retiros
+    completos. El monto rendido es exactamente lo que se está documentando
+    en ese momento -- el resto del retiro, si queda algo sin boleta, sigue
+    disponible para cargarle más boletas y rendirlas en otro lote después.
+    Ya no hace falta "cerrar manualmente" ni justificar el 100% de nada
+    para poder rendir: cada boleta ya es, por definición, algo documentado
+    y listo para presentarse."""
 
-    def test_rendir_gasto_sin_boletas_funciona(self):
+    def test_no_se_puede_rendir_sin_seleccionar_ninguna_boleta(self):
+        resp = self.client.post("/api/caja/rendicion", json={"detalle_ids": []})
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+
+    def test_rendir_una_boleta_parcial_solo_rinde_ese_monto_y_el_resto_sigue_pendiente(self):
         gasto = self._crear_gasto(monto="1000").get_json()
-        resp = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]]})
-        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        r1 = self._agregar_boleta(gasto["id"], monto="400", numero_documento="F-1")
+        boleta_id = r1.get_json()["boletas"][0]["id"]
 
-    def test_rendir_gasto_parcialmente_justificado_funciona(self):
-        gasto = self._crear_gasto(monto="1000").get_json()
-        self._agregar_boleta(gasto["id"], monto="400", numero_documento="F-1")
-        resp = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]]})
+        resp = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta_id]})
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
-        # El total rendido/repuesto sigue siendo el del retiro completo
-        # (lo que realmente salió de la caja), no la suma de boletas.
-        self.assertEqual(resp.get_json()["total"], 1000.0)
+        # El total rendido es el de la BOLETA seleccionada, no el del retiro
+        # completo -- a diferencia del modelo viejo, acá los $600 restantes
+        # siguen sin documentar Y sin rendir, disponibles para una boleta futura.
+        self.assertEqual(resp.get_json()["total"], 400.0)
 
-    def test_rendir_gasto_listo_funciona_y_queda_fuera_de_pendientes(self):
+        pend = self.client.get("/api/caja/pendientes").get_json()["gastos"]
+        gasto_pendiente = next(g for g in pend if g["id"] == gasto["id"])
+        self.assertEqual(gasto_pendiente["monto_pendiente"], 600.0)
+        self.assertEqual(gasto_pendiente["monto_rendido"], 400.0)
+        self.assertEqual(len(gasto_pendiente["boletas"]), 1)
+        self.assertTrue(gasto_pendiente["boletas"][0]["rendido"])
+
+    def test_gasto_desaparece_de_pendientes_cuando_todo_esta_documentado_y_rendido(self):
         gasto = self._crear_gasto(monto="1000", medio_pago="tarjeta_empresa").get_json()
-        self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1", rubro_gav="otros")
+        r1 = self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1", rubro_gav="otros")
+        boleta_id = r1.get_json()["boletas"][0]["id"]
 
-        resp = self.client.post("/api/caja/rendicion", json={"gasto_ids": [gasto["id"]], "medio_pago": "tarjeta_empresa"})
+        resp = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta_id]})
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
 
         pend = self.client.get("/api/caja/pendientes?medio_pago=tarjeta_empresa").get_json()["gastos"]
         self.assertFalse(any(g["id"] == gasto["id"] for g in pend))
 
         det = self.client.get(f"/api/caja/rendicion/{resp.get_json()['id']}").get_json()
-        self.assertEqual(len(det["gastos"]), 1)
-        self.assertEqual(det["gastos"][0]["boletas"][0]["numero_documento"], "F-1")
+        self.assertEqual(len(det["boletas"]), 1)
+        self.assertEqual(det["boletas"][0]["numero_documento"], "F-1")
+
+    def test_se_pueden_agregar_mas_boletas_y_rendirlas_en_otro_lote(self):
+        """El caso concreto que reportó el taller: un retiro de $180.000 se
+        rinde primero con una boleta de $90.000 -- los $90.000 restantes
+        quedan disponibles para una segunda boleta y una segunda rendición,
+        sin que la primera rendición se los haya "llevado" sin documentarlos."""
+        gasto = self._crear_gasto(monto="180000").get_json()
+        r1 = self._agregar_boleta(gasto["id"], monto="90000", numero_documento="F-1")
+        boleta1_id = r1.get_json()["boletas"][0]["id"]
+        rend1 = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta1_id]})
+        self.assertEqual(rend1.status_code, 201, rend1.get_data(as_text=True))
+        self.assertEqual(rend1.get_json()["total"], 90000.0)
+
+        r2 = self._agregar_boleta(gasto["id"], monto="90000", numero_documento="F-2")
+        self.assertEqual(r2.status_code, 201, r2.get_data(as_text=True))
+        self.assertEqual(r2.get_json()["monto_pendiente"], 0)
+        boleta2_id = next(b["id"] for b in r2.get_json()["boletas"] if b["numero_documento"] == "F-2")
+
+        rend2 = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta2_id]})
+        self.assertEqual(rend2.status_code, 201, rend2.get_data(as_text=True))
+        self.assertEqual(rend2.get_json()["total"], 90000.0)
+
+    def test_no_se_puede_rendir_dos_veces_la_misma_boleta(self):
+        gasto = self._crear_gasto(monto="1000").get_json()
+        r1 = self._agregar_boleta(gasto["id"], monto="1000", numero_documento="F-1")
+        boleta_id = r1.get_json()["boletas"][0]["id"]
+        rend1 = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta_id]})
+        self.assertEqual(rend1.status_code, 201, rend1.get_data(as_text=True))
+
+        rend2 = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta_id]})
+        self.assertEqual(rend2.status_code, 400, rend2.get_data(as_text=True))
 
 
 class TestGastosPorOtExcluidoDelGav(_Base):

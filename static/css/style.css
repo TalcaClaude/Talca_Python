@@ -1765,6 +1765,9 @@ svg .chart-punto-hover {
 .cr-boleta-item .cr-boleta-rubro { flex: 1; color: var(--text-muted); }
 .cr-boleta-item .cr-boleta-monto { font-family: var(--font-mono); white-space: nowrap; }
 .cr-boleta-item button { flex: none; }
+.cr-boleta-item input[type="checkbox"] { flex: none; }
+.cr-boleta-item--rendida { opacity: 0.65; }
+.cr-boleta-estado { flex: none; font-size: 11.5px; color: var(--success); white-space: nowrap; }
 
 .cr-form-boleta {
   background: var(--panel);

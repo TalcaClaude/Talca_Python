@@ -1,6 +1,7 @@
 const state = {
   sesion: { username: null, nombre: null },
   cajaPendientesSeleccionados: new Set(),
+  cajaBoletasConocidas: new Set(),
   cajaPendientesLista: [],
   crGastoAbierto: null,
   cajaMovimientos: [],
@@ -617,8 +618,11 @@ document.getElementById("form-caja-aporte").addEventListener("submit", async (e)
 // incluir en la rendición final (el botón grande de abajo).
 
 function actualizarTotalSeleccionadoRendicion() {
+  // Desde la Migración 26 se selecciona por BOLETA (no por gasto completo)
+  // -- el total de la rendición es exactamente la suma de las boletas
+  // marcadas, nunca el monto del retiro completo.
   const total = [...state.cajaPendientesSeleccionados].reduce((suma, id) => {
-    const chk = document.querySelector(`[data-pendiente-id="${id}"]`);
+    const chk = document.querySelector(`[data-boleta-seleccionable="${id}"]`);
     return suma + (chk ? Number(chk.dataset.monto) : 0);
   }, 0);
   document.getElementById("cr-total-seleccionado").textContent = fmtMoney(total);
@@ -633,11 +637,29 @@ function optionsRubroGav(valorActual) {
 function renderBoletaItem(b) {
   const rubroTxt = b.rubro_gav ? (RUBRO_GAV_LABEL[b.rubro_gav] || b.rubro_gav) : "sin clasificar";
   const otTxt = b.rubro_gav === "gastos_por_ot" && b.orden_id ? ` · OT #${b.orden_id}` : "";
-  return `
-    <div class="cr-boleta-item" data-boleta-id="${b.id}">
+  const info = `
       <span class="cr-boleta-doc">${escapeHtml(b.numero_documento) || "(sin N°)"}</span>
       <span class="cr-boleta-rubro">${rubroTxt}${otTxt}${b.descripcion ? " — " + escapeHtml(b.descripcion) : ""}</span>
-      <span class="cr-boleta-monto mono">${fmtMoney(b.monto)}</span>
+      <span class="cr-boleta-monto mono">${fmtMoney(b.monto)}</span>`;
+  // Una boleta ya rendida (Migración 26: la rendición se genera por boleta,
+  // no por gasto completo) queda de solo lectura acá -- no se puede volver
+  // a seleccionar, editar ni eliminar (ver caja_editar_boleta/caja_eliminar_boleta).
+  if (b.rendido) {
+    return `
+    <div class="cr-boleta-item cr-boleta-item--rendida" data-boleta-id="${b.id}">
+      ${info}
+      <span class="cr-boleta-estado">✓ ya rendida</span>
+    </div>`;
+  }
+  // Preseleccionada por defecto (ver renderPendientesRendicion): el caso más
+  // común es rendir todo lo que ya está documentado, así que alcanza con
+  // desmarcar lo que no corresponda en vez de tener que marcar boleta por
+  // boleta.
+  const checked = state.cajaPendientesSeleccionados.has(b.id) ? "checked" : "";
+  return `
+    <div class="cr-boleta-item" data-boleta-id="${b.id}">
+      <input type="checkbox" data-boleta-seleccionable="${b.id}" data-monto="${b.monto}" ${checked}>
+      ${info}
       <button type="button" class="btn btn-secundario" data-eliminar-boleta="${b.id}">Quitar</button>
     </div>`;
 }
@@ -679,20 +701,23 @@ function renderFormBoleta(gastoId, montoSugerido) {
 
 function renderGastoCard(g) {
   const abierto = state.crGastoAbierto === g.id;
-  // El pendiente es solo informativo -- el taller pidió expresamente poder
-  // rendir con boletas parciales (puede quedar monto a favor, o perderse
-  // una boleta chica) SIN tener que justificar el 100% ni cerrar primero.
-  const estadoTxt = g.monto_pendiente > 0
-    ? `<span class="cr-gasto-estado cr-gasto-estado--pendiente">faltan ${fmtMoney(g.monto_pendiente)}${g.cerrado_manualmente ? " (cerrado manual)" : ""}</span>`
-    : `<span class="cr-gasto-estado cr-gasto-estado--listo">✓ justificado completo</span>`;
+  // Ya no hay un único estado "listo/no listo" a nivel de retiro (Migración
+  // 26): puede tener a la vez plata sin boleta Y boletas ya listas para
+  // rendir. Se muestran ambos datos, cada uno solo si aplica.
+  const badges = [];
+  if (g.monto_pendiente > 0) {
+    badges.push(`<span class="cr-gasto-estado cr-gasto-estado--pendiente">faltan ${fmtMoney(g.monto_pendiente)} sin boleta${g.cerrado_manualmente ? " (cerrado manual)" : ""}</span>`);
+  }
+  if (g.monto_por_rendir > 0) {
+    badges.push(`<span class="cr-gasto-estado cr-gasto-estado--listo">${fmtMoney(g.monto_por_rendir)} listo para rendir</span>`);
+  }
   return `
     <div class="cr-gasto ${abierto ? "cr-gasto--abierto" : ""}" data-gasto-id="${g.id}">
       <div class="cr-gasto-resumen" data-toggle-gasto="${g.id}">
-        <input type="checkbox" data-pendiente-id="${g.id}" data-monto="${g.monto}">
         <span class="cr-gasto-fecha">${fmtFecha(g.fecha)}</span>
         <span>${MEDIO_PAGO_LABEL[g.medio_pago] || g.medio_pago}</span>
         <span class="cr-gasto-monto mono">${fmtMoney(g.monto)}</span>
-        ${estadoTxt}
+        ${badges.join("")}
         <span class="cr-gasto-chevron">▾</span>
       </div>
       <div class="cr-gasto-detalle" style="display:${abierto ? "flex" : "none"}">
@@ -701,7 +726,7 @@ function renderGastoCard(g) {
         </div>
         ${renderFormBoleta(g.id, g.monto_pendiente)}
         <div class="cr-gasto-cerrar">
-          <span>${g.monto_pendiente > 0 ? `Quedan ${fmtMoney(g.monto_pendiente)} sin boleta — igual se puede rendir así.` : "Monto completamente justificado."}</span>
+          <span>${g.monto_pendiente > 0 ? `Quedan ${fmtMoney(g.monto_pendiente)} sin boleta — se puede rendir el resto igual.` : "Monto completamente justificado."}</span>
           <button type="button" class="btn btn-secundario" data-toggle-cierre="${g.id}" data-cerrado="${g.cerrado_manualmente ? "1" : "0"}">
             ${g.cerrado_manualmente ? "Reabrir" : "Marcar cerrado (sin más boletas)"}
           </button>
@@ -714,14 +739,17 @@ function wireGastoCard(cont, g) {
   const card = cont.querySelector(`.cr-gasto[data-gasto-id="${g.id}"]`);
   if (!card) return;
 
-  const chk = card.querySelector(`[data-pendiente-id="${g.id}"]`);
-  if (chk) {
+  // Una casilla por BOLETA (Migración 26) -- vienen preseleccionadas desde
+  // renderPendientesRendicion, acá solo se sincroniza el Set cuando el
+  // usuario las toca.
+  card.querySelectorAll("[data-boleta-seleccionable]").forEach(chk => {
+    const boletaId = parseInt(chk.dataset.boletaSeleccionable, 10);
     chk.addEventListener("change", () => {
-      if (chk.checked) state.cajaPendientesSeleccionados.add(g.id);
-      else state.cajaPendientesSeleccionados.delete(g.id);
+      if (chk.checked) state.cajaPendientesSeleccionados.add(boletaId);
+      else state.cajaPendientesSeleccionados.delete(boletaId);
       actualizarTotalSeleccionadoRendicion();
     });
-  }
+  });
 
   card.querySelector("[data-toggle-gasto]").addEventListener("click", (e) => {
     if (e.target.closest("input,button")) return; // no interceptar el checkbox
@@ -830,10 +858,21 @@ function renderPendientesRendicion(cont) {
   const gastos = state.cajaPendientesLista || [];
   const medio = document.getElementById("cr-medio-pago").value;
   if (gastos.length === 0) {
-    cont.innerHTML = `<p class="vacio">No hay retiros pendientes de rendir en ${MEDIO_PAGO_LABEL[medio] || medio}. 👍</p>`;
+    cont.innerHTML = `<p class="vacio">No hay boletas ni retiros pendientes en ${MEDIO_PAGO_LABEL[medio] || medio}. 👍</p>`;
     actualizarTotalSeleccionadoRendicion();
     return;
   }
+  // Toda boleta sin rendir que aparece por primera vez (recién cargada, o
+  // recién vista en este modal) queda preseleccionada sola -- el caso más
+  // común es rendir todo lo que ya está documentado, así que alcanza con
+  // desmarcar lo que no corresponda en vez de tener que marcar boleta por
+  // boleta (ver renderBoletaItem).
+  gastos.forEach(g => (g.boletas || []).forEach(b => {
+    if (!b.rendido && !state.cajaBoletasConocidas.has(b.id)) {
+      state.cajaBoletasConocidas.add(b.id);
+      state.cajaPendientesSeleccionados.add(b.id);
+    }
+  }));
   cont.innerHTML = gastos.map(renderGastoCard).join("");
   gastos.forEach(g => wireGastoCard(cont, g));
   actualizarTotalSeleccionadoRendicion();
@@ -841,6 +880,7 @@ function renderPendientesRendicion(cont) {
 
 async function cargarPendientesRendicion() {
   state.cajaPendientesSeleccionados = new Set();
+  state.cajaBoletasConocidas = new Set();
   state.crGastoAbierto = null;
   const cont = document.getElementById("cr-lista-pendientes");
   cont.innerHTML = `<p class="vacio">Cargando…</p>`;
@@ -866,9 +906,12 @@ document.getElementById("btn-generar-rendicion").addEventListener("click", async
 document.getElementById("cr-medio-pago").addEventListener("change", () => cargarPendientesRendicion());
 
 document.getElementById("btn-confirmar-rendicion").addEventListener("click", async () => {
-  const gastoIds = [...state.cajaPendientesSeleccionados];
-  if (gastoIds.length === 0) {
-    toast("Selecciona al menos un retiro listo para rendir", true);
+  // Desde la Migración 26 se rinde por BOLETA -- el total de la rendición es
+  // exactamente la suma de lo seleccionado, nunca el monto completo de un
+  // retiro que todavía no esté 100% documentado.
+  const detalleIds = [...state.cajaPendientesSeleccionados];
+  if (detalleIds.length === 0) {
+    toast("Selecciona al menos una boleta para rendir", true);
     return;
   }
   const reponerSaldo = document.getElementById("cr-reponer-saldo").checked;
@@ -876,7 +919,7 @@ document.getElementById("btn-confirmar-rendicion").addEventListener("click", asy
     await api("/api/caja/rendicion", {
       method: "POST",
       body: JSON.stringify({
-        gasto_ids: gastoIds,
+        detalle_ids: detalleIds,
         nota: document.getElementById("cr-nota").value,
         reponer_saldo: reponerSaldo,
       }),
@@ -905,7 +948,7 @@ document.getElementById("btn-ver-rendiciones").addEventListener("click", async (
       <tr data-id="${r.id}">
         <td class="mono">${fmtFecha(r.fecha)}</td>
         <td>${MEDIO_PAGO_LABEL[r.medio_pago] || r.medio_pago || "—"}</td>
-        <td class="num mono">${r.n_gastos}</td>
+        <td class="num mono">${r.n_boletas}</td>
         <td class="num mono">${fmtMoney(r.total)}</td>
         <td>${r.reposicion_automatica ? "Sí" : "No"}</td>
         <td>${escapeHtml(r.nota) || "—"}</td>
@@ -933,19 +976,17 @@ async function verDetalleRendicion(id) {
       <dt>Fecha</dt><dd>${fmtFecha(r.fecha)}</dd>
       <dt>Medio de pago</dt><dd>${MEDIO_PAGO_LABEL[r.medio_pago] || r.medio_pago || "—"}</dd>
       <dt>Total</dt><dd class="mono">${fmtMoney(r.total)}</dd>
-      <dt>N° de gastos</dt><dd class="mono">${r.gastos.length}</dd>
+      <dt>N° de boletas</dt><dd class="mono">${r.boletas.length}</dd>
       <dt>¿Repuso el saldo?</dt><dd>${r.reposicion_automatica ? "Sí — se creó un aporte automático por el mismo total" : "No — estos gastos ya estaban cubiertos"}</dd>
       <dt>Nota</dt><dd>${escapeHtml(r.nota) || "—"}</dd>
       <dt>Responsable</dt><dd>${escapeHtml(r.usuario) || "—"}</dd>
     `;
-    // Una rendición junta "gastos" (retiros) ya listos -- cada uno puede
-    // traer más de una boleta (Migración 25), así que acá se listan todas
-    // las boletas de todos los gastos incluidos, en una sola tabla plana.
-    const boletas = r.gastos.flatMap(g => (g.boletas || []).map(b => ({ ...b, fechaRetiro: g.fecha })));
-    tbody.innerHTML = boletas.length
-      ? boletas.map(b => `
+    // Desde la Migración 26 una rendición junta BOLETAS individuales
+    // directamente (ya no gastos completos con boletas adentro).
+    tbody.innerHTML = r.boletas.length
+      ? r.boletas.map(b => `
         <tr>
-          <td class="mono">${fmtFecha(b.fechaRetiro)}</td>
+          <td class="mono">${fmtFecha(b.fecha_retiro)}</td>
           <td>${escapeHtml(b.numero_documento) || "—"}</td>
           <td>${b.rubro_gav ? (RUBRO_GAV_LABEL[b.rubro_gav] || b.rubro_gav) + (b.rubro_gav === "gastos_por_ot" && b.orden_id ? ` · OT #${b.orden_id}` : "") : "—"}</td>
           <td>${escapeHtml(b.descripcion) || "—"}</td>

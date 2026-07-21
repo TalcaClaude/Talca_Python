@@ -720,13 +720,25 @@
           </select>
           <p class="ayuda-inline">Un mismo producto puede haberse comprado a varios proveedores: elige de cuál viene la unidad que se está perdiendo, para no mezclar el registro de merma.</p>
         </div>
+        <div class="campo" id="m-proveedor-salida-wrap" style="display:none">
+          <label>Proveedor de estas unidades *</label>
+          <select id="m-proveedor-salida">
+            <option value="">Cargando…</option>
+          </select>
+          <p class="ayuda-inline">Este producto puede tener stock de más de un proveedor, con costos distintos: elige de cuál están saliendo estas unidades.</p>
+        </div>
+        <div class="campo" id="m-orden-wrap" style="display:none">
+          <label id="m-orden-label">Orden de trabajo *</label>
+          <input type="text" id="m-orden-id" placeholder="Ej: 123" inputmode="numeric">
+          <p class="ayuda-inline" id="m-orden-preview" style="display:none"></p>
+        </div>
         <div class="grid-2">
           <div class="campo" id="m-costo-wrap">
             <label>Costo unitario de esta compra ($ CLP, opcional)</label>
             <input type="number" id="m-costo" min="0" step="1" placeholder="Déjalo vacío si no cambió">
           </div>
           <div class="campo">
-            <label>Detalle / referencia (opcional)</label>
+            <label id="m-motivo-label">Detalle / referencia (opcional)</label>
             <input type="text" id="m-motivo" placeholder="Ej: Compra a proveedor, orden de trabajo #123…">
           </div>
         </div>

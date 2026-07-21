@@ -2796,6 +2796,79 @@ def eliminar_pago_orden(orden_id, pago_id):
 # Ítems de la orden (repuestos y mano de obra)
 # ---------------------------------------------------------------------------
 
+def registrar_salida_directa_a_orden(db, orden_id, producto_id, cantidad, categoria, usuario, motivo, proveedor_id=None):
+    """Descarga un producto directamente a una orden de trabajo desde el
+    formulario "Registrar movimiento" de Logística (categoría "Consumo
+    interno" o "Reserva"), en vez del /movimiento genérico. Queda asociado a
+    la OT igual que si se hubiera agregado desde la pestaña de repuestos de
+    la orden (aparece en orden_items, afecta el costeo) pero -- a diferencia
+    de agregar_item_orden(), que siempre fuerza categoría "Consumo interno"
+    -- respeta la categoría real elegida, y usa el costo promedio del
+    proveedor elegido a mano (no el CPP general del producto) para que el
+    costo que quede en la OT sea el más real posible: útil, por ejemplo, si
+    el auto vuelve por garantía y hay que saber exactamente qué repuesto (de
+    qué proveedor) se usó. Si la categoría es "Reserva", el ítem queda
+    marcado como tal en su detalle, para distinguirlo de un consumo directo.
+
+    Devuelve (item_dict, None) si salió bien, o (None, (mensaje, status)) si
+    hubo un error -- quien llama debe propagarlo tal cual (ver
+    registrar_movimiento en app.py)."""
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return None, ("No existe una orden de trabajo con ese número", 404)
+    if orden["estado"] in ESTADOS_CERRADOS:
+        return None, (f"La orden #{orden_id} está '{orden['estado']}' y no admite más ítems. Reábrela primero cambiando su estado.", 409)
+
+    producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return None, ("Producto no encontrado", 400)
+
+    costo_unitario = producto["costo_compra"]
+    if proveedor_id is None:
+        balde = db.execute(
+            "SELECT costo_promedio FROM stock_proveedores WHERE producto_id = ? AND proveedor_id IS NULL",
+            (producto_id,),
+        ).fetchone()
+    else:
+        balde = db.execute(
+            "SELECT costo_promedio FROM stock_proveedores WHERE producto_id = ? AND proveedor_id = ?",
+            (producto_id, proveedor_id),
+        ).fetchone()
+    if balde is not None:
+        costo_unitario = balde["costo_promedio"]
+
+    cantidad_stock = int(round(cantidad))
+    motivo_completo = motivo or f"ORDEN DE TRABAJO #{orden_id}"
+    try:
+        _aplicar_salida_stock(
+            db, producto, cantidad_stock, motivo=motivo_completo, usuario=usuario, categoria=categoria,
+            proveedor_id=proveedor_id, proveedor_manual=True,
+        )
+    except ValueError as e:
+        return None, (str(e), 400)
+
+    movimiento_id = db.execute(
+        "SELECT id FROM movimientos WHERE producto_id = ? ORDER BY id DESC LIMIT 1", (producto_id,)
+    ).fetchone()[0]
+
+    ts = now_iso()
+    detalle_item = "Reservado desde Logística (aún sin descargar como consumo)" if categoria == "Reserva" else ""
+    cur = db.execute(
+        """
+        INSERT INTO orden_items (
+            orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
+            movimiento_id, usuario, creado_en, detalle, aplica_iva
+        ) VALUES (?, 'repuesto', ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        """,
+        (orden_id, producto_id, producto["nombre"], cantidad, costo_unitario, movimiento_id, usuario, ts, detalle_item),
+    )
+    db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
+
+    nuevo_item = dict(db.execute("SELECT * FROM orden_items WHERE id = ?", (cur.lastrowid,)).fetchone())
+    nuevo_item["subtotal"] = _item_subtotal(nuevo_item)
+    return nuevo_item, None
+
+
 @bp.route("/api/operativo/ordenes/<int:orden_id>/items", methods=["POST"])
 def agregar_item_orden(orden_id):
     db = get_db()

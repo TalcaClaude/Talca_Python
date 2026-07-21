@@ -664,6 +664,128 @@ def _recalcular_stock_minimo(db, producto_id):
     return calculo
 
 
+# ---------------------------------------------------------------------------
+# Stock por proveedor (stock_proveedores): a diferencia del Costo Promedio
+# Ponderado general de productos.costo_compra (que sigue siendo el único
+# costo "oficial" usado en todos los reportes/costeos), esta tabla lleva un
+# balde de cantidad + costo promedio propio POR proveedor, para poder saber
+# de qué proveedor viene el stock disponible y no mezclar calidades/costos
+# distintos bajo un mismo número. Mismo patrón que merma_proveedores
+# (app.py), pero para stock vivo en vez de merma.
+# ---------------------------------------------------------------------------
+
+def _stockprov_bucket_get(db, producto_id, proveedor_id):
+    if proveedor_id is None:
+        return db.execute(
+            "SELECT * FROM stock_proveedores WHERE producto_id = ? AND proveedor_id IS NULL",
+            (producto_id,),
+        ).fetchone()
+    return db.execute(
+        "SELECT * FROM stock_proveedores WHERE producto_id = ? AND proveedor_id = ?",
+        (producto_id, proveedor_id),
+    ).fetchone()
+
+
+def _stockprov_bucket_entrada(db, producto_id, proveedor_id, cantidad, costo_unitario):
+    """Suma unidades al balde de stock de un proveedor específico (o NULL =
+    sin proveedor conocido, ej. stock inicial o entrada sin factura) y
+    recalcula el costo promedio de ESE balde en particular (independiente
+    del costo promedio general del producto). Crea el balde si no existía."""
+    bucket = _stockprov_bucket_get(db, producto_id, proveedor_id)
+    ts = now_iso()
+    if bucket is None:
+        db.execute(
+            "INSERT INTO stock_proveedores (producto_id, proveedor_id, cantidad, costo_promedio, actualizado_en) VALUES (?, ?, ?, ?, ?)",
+            (producto_id, proveedor_id, cantidad, costo_unitario if costo_unitario is not None else 0, ts),
+        )
+        return
+    cantidad_actual = bucket["cantidad"]
+    nueva_cantidad = cantidad_actual + cantidad
+    nuevo_costo = bucket["costo_promedio"]
+    if costo_unitario is not None:
+        valor_actual = cantidad_actual * bucket["costo_promedio"]
+        valor_nuevo = cantidad * costo_unitario
+        nuevo_costo = (valor_actual + valor_nuevo) / nueva_cantidad if nueva_cantidad > 0 else costo_unitario
+    db.execute(
+        "UPDATE stock_proveedores SET cantidad = ?, costo_promedio = ?, actualizado_en = ? WHERE id = ?",
+        (nueva_cantidad, nuevo_costo, ts, bucket["id"]),
+    )
+
+
+def _stockprov_bucket_salida(db, producto_id, proveedor_id, cantidad):
+    """Descuenta unidades del balde de un proveedor específico (no toca su
+    costo promedio, igual que una salida no toca el CPP general). Se usa
+    cuando la persona elige a mano de qué proveedor está saliendo el
+    producto (formulario de "Registrar movimiento"). Lanza ValueError si ese
+    balde no tiene stock suficiente -- a propósito, para que quien eligió
+    mal el proveedor vea el error de inmediato en vez de dejar el balde en
+    negativo."""
+    bucket = _stockprov_bucket_get(db, producto_id, proveedor_id)
+    disponible = bucket["cantidad"] if bucket else 0
+    if cantidad > disponible:
+        raise ValueError(f"Ese proveedor solo tiene {disponible} unidad(es) disponibles de este producto")
+    ts = now_iso()
+    nuevo = disponible - cantidad
+    if nuevo <= 0:
+        db.execute("DELETE FROM stock_proveedores WHERE id = ?", (bucket["id"],))
+    else:
+        db.execute(
+            "UPDATE stock_proveedores SET cantidad = ?, actualizado_en = ? WHERE id = ?",
+            (nuevo, ts, bucket["id"]),
+        )
+
+
+def _stockprov_descontar_automatico(db, producto_id, cantidad):
+    """Descuenta unidades de los baldes de proveedor de un producto SIN que
+    nadie haya elegido a mano de cuál (ej. un repuesto que se consume desde
+    una orden de trabajo por la pantalla de Operativo, o una salida de
+    Convertidores de Torque -- pantallas que hoy no tienen selector de
+    proveedor). Es "mejor esfuerzo": prioriza el balde "sin proveedor
+    conocido" y de ahí los baldes actualizados hace más tiempo (aproximación
+    FIFO), y si los baldes registrados no alcanzan a cubrir la cantidad
+    (puede pasar si arrastran una inconsistencia histórica) simplemente los
+    deja en 0 en vez de bloquear la salida real de stock -- este desglose es
+    información complementaria, nunca debe ser la causa de que una OT o una
+    fabricación de convertidor no pueda completarse."""
+    baldes = db.execute(
+        "SELECT * FROM stock_proveedores WHERE producto_id = ? ORDER BY (proveedor_id IS NULL) DESC, actualizado_en ASC",
+        (producto_id,),
+    ).fetchall()
+    restante = cantidad
+    ts = now_iso()
+    for balde in baldes:
+        if restante <= 0:
+            break
+        tomar = min(balde["cantidad"], restante)
+        if tomar <= 0:
+            continue
+        restante -= tomar
+        nuevo = balde["cantidad"] - tomar
+        if nuevo <= 0:
+            db.execute("DELETE FROM stock_proveedores WHERE id = ?", (balde["id"],))
+        else:
+            db.execute(
+                "UPDATE stock_proveedores SET cantidad = ?, actualizado_en = ? WHERE id = ?",
+                (nuevo, ts, balde["id"]),
+            )
+
+
+def _stockprov_descontar_preferido(db, producto_id, proveedor_id_preferido, cantidad):
+    """Igual que _stockprov_descontar_automatico, pero primero intenta
+    descontar del balde de un proveedor preferido (ej. el proveedor que la
+    persona ya eligió al registrar una pérdida/merma) y solo si ese balde no
+    alcanza, cubre el resto con el resto de los baldes disponibles. Nunca
+    lanza ValueError -- mismo criterio "mejor esfuerzo" de arriba."""
+    bucket = _stockprov_bucket_get(db, producto_id, proveedor_id_preferido)
+    disponible_preferido = bucket["cantidad"] if bucket else 0
+    tomar_preferido = min(disponible_preferido, cantidad)
+    if tomar_preferido > 0:
+        _stockprov_bucket_salida(db, producto_id, proveedor_id_preferido, tomar_preferido)
+    restante = cantidad - tomar_preferido
+    if restante > 0:
+        _stockprov_descontar_automatico(db, producto_id, restante)
+
+
 def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra"):
     """Aplica una entrada de stock a un producto, recalculando el Costo
     Promedio Ponderado si se informa costo_unitario, y deja el movimiento
@@ -700,15 +822,37 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
             nuevo_stock,
         ),
     )
+    # El proveedor de esta entrada se toma de la factura si la hay (y tiene
+    # proveedor asignado); si no, queda en el balde "sin proveedor conocido"
+    # -- esto pasa siempre, automáticamente, sin que nadie tenga que elegir
+    # nada a mano (a diferencia de la salida, acá el dato ya existe en la
+    # factura).
+    proveedor_id_entrada = None
+    if factura is not None:
+        try:
+            proveedor_id_entrada = factura["proveedor_id"]
+        except (IndexError, KeyError):
+            proveedor_id_entrada = None
+    _stockprov_bucket_entrada(db, producto_row["id"], proveedor_id_entrada, cantidad, costo_unitario)
     _recalcular_stock_minimo(db, producto_row["id"])
     return nuevo_stock
 
 
-def _aplicar_salida_stock(db, producto_row, cantidad, motivo, usuario, categoria="Consumo interno"):
+def _aplicar_salida_stock(db, producto_row, cantidad, motivo, usuario, categoria="Consumo interno",
+                           proveedor_id=None, proveedor_manual=False):
     """Aplica una salida de stock a un producto (sin tocar el Costo Promedio
     Ponderado — una salida no cambia lo que costó lo que queda en bodega).
     Deja el movimiento registrado y recalcula el stock mínimo, porque una
     salida sí cambia el consumo real que alimenta esa proyección.
+
+    proveedor_id / proveedor_manual controlan el descuento del desglose por
+    proveedor (stock_proveedores): si proveedor_manual=True, se descuenta
+    ESTRICTAMENTE del balde de proveedor_id indicado (puede lanzar
+    ValueError si ese balde no alcanza -- pensado para cuando una persona
+    elige el proveedor a mano en el formulario). Si proveedor_manual=False
+    (default, para no romper los llamados existentes que todavía no tienen
+    ese selector), se descuenta automáticamente del/los balde(s) disponibles
+    sin bloquear la operación.
 
     Lanza ValueError si no hay stock disponible suficiente, con el mismo
     mensaje que usa el resto del sistema para este caso — el que llama debe
@@ -718,6 +862,15 @@ def _aplicar_salida_stock(db, producto_row, cantidad, motivo, usuario, categoria
     stock_actual = producto_row["stock_disponible"]
     if cantidad > stock_actual:
         raise ValueError(f"No hay stock suficiente (disponible: {stock_actual})")
+    if proveedor_manual:
+        # Se valida ANTES de escribir nada, para no dejar el movimiento
+        # general aplicado si después falla el descuento del balde de
+        # proveedor (mismo criterio que la validación de stock_actual de
+        # arriba, ambas fallan "limpio" sin tocar la base).
+        bucket = _stockprov_bucket_get(db, producto_row["id"], proveedor_id)
+        disponible_proveedor = bucket["cantidad"] if bucket else 0
+        if cantidad > disponible_proveedor:
+            raise ValueError(f"Ese proveedor solo tiene {disponible_proveedor} unidad(es) disponibles de este producto")
     nuevo_stock = stock_actual - cantidad
 
     ts = now_iso()
@@ -730,6 +883,10 @@ def _aplicar_salida_stock(db, producto_row, cantidad, motivo, usuario, categoria
         "VALUES (?, ?, 'salida', ?, ?, ?, ?, ?)",
         (producto_row["id"], ts, categoria, cantidad, motivo, usuario, nuevo_stock),
     )
+    if proveedor_manual:
+        _stockprov_bucket_salida(db, producto_row["id"], proveedor_id, cantidad)
+    else:
+        _stockprov_descontar_automatico(db, producto_row["id"], cantidad)
     _recalcular_stock_minimo(db, producto_row["id"])
     return nuevo_stock
 

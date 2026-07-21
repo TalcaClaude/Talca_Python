@@ -83,6 +83,8 @@ from core import (  # noqa: E402
     _recalcular_stock_minimo,
     _aplicar_entrada_stock,
     _aplicar_salida_stock,
+    _stockprov_bucket_entrada,
+    _stockprov_descontar_preferido,
     _crear_libro_excel,
     _estilo_encabezado,
     _autoancho,
@@ -1080,6 +1082,55 @@ def init_db():
     # libre, solo se agrega este tercer valor válido (ver
     # TIPOS_MECANICO_VALIDOS en core.py).
 
+    # ---- Migración 22: stock por proveedor (pedido del taller: un mismo
+    # repuesto puede venir de proveedores de calidad/costo muy distintos, y
+    # hasta ahora todo se mezclaba bajo un solo costo promedio sin poder
+    # saber de qué proveedor viene lo que hay disponible). Mismo patrón que
+    # merma_proveedores (Migración 8): un balde por producto+proveedor, en
+    # vez de duplicar el producto. Se llena solo desde ahora en adelante:
+    # - En cada ENTRADA con factura, el balde del proveedor de esa factura
+    #   se actualiza automáticamente (ver _aplicar_entrada_stock en core.py).
+    # - En cada SALIDA desde el formulario de "Registrar movimiento", la
+    #   persona elige a mano de qué proveedor están saliendo las unidades
+    #   (ver _aplicar_salida_stock con proveedor_manual=True) -- se pidió
+    #   así (no automático) para que el costo que quede en la orden de
+    #   trabajo sea el real de ese proveedor, útil por ejemplo si un auto
+    #   vuelve por garantía y hay que saber qué repuesto específico se usó.
+    # - Otras salidas automáticas que todavía no tienen selector de
+    #   proveedor (consumo de repuesto desde una OT por la pantalla de
+    #   Operativo, Convertidores de Torque) descuentan del balde disponible
+    #   sin preguntar (ver _stockprov_descontar_automatico en core.py) --
+    #   no bloquean su flujo por esto, es información complementaria.
+    # No se puede reconstruir con certeza el desglose histórico (no se sabe
+    # de qué proveedor salió cada unidad ya consumida antes de esta
+    # migración), así que el stock ya disponible al momento de migrar queda
+    # en un balde "sin proveedor conocido" -- mismo criterio que se usó para
+    # la merma vieja en la Migración 8.
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS stock_proveedores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            producto_id INTEGER NOT NULL REFERENCES productos(id) ON DELETE CASCADE,
+            proveedor_id INTEGER REFERENCES proveedores(id),
+            cantidad INTEGER NOT NULL DEFAULT 0,
+            costo_promedio REAL NOT NULL DEFAULT 0,
+            actualizado_en TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_stock_proveedores_producto_id ON stock_proveedores (producto_id);
+        """
+    )
+    db.commit()
+
+    ya_migrado_stockprov = db.execute("SELECT COUNT(*) FROM stock_proveedores").fetchone()[0]
+    if ya_migrado_stockprov == 0:
+        con_stock = db.execute("SELECT id, stock_disponible, costo_compra FROM productos WHERE stock_disponible > 0").fetchall()
+        for p in con_stock:
+            db.execute(
+                "INSERT INTO stock_proveedores (producto_id, proveedor_id, cantidad, costo_promedio, actualizado_en) VALUES (?, NULL, ?, ?, ?)",
+                (p["id"], p["stock_disponible"], p["costo_compra"], now_iso()),
+            )
+        db.commit()
+
     # ---- Índices de rendimiento: movimientos es la tabla que más va a
     # crecer con los años (cada entrada, salida y pérdida queda ahí para
     # siempre), y prácticamente todas las pantallas de análisis (Rotación,
@@ -1327,6 +1378,44 @@ def _merma_bucket_sumar(db, producto_id, proveedor_id, delta):
             "UPDATE merma_proveedores SET cantidad = ?, actualizado_en = ? WHERE id = ?",
             (nuevo, ts, bucket["id"]),
         )
+
+
+def _stockprov_buckets_producto(db, producto_id):
+    """Desglose ACTUAL (solo baldes con cantidad > 0) del stock disponible
+    de un producto por proveedor, para mostrarlo en la ficha del producto y
+    para poblar el selector de "de qué proveedor sale esto" al registrar una
+    salida. A diferencia de _proveedores_origen_producto (que mira TODO el
+    historial de compras, sirve para la pérdida), esto solo muestra
+    proveedores con stock vivo ahora mismo."""
+    filas = db.execute(
+        """
+        SELECT sp.proveedor_id, pr.nombre AS proveedor_nombre, sp.cantidad, sp.costo_promedio, sp.actualizado_en
+        FROM stock_proveedores sp
+        LEFT JOIN proveedores pr ON pr.id = sp.proveedor_id
+        WHERE sp.producto_id = ? AND sp.cantidad > 0
+        ORDER BY (sp.proveedor_id IS NULL), pr.nombre COLLATE NOCASE
+        """,
+        (producto_id,),
+    ).fetchall()
+    baldes = []
+    permite_sin_proveedor = False
+    for f in filas:
+        if f["proveedor_id"] is None:
+            permite_sin_proveedor = True
+            baldes.append({
+                "proveedor_id": None,
+                "proveedor_nombre": "Sin proveedor conocido (stock inicial / sin factura)",
+                "cantidad": f["cantidad"],
+                "costo_promedio": f["costo_promedio"],
+            })
+        else:
+            baldes.append({
+                "proveedor_id": f["proveedor_id"],
+                "proveedor_nombre": f["proveedor_nombre"],
+                "cantidad": f["cantidad"],
+                "costo_promedio": f["costo_promedio"],
+            })
+    return baldes, permite_sin_proveedor
 
 
 # ---------------------------------------------------------------------------
@@ -2005,6 +2094,7 @@ def productos_importar_excel_confirmar():
     try:
         db.execute("DELETE FROM productos")
         db.execute("DELETE FROM stock_minimo_calculo")
+        db.execute("DELETE FROM stock_proveedores")
         for f in filas:
             cur = db.execute(
                 """
@@ -2026,6 +2116,13 @@ def productos_importar_excel_confirmar():
                     VALUES (?, ?, 'entrada', 'Ajuste de inventario', ?, 'Carga inicial por importación de Excel', ?, ?, ?)
                     """,
                     (nuevo_id, ts, f["cantidad"], usuario_actual(), f["costo_compra"], f["cantidad"]),
+                )
+                # El Excel no trae proveedor por línea -- igual que el stock
+                # inicial al crear un producto a mano, cae en el balde "sin
+                # proveedor conocido" (ver Migración 22).
+                db.execute(
+                    "INSERT INTO stock_proveedores (producto_id, proveedor_id, cantidad, costo_promedio, actualizado_en) VALUES (?, NULL, ?, ?, ?)",
+                    (nuevo_id, f["cantidad"], f["costo_compra"], ts),
                 )
             _asegurar_categoria(db, f["categoria"])
             _asegurar_modelo(db, f["modelo"])
@@ -2162,7 +2259,13 @@ def crear_producto():
     nombre = nombre_automatico(categoria, modelo, codigo_interno, nuevo_id)
     db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nombre, nuevo_id))
 
-    # Si se crea con stock inicial, se deja registrado como movimiento de entrada
+    # Si se crea con stock inicial, se deja registrado como movimiento de
+    # entrada. No pasa por _aplicar_entrada_stock (el producto recién se
+    # está creando, no existe fila previa que actualizar), así que el balde
+    # de "stock por proveedor" correspondiente se arma acá a mano: al no
+    # venir de una factura, siempre cae en el balde "sin proveedor conocido"
+    # -- igual que un stock inicial cargado antes de que existiera este
+    # desglose (ver Migración 22).
     if stock_disponible > 0:
         db.execute(
             """
@@ -2171,6 +2274,7 @@ def crear_producto():
             """,
             (nuevo_id, ts, stock_disponible, usuario_actual(), costo_compra, stock_disponible),
         )
+        _stockprov_bucket_entrada(db, nuevo_id, None, stock_disponible, costo_compra)
 
     # El stock mínimo se calcula solo desde el primer momento (con cero
     # historial da 0 — recién se establece un mínimo real una vez que el
@@ -2422,6 +2526,8 @@ def registrar_movimiento(producto_id):
         return jsonify({"error": "Tipo de movimiento inválido (usa entrada, salida o perdida)"}), 400
 
     proveedor_id_perdida = None
+    proveedor_id_salida = None
+    orden_id_asociada = None
     if tipo == "perdida":
         categoria = "Merma o pérdida"
         # El proveedor de una pérdida SIEMPRE debe ser uno que efectivamente
@@ -2450,6 +2556,42 @@ def registrar_movimiento(producto_id):
             return jsonify({
                 "error": f"Para {tipo}, la categoría debe ser una de: {', '.join(categorias_permitidas)}"
             }), 400
+
+        if tipo == "salida":
+            # De qué proveedor están saliendo estas unidades: se elige a
+            # mano (no se reparte/infiera solo), para que el costo que
+            # quede registrado -- y el que se le carga a una orden de
+            # trabajo si corresponde -- sea el real de ESE proveedor.
+            baldes_posibles, permite_sin_proveedor_salida = _stockprov_buckets_producto(db, producto_id)
+            ids_posibles_salida = {b["proveedor_id"] for b in baldes_posibles if b["proveedor_id"] is not None}
+            proveedor_id_crudo_salida = data.get("proveedor_id")
+            if proveedor_id_crudo_salida in (None, ""):
+                if not permite_sin_proveedor_salida:
+                    return jsonify({"error": "Selecciona de qué proveedor están saliendo estas unidades"}), 400
+                proveedor_id_salida = None
+            else:
+                try:
+                    proveedor_id_salida = int(proveedor_id_crudo_salida)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "Proveedor inválido"}), 400
+                if proveedor_id_salida not in ids_posibles_salida:
+                    return jsonify({"error": "Ese proveedor no tiene stock disponible de este producto. Elige uno de la lista."}), 400
+
+            # Orden de trabajo asociada: obligatoria si la categoría es
+            # "Consumo interno" (siempre debe saberse a qué OT se le está
+            # descargando el repuesto); opcional si es "Reserva" (se puede
+            # reservar para una OT que todavía no existe en el sistema).
+            if categoria in ("Consumo interno", "Reserva"):
+                orden_id_crudo = (data.get("orden_id") or "")
+                orden_id_crudo = str(orden_id_crudo).strip()
+                if not orden_id_crudo:
+                    if categoria == "Consumo interno":
+                        return jsonify({"error": "Indica el número de la orden de trabajo a la que se le está descargando este repuesto"}), 400
+                else:
+                    try:
+                        orden_id_asociada = int(orden_id_crudo)
+                    except (TypeError, ValueError):
+                        return jsonify({"error": "Número de orden de trabajo inválido"}), 400
 
     if factura_numero and tipo != "entrada":
         return jsonify({"error": "El número de factura solo aplica a movimientos de entrada"}), 400
@@ -2500,10 +2642,26 @@ def registrar_movimiento(producto_id):
         # ya lo maneja _aplicar_salida_stock (core.py), que también usa
         # el módulo Operativo cuando una orden de trabajo consume un
         # repuesto, para que ambos caminos queden siempre consistentes.
-        try:
-            nuevo_stock = _aplicar_salida_stock(db, row, cantidad, motivo, usuario, categoria)
-        except ValueError as e:
-            return jsonify({"error": str(e)}), 400
+        if orden_id_asociada is not None:
+            # Se pidió el número de OT: en vez de un movimiento genérico, el
+            # producto queda formalmente asociado a esa orden (mismo efecto
+            # que agregarlo desde la pestaña de repuestos de la OT), con la
+            # categoría real elegida (Consumo interno o Reserva).
+            _nuevo_item, _error = registrar_salida_directa_a_orden(
+                db, orden_id_asociada, producto_id, cantidad,
+                categoria=categoria, usuario=usuario, motivo=motivo,
+                proveedor_id=proveedor_id_salida,
+            )
+            if _error:
+                return jsonify({"error": _error[0]}), _error[1]
+        else:
+            try:
+                nuevo_stock = _aplicar_salida_stock(
+                    db, row, cantidad, motivo, usuario, categoria,
+                    proveedor_id=proveedor_id_salida, proveedor_manual=True,
+                )
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
     else:  # perdida -> el stock sale de "disponible" pero no desaparece: pasa a la cuenta de merma
         if cantidad > stock_actual:
             return jsonify({"error": f"No hay stock disponible suficiente para marcar como pérdida (disponible: {stock_actual})"}), 400
@@ -2520,6 +2678,7 @@ def registrar_movimiento(producto_id):
             (producto_id, ts, categoria, cantidad, motivo, usuario, nuevo_stock, proveedor_id_perdida),
         )
         _merma_bucket_sumar(db, producto_id, proveedor_id_perdida, cantidad)
+        _stockprov_descontar_preferido(db, producto_id, proveedor_id_perdida, cantidad)
 
     if linea:
         db.execute(
@@ -3312,7 +3471,7 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
         (numero, proveedor_id, fecha, ts, condicion_pago, porcentaje_contado, plazo_dias_credito),
     )
     factura_id = cur.lastrowid
-    factura_row = {"id": factura_id, "numero": numero}
+    factura_row = {"id": factura_id, "numero": numero, "proveedor_id": proveedor_id}
 
     for producto, cantidad, precio_unitario in lineas_validadas:
         cur_linea = db.execute(
@@ -7131,6 +7290,23 @@ def proveedores_origen_producto(producto_id):
     return jsonify({"proveedores": proveedores, "permite_sin_proveedor": permite_sin_proveedor})
 
 
+@app.route("/api/productos/<int:producto_id>/stock-proveedores", methods=["GET"])
+def stock_proveedores_producto(producto_id):
+    """Desglose del stock DISPONIBLE ahora mismo por proveedor (tabla
+    stock_proveedores) -- se usa para: (1) mostrarlo en la ficha del
+    producto, y (2) para el selector obligatorio de "de qué proveedor salen
+    estas unidades" al registrar una salida (venta, consumo interno,
+    reserva, ajuste, devolución). A diferencia de /proveedores-origen (que
+    mira todo el historial de compras, para la pérdida), esto solo lista
+    proveedores con stock vivo."""
+    db = get_db()
+    producto = db.execute("SELECT id FROM productos WHERE id = ?", (producto_id,)).fetchone()
+    if producto is None:
+        return jsonify({"error": "Producto no encontrado"}), 404
+    baldes, permite_sin_proveedor = _stockprov_buckets_producto(db, producto_id)
+    return jsonify({"proveedores": baldes, "permite_sin_proveedor": permite_sin_proveedor})
+
+
 @app.route("/api/mermas", methods=["GET"])
 def listar_mermas():
     """Módulo 7: Mermas.
@@ -8589,6 +8765,7 @@ from modulos.operativo import (  # noqa: E402
     _actualizar_campos_orden_por_agente,
     resumen_utilidad_mes,
     _guardar_foto_entidad,
+    registrar_salida_directa_a_orden,
 )
 app.register_blueprint(bp_operativo)
 

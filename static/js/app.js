@@ -1092,12 +1092,15 @@ async function abrirDetalle(id, enfocarMovimiento) {
     state.productoActivo = p;
     renderDetalle(p);
     resetearCampoFactura();
+    resetearCampoOrden();
     document.getElementById("m-tipo").value = "entrada";
     document.getElementById("m-cantidad-label").textContent = "Cantidad";
     document.getElementById("m-costo-wrap").style.display = "flex";
     document.getElementById("m-factura-wrap").style.display = "flex";
     document.getElementById("m-categoria-wrap").style.display = "flex";
     document.getElementById("m-proveedor-merma-wrap").style.display = "none";
+    document.getElementById("m-proveedor-salida-wrap").style.display = "none";
+    document.getElementById("m-orden-wrap").style.display = "none";
     poblarSelectCategoriaMovimiento(CATEGORIAS_ENTRADA, "Compra");
     abrirModal("modal-detalle");
     if (enfocarMovimiento) {
@@ -1356,31 +1359,118 @@ async function cargarProveedoresMerma(productoId) {
   }
 }
 
+// Igual que cargarProveedoresMerma, pero para una salida real (venta,
+// consumo interno, reserva, ajuste, devolución): en vez de mirar TODO el
+// historial de compras, solo lista proveedores con stock disponible AHORA
+// MISMO (balde > 0), porque de ahí es de donde efectivamente se puede
+// descontar.
+async function cargarProveedoresSalida(productoId) {
+  const select = document.getElementById("m-proveedor-salida");
+  select.innerHTML = '<option value="">Cargando…</option>';
+  try {
+    const data = await api(`/api/productos/${productoId}/stock-proveedores`);
+    if (data.proveedores.length === 0) {
+      select.innerHTML = '<option value="">Este producto no tiene stock disponible</option>';
+      return;
+    }
+    const opciones = ['<option value="">-- Selecciona un proveedor --</option>'];
+    data.proveedores.forEach(p => {
+      const valor = p.proveedor_id === null ? "__sin_proveedor__" : p.proveedor_id;
+      opciones.push(`<option value="${valor}">${escapeHtml(p.proveedor_nombre)} (${p.cantidad} disponibles, ${fmtMoney(p.costo_promedio)} c/u)</option>`);
+    });
+    select.innerHTML = opciones.join("");
+  } catch (e) {
+    select.innerHTML = '<option value="">Error al cargar proveedores</option>';
+    toast(e.message, true);
+  }
+}
+
+function resetearCampoOrden() {
+  document.getElementById("m-orden-id").value = "";
+  document.getElementById("m-orden-preview").style.display = "none";
+  state.ordenEncontradaMovimiento = null;
+}
+
+async function buscarOrdenParaMovimiento() {
+  const numero = document.getElementById("m-orden-id").value.trim();
+  const preview = document.getElementById("m-orden-preview");
+  state.ordenEncontradaMovimiento = null;
+
+  if (!numero) {
+    preview.style.display = "none";
+    return;
+  }
+  try {
+    const orden = await api(`/api/operativo/ordenes/${encodeURIComponent(numero)}`);
+    const cliente = orden.cliente ? orden.cliente.nombre : "";
+    const equipo = orden.equipo ? [orden.equipo.identificador, orden.equipo.anio].filter(Boolean).join(" · ") : "";
+    preview.textContent = `✓ OT #${orden.id}${cliente ? " — " + cliente : ""}${equipo ? " (" + equipo + ")" : ""} · estado: ${orden.estado}`;
+    preview.style.display = "block";
+    state.ordenEncontradaMovimiento = orden;
+  } catch (e) {
+    preview.textContent = e.message || `No existe una orden de trabajo con el número "${numero}".`;
+    preview.style.display = "block";
+  }
+}
+
+let ordenLookupTimeout;
+document.getElementById("m-orden-id").addEventListener("input", () => {
+  clearTimeout(ordenLookupTimeout);
+  ordenLookupTimeout = setTimeout(buscarOrdenParaMovimiento, 400);
+});
+
+// Muestra/oculta el campo de Orden de trabajo y ajusta si es obligatorio,
+// según tipo + categoría: solo aplica a una salida con categoría "Consumo
+// interno" (obligatorio -- siempre se sabe a qué OT se le descarga el
+// repuesto) o "Reserva" (opcional -- se puede reservar para una OT que
+// todavía no existe en el sistema).
+function actualizarCampoOrdenMovimiento() {
+  const tipo = document.getElementById("m-tipo").value;
+  const categoria = document.getElementById("m-categoria").value;
+  const esSalida = tipo === "salida";
+  const ordenAplica = esSalida && (categoria === "Consumo interno" || categoria === "Reserva");
+  const ordenObligatoria = esSalida && categoria === "Consumo interno";
+
+  document.getElementById("m-orden-wrap").style.display = ordenAplica ? "flex" : "none";
+  document.getElementById("m-orden-label").textContent = "Orden de trabajo" + (ordenObligatoria ? " *" : " (opcional — déjalo vacío si es para una OT que todavía no existe)");
+  document.getElementById("m-motivo-label").textContent = ordenAplica
+    ? "Detalle adicional (opcional)"
+    : "Detalle / referencia (opcional)";
+  if (!ordenAplica) resetearCampoOrden();
+}
+
+document.getElementById("m-categoria").addEventListener("change", actualizarCampoOrdenMovimiento);
+
 document.getElementById("m-tipo").addEventListener("change", (e) => {
   const tipo = e.target.value;
   const esEntrada = tipo === "entrada";
   const esPerdida = tipo === "perdida";
+  const esSalida = tipo === "salida";
   document.getElementById("m-cantidad-label").textContent = "Cantidad";
   document.getElementById("m-costo-wrap").style.display = esEntrada ? "flex" : "none";
   document.getElementById("m-factura-wrap").style.display = esEntrada ? "flex" : "none";
   document.getElementById("m-categoria-wrap").style.display = esPerdida ? "none" : "flex";
   document.getElementById("m-proveedor-merma-wrap").style.display = esPerdida ? "flex" : "none";
+  document.getElementById("m-proveedor-salida-wrap").style.display = esSalida ? "flex" : "none";
+  const productoId = document.getElementById("m-producto-id").value;
   if (!esPerdida) {
     poblarSelectCategoriaMovimiento(esEntrada ? CATEGORIAS_ENTRADA : CATEGORIAS_SALIDA, CATEGORIA_POR_DEFECTO[tipo]);
-  } else {
-    const productoId = document.getElementById("m-producto-id").value;
-    if (productoId) cargarProveedoresMerma(productoId);
+  } else if (productoId) {
+    cargarProveedoresMerma(productoId);
   }
+  if (esSalida && productoId) cargarProveedoresSalida(productoId);
   if (!esEntrada) resetearCampoFactura();
+  actualizarCampoOrdenMovimiento();
 });
 
 document.getElementById("form-movimiento").addEventListener("submit", async (e) => {
   e.preventDefault();
   const id = document.getElementById("m-producto-id").value;
   const tipo = document.getElementById("m-tipo").value;
+  const categoria = document.getElementById("m-categoria").value;
   const payload = {
     tipo,
-    categoria: document.getElementById("m-categoria").value,
+    categoria,
     cantidad: document.getElementById("m-cantidad").value,
     costo_unitario: document.getElementById("m-costo").value,
     factura_numero: document.getElementById("m-factura").value,
@@ -1394,6 +1484,23 @@ document.getElementById("form-movimiento").addEventListener("submit", async (e) 
     }
     payload.proveedor_id = valorProveedor === "__sin_proveedor__" ? null : parseInt(valorProveedor, 10);
   }
+  if (tipo === "salida") {
+    const valorProveedor = document.getElementById("m-proveedor-salida").value;
+    if (!valorProveedor) {
+      toast("Selecciona de qué proveedor están saliendo estas unidades", true);
+      return;
+    }
+    payload.proveedor_id = valorProveedor === "__sin_proveedor__" ? null : parseInt(valorProveedor, 10);
+
+    if (categoria === "Consumo interno" || categoria === "Reserva") {
+      const ordenTexto = document.getElementById("m-orden-id").value.trim();
+      if (!ordenTexto && categoria === "Consumo interno") {
+        toast("Indica el número de la orden de trabajo a la que se le está descargando este repuesto", true);
+        return;
+      }
+      if (ordenTexto) payload.orden_id = ordenTexto;
+    }
+  }
   try {
     await api(`/api/productos/${id}/movimiento`, { method: "POST", body: JSON.stringify(payload) });
     toast("Movimiento registrado");
@@ -1402,10 +1509,13 @@ document.getElementById("form-movimiento").addEventListener("submit", async (e) 
     document.getElementById("m-factura-wrap").style.display = "flex";
     document.getElementById("m-categoria-wrap").style.display = "flex";
     document.getElementById("m-proveedor-merma-wrap").style.display = "none";
+    document.getElementById("m-proveedor-salida-wrap").style.display = "none";
+    document.getElementById("m-orden-wrap").style.display = "none";
     document.getElementById("m-cantidad-label").textContent = "Cantidad";
     document.getElementById("m-tipo").value = "entrada";
     poblarSelectCategoriaMovimiento(CATEGORIAS_ENTRADA, "Compra");
     resetearCampoFactura();
+    resetearCampoOrden();
     document.getElementById("m-usuario").value = state.sesion.nombre || state.sesion.username || "";
     await Promise.all([cargarProductos(), cargarResumen()]);
     await abrirDetalle(id);

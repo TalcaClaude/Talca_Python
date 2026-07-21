@@ -345,6 +345,7 @@ async function cargarDashboardOperativo() {
     document.getElementById("op-s-costo-ots-cerradas").textContent = fmtMoney(data.costo_ots_cerradas);
     document.getElementById("op-s-costo-mano-obra-cerradas").textContent = fmtMoney(data.costo_mano_obra_ots_cerradas || 0);
     document.getElementById("op-s-costo-convertidores-cerradas").textContent = fmtMoney(data.costo_convertidores_ots_cerradas || 0);
+    document.getElementById("op-s-costo-caja-chica-cerradas").textContent = fmtMoney(data.costo_caja_chica_ots_cerradas || 0);
     document.getElementById("op-s-costo-garantias").textContent = fmtMoney(data.costo_garantias_mes);
     document.getElementById("op-s-garantias-abiertas").textContent = data.garantias_abiertas;
     document.getElementById("op-s-ticket-promedio").textContent = fmtMoney(data.ticket_promedio_mes);
@@ -1823,9 +1824,25 @@ function renderCostosOrden(orden) {
       </tr>
     `).join("");
   }
+  const tbodyCC = document.getElementById("tbody-opod-costos-caja-chica");
+  const boletasCC = orden.costos_caja_chica || [];
+  if (boletasCC.length === 0) {
+    tbodyCC.innerHTML = `<tr><td colspan="4" class="vacio">Sin gastos de caja chica asociados.</td></tr>`;
+  } else {
+    tbodyCC.innerHTML = boletasCC.map(b => `
+      <tr>
+        <td>${fmtFechaSolo((b.fecha_retiro || "").slice(0, 10))}</td>
+        <td>${escapeHtml(b.numero_documento || "—")}</td>
+        <td>${escapeHtml(b.descripcion || "—")}</td>
+        <td class="num">${fmtMoney(b.monto)}</td>
+      </tr>
+    `).join("");
+  }
+
   document.getElementById("opod-c-costo-repuestos").textContent = fmtMoney(orden.costo_repuestos || 0);
   document.getElementById("opod-c-mano-obra").textContent = fmtMoney(orden.mano_obra_cargada || 0);
   document.getElementById("opod-c-costo-convertidores").textContent = fmtMoney(orden.costo_convertidores || 0);
+  document.getElementById("opod-c-costo-caja-chica").textContent = fmtMoney(orden.costo_caja_chica || 0);
   document.getElementById("opod-c-neto").textContent = fmtMoney(orden.valor_neto || 0);
   document.getElementById("opod-c-total").textContent = fmtMoney(orden.valor_total || 0);
   document.getElementById("opod-c-pagado").textContent = fmtMoney(orden.total_pagado || 0);

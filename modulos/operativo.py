@@ -1464,8 +1464,26 @@ def _orden_dict(db, row):
     d["costo_repuestos"] = round(costo_repuestos, 2)
     d["mano_obra_cargada"] = round(mano_obra_cargada, 2)
     d["costo_convertidores"] = round(costo_convertidores, 2)
+
+    # Gastos de Caja Chica con rubro "Gastos por OT" (Migración 25) ligados
+    # a esta orden -- boletas cargadas contra un retiro de caja chica que en
+    # realidad son un costo de esta OT puntual (ej. un repuesto comprado en
+    # efectivo). Se muestran en la pestaña "Costos" junto a repuestos/mano
+    # de obra, con la boleta a la que corresponden, y sí restan de la
+    # utilidad estimada -- por eso se excluyen del GAV en el Estado de
+    # Resultados (quedarían duplicadas si sumaran en los dos lados).
+    boletas_caja_chica = db.execute(
+        "SELECT d.id, d.numero_documento, d.monto, d.descripcion, d.gasto_id, g.fecha AS fecha_retiro "
+        "FROM caja_gasto_detalles d JOIN caja_movimientos g ON g.id = d.gasto_id "
+        "WHERE d.orden_id = ? AND d.rubro_gav = 'gastos_por_ot' ORDER BY g.fecha ASC",
+        (d["id"],),
+    ).fetchall()
+    d["costos_caja_chica"] = [dict(b) for b in boletas_caja_chica]
+    costo_caja_chica = sum(b["monto"] for b in boletas_caja_chica)
+    d["costo_caja_chica"] = round(costo_caja_chica, 2)
+
     d["utilidad_estimada"] = round(
-        valor_neto - costo_repuestos - mano_obra_cargada - costo_convertidores, 2
+        valor_neto - costo_repuestos - mano_obra_cargada - costo_convertidores - costo_caja_chica, 2
     )
 
     try:
@@ -1656,7 +1674,7 @@ def ventas_y_costo_ot_mes(db, prefijo_mes):
         return {
             "monto_cerradas_mes": monto_cerradas_mes,
             "costo_repuestos": 0.0, "costo_mano_obra": 0.0, "costo_convertidores": 0.0,
-            "costo_total": 0.0, "utilidad_mes": 0.0,
+            "costo_caja_chica": 0.0, "costo_total": 0.0, "utilidad_mes": 0.0,
         }
 
     _iva_case = f"(CASE WHEN aplica_iva = 1 THEN 1 + {IVA_PORCENTAJE} ELSE 1 END)"
@@ -1677,14 +1695,26 @@ def ventas_y_costo_ot_mes(db, prefijo_mes):
         f"WHERE tipo = 'convertidor_torque' AND orden_id IN ({placeholders})",
         ids_cerradas_mes,
     ).fetchone()["total"] or 0
+    # Gastos de Caja Chica con rubro "Gastos por OT" (Migración 25) ligados
+    # a una de estas órdenes -- boletas cargadas contra un retiro de caja
+    # chica que en realidad son un costo de ESTA OT puntual, no gasto
+    # administrativo. Por eso se excluyen del GAV en el Estado de
+    # Resultados (ver finanzas_estado_resultados) y en cambio se suman acá,
+    # junto a repuestos/mano de obra/convertidores.
+    costo_caja_chica = db.execute(
+        f"SELECT COALESCE(SUM(monto), 0) AS total FROM caja_gasto_detalles "
+        f"WHERE rubro_gav = 'gastos_por_ot' AND orden_id IN ({placeholders})",
+        ids_cerradas_mes,
+    ).fetchone()["total"] or 0
 
-    costo_total = round(costo_repuestos + costo_mano_obra + costo_convertidores, 2)
+    costo_total = round(costo_repuestos + costo_mano_obra + costo_convertidores + costo_caja_chica, 2)
     utilidad_mes = round(monto_cerradas_mes - costo_total, 2)
     return {
         "monto_cerradas_mes": monto_cerradas_mes,
         "costo_repuestos": round(costo_repuestos, 2),
         "costo_mano_obra": round(costo_mano_obra, 2),
         "costo_convertidores": round(costo_convertidores, 2),
+        "costo_caja_chica": round(costo_caja_chica, 2),
         "costo_total": costo_total,
         "utilidad_mes": utilidad_mes,
     }
@@ -1803,11 +1833,27 @@ def dashboard_operativo():
         ).fetchone()
         return fila["total"] or 0
 
+    # Costo de boletas de Caja Chica rendidas con rubro "Gastos por OT" y
+    # ligadas a alguna de las OTs cerradas este mes (ver Migración 25 /
+    # caja_gasto_detalles) -- plata real que salió del taller para esa OT,
+    # igual criterio que ventas_y_costo_ot_mes.
+    def _suma_costo_caja_chica(ids):
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        fila = db.execute(
+            f"SELECT COALESCE(SUM(monto), 0) AS total FROM caja_gasto_detalles "
+            f"WHERE rubro_gav = 'gastos_por_ot' AND orden_id IN ({placeholders})",
+            ids,
+        ).fetchone()
+        return fila["total"] or 0
+
     monto_cerradas_mes = round(sum(_valor_total_orden(r) for r in cerradas_mes), 2)
     monto_por_cerrar = round(sum(_valor_total_orden(r) for r in abiertas), 2)
     costo_repuestos_cerradas_mes = _suma_costo_repuestos(ids_cerradas_mes)
     costo_mano_obra_cerradas_mes = _suma_costo_mano_obra(ids_cerradas_mes)
     costo_convertidores_cerradas_mes = _suma_costo_convertidores(ids_cerradas_mes)
+    costo_caja_chica_cerradas_mes = _suma_costo_caja_chica(ids_cerradas_mes)
     # Antes eran históricas (todas las OTs entregadas alguna vez); se acotaron
     # al mes en curso para que sigan el mismo criterio "día a día" que el
     # resto de las tarjetas de este dashboard (ver nota del usuario: todo lo
@@ -1815,11 +1861,13 @@ def dashboard_operativo():
     costo_ots_cerradas = round(costo_repuestos_cerradas_mes, 2)
     costo_mano_obra_ots_cerradas = round(costo_mano_obra_cerradas_mes, 2)
     costo_convertidores_ots_cerradas = round(costo_convertidores_cerradas_mes, 2)
+    costo_caja_chica_ots_cerradas = round(costo_caja_chica_cerradas_mes, 2)
     utilidad_mes = round(
         monto_cerradas_mes
         - costo_repuestos_cerradas_mes
         - costo_mano_obra_cerradas_mes
-        - costo_convertidores_cerradas_mes,
+        - costo_convertidores_cerradas_mes
+        - costo_caja_chica_cerradas_mes,
         2,
     )
 
@@ -1878,6 +1926,7 @@ def dashboard_operativo():
         "costo_ots_cerradas": costo_ots_cerradas,
         "costo_mano_obra_ots_cerradas": costo_mano_obra_ots_cerradas,
         "costo_convertidores_ots_cerradas": costo_convertidores_ots_cerradas,
+        "costo_caja_chica_ots_cerradas": costo_caja_chica_ots_cerradas,
         "costo_garantias": round(costo_garantias, 2),
         "utilidad_mes": utilidad_mes,
         "ticket_promedio_mes": ticket_promedio_mes,

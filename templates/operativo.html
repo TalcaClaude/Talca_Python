@@ -97,6 +97,10 @@
       <span class="summary-value" id="op-s-costo-convertidores-cerradas">—</span>
     </div>
     <div class="summary-card summary-card--warn">
+      <span class="summary-label">Costo caja chica OTs cerradas (mes)</span>
+      <span class="summary-value" id="op-s-costo-caja-chica-cerradas">—</span>
+    </div>
+    <div class="summary-card summary-card--warn">
       <span class="summary-label">Costo garantías (mes)</span>
       <span class="summary-value" id="op-s-costo-garantias">—</span>
     </div>
@@ -1033,16 +1037,32 @@
         </tbody>
       </table>
 
+      <h3 class="subtitulo" style="margin-top:18px">Caja chica asociada a esta OT</h3>
+      <table class="tabla">
+        <thead>
+          <tr>
+            <th>Fecha del retiro</th>
+            <th>N° factura</th>
+            <th>Detalle</th>
+            <th class="num">Monto</th>
+          </tr>
+        </thead>
+        <tbody id="tbody-opod-costos-caja-chica">
+          <tr><td colspan="4" class="vacio">Sin gastos de caja chica asociados.</td></tr>
+        </tbody>
+      </table>
+
       <div class="op-resumen-linea"><span>Costo de repuestos</span><strong id="opod-c-costo-repuestos">—</strong></div>
       <div class="op-resumen-linea"><span>Mano de obra cargada</span><strong id="opod-c-mano-obra">—</strong></div>
       <div class="op-resumen-linea"><span>Costo convertidores de torque</span><strong id="opod-c-costo-convertidores">—</strong></div>
+      <div class="op-resumen-linea"><span>Costo caja chica</span><strong id="opod-c-costo-caja-chica">—</strong></div>
       <hr class="op-divisor">
       <div class="op-resumen-linea"><span>Valor cobrado (Neto)</span><strong id="opod-c-neto">—</strong></div>
       <div class="op-resumen-linea"><span>Total OT (con IVA si aplica)</span><strong id="opod-c-total">—</strong></div>
       <div class="op-resumen-linea"><span>Total pagado</span><strong id="opod-c-pagado">—</strong></div>
       <div class="op-resumen-linea"><span>Total por pagar</span><strong id="opod-c-por-pagar">—</strong></div>
       <div class="op-resumen-linea op-resumen-linea--utilidad"><span>Utilidad estimada</span><strong id="opod-c-utilidad">—</strong></div>
-      <p class="ayuda-inline">Utilidad estimada = valor cobrado (Neto) − costo de los repuestos cargados − costo de la mano de obra con costo unitario cargado (ej. trabajo externo/subcontratado) − costo de los convertidores de torque internos cargados como repuesto. La mano de obra interna sin costo cargado ($0) no resta.</p>
+      <p class="ayuda-inline">Utilidad estimada = valor cobrado (Neto) − costo de los repuestos cargados − costo de la mano de obra con costo unitario cargado (ej. trabajo externo/subcontratado) − costo de los convertidores de torque internos cargados como repuesto − costo de caja chica asociado (boletas rendidas con rubro "Gastos por OT" ligadas a esta orden). La mano de obra interna sin costo cargado ($0) no resta.</p>
     </div>
 
     <div class="op-tab-panel" id="opod-panel-recepcion" style="display:none">

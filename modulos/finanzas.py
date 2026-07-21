@@ -921,19 +921,12 @@ def caja_crear_rendicion():
     if any(g["rendicion_id"] is not None for g in gastos):
         return jsonify({"error": "Alguno de los gastos seleccionados ya fue rendido antes"}), 400
 
-    # Migración 25: un gasto solo puede rendirse cuando sus boletas ya
-    # justifican el 100% del monto, o cuando se cerró manualmente (ver
-    # caja_cerrar_gasto) -- no tendría sentido "rendir" un retiro que
-    # todavía no se sabe en qué se gastó.
-    no_listos = [
-        g for g in gastos
-        if not _gasto_estado_boletas(db, g["id"], g["monto"], g["cerrado_manualmente"])[3]
-    ]
-    if no_listos:
-        detalle = ", ".join(f"#{g['id']} ({g['fecha'][:10]})" for g in no_listos)
-        return jsonify({
-            "error": f"Estos gastos todavía no están listos para rendir (les faltan boletas o cerrarlos manualmente): {detalle}"
-        }), 400
+    # A propósito NO se exige que las boletas cubran el 100% del monto para
+    # poder rendir -- el taller pidió expresamente poder rendir con boletas
+    # parciales (puede quedar monto a favor, o simplemente perderse una
+    # boleta chica) sin tener que cerrar el gasto manualmente primero. El
+    # monto de la rendición sigue siendo el del retiro completo (lo que
+    # realmente salió de la caja), no la suma de boletas.
 
     # Todos los gastos de una rendición tienen que ser del mismo medio_pago:
     # una rendición es literalmente "estoy presentando este lote de
@@ -1786,11 +1779,10 @@ def finanzas_estado_resultados():
     # que ya se cuentan como costo de ventas cuando el repuesto se usa en una
     # OT, ver ventas_y_costo_ot_mes; contarlas también acá sería duplicar el
     # gasto. El rubro "gastos_por_ot" se excluye del mismo modo y por la
-    # misma razón: es un costo de una OT puntual, no un gasto administrativo
-    # -- se reporta aparte más abajo ('gastos_por_ot_total'), sin sumarse a
-    # gav_total, para no inflar GAV con algo que en realidad es costo
-    # asociado a una orden de trabajo. Se atribuye al mes de la FECHA del
-    # gasto (cuándo salió la plata de caja), no de cuándo se cargó la boleta.
+    # misma razón, pero además YA SE CONTÓ arriba: ventas_y_costo_ot_mes
+    # (ot["costo_caja_chica"], ver "costo_ventas" en el jsonify de abajo) lo
+    # suma como costo de la orden de trabajo a la que quedó ligada esa
+    # boleta -- sumarlo también acá lo duplicaría.
     filas_gav = db.execute(
         "SELECT d.rubro_gav AS rubro_gav, COALESCE(SUM(d.monto), 0) AS total "
         "FROM caja_gasto_detalles d JOIN caja_movimientos g ON g.id = d.gasto_id "
@@ -1800,13 +1792,6 @@ def finanzas_estado_resultados():
     ).fetchall()
     gav_por_rubro = {fila["rubro_gav"]: round(fila["total"], 2) for fila in filas_gav}
     gav_caja_chica_total = round(sum(gav_por_rubro.values()), 2)
-
-    gastos_por_ot_total = db.execute(
-        "SELECT COALESCE(SUM(d.monto), 0) AS total FROM caja_gasto_detalles d "
-        "JOIN caja_movimientos g ON g.id = d.gasto_id "
-        "WHERE g.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? AND d.rubro_gav = 'gastos_por_ot'",
-        (mes,),
-    ).fetchone()["total"] or 0
 
     gav_sin_clasificar = db.execute(
         "SELECT COALESCE(SUM(d.monto), 0) AS total FROM caja_gasto_detalles d "
@@ -1847,6 +1832,7 @@ def finanzas_estado_resultados():
             "costo_repuestos": ot["costo_repuestos"],
             "costo_mano_obra": ot["costo_mano_obra"],
             "costo_convertidores_internos": ot["costo_convertidores"],
+            "costo_caja_chica_ot": ot["costo_caja_chica"],
             "costo_ot_total": costo_ot_total,
             "costo_ct_total": costo_ct_total,
             "total": costo_ventas_total,
@@ -1858,7 +1844,6 @@ def finanzas_estado_resultados():
             "rubros_label": RUBROS_GAV_QUE_SUMAN_GAV,
             "sin_clasificar": round(gav_sin_clasificar, 2),
             "caja_chica_total": gav_caja_chica_total,
-            "gastos_por_ot_total": round(gastos_por_ot_total, 2),
             "remuneraciones": manual["remuneraciones"],
             "bono_remuneraciones": manual["bono_remuneraciones"],
             "otras_remuneraciones": manual["otras_remuneraciones"],

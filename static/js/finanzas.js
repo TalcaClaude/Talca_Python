@@ -679,13 +679,16 @@ function renderFormBoleta(gastoId, montoSugerido) {
 
 function renderGastoCard(g) {
   const abierto = state.crGastoAbierto === g.id;
-  const estadoTxt = g.listo_para_rendir
-    ? `<span class="cr-gasto-estado cr-gasto-estado--listo">✓ listo${g.cerrado_manualmente ? " (cerrado manual)" : ""}</span>`
-    : `<span class="cr-gasto-estado cr-gasto-estado--pendiente">faltan ${fmtMoney(g.monto_pendiente)}</span>`;
+  // El pendiente es solo informativo -- el taller pidió expresamente poder
+  // rendir con boletas parciales (puede quedar monto a favor, o perderse
+  // una boleta chica) SIN tener que justificar el 100% ni cerrar primero.
+  const estadoTxt = g.monto_pendiente > 0
+    ? `<span class="cr-gasto-estado cr-gasto-estado--pendiente">faltan ${fmtMoney(g.monto_pendiente)}${g.cerrado_manualmente ? " (cerrado manual)" : ""}</span>`
+    : `<span class="cr-gasto-estado cr-gasto-estado--listo">✓ justificado completo</span>`;
   return `
     <div class="cr-gasto ${abierto ? "cr-gasto--abierto" : ""}" data-gasto-id="${g.id}">
       <div class="cr-gasto-resumen" data-toggle-gasto="${g.id}">
-        <input type="checkbox" data-pendiente-id="${g.id}" data-monto="${g.monto}" ${g.listo_para_rendir ? "" : "disabled"}>
+        <input type="checkbox" data-pendiente-id="${g.id}" data-monto="${g.monto}">
         <span class="cr-gasto-fecha">${fmtFecha(g.fecha)}</span>
         <span>${MEDIO_PAGO_LABEL[g.medio_pago] || g.medio_pago}</span>
         <span class="cr-gasto-monto mono">${fmtMoney(g.monto)}</span>
@@ -698,9 +701,9 @@ function renderGastoCard(g) {
         </div>
         ${renderFormBoleta(g.id, g.monto_pendiente)}
         <div class="cr-gasto-cerrar">
-          <span>${g.monto_pendiente > 0 ? `Quedan ${fmtMoney(g.monto_pendiente)} sin boleta.` : "Monto completamente justificado."}</span>
+          <span>${g.monto_pendiente > 0 ? `Quedan ${fmtMoney(g.monto_pendiente)} sin boleta — igual se puede rendir así.` : "Monto completamente justificado."}</span>
           <button type="button" class="btn btn-secundario" data-toggle-cierre="${g.id}" data-cerrado="${g.cerrado_manualmente ? "1" : "0"}">
-            ${g.cerrado_manualmente ? "Reabrir" : "Cerrar sin más boletas"}
+            ${g.cerrado_manualmente ? "Reabrir" : "Marcar cerrado (sin más boletas)"}
           </button>
         </div>
       </div>
@@ -821,9 +824,6 @@ function actualizarGastoEnLista(gastoActualizado) {
   state.cajaPendientesLista = (state.cajaPendientesLista || []).map(g =>
     g.id === gastoActualizado.id ? gastoActualizado : g
   );
-  if (!gastoActualizado.listo_para_rendir) {
-    state.cajaPendientesSeleccionados.delete(gastoActualizado.id);
-  }
 }
 
 function renderPendientesRendicion(cont) {
@@ -2064,6 +2064,7 @@ function renderEstadoResultados(d) {
         ${erFila("Mano de obra (con costo cargado)", d.costo_ventas.costo_mano_obra, { linea: "costo_mano_obra" })}
         ${erFila("Convertidores de torque internos", d.costo_ventas.costo_convertidores_internos, { linea: "costo_convertidores" })}
         ${erFila("Costo de convertidores vendidos directo", d.costo_ventas.costo_ct_total, { linea: "costo_ct" })}
+        ${erFila("Caja chica asociada a OT", d.costo_ventas.costo_caja_chica_ot)}
         ${erFila("Total Costo de Ventas", d.costo_ventas.total, { cls: "er-subtotal" })}
 
         ${erFilaPct("Utilidad Bruta", d.utilidad_bruta, d.margen_bruto_pct, { cls: "er-total", linea: "_formula:utilidad_bruta" })}

@@ -301,8 +301,9 @@ async function abrirOtDesdeQueryParam() {
   const params = new URLSearchParams(location.search);
   const otId = params.get("abrir_ot");
   if (!otId) return;
+  const ordenId = parseInt(otId, 10);
   const pestana = params.get("tab") || "diagnostico";
-  await abrirDetalleOrden(parseInt(otId, 10));
+  await abrirDetalleOrden(ordenId);
   const tabDestino = document.querySelector(`#modal-op-orden-detalle .op-tab[data-opod-tab="${pestana}"]`);
   if (tabDestino) tabDestino.click();
   // Se limpia el query param para que recargar la página no vuelva a abrir
@@ -311,6 +312,21 @@ async function abrirOtDesdeQueryParam() {
   url.searchParams.delete("abrir_ot");
   url.searchParams.delete("tab");
   history.replaceState(null, "", url.pathname + url.search + url.hash);
+  // Al llegar acá desde el link de un aviso (campanita/alerta flotante),
+  // se marca como "vista" todo lo pendiente de ESTA orden -- así deja de
+  // sumar en el contador/alerta roja aunque siga apareciendo en el panel
+  // de la campanita hasta que alguien la descarte a mano (pedido del
+  // taller: "una vez que se pincha y se abre, ya debería quedar marcada
+  // como revisada... pero no es necesario que desaparezca"). Se hace
+  // siempre que se llega con abrir_ot, no solo desde el aviso, porque no
+  // hay forma de distinguir el origen del link y no tiene costo marcarla
+  // igual si la persona abrió la OT por otro camino.
+  try {
+    await api(`/api/notificaciones/marcar-vista/${ordenId}`, { method: "POST" });
+    if (typeof notifSondear === "function") await notifSondear();
+  } catch (e) {
+    // Silencioso -- no bloquea la apertura de la OT si esto falla.
+  }
 }
 abrirOtDesdeQueryParam();
 

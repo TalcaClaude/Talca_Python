@@ -1268,11 +1268,37 @@ def init_db():
             creado_en TEXT NOT NULL,
             atendida INTEGER NOT NULL DEFAULT 0,
             atendida_por TEXT DEFAULT '',
-            atendida_en TEXT
+            atendida_en TEXT,
+            vista INTEGER NOT NULL DEFAULT 0
         )
         """
     )
     db.commit()
+
+    # ---- Migración 24: distinguir "vista" de "atendida" en los avisos de
+    # Operativo (sugerencias de diagnóstico y pruebas de ruta) -- pedido
+    # del taller: al abrir la OT desde el link del aviso, ya no debería
+    # seguir apareciendo en la alerta roja de abajo a la derecha ni en el
+    # contador de la campanita, PERO tampoco hace falta que desaparezca de
+    # la lista del panel (eso sigue siendo lo que hace "Marcar como
+    # revisada"/"Descartar sugerencia", que marca 'atendida'). 'vista' es
+    # más liviana: se marca sola al abrir la OT desde el aviso (ver
+    # /api/notificaciones/marcar-vista/<orden_id> y
+    # abrirOtDesdeQueryParam() en operativo.js), no requiere una acción
+    # explícita de la persona, y el conteo/alerta de pendientes ahora
+    # cuenta solo lo que sigue sin 'atender' Y sin 'ver' (atendida=0 AND
+    # vista=0) -- el panel de la campanita, en cambio, sigue mostrando todo
+    # lo no atendido sin importar si ya se vio o no. Va acá porque ambas
+    # tablas (sugerencias_diagnostico y pruebas_ruta) ya existen a esta
+    # altura de init_db().
+    columnas_sugerencias_diagnostico = [c[1] for c in db.execute("PRAGMA table_info(sugerencias_diagnostico)").fetchall()]
+    if "vista" not in columnas_sugerencias_diagnostico:
+        db.execute("ALTER TABLE sugerencias_diagnostico ADD COLUMN vista INTEGER NOT NULL DEFAULT 0")
+        db.commit()
+    columnas_pruebas_ruta_v24 = [c[1] for c in db.execute("PRAGMA table_info(pruebas_ruta)").fetchall()]
+    if "vista" not in columnas_pruebas_ruta_v24:
+        db.execute("ALTER TABLE pruebas_ruta ADD COLUMN vista INTEGER NOT NULL DEFAULT 0")
+        db.commit()
 
     # ---- Migración 17: acceso a más de un módulo por usuario. Hasta acá
     # cada usuario no-admin quedaba encerrado en el único módulo que su
@@ -6344,10 +6370,18 @@ def notificaciones_resumen():
     # sección de arriba), este endpoint va a necesitar volver a ser público
     # y filtrar por categoría según el rol, en vez de un solo candado para
     # todo.
+    # El contador (usado por el badge de la campanita y la alerta roja de
+    # abajo a la derecha) exige además "vista = 0" (Migración 24) -- una
+    # vez que la persona abrió la OT desde el link del aviso, deja de
+    # sumar acá aunque la sugerencia/prueba siga sin "atender" y siga
+    # apareciendo en el panel de la campanita (ver
+    # _agente_listar_todas_sugerencias_pendientes /
+    # _operativo_listar_todas_pruebas_ruta_pendientes más abajo, que NO
+    # filtran por vista).
     db = get_db()
-    sugerencias = db.execute("SELECT COUNT(*) AS n FROM sugerencias_diagnostico WHERE atendida = 0").fetchone()["n"]
+    sugerencias = db.execute("SELECT COUNT(*) AS n FROM sugerencias_diagnostico WHERE atendida = 0 AND vista = 0").fetchone()["n"]
     pruebas_ruta = db.execute(
-        "SELECT COUNT(*) AS n FROM pruebas_ruta WHERE atendida = 0 AND origen = 'whatsapp'"
+        "SELECT COUNT(*) AS n FROM pruebas_ruta WHERE atendida = 0 AND vista = 0 AND origen = 'whatsapp'"
     ).fetchone()["n"]
     return jsonify({"sugerencias_diagnostico": sugerencias, "pruebas_ruta": pruebas_ruta})
 
@@ -6364,6 +6398,29 @@ def notificaciones_sugerencias_diagnostico():
 def notificaciones_pruebas_ruta():
     db = get_db()
     return jsonify(_operativo_listar_todas_pruebas_ruta_pendientes(db))
+
+
+@app.route("/api/notificaciones/marcar-vista/<int:orden_id>", methods=["POST"])
+@requiere_rol("operativo")
+def notificaciones_marcar_vista(orden_id):
+    """Marca como 'vista' (Migración 24) todas las sugerencias de
+    diagnóstico y pruebas de ruta pendientes de una OT en particular -- se
+    llama sola al abrir una OT desde el link de un aviso (ver
+    abrirOtDesdeQueryParam() en operativo.js), no requiere que la persona
+    haga clic en nada aparte. A propósito NO marca 'atendida': la
+    sugerencia/prueba sigue apareciendo en el panel de la campanita hasta
+    que alguien la descarte a mano con "Marcar como revisada"/"Descartar
+    sugerencia" -- ver /api/sugerencias-diagnostico/<id>/atender y
+    /api/operativo/pruebas-ruta/<id>/atender -- esto solo saca el aviso
+    urgente (badge/alerta roja) de encima."""
+    db = get_db()
+    db.execute("UPDATE sugerencias_diagnostico SET vista = 1 WHERE ot_id = ? AND atendida = 0 AND vista = 0", (orden_id,))
+    db.execute(
+        "UPDATE pruebas_ruta SET vista = 1 WHERE orden_id = ? AND atendida = 0 AND vista = 0 AND origen = 'whatsapp'",
+        (orden_id,),
+    )
+    db.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/operativo/pruebas-ruta/<int:prueba_id>/atender", methods=["POST"])

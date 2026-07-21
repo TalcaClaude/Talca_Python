@@ -122,6 +122,65 @@ class TestAtenderPruebaRuta(_Base):
         self.assertEqual(resp.status_code, 404)
 
 
+class TestMarcarVista(_Base):
+    """Ver Migración 24: abrir una OT desde el link de un aviso marca sus
+    sugerencias/pruebas pendientes como 'vista' -- deja de sumar en el
+    contador/alerta roja, pero sigue apareciendo en el panel de la
+    campanita hasta que alguien la descarte de verdad con 'atender'."""
+
+    def test_marcar_vista_saca_del_contador_pero_no_de_la_lista(self):
+        self._registrar_mecanico("Probador Notif Vista", "+56900910003")
+        cliente = self._crear_cliente("Cliente Notif Vista")
+        orden = self._crear_orden(cliente["id"])
+        self._mandar_texto("+56900910003", f"ot {orden['id']} prueba de ruta, freno chirría un poco")
+
+        antes = self.client.get("/api/notificaciones/resumen").get_json()
+        self.assertGreaterEqual(antes["pruebas_ruta"], 1)
+        lista_antes = self.client.get("/api/notificaciones/pruebas-ruta").get_json()
+        self.assertIn(orden["id"], [p["orden_id"] for p in lista_antes])
+
+        resp = self.client.post(f"/api/notificaciones/marcar-vista/{orden['id']}", json={})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        despues = self.client.get("/api/notificaciones/resumen").get_json()
+        self.assertEqual(despues["pruebas_ruta"], antes["pruebas_ruta"] - 1)
+
+        # Sigue en el panel -- marcar vista NO es lo mismo que atender.
+        lista_despues = self.client.get("/api/notificaciones/pruebas-ruta").get_json()
+        self.assertIn(orden["id"], [p["orden_id"] for p in lista_despues])
+
+    def test_marcar_vista_tambien_aplica_a_sugerencias_de_diagnostico(self):
+        self._registrar_mecanico("Mecánico Restringido Notif Vista", "+56900910005", tipo="mecanico")
+        cliente = self._crear_cliente("Cliente Notif Vista Sugerencia")
+        orden = self._crear_orden(cliente["id"])
+        resp = self._mandar_texto("+56900910005", f"ot {orden['id']} posible correa floja")
+        self.assertTrue(resp.get_json()["exito"], resp.get_data(as_text=True))
+
+        antes = self.client.get("/api/notificaciones/resumen").get_json()["sugerencias_diagnostico"]
+        self.client.post(f"/api/notificaciones/marcar-vista/{orden['id']}", json={})
+        despues = self.client.get("/api/notificaciones/resumen").get_json()["sugerencias_diagnostico"]
+        self.assertEqual(despues, antes - 1)
+
+        lista = self.client.get("/api/notificaciones/sugerencias-diagnostico").get_json()
+        self.assertIn(orden["id"], [s["ot_id"] for s in lista])
+
+    def test_marcar_vista_de_una_orden_no_afecta_a_otra(self):
+        self._registrar_mecanico("Probador Notif Vista Dos", "+56900910004")
+        cliente_a = self._crear_cliente("Cliente Notif Vista A")
+        cliente_b = self._crear_cliente("Cliente Notif Vista B")
+        orden_a = self._crear_orden(cliente_a["id"])
+        orden_b = self._crear_orden(cliente_b["id"])
+        self._mandar_texto("+56900910004", f"ot {orden_a['id']} prueba de ruta ok")
+        self._mandar_texto("+56900910004", f"ot {orden_b['id']} prueba de ruta ok")
+
+        self.client.post(f"/api/notificaciones/marcar-vista/{orden_a['id']}", json={})
+
+        lista = self.client.get("/api/notificaciones/pruebas-ruta").get_json()
+        ids_ordenes = [p["orden_id"] for p in lista]
+        self.assertIn(orden_a["id"], ids_ordenes)  # sigue en la lista (solo se marcó vista)
+        self.assertIn(orden_b["id"], ids_ordenes)  # nunca se tocó
+
+
 class TestAccesoPorRolNotificacionesPruebasRuta(_Base):
     def _crear_usuario(self, username, rol):
         resp = self.client.post(

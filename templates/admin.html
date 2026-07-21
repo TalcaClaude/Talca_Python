@@ -117,6 +117,13 @@
   </section>
 
   <section class="chart-card" style="margin-top:22px;">
+    <h3>Vaciar Caja Chica (solo pruebas)</h3>
+    <p class="chart-sub">Borra TODOS los retiros, boletas, aportes y rendiciones de Caja Chica para dejarla en $0 — pensado para probar el módulo sin que estorben datos de prueba, no para uso normal. Si alguno de esos gastos había ingresado stock al inventario (compra de emergencia), esa entrada de stock NO se revierte sola; el botón te avisa si encuentra algún caso así para que revises el inventario a mano. Descarga un respaldo antes si quieres poder volver atrás.</p>
+    <button type="button" class="btn btn-danger" id="btn-vaciar-caja-chica">Vaciar Caja Chica</button>
+    <p class="ayuda-inline" id="resultado-vaciar-caja" style="margin-top:10px;"></p>
+  </section>
+
+  <section class="chart-card" style="margin-top:22px;">
     <h3>Migración de datos (clientes / autos / OT abiertas)</h3>
     <!-- Antes esta herramienta solo se podía llegar tipeando la URL a mano
          (/admin/migracion-datos) -- no tenía ningún link visible desde acá,

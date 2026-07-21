@@ -909,6 +909,58 @@ def caja_ver_comprobante(nombre_archivo):
     return send_file(ruta)
 
 
+@bp.route("/api/admin/caja/vaciar", methods=["POST"])
+@requiere_rol()
+def caja_vaciar():
+    """Borra TODO lo de Caja Chica (gastos/retiros, boletas, aportes y
+    rendiciones) para dejarla en $0 -- pensado para volver a un estado
+    limpio mientras se prueba el módulo (pedido explícito del taller), NO
+    para uso normal del día a día. Solo admin (ver @requiere_rol()).
+
+    Si algún gasto había ingresado stock al inventario (compra de
+    emergencia, columna movimiento_inventario_id), ESE movimiento de
+    inventario NO se revierte acá -- borrar el gasto de Caja Chica no
+    deshace la entrada de stock, así que se informa en la respuesta para
+    poder revisar el inventario a mano si corresponde."""
+    db = get_db()
+
+    con_stock = db.execute(
+        "SELECT id, monto, producto_id, movimiento_inventario_id FROM caja_movimientos "
+        "WHERE tipo = 'gasto' AND movimiento_inventario_id IS NOT NULL"
+    ).fetchall()
+    avisos_stock = [dict(r) for r in con_stock]
+
+    archivos = set()
+    for r in db.execute("SELECT comprobante_archivo FROM caja_movimientos WHERE comprobante_archivo != ''").fetchall():
+        archivos.add(r["comprobante_archivo"])
+    for r in db.execute("SELECT comprobante_archivo FROM caja_gasto_detalles WHERE comprobante_archivo != ''").fetchall():
+        archivos.add(r["comprobante_archivo"])
+    for nombre in archivos:
+        ruta = os.path.join(COMPROBANTES_DIR, nombre)
+        if os.path.exists(ruta):
+            try:
+                os.remove(ruta)
+            except OSError:
+                pass
+
+    n_boletas = db.execute("SELECT COUNT(*) FROM caja_gasto_detalles").fetchone()[0]
+    n_movimientos = db.execute("SELECT COUNT(*) FROM caja_movimientos").fetchone()[0]
+    n_rendiciones = db.execute("SELECT COUNT(*) FROM caja_rendiciones").fetchone()[0]
+
+    db.execute("DELETE FROM caja_gasto_detalles")
+    db.execute("DELETE FROM caja_movimientos")
+    db.execute("DELETE FROM caja_rendiciones")
+    db.commit()
+
+    return jsonify({
+        "ok": True,
+        "boletas_eliminadas": n_boletas,
+        "movimientos_eliminados": n_movimientos,
+        "rendiciones_eliminadas": n_rendiciones,
+        "avisos_stock": avisos_stock,
+    })
+
+
 @bp.route("/api/caja/pendientes", methods=["GET"])
 def caja_gastos_pendientes():
     """Lista los gastos (retiros) que todavía tienen algo por hacer -- les

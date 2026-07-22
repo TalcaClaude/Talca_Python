@@ -267,18 +267,22 @@ def _caja_resumen_medio(db, medio_pago):
         "SELECT COALESCE(SUM(monto), 0) FROM caja_movimientos WHERE tipo = 'gasto' AND medio_pago = ?",
         (medio_pago,),
     ).fetchone()[0]
-    # Desde la Migración 26 "pendiente de rendir" es la suma de las BOLETAS
-    # ya cargadas (documentadas) que todavía no se incluyeron en ninguna
-    # rendición -- es justo lo que aparece seleccionable en el modal
-    # "Generar rendición" para este medio de pago. El monto de un retiro que
-    # todavía no tiene boleta (monto_pendiente en _gasto_estado_boletas) es
-    # un concepto distinto: falta documentarlo, no falta rendirlo.
-    pendiente_rendir = db.execute(
+    # "Pendiente de rendir" = de toda la plata retirada (total_gastado),
+    # cuánta todavía NO ha vuelto a través de una rendición -- sin importar
+    # si ya tiene boleta cargada o no. Antes de la Migración 26 esto se
+    # calculaba distinto (solo boletas ya documentadas sin rendir) y podía
+    # mostrar $0 aunque hubiera retiros recién creados sin ninguna boleta
+    # todavía, lo cual confundía (parecía que no quedaba nada por hacer). El
+    # desglose fino -- cuánto de ese pendiente es "sin boleta" vs "con
+    # boleta pero sin rendir" -- se ve gasto por gasto en el modal "Generar
+    # rendición" (ver renderGastoCard en finanzas.js).
+    total_rendido = db.execute(
         "SELECT COALESCE(SUM(d.monto), 0) FROM caja_gasto_detalles d "
         "JOIN caja_movimientos g ON g.id = d.gasto_id "
-        "WHERE d.rendicion_id IS NULL AND g.medio_pago = ?",
+        "WHERE d.rendicion_id IS NOT NULL AND g.medio_pago = ?",
         (medio_pago,),
     ).fetchone()[0]
+    pendiente_rendir = round(total_gastado - total_rendido, 2)
 
     inicio_mes = datetime.now().strftime("%Y-%m") + "-01"
     gastado_mes = db.execute(
@@ -1075,13 +1079,19 @@ def caja_crear_rendicion():
     # borrar suelta y dejar el saldo descuadrado respecto a los gastos que
     # ya quedaron marcados como rendidos. Hereda el medio_pago de la
     # rendición para que el saldo que repone sea el mismo que se gastó.
+    # La descripción incluye los N° de factura/boleta rendidos (pedido del
+    # taller: al editar/ver este aporte se veía solo "RENDICIÓN #17" sin
+    # forma de saber a qué factura(s) correspondía esa plata).
     if reponer_saldo:
+        docs = ", ".join(dict.fromkeys(b["numero_documento"] or "(sin N°)" for b in boletas))
         db.execute(
             """
             INSERT INTO caja_movimientos (tipo, medio_pago, fecha, monto, descripcion, usuario, rendicion_origen_id, creado_en)
             VALUES ('aporte', ?, ?, ?, ?, ?, ?, ?)
             """,
-            (medio_pago, ts, total, f"REPOSICIÓN AUTOMÁTICA - RENDICIÓN #{rendicion_id}", usuario_actual(), rendicion_id, ts),
+            (medio_pago, ts, total,
+             f"REPOSICIÓN AUTOMÁTICA - RENDICIÓN #{rendicion_id} (FACTURA(S): {docs})",
+             usuario_actual(), rendicion_id, ts),
         )
 
     db.commit()

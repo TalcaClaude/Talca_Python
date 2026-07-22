@@ -418,17 +418,22 @@ class TestCajaChica(unittest.TestCase):
         self.assertAlmostEqual(despues["total_aportado"] - antes["total_aportado"], 10000, delta=0.01)
         self.assertAlmostEqual(despues["total_gastado"] - antes["total_gastado"], 3000, delta=0.01)
 
-    def test_pendiente_de_rendir_solo_cuenta_boletas_sin_rendicion(self):
-        """Migración 26: la Rendición se genera por boleta, no por gasto
-        completo -- "pendiente de rendir" solo cuenta lo ya DOCUMENTADO con
-        boleta y que todavía no se incluyó en una rendición. Un retiro
-        recién creado sin boleta todavía no aporta nada ahí (falta
-        documentarlo, no falta rendirlo)."""
+    def test_pendiente_de_rendir_cuenta_todo_lo_gastado_que_no_ha_vuelto_por_rendicion(self):
+        """"Pendiente de rendir" = total retirado (gastado) menos lo que ya
+        volvió a través de una rendición -- sin importar si el retiro tiene
+        boleta cargada o no. Ojo: la versión anterior de este cálculo solo
+        contaba boletas ya documentadas, así que un retiro recién creado sin
+        boleta no aportaba nada ahí -- eso confundía al taller (mostraba $0
+        pendiente aunque hubiera plata recién retirada sin ninguna boleta
+        todavía). Ahora un retiro nuevo aporta a "pendiente" de inmediato,
+        tenga boleta o no, y solo baja cuando se rinde."""
         antes = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
         gasto = self._crear_gasto(1500)
 
+        # Un retiro recién creado, SIN boleta todavía, ya cuenta como
+        # pendiente -- es plata que salió de la caja y todavía no volvió.
         sin_boleta = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
-        self.assertAlmostEqual(sin_boleta["pendiente_rendir"], antes["pendiente_rendir"], delta=0.01)
+        self.assertAlmostEqual(sin_boleta["pendiente_rendir"] - antes["pendiente_rendir"], 1500, delta=0.01)
 
         resp_boleta = self.client.post(
             f"/api/caja/gasto/{gasto['id']}/boleta", data={"monto": "1500", "numero_documento": "B-1"}
@@ -436,8 +441,10 @@ class TestCajaChica(unittest.TestCase):
         self.assertEqual(resp_boleta.status_code, 201, resp_boleta.get_data(as_text=True))
         boleta_id = resp_boleta.get_json()["boletas"][0]["id"]
 
-        despues = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
-        self.assertAlmostEqual(despues["pendiente_rendir"] - antes["pendiente_rendir"], 1500, delta=0.01)
+        # Agregar la boleta no cambia el pendiente (documentar no es lo
+        # mismo que rendir).
+        con_boleta = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
+        self.assertAlmostEqual(con_boleta["pendiente_rendir"], sin_boleta["pendiente_rendir"], delta=0.01)
 
         # Al rendir esa boleta, debería salir de "pendiente de rendir" sin
         # afectar el total gastado (la plata ya se gastó, solo cambia su
@@ -446,8 +453,8 @@ class TestCajaChica(unittest.TestCase):
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
 
         final = self.client.get("/api/caja/resumen").get_json()["efectivo_cajero"]
-        self.assertAlmostEqual(final["pendiente_rendir"], despues["pendiente_rendir"] - 1500, delta=0.01)
-        self.assertAlmostEqual(final["total_gastado"], despues["total_gastado"], delta=0.01)
+        self.assertAlmostEqual(final["pendiente_rendir"], antes["pendiente_rendir"], delta=0.01)
+        self.assertAlmostEqual(final["total_gastado"], con_boleta["total_gastado"], delta=0.01)
 
     def test_resumen_desglosa_saldo_por_medio_de_pago_y_cristian_puede_quedar_negativo(self):
         """El pedido explícito del taller: 3 medios con saldo separado

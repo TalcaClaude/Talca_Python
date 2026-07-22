@@ -3655,12 +3655,10 @@ class TestEstadoResultados(unittest.TestCase):
         dos pasos seguidos para no tener que repetirlos en cada test. Se
         crea siempre una boleta por el monto completo (rubro_gav='' si no
         se pasa nada, igual que el comportamiento anterior de un gasto "sin
-        clasificar")."""
+        clasificar"). Migración 27: "compra de emergencia" (producto_id /
+        cantidad) también se pasa a la boleta, no al gasto/retiro -- recién
+        ahí se sabe qué se compró de verdad."""
         data_gasto = {"fecha": f"{self.MES}-{dia}", "monto": str(monto)}
-        extra_gasto_keys = {"producto_id", "cantidad"}
-        for k in list(extra):
-            if k in extra_gasto_keys:
-                data_gasto[k] = extra.pop(k)
         resp = self.client.post("/api/caja/gasto", data=data_gasto)
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         gasto = resp.get_json()

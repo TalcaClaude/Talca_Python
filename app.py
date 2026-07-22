@@ -1081,6 +1081,23 @@ def init_db():
         db.execute("ALTER TABLE caja_gasto_detalles ADD COLUMN rendicion_id INTEGER REFERENCES caja_rendiciones(id)")
         db.commit()
 
+    # ---- Migración 27: "compra de emergencia" (ingreso de stock al
+    # inventario) se mueve del GASTO/retiro a la BOLETA individual. Quien
+    # registra el retiro solo sabe monto y fecha (ver Migración 25) -- recién
+    # al cargar la boleta se sabe qué se compró de verdad, así que es ahí
+    # donde tiene sentido preguntar si corresponde ingresar stock. Las
+    # columnas 'caja_movimientos.producto_id' / 'movimiento_inventario_id'
+    # (de antes de la Migración 25) dejan de usarse para gastos nuevos -- se
+    # mantienen en el esquema solo por compatibilidad con compras de
+    # emergencia ya registradas, nunca se vuelven a escribir.
+    columnas_caja_detalle_v27 = [c[1] for c in db.execute("PRAGMA table_info(caja_gasto_detalles)").fetchall()]
+    if "producto_id" not in columnas_caja_detalle_v27:
+        db.execute("ALTER TABLE caja_gasto_detalles ADD COLUMN producto_id INTEGER REFERENCES productos(id)")
+        db.commit()
+    if "movimiento_inventario_id" not in columnas_caja_detalle_v27:
+        db.execute("ALTER TABLE caja_gasto_detalles ADD COLUMN movimiento_inventario_id INTEGER REFERENCES movimientos(id)")
+        db.commit()
+
     # Datos manuales del Estado de Resultados por mes (rubros que no se
     # registran en ningún otro lugar del sistema porque vienen de
     # contabilidad/remuneraciones externas: sueldos, Previred, arriendo,

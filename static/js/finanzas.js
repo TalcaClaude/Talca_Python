@@ -306,7 +306,7 @@ async function cargarCajaResumen() {
     document.getElementById("caja-ef-saldo").textContent = fmtMoney(ef.saldo_disponible);
     document.getElementById("caja-ef-pendiente").textContent = fmtMoney(ef.pendiente_rendir);
     document.getElementById("caja-ef-gastado-mes").textContent = fmtMoney(ef.gastado_mes);
-    document.getElementById("caja-ef-total-aportado").textContent = fmtMoney(ef.total_aportado);
+    document.getElementById("caja-ef-total-rendido").textContent = fmtMoney(ef.total_rendido);
 
     const tj = d.tarjeta_empresa;
     document.getElementById("caja-tj-pendiente").textContent = fmtMoney(tj.pendiente_rendir);
@@ -429,32 +429,19 @@ document.getElementById("caja-limpiar-filtros").addEventListener("click", () => 
 // ---- Nuevo gasto ----
 // Migración 25: acá solo se registra el RETIRO (monto, medio de pago,
 // fecha) -- quien lo carga viendo el banco no tiene más información que
-// esa. El N° de boleta/factura, el rubro, el detalle y la OT relacionada
-// se cargan después, boleta por boleta, desde "Generar rendición" (ver
-// más abajo, cargarPendientesRendicion / agregarBoletaAGasto).
+// esa. El N° de boleta/factura, el rubro, el detalle, si es una compra de
+// emergencia (Migración 27) y la OT relacionada se cargan después, boleta
+// por boleta, desde "Generar rendición" (ver más abajo,
+// cargarPendientesRendicion / agregarBoletaAGasto).
 
 document.getElementById("btn-nuevo-gasto").addEventListener("click", async () => {
   document.getElementById("form-caja-gasto").reset();
   document.getElementById("cg-id").value = "";
-  document.getElementById("cg-emergencia-campos").style.display = "none";
   document.getElementById("modal-caja-gasto-titulo").textContent = "Nuevo gasto";
   document.getElementById("cg-bloqueado-aviso").style.display = "none";
-  document.getElementById("cg-emergencia-wrap").style.display = "block";
   document.getElementById("cg-acciones-editar").style.display = "none";
   habilitarFormularioCaja("cg", true);
-  try {
-    const data = await api("/api/productos");
-    const select = document.getElementById("cg-producto-id");
-    select.innerHTML = '<option value="">Selecciona un producto…</option>' +
-      data.productos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("");
-  } catch (e) {
-    toast(e.message, true);
-  }
   abrirModal("modal-caja-gasto");
-});
-
-document.getElementById("cg-emergencia").addEventListener("change", (e) => {
-  document.getElementById("cg-emergencia-campos").style.display = e.target.checked ? "block" : "none";
 });
 
 function habilitarFormularioCaja(prefijo, habilitado) {
@@ -472,9 +459,6 @@ function abrirEdicionCajaGasto(id) {
   document.getElementById("cg-fecha").value = (m.fecha || "").slice(0, 10);
   document.getElementById("cg-medio-pago").value = m.medio_pago || "efectivo_cajero";
   document.getElementById("modal-caja-gasto-titulo").textContent = "Editar gasto";
-  // La compra de emergencia queda fija al crear el gasto (ya generó su
-  // propio movimiento de inventario); no tiene sentido editarla después.
-  document.getElementById("cg-emergencia-wrap").style.display = m.movimiento_inventario_id ? "none" : "block";
 
   const bloqueo = m.bloqueado_motivo;
   const aviso = document.getElementById("cg-bloqueado-aviso");
@@ -513,10 +497,6 @@ document.getElementById("form-caja-gasto").addEventListener("submit", async (e) 
   formData.append("monto", document.getElementById("cg-monto").value);
   formData.append("fecha", document.getElementById("cg-fecha").value);
   formData.append("medio_pago", document.getElementById("cg-medio-pago").value);
-  if (!id && document.getElementById("cg-emergencia").checked) {
-    formData.append("producto_id", document.getElementById("cg-producto-id").value);
-    formData.append("cantidad", document.getElementById("cg-cantidad").value);
-  }
 
   try {
     const url = id ? `/api/caja/movimiento/${id}` : "/api/caja/gasto";
@@ -644,11 +624,16 @@ function renderBoletaItem(b) {
   // Una boleta ya rendida (Migración 26: la rendición se genera por boleta,
   // no por gasto completo) queda de solo lectura acá -- no se puede volver
   // a seleccionar, editar ni eliminar (ver caja_editar_boleta/caja_eliminar_boleta).
+  // Migración 27: si esta boleta ingresó stock al inventario (compra de
+  // emergencia), no se puede editar ni eliminar sin descuadrar el
+  // inventario -- ver caja_editar_boleta/caja_eliminar_boleta. Se avisa acá
+  // igual que con una boleta ya rendida.
+  const stockTxt = b.ingreso_stock ? ` <span class="cr-boleta-estado">📦 ingresó stock</span>` : "";
   if (b.rendido) {
     return `
     <div class="cr-boleta-item cr-boleta-item--rendida" data-boleta-id="${b.id}">
       ${info}
-      <span class="cr-boleta-estado">✓ ya rendida</span>
+      <span class="cr-boleta-estado">✓ ya rendida</span>${stockTxt}
     </div>`;
   }
   // Preseleccionada por defecto (ver renderPendientesRendicion): el caso más
@@ -656,11 +641,12 @@ function renderBoletaItem(b) {
   // desmarcar lo que no corresponda en vez de tener que marcar boleta por
   // boleta.
   const checked = state.cajaPendientesSeleccionados.has(b.id) ? "checked" : "";
+  const quitarBtn = b.ingreso_stock ? "" : `<button type="button" class="btn btn-secundario" data-eliminar-boleta="${b.id}">Quitar</button>`;
   return `
     <div class="cr-boleta-item" data-boleta-id="${b.id}">
       <input type="checkbox" data-boleta-seleccionable="${b.id}" data-monto="${b.monto}" ${checked}>
-      ${info}
-      <button type="button" class="btn btn-secundario" data-eliminar-boleta="${b.id}">Quitar</button>
+      ${info}${stockTxt}
+      ${quitarBtn}
     </div>`;
 }
 
@@ -693,10 +679,45 @@ function renderFormBoleta(gastoId, montoSugerido) {
         <label>Detalle (opcional)</label>
         <input type="text" data-campo="descripcion" placeholder="Ej: Pilas para el multímetro">
       </div>
+      <div class="campo" data-emergencia-wrap>
+        <label class="toggle-critico">
+          <input type="checkbox" data-campo-emergencia>
+          Esta boleta es de una compra de emergencia — ingresar el stock a un producto del inventario
+        </label>
+        <div data-emergencia-campos style="display:none">
+          <div class="grid-2">
+            <div class="campo">
+              <label>Producto</label>
+              <select data-campo-producto-id>
+                <option value="">Selecciona un producto…</option>
+              </select>
+            </div>
+            <div class="campo">
+              <label>Cantidad</label>
+              <input type="number" data-campo-cantidad min="1" value="1">
+            </div>
+          </div>
+          <p class="ayuda-inline">El costo unitario se calcula solo, dividiendo el monto de esta boleta entre la cantidad.</p>
+        </div>
+      </div>
       <div class="modal-actions">
         <button type="submit" class="btn btn-primary">Agregar boleta</button>
       </div>
     </form>`;
+}
+
+let productosParaEmergenciaCache = null;
+async function poblarProductosEmergencia(select) {
+  try {
+    if (!productosParaEmergenciaCache) {
+      const data = await api("/api/productos");
+      productosParaEmergenciaCache = data.productos;
+    }
+    select.innerHTML = '<option value="">Selecciona un producto…</option>' +
+      productosParaEmergenciaCache.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("");
+  } catch (e) {
+    toast(e.message, true);
+  }
 }
 
 function renderGastoCard(g) {
@@ -821,6 +842,19 @@ function wireGastoCard(cont, g) {
       ordenLookupTimeout = setTimeout(buscarOrden, 400);
     });
 
+    // Migración 27: "compra de emergencia" (ingresa stock al inventario) se
+    // pregunta acá, boleta por boleta -- recién al cargar la boleta se sabe
+    // qué se compró de verdad (ver caja_agregar_boleta).
+    const chkEmergencia = formBoleta.querySelector("[data-campo-emergencia]");
+    const camposEmergencia = formBoleta.querySelector("[data-emergencia-campos]");
+    const selectProducto = formBoleta.querySelector("[data-campo-producto-id]");
+    chkEmergencia.addEventListener("change", async () => {
+      camposEmergencia.style.display = chkEmergencia.checked ? "block" : "none";
+      if (chkEmergencia.checked && selectProducto.options.length <= 1) {
+        await poblarProductosEmergencia(selectProducto);
+      }
+    });
+
     formBoleta.addEventListener("submit", async (e) => {
       e.preventDefault();
       if (selectRubro.value === "gastos_por_ot" && !ordenEncontrada) {
@@ -833,6 +867,10 @@ function wireGastoCard(cont, g) {
       fd.append("rubro_gav", selectRubro.value);
       fd.append("descripcion", formBoleta.querySelector('[data-campo="descripcion"]').value);
       fd.append("orden_id", selectRubro.value === "gastos_por_ot" && ordenEncontrada ? ordenEncontrada.id : "");
+      if (chkEmergencia.checked) {
+        fd.append("producto_id", selectProducto.value);
+        fd.append("cantidad", formBoleta.querySelector("[data-campo-cantidad]").value);
+      }
       try {
         const res = await fetch(`/api/caja/gasto/${g.id}/boleta`, { method: "POST", body: fd });
         const data = await res.json().catch(() => ({}));

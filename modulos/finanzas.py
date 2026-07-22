@@ -218,6 +218,7 @@ def _gasto_estado_boletas(db, gasto_id, monto_gasto, cerrado_manualmente):
     for b in boletas:
         b["tiene_comprobante"] = bool(b.get("comprobante_archivo"))
         b["rendido"] = b.get("rendicion_id") is not None
+        b["ingreso_stock"] = b.get("movimiento_inventario_id") is not None
     monto_justificado = round(sum(b["monto"] for b in boletas), 2)
     monto_pendiente = round(max(monto_gasto - monto_justificado, 0), 2)
     monto_rendido = round(sum(b["monto"] for b in boletas if b["rendido"]), 2)
@@ -294,6 +295,10 @@ def _caja_resumen_medio(db, medio_pago):
         "saldo_disponible": round(total_aportado - total_gastado, 2),
         "total_aportado": total_aportado,
         "total_gastado": total_gastado,
+        # Suma histórica de lo que ya volvió a través de una rendición (no
+        # confundir con total_aportado, que incluye también aportes
+        # manuales que nunca pasaron por una rendición).
+        "total_rendido": total_rendido,
         "pendiente_rendir": pendiente_rendir,
         "gastado_mes": gastado_mes,
     }
@@ -523,7 +528,6 @@ def caja_crear_gasto():
     contra este mismo gasto (ver caja_agregar_boleta más abajo) -- puede
     haber más de una boleta por gasto si el retiro cubrió varias compras."""
     db = get_db()
-    _iniciar_transaccion_stock(db)  # puede incluir una "compra de emergencia" que ingresa stock
     data = request.form
 
     try:
@@ -541,48 +545,19 @@ def caja_crear_gasto():
     fecha = (data.get("fecha") or "").strip()
     fecha = f"{fecha}T{datetime.now().strftime('%H:%M:%S')}" if fecha else now_iso()
 
-    # ---- Compra de emergencia asociada al inventario: caso especial, no es
-    # un simple retiro -- quien la registra SÍ sabe en el momento qué compró,
-    # así que además de registrar el gasto se ingresa el stock como una
-    # entrada normal (igual que una factura), dejando ambos registros
-    # enlazados para que se pueda seguir el rastro del dinero al producto.
-    # De todas formas, igual que cualquier otro gasto, sigue necesitando su(s)
-    # boleta(s) para poder rendirse.
-    producto_id = (data.get("producto_id") or "").strip()
-    movimiento_inventario_id = None
-    if producto_id:
-        try:
-            producto_id = int(producto_id)
-            cantidad = int(data.get("cantidad") or 0)
-            if cantidad <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            return jsonify({"error": "Para asociar una compra de emergencia, indica un producto y una cantidad válida"}), 400
-
-        producto_row = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
-        if producto_row is None:
-            return jsonify({"error": "El producto seleccionado no existe"}), 400
-
-        costo_unitario = monto / cantidad
-        _aplicar_entrada_stock(
-            db, producto_row, cantidad, costo_unitario,
-            motivo="COMPRA DE EMERGENCIA (CAJA CHICA)",
-            usuario=usuario_actual(), factura=None, categoria="Compra",
-        )
-        movimiento_inventario_id = db.execute(
-            "SELECT id FROM movimientos WHERE producto_id = ? ORDER BY id DESC LIMIT 1", (producto_id,)
-        ).fetchone()[0]
-    else:
-        producto_id = None
-
+    # Desde la Migración 27 "compra de emergencia" (ingreso de stock al
+    # inventario) ya no se pregunta acá -- quien registra el retiro solo
+    # sabe monto y fecha, todavía no sabe qué se va a comprar con esa plata.
+    # Se pregunta después, boleta por boleta, en caja_agregar_boleta (ahí sí
+    # se sabe qué se compró de verdad).
     ts = now_iso()
     cur = db.execute(
         """
         INSERT INTO caja_movimientos (
-            tipo, medio_pago, fecha, monto, usuario, producto_id, movimiento_inventario_id, creado_en
-        ) VALUES ('gasto', ?, ?, ?, ?, ?, ?, ?)
+            tipo, medio_pago, fecha, monto, usuario, creado_en
+        ) VALUES ('gasto', ?, ?, ?, ?, ?)
         """,
-        (medio_pago, fecha, monto, usuario_actual(), producto_id, movimiento_inventario_id, ts),
+        (medio_pago, fecha, monto, usuario_actual(), ts),
     )
     db.commit()
     nuevo = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -599,8 +574,13 @@ def caja_agregar_boleta(gasto_id):
     boleta individual, así que siempre se puede seguir agregando boletas
     nuevas a un gasto aunque otras boletas suyas ya se hayan rendido antes
     -- lo único que no se puede tocar es una boleta que YA fue rendida (ver
-    caja_editar_boleta/caja_eliminar_boleta)."""
+    caja_editar_boleta/caja_eliminar_boleta). Desde la Migración 27, si esta
+    boleta corresponde a una "compra de emergencia", el ingreso de stock al
+    inventario se registra acá (antes se preguntaba al crear el retiro
+    completo, pero recién al cargar la boleta se sabe qué se compró de
+    verdad -- ver comentario en caja_crear_gasto)."""
     db = get_db()
+    _iniciar_transaccion_stock(db)  # puede incluir una "compra de emergencia" que ingresa stock
     gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ? AND tipo = 'gasto'", (gasto_id,)).fetchone()
     if gasto is None:
         return jsonify({"error": "Gasto no encontrado"}), 404
@@ -635,16 +615,49 @@ def caja_agregar_boleta(gasto_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    # ---- Compra de emergencia asociada al inventario: esta boleta puntual
+    # ingresó stock además de justificar el gasto, así que se deja el
+    # movimiento de inventario enlazado para poder seguir el rastro del
+    # dinero al producto. El costo unitario se calcula con el monto DE ESTA
+    # BOLETA (no el del retiro completo, que puede cubrir más de una
+    # compra).
+    producto_id = (data.get("producto_id") or "").strip()
+    movimiento_inventario_id = None
+    if producto_id:
+        try:
+            producto_id = int(producto_id)
+            cantidad = int(data.get("cantidad") or 0)
+            if cantidad <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"error": "Para asociar una compra de emergencia, indica un producto y una cantidad válida"}), 400
+
+        producto_row = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        if producto_row is None:
+            return jsonify({"error": "El producto seleccionado no existe"}), 400
+
+        costo_unitario = monto / cantidad
+        _aplicar_entrada_stock(
+            db, producto_row, cantidad, costo_unitario,
+            motivo="COMPRA DE EMERGENCIA (CAJA CHICA)",
+            usuario=usuario_actual(), factura=None, categoria="Compra",
+        )
+        movimiento_inventario_id = db.execute(
+            "SELECT id FROM movimientos WHERE producto_id = ? ORDER BY id DESC LIMIT 1", (producto_id,)
+        ).fetchone()[0]
+    else:
+        producto_id = None
+
     ts = now_iso()
     db.execute(
         """
         INSERT INTO caja_gasto_detalles (
             gasto_id, numero_documento, monto, rubro_gav, categoria, proveedor, descripcion,
-            orden_id, comprobante_archivo, usuario, creado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            orden_id, comprobante_archivo, producto_id, movimiento_inventario_id, usuario, creado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (gasto_id, numero_documento, monto, rubro_gav, categoria, proveedor, descripcion,
-         orden_id, comprobante, usuario_actual(), ts),
+         orden_id, comprobante, producto_id, movimiento_inventario_id, usuario_actual(), ts),
     )
     # Si el gasto se había cerrado manualmente (vuelto en caja, boleta chica
     # perdida) y recién ahora aparece otra boleta, se reabre solo -- ya no
@@ -665,6 +678,9 @@ def caja_editar_boleta(detalle_id):
         return jsonify({"error": "Boleta no encontrada"}), 404
     if detalle["rendicion_id"] is not None:
         return jsonify({"error": "Esta boleta ya fue incluida en una rendición y no se puede modificar."}), 409
+    if detalle["movimiento_inventario_id"] is not None:
+        return jsonify({"error": "Esta boleta ingresó stock al inventario (compra de emergencia). "
+                                  "Ajusta el stock manualmente primero si corresponde, y luego edita la boleta."}), 409
     gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (detalle["gasto_id"],)).fetchone()
 
     data = request.form
@@ -727,6 +743,9 @@ def caja_eliminar_boleta(detalle_id):
         return jsonify({"error": "Boleta no encontrada"}), 404
     if detalle["rendicion_id"] is not None:
         return jsonify({"error": "Esta boleta ya fue incluida en una rendición y no se puede eliminar."}), 409
+    if detalle["movimiento_inventario_id"] is not None:
+        return jsonify({"error": "Esta boleta ingresó stock al inventario (compra de emergencia). "
+                                  "Ajusta el stock manualmente primero si corresponde, y luego elimina la boleta."}), 409
     gasto = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (detalle["gasto_id"],)).fetchone()
 
     if detalle["comprobante_archivo"]:
@@ -921,18 +940,23 @@ def caja_vaciar():
     limpio mientras se prueba el módulo (pedido explícito del taller), NO
     para uso normal del día a día. Solo admin (ver @requiere_rol()).
 
-    Si algún gasto había ingresado stock al inventario (compra de
-    emergencia, columna movimiento_inventario_id), ESE movimiento de
-    inventario NO se revierte acá -- borrar el gasto de Caja Chica no
-    deshace la entrada de stock, así que se informa en la respuesta para
-    poder revisar el inventario a mano si corresponde."""
+    Si algún gasto (o, desde la Migración 27, alguna boleta) había ingresado
+    stock al inventario (compra de emergencia, columna
+    movimiento_inventario_id), ESE movimiento de inventario NO se revierte
+    acá -- borrar el gasto/boleta de Caja Chica no deshace la entrada de
+    stock, así que se informa en la respuesta para poder revisar el
+    inventario a mano si corresponde."""
     db = get_db()
 
-    con_stock = db.execute(
+    con_stock_gastos = db.execute(
         "SELECT id, monto, producto_id, movimiento_inventario_id FROM caja_movimientos "
         "WHERE tipo = 'gasto' AND movimiento_inventario_id IS NOT NULL"
     ).fetchall()
-    avisos_stock = [dict(r) for r in con_stock]
+    con_stock_boletas = db.execute(
+        "SELECT id, monto, producto_id, movimiento_inventario_id FROM caja_gasto_detalles "
+        "WHERE movimiento_inventario_id IS NOT NULL"
+    ).fetchall()
+    avisos_stock = [dict(r) for r in con_stock_gastos] + [dict(r) for r in con_stock_boletas]
 
     archivos = set()
     for r in db.execute("SELECT comprobante_archivo FROM caja_movimientos WHERE comprobante_archivo != ''").fetchall():
@@ -1026,15 +1050,32 @@ def caja_crear_rendicion():
     if not detalle_ids:
         return jsonify({"error": "Selecciona al menos una boleta para rendir"}), 400
 
-    placeholders = ",".join("?" for _ in detalle_ids)
-    boletas = db.execute(
+    # Se descartan silenciosamente ids que ya no corresponden a una boleta
+    # real, o que a esta altura ya fueron rendidas -- puede pasar si la
+    # lista del modal quedó desactualizada (otra pestaña rindió, editó o
+    # eliminó esa boleta, o se vació la Caja Chica, mientras este modal
+    # seguía abierto). Es más amigable rendir lo que sí sigue siendo válido
+    # que bloquear todo el lote por una sola boleta obsoleta.
+    detalle_ids_validos = []
+    for i in detalle_ids:
+        try:
+            detalle_ids_validos.append(int(i))
+        except (TypeError, ValueError):
+            continue  # ids nulos/corruptos (ej. "NaN" perdido en el camino) se ignoran
+    if not detalle_ids_validos:
+        return jsonify({"error": "No se encontró ninguna de las boletas seleccionadas. "
+                                  "Cierra y vuelve a abrir \"Generar rendición\" para actualizar el listado."}), 400
+
+    placeholders = ",".join("?" for _ in detalle_ids_validos)
+    boletas_encontradas = db.execute(
         f"SELECT * FROM caja_gasto_detalles WHERE id IN ({placeholders})",
-        detalle_ids,
+        detalle_ids_validos,
     ).fetchall()
-    if len(boletas) != len(detalle_ids):
-        return jsonify({"error": "Alguna de las boletas seleccionadas no existe"}), 400
-    if any(b["rendicion_id"] is not None for b in boletas):
-        return jsonify({"error": "Alguna de las boletas seleccionadas ya fue rendida antes"}), 400
+    boletas = [b for b in boletas_encontradas if b["rendicion_id"] is None]
+    if not boletas:
+        return jsonify({"error": "Las boletas seleccionadas ya no están disponibles para rendir (puede que ya se hayan "
+                                  "rendido, editado o eliminado en otra pestaña). Cierra y vuelve a abrir \"Generar "
+                                  "rendición\" para actualizar el listado."}), 400
 
     gastos_ids = list({b["gasto_id"] for b in boletas})
     gastos_placeholders = ",".join("?" for _ in gastos_ids)
@@ -1910,18 +1951,19 @@ def finanzas_estado_resultados():
 
     # ---- GAV: boletas de Caja Chica ya clasificadas por rubro_gav (Migración
     # 25 -- el rubro vive en la boleta, no en el gasto/retiro). Nunca incluye
-    # producto_id IS NOT NULL en el gasto -- esas son compras de inventario
-    # que ya se cuentan como costo de ventas cuando el repuesto se usa en una
-    # OT, ver ventas_y_costo_ot_mes; contarlas también acá sería duplicar el
-    # gasto. El rubro "gastos_por_ot" se excluye del mismo modo y por la
-    # misma razón, pero además YA SE CONTÓ arriba: ventas_y_costo_ot_mes
-    # (ot["costo_caja_chica"], ver "costo_ventas" en el jsonify de abajo) lo
-    # suma como costo de la orden de trabajo a la que quedó ligada esa
-    # boleta -- sumarlo también acá lo duplicaría.
+    # producto_id IS NOT NULL en la BOLETA (Migración 27: la compra de
+    # emergencia se liga a la boleta, no al gasto/retiro) -- esas son
+    # compras de inventario que ya se cuentan como costo de ventas cuando el
+    # repuesto se usa en una OT, ver ventas_y_costo_ot_mes; contarlas también
+    # acá sería duplicar el gasto. El rubro "gastos_por_ot" se excluye del
+    # mismo modo y por la misma razón, pero además YA SE CONTÓ arriba:
+    # ventas_y_costo_ot_mes (ot["costo_caja_chica"], ver "costo_ventas" en el
+    # jsonify de abajo) lo suma como costo de la orden de trabajo a la que
+    # quedó ligada esa boleta -- sumarlo también acá lo duplicaría.
     filas_gav = db.execute(
         "SELECT d.rubro_gav AS rubro_gav, COALESCE(SUM(d.monto), 0) AS total "
         "FROM caja_gasto_detalles d JOIN caja_movimientos g ON g.id = d.gasto_id "
-        "WHERE g.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? "
+        "WHERE d.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? "
         "AND d.rubro_gav != '' AND d.rubro_gav != 'gastos_por_ot' GROUP BY d.rubro_gav",
         (mes,),
     ).fetchall()
@@ -1931,7 +1973,7 @@ def finanzas_estado_resultados():
     gav_sin_clasificar = db.execute(
         "SELECT COALESCE(SUM(d.monto), 0) AS total FROM caja_gasto_detalles d "
         "JOIN caja_movimientos g ON g.id = d.gasto_id "
-        "WHERE g.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? AND d.rubro_gav = ''",
+        "WHERE d.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? AND d.rubro_gav = ''",
         (mes,),
     ).fetchone()["total"] or 0
 
@@ -2167,7 +2209,7 @@ def finanzas_estado_resultados_detalle():
             f"SELECT g.fecha AS fecha, d.categoria AS categoria, d.descripcion AS descripcion, "
             f"d.proveedor AS proveedor, d.numero_documento AS numero_documento, d.monto AS monto "
             f"FROM caja_gasto_detalles d JOIN caja_movimientos g ON g.id = d.gasto_id "
-            f"WHERE g.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? {filtro_rubro} "
+            f"WHERE d.producto_id IS NULL AND substr(g.fecha, 1, 7) = ? {filtro_rubro} "
             f"ORDER BY g.fecha",
             params,
         ).fetchall()

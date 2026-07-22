@@ -143,8 +143,8 @@
           <span class="summary-value" id="caja-ef-gastado-mes">—</span>
         </div>
         <div class="summary-card">
-          <span class="summary-label">Total retirado</span>
-          <span class="summary-value" id="caja-ef-total-aportado">—</span>
+          <span class="summary-label" title="Suma histórica de todo lo que ya volvió a través de una rendición.">Total rendido</span>
+          <span class="summary-value" id="caja-ef-total-rendido">—</span>
         </div>
       </section>
     </div>
@@ -451,7 +451,7 @@
       <button class="modal-close" data-close="modal-caja-gasto">&times;</button>
     </div>
     <p class="ayuda-inline" id="cg-bloqueado-aviso" style="display:none"></p>
-    <p class="ayuda-inline">Monto, fecha y medio de pago — es todo lo que se necesita para registrar el retiro. El N° de boleta/factura, el rubro, el detalle y (si corresponde) la OT relacionada se agregan después, boleta por boleta, desde "Generar rendición" — pueden ser varias boletas para un mismo retiro.</p>
+    <p class="ayuda-inline">Monto, fecha y medio de pago — es todo lo que se necesita para registrar el retiro. El N° de boleta/factura, el rubro, el detalle, si corresponde a una compra de emergencia (que ingresa stock al inventario) y la OT relacionada se agregan después, boleta por boleta, desde "Generar rendición" — pueden ser varias boletas para un mismo retiro.</p>
     <form id="form-caja-gasto">
       <input type="hidden" id="cg-id">
       <div class="grid-2">
@@ -471,28 +471,6 @@
           <option value="tarjeta_empresa">Tarjeta empresa</option>
           <option value="cristian">Vía Cristian (logística)</option>
         </select>
-      </div>
-
-      <div id="cg-emergencia-wrap">
-        <label class="toggle-critico">
-          <input type="checkbox" id="cg-emergencia">
-          Es una compra de emergencia — ingresar el stock a un producto del inventario
-        </label>
-        <div id="cg-emergencia-campos" style="display:none">
-          <div class="grid-2">
-            <div class="campo">
-              <label>Producto</label>
-              <select id="cg-producto-id">
-                <option value="">Selecciona un producto…</option>
-              </select>
-            </div>
-            <div class="campo">
-              <label>Cantidad</label>
-              <input type="number" id="cg-cantidad" min="1" value="1">
-            </div>
-          </div>
-          <p class="ayuda-inline">El costo unitario se calcula solo, dividiendo el monto del gasto entre la cantidad.</p>
-        </div>
       </div>
 
       <div class="modal-actions modal-actions--split" id="cg-acciones-editar" style="display:none">

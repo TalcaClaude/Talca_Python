@@ -2196,6 +2196,15 @@ svg .chart-punto-hover {
 }
 .op-sugerencia-texto {
   margin: 0 0 6px 0;
+  /* Los mensajes de WhatsApp (pruebas de ruta / sugerencias de diagnóstico
+     mandadas por un mecánico) suelen venir con saltos de línea y viñetas
+     ("· funcionamiento de marchas (ok)") que el mecánico escribió a
+     propósito para que se lea ordenado -- por default un <p> colapsa esos
+     saltos de línea y todo queda pegado en una sola línea. pre-line
+     preserva los saltos de línea del texto tal cual se guardó, pero sigue
+     colapsando espacios/tabs de más (a diferencia de pre-wrap), así que un
+     mensaje escrito normal (sin saltos) se sigue viendo igual que antes. */
+  white-space: pre-line;
 }
 .op-sugerencia-foto {
   position: relative;

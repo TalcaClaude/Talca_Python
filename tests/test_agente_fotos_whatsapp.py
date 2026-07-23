@@ -850,6 +850,159 @@ class TestPerfilEncargadoPreEntrega(unittest.TestCase):
         resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/pre-entrega", json={"texto": "  "})
         self.assertEqual(resp.status_code, 400)
 
+    def _estado_de(self, orden_id):
+        return self.client.get(f"/api/operativo/ordenes/{orden_id}").get_json()["estado"]
+
+    def test_confirmacion_explicita_mueve_la_ot_a_listo(self):
+        # Pedido del taller: "solo en el caso de que se diga explícitamente
+        # que está listo para la entrega, la orden de trabajo se debe mover
+        # a 'listo para la entrega'".
+        self._registrar_mecanico("Encargado Confirma", "+56900900030")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT010")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+        self.assertEqual(self._estado_de(orden["id"]), "recibido")
+
+        resp = self._mandar_texto("+56900900030", f"ot {orden['id']} listo para la entrega")
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["estado_nuevo"], "listo")
+        self.assertIn("Listo para la entrega", data["respuesta_texto"])
+        self.assertEqual(self._estado_de(orden["id"]), "listo")
+
+    def test_mensaje_ambiguo_no_mueve_el_estado_y_avisa(self):
+        # "si hubiese alguna ambigüedad, debe preguntar y ante la duda
+        # dejarla sin movimiento" -- un comentario normal de revisión, sin
+        # la frase explícita, no debe mover nada, y la respuesta tiene que
+        # explicar por qué no se movió.
+        self._registrar_mecanico("Encargado Ambiguo", "+56900900031")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT011")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto("+56900900031", f"ot {orden['id']} revisada y lavada")
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["estado_nuevo"], "")
+        self.assertIn("No moví la OT", data["respuesta_texto"])
+        self.assertEqual(self._estado_de(orden["id"]), "recibido")
+
+    def test_frase_negada_no_mueve_el_estado(self):
+        # "no está lista para la entrega" trae las palabras clave pero
+        # negadas -- tiene que quedar exactamente igual que un mensaje
+        # ambiguo (sin movimiento).
+        self._registrar_mecanico("Encargado Negado", "+56900900032")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT012")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto(
+            "+56900900032", f"ot {orden['id']} no esta lista para la entrega, falta el parachoques"
+        )
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["estado_nuevo"], "")
+        self.assertEqual(self._estado_de(orden["id"]), "recibido")
+
+    def test_ot_ya_lista_se_mantiene_sin_error_ante_nueva_confirmacion(self):
+        # Este perfil NUNCA puede sacar una OT de "listo" -- ni por
+        # accidente ni porque llegue otra confirmación después. Se prueba
+        # mandando dos mensajes de confirmación seguidos: el primero mueve
+        # la OT, el segundo no debe romper nada ni "revertir" el estado.
+        self._registrar_mecanico("Encargado Repite", "+56900900033")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT013")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        self._mandar_texto("+56900900033", f"ot {orden['id']} listo para la entrega")
+        self.assertEqual(self._estado_de(orden["id"]), "listo")
+
+        resp = self._mandar_texto("+56900900033", f"ot {orden['id']} lista para entregar de nuevo")
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["estado_nuevo"], "")
+        self.assertIn("ya estaba marcada", data["respuesta_texto"])
+        self.assertEqual(self._estado_de(orden["id"]), "listo")
+
+    def test_confirmacion_por_foto_tambien_mueve_la_ot_a_listo(self):
+        self._registrar_mecanico("Encargado Foto Listo", "+56900900034")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT014")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+                           return_value={"tipo": "otro", "patente": ""}):
+            resp = self._subir_foto(
+                "+56900900034", texto=f"ot {orden['id']} lista para la entrega"
+            )
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["estado_nuevo"], "listo")
+        self.assertEqual(self._estado_de(orden["id"]), "listo")
+
+    def test_confirmacion_por_foto_ambigua_no_mueve_el_estado(self):
+        self._registrar_mecanico("Encargado Foto Ambiguo", "+56900900035")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT015")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+                           return_value={"tipo": "otro", "patente": ""}):
+            resp = self._subir_foto(
+                "+56900900035", texto=f"ot {orden['id']} auto lavado y revisado"
+            )
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["estado_nuevo"], "")
+        self.assertEqual(self._estado_de(orden["id"]), "recibido")
+
+
+class TestDetectorTextoConfirmaListoParaEntrega(unittest.TestCase):
+    """Pruebas directas sobre _agente_texto_confirma_listo_para_entrega --
+    el detector determinístico (sin IA) que decide si un mensaje confirma
+    EXPLÍCITAMENTE que el vehículo quedó listo para la entrega. Se prueba
+    aparte de los tests de integración de arriba porque acá interesa cubrir
+    muchas variantes de texto rápido, sin el costo de armar una OT por caso."""
+
+    def test_frases_claras_confirman(self):
+        frases = [
+            "listo para la entrega",
+            "Lista para la entrega",
+            "listo para entregar",
+            "lista para entregar",
+            "ya se puede retirar, esta listo",
+            "auto listo, puede pasar a retirarlo",
+            "LISTO PARA LA ENTREGA",
+        ]
+        for frase in frases:
+            with self.subTest(frase=frase):
+                self.assertTrue(taller_app._agente_texto_confirma_listo_para_entrega(frase))
+
+    def test_frases_ambiguas_no_confirman(self):
+        frases = [
+            "revisada y lavada",
+            "falta terminar el detallado",
+            "esta listo",  # "listo" solo, sin mención de entrega/retiro
+            "se entrego la cotizacion al cliente",
+            "",
+            "   ",
+            None,
+        ]
+        for frase in frases:
+            with self.subTest(frase=frase):
+                self.assertFalse(taller_app._agente_texto_confirma_listo_para_entrega(frase))
+
+    def test_frases_negadas_no_confirman(self):
+        frases = [
+            "no esta lista para la entrega",
+            "todavia no queda lista para la entrega",
+            "falta lavado para que quede lista para la entrega",
+            "sin lavar, no esta lista para la entrega",
+        ]
+        for frase in frases:
+            with self.subTest(frase=frase):
+                self.assertFalse(taller_app._agente_texto_confirma_listo_para_entrega(frase))
+
 
 if __name__ == "__main__":
     unittest.main()

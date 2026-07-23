@@ -5,10 +5,12 @@
 // (inicio.html, el selector de módulos, no carga ningún *.js de módulo), así
 // que trae sus propias copias de utilidades con prefijo "notif".
 //
-// Hoy solo cubre sugerencias de diagnóstico de mecánicos restringidos (ver
-// migración 16 / agente_mecanicos.tipo en app.py) -- pensada para sumar más
-// categorías más adelante sin rehacer el mecanismo (ver /api/notificaciones/
-// resumen, que ya devuelve un dict con una clave por categoría).
+// Cubre tres categorías, todas dejadas por mecánicos restringidos vía
+// WhatsApp (ver migración 16/21/30 / agente_mecanicos.tipo en app.py):
+// sugerencias de diagnóstico, pruebas de ruta y Pre entrega -- pensada para
+// sumar más categorías más adelante sin rehacer el mecanismo (ver
+// /api/notificaciones/resumen, que ya devuelve un dict con una clave por
+// categoría).
 // ---------------------------------------------------------------------------
 
 const NOTIF_INTERVALO_SONDEO_MS = 25000;
@@ -137,8 +139,43 @@ async function notifCargarListaPruebasRuta() {
   }
 }
 
+async function notifCargarListaPreEntrega() {
+  const lista = document.getElementById("notif-bell-lista-pre-entrega");
+  if (!lista) return;
+  try {
+    const entradas = await notifApi("/api/notificaciones/pre-entrega");
+    if (!entradas.length) {
+      lista.innerHTML = `<p class="ayuda-inline">Sin novedades.</p>`;
+      return;
+    }
+    lista.innerHTML = entradas.map(p => `
+      <div class="notif-item" data-id="${p.id}">
+        <p class="notif-item-ot">
+          <a href="/operativo?abrir_ot=${p.orden_id}&tab=pre_entrega#ordenes">OT #${p.orden_id}${p.cliente_nombre ? " — " + notifEscapeHtml(p.cliente_nombre) : ""}${p.patente ? " · " + notifEscapeHtml(p.patente) : ""}</a>
+        </p>
+        <p class="notif-item-texto">${notifEscapeHtml(p.texto)}${p.foto_id ? " 📷" : ""}</p>
+        <p class="notif-item-meta">Por: ${notifEscapeHtml(p.autor)} — ${notifFmtFecha(p.creado_en)}</p>
+        <button type="button" class="btn btn-secundario btn-chico" data-notif-atender-pre-entrega="${p.id}">Marcar como revisada</button>
+      </div>
+    `).join("");
+    lista.querySelectorAll("[data-notif-atender-pre-entrega]").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+          await notifApi(`/api/operativo/pre-entrega/${btn.dataset.notifAtenderPreEntrega}/atender`, { method: "POST" });
+          await notifSondear();
+        } catch (e) {
+          btn.disabled = false;
+        }
+      });
+    });
+  } catch (e) {
+    lista.innerHTML = `<p class="ayuda-inline">No se pudo cargar la lista.</p>`;
+  }
+}
+
 async function notifCargarLista() {
-  await Promise.all([notifCargarListaSugerencias(), notifCargarListaPruebasRuta()]);
+  await Promise.all([notifCargarListaSugerencias(), notifCargarListaPruebasRuta(), notifCargarListaPreEntrega()]);
 }
 
 async function notifAbrirPanel() {
@@ -167,7 +204,8 @@ async function notifSondear() {
     const resumen = await notifApi("/api/notificaciones/resumen");
     const sugerencias = resumen.sugerencias_diagnostico || 0;
     const pruebasRuta = resumen.pruebas_ruta || 0;
-    const total = sugerencias + pruebasRuta;
+    const preEntrega = resumen.pre_entrega || 0;
+    const total = sugerencias + pruebasRuta + preEntrega;
     wrap.style.display = "";
     const badge = document.getElementById("notif-bell-badge");
     if (total > 0) {

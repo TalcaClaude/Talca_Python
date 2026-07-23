@@ -1,14 +1,16 @@
 <!-- Campanita de notificaciones global (ver static/js/notificaciones.js).
-     Avisa dos cosas para Operativo: sugerencias de diagnóstico dejadas por
+     Avisa tres cosas para Operativo: sugerencias de diagnóstico dejadas por
      mecánicos de perfil restringido por WhatsApp (ver migración 16 en
-     app.py) y entradas nuevas de la bitácora de pruebas de ruta dejadas
-     por el perfil 'probador_de_autos' (ver migración 20/21/23) -- ambas
-     sin revisar todavía. Pensada desde el principio para sumar más
-     categorías más adelante (una por rol: CxC/CxP próximas para finanzas,
-     stock crítico para logística), sin tener que rehacer el mecanismo. El
-     propio script decide si mostrarse u ocultarse según el rol de la
-     sesión (por ahora: admin/operativo, que son quienes revisan estas dos
-     cosas) -- se incluye en todas las plantillas autenticadas igual que
+     app.py), entradas nuevas de la bitácora de pruebas de ruta dejadas por
+     el perfil 'probador_de_autos' (ver migración 20/21/23) y entradas
+     nuevas de la bitácora de Pre entrega dejadas por el perfil
+     'encargado_pre_entrega' (ver migración 30/31) -- las tres sin revisar
+     todavía. Pensada desde el principio para sumar más categorías más
+     adelante (una por rol: CxC/CxP próximas para finanzas, stock crítico
+     para logística), sin tener que rehacer el mecanismo. El propio script
+     decide si mostrarse u ocultarse según el rol de la sesión (por ahora:
+     admin/operativo, que son quienes revisan estas categorías) -- se
+     incluye en todas las plantillas autenticadas igual que
      _alerta_facturas_pendientes.html, para no depender de en qué módulo
      esté parado quien tiene que verla.
 
@@ -27,6 +29,8 @@
     <div id="notif-bell-lista"><p class="ayuda-inline">Cargando…</p></div>
     <h4>Pruebas de ruta</h4>
     <div id="notif-bell-lista-pruebas-ruta"><p class="ayuda-inline">Cargando…</p></div>
+    <h4>Pre entrega</h4>
+    <div id="notif-bell-lista-pre-entrega"><p class="ayuda-inline">Cargando…</p></div>
   </div>
 </div>
 

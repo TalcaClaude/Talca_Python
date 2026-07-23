@@ -1197,6 +1197,26 @@ def init_db():
     )
     db.commit()
 
+    # ---- Migración 31: aviso de "Pre entrega por revisar" para la
+    # campanita de notificaciones (mismo mecanismo que Migración 23/24 para
+    # pruebas_ruta/sugerencias_diagnostico) -- se agrega ACÁ, como columnas
+    # nuevas sobre la tabla creada en la Migración 30, en vez de meterlas
+    # directo en el CREATE TABLE de arriba, porque ese CREATE TABLE ya se
+    # entregó antes y en un despliegue que ya lo corrió el ALTER TABLE es lo
+    # único que agrega las columnas sin perder datos (igual que las demás
+    # migraciones de este archivo). También se aprovecha para que el
+    # "encargado_pre_entrega" pueda mover la OT a "Listo" cuando el mensaje
+    # confirma EXPLÍCITAMENTE que quedó lista para la entrega (ver
+    # _agente_texto_confirma_listo_para_entrega) -- eso no necesita columnas
+    # nuevas, se apoya en el estado ya existente de la OT.
+    columnas_pre_entrega = [c[1] for c in db.execute("PRAGMA table_info(pre_entrega)").fetchall()]
+    if "atendida" not in columnas_pre_entrega:
+        db.execute("ALTER TABLE pre_entrega ADD COLUMN atendida INTEGER NOT NULL DEFAULT 0")
+        db.execute("ALTER TABLE pre_entrega ADD COLUMN atendida_por TEXT NOT NULL DEFAULT ''")
+        db.execute("ALTER TABLE pre_entrega ADD COLUMN atendida_en TEXT NOT NULL DEFAULT ''")
+        db.execute("ALTER TABLE pre_entrega ADD COLUMN vista INTEGER NOT NULL DEFAULT 0")
+        db.commit()
+
     # Datos manuales del Estado de Resultados por mes (rubros que no se
     # registran en ningún otro lugar del sistema porque vienen de
     # contabilidad/remuneraciones externas: sueldos, Previred, arriendo,
@@ -5927,6 +5947,83 @@ def _agente_guardar_pre_entrega(db, ot_id, foto_id, autor_nombre, texto):
     db.commit()
 
 
+# Patrón usado por _agente_texto_confirma_listo_para_entrega: "list[oa]"
+# (listo/lista) cerca de "entrega/entregar/retiro/retirar", en cualquier
+# orden, dentro de la misma oración -- se define una sola vez a nivel de
+# módulo para no recompilarlo en cada mensaje que llega por WhatsApp.
+_PATRON_LISTO_PARA_ENTREGA = re.compile(
+    r"\blist[oa]\b[^.\n]{0,25}\b(?:entrega|entregar|retiro|retirar)\w*"
+    r"|\b(?:entrega|entregar|retiro|retirar)\w*[^.\n]{0,25}\blist[oa]\b"
+)
+# Negaciones que, si aparecen en la MISMA oración que el patrón de arriba,
+# invalidan la confirmación (ej. "no está lista para la entrega, falta el
+# parachoques") -- a propósito la lista es corta y literal (no un intento de
+# NLP de negación general): cualquier otro caso ambiguo ya queda descartado
+# porque _PATRON_LISTO_PARA_ENTREGA simplemente no matchea.
+_PATRON_NEGACION_LISTO = re.compile(r"\b(no|sin|falta|faltan|todavia)\b")
+
+
+def _agente_texto_confirma_listo_para_entrega(texto):
+    """Detecta, de forma determinística y conservadora, si un mensaje del
+    perfil 'encargado_pre_entrega' (ver Migración 30/31) confirma
+    EXPLÍCITAMENTE que el vehículo quedó listo para la entrega -- a
+    propósito NO se reutiliza acá el intérprete de IA
+    (_llamar_claude_interpretar_mensaje_agente) que usa el perfil
+    'completo' para cambiar de estado: el pedido del taller fue "la
+    información tiene que ser muy clara... ante la duda dejarla sin
+    movimiento", así que se prefiere un chequeo de palabras clave 100%
+    predecible y auditable (sin depender de una llamada a un servicio
+    externo, ni de que ANTHROPIC_API_KEY esté configurada, ni del riesgo de
+    que una IA interprete de más) antes que dejarle la decisión a un
+    modelo.
+
+    Devuelve True SOLO si alguna oración del mensaje trae "listo"/"lista"
+    cerca de "entrega"/"entregar"/"retiro"/"retirar" (en cualquier orden) y
+    esa misma oración no trae una negación cercana (ej. "no está lista
+    para la entrega", "todavía falta para que quede lista"). Cualquier
+    otro caso -- texto ambiguo, sin esas palabras, o con ellas pero
+    negadas -- devuelve False, que es justamente lo que hace que la OT NO
+    se mueva de estado (ver _agente_procesar_mensaje, rama
+    'es_encargado_pre_entrega')."""
+    texto_norm = normalizar_busqueda(texto or "")
+    if not texto_norm:
+        return False
+    for oracion in re.split(r"[.\n]+", texto_norm):
+        if _PATRON_LISTO_PARA_ENTREGA.search(oracion) and not _PATRON_NEGACION_LISTO.search(oracion):
+            return True
+    return False
+
+
+def _agente_pre_entrega_intentar_marcar_listo(db, ot, texto):
+    """Si 'texto' confirma explícitamente que el vehículo está listo para
+    la entrega (ver _agente_texto_confirma_listo_para_entrega), mueve la OT
+    a 'listo' -- y SOLO a 'listo': este perfil no tiene permiso para
+    ejecutar ningún otro cambio de estado, ni para sacar una OT de 'listo'
+    una vez que llegó ahí (pedido del taller: "solo es posible moverla a
+    esa casilla y solo esa. tampoco tiene permiso para sacar una ot de
+    ahi"). Reutiliza _actualizar_estado_orden_por_agente -- la misma
+    función que usa el perfil 'completo' para cambiar de estado -- para que
+    los efectos secundarios de un cambio de estado (ver
+    _manejar_transicion_cxc) se apliquen igual acá.
+
+    Devuelve el texto que se agrega a la respuesta de WhatsApp, explicando
+    SIEMPRE qué pasó (se movió, ya estaba en "listo", o no se encontró una
+    confirmación explícita) -- nunca se queda callado sobre el estado,
+    justo lo que pidió el taller ("debe preguntar" ante la ambigüedad)."""
+    if not _agente_texto_confirma_listo_para_entrega(texto):
+        return (
+            "\n\n❓ No moví la OT a \"Listo para la entrega\" porque no encontré una confirmación "
+            "explícita en tu mensaje. Si el vehículo ya está listo, escribe algo claro como "
+            "\"listo para la entrega\" o \"lista para entregar\"."
+        )
+    if ot["estado"] == "listo":
+        return "\n\n✅ La OT ya estaba marcada como \"Listo para la entrega\" -- no hice ningún cambio."
+    _, error = _actualizar_estado_orden_por_agente(db, ot["ot_id"], "listo")
+    if error:
+        return f"\n\n⚠️ No pude mover la OT a \"Listo para la entrega\": {error}"
+    return "\n\n🚚 Moví la OT a \"Listo para la entrega\"."
+
+
 def _agente_listar_sugerencias_pendientes(db, ot_id):
     """Sugerencias de diagnóstico (ver _agente_guardar_sugerencia_diagnostico)
     aún no revisadas para una OT, más recientes primero."""
@@ -5981,6 +6078,30 @@ def _operativo_listar_todas_pruebas_ruta_pendientes(db):
         LEFT JOIN equipos e ON e.id = o.equipo_id
         WHERE pr.atendida = 0 AND pr.origen = 'whatsapp'
         ORDER BY pr.creado_en DESC
+        """
+    ).fetchall()
+    return [dict(f) for f in filas]
+
+
+def _operativo_listar_todas_pre_entrega_pendientes(db):
+    """Igual que _operativo_listar_todas_pruebas_ruta_pendientes, pero para
+    la bitácora de Pre entrega (tabla pre_entrega, Migración 30/31): todas
+    las entradas llegadas por WhatsApp (perfil 'encargado_pre_entrega') que
+    todavía no se marcaron como revisadas, con la info de la OT para que la
+    lista sea legible sin otra llamada."""
+    filas = db.execute(
+        """
+        SELECT
+            pe.*,
+            o.estado AS ot_estado,
+            c.nombre AS cliente_nombre,
+            e.identificador AS patente
+        FROM pre_entrega pe
+        JOIN ordenes_trabajo o ON o.id = pe.orden_id
+        LEFT JOIN clientes c ON c.id = o.cliente_id
+        LEFT JOIN equipos e ON e.id = o.equipo_id
+        WHERE pe.atendida = 0 AND pe.origen = 'whatsapp'
+        ORDER BY pe.creado_en DESC
         """
     ).fetchall()
     return [dict(f) for f in filas]
@@ -6320,14 +6441,21 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                 # arriba (eso NO cambia para nadie), y el comentario que la
                 # acompaña se guarda directo como una entrada nueva en la
                 # bitácora de Pre entrega, vinculada a la OT y a la foto
-                # recién archivada.
+                # recién archivada. Además, si el texto confirma
+                # EXPLÍCITAMENTE que el vehículo quedó listo para la
+                # entrega, la OT se mueve a "listo" -- y SOLO a ese estado
+                # (ver _agente_pre_entrega_intentar_marcar_listo).
                 _agente_guardar_pre_entrega(
                     db, ot_resuelta["ot_id"], foto_archivada["id"], mecanico["nombre"], texto_resto,
                 )
+                estado_previo = ot_resuelta["estado"]
+                mensaje_estado = _agente_pre_entrega_intentar_marcar_listo(db, ot_resuelta, texto_resto)
+                estado_quedo = "listo" if (estado_previo != "listo" and "🚚" in mensaje_estado) else ""
                 return _registrar(
-                    mecanico["nombre"], "pre_entrega_registrada", ot_resuelta["ot_id"], "", "", True,
+                    mecanico["nombre"], "pre_entrega_registrada", ot_resuelta["ot_id"],
+                    estado_previo, estado_quedo, True,
                     f"{nota_foto_archivada}\n✅ Dejé tu registro de pre entrega (\"{texto_resto}\") en la "
-                    f"bitácora de la OT #{ot_resuelta['ot_id']}.",
+                    f"bitácora de la OT #{ot_resuelta['ot_id']}.{mensaje_estado}",
                 )
 
             if es_mecanico_restringido:
@@ -6403,9 +6531,14 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
             _agente_guardar_pre_entrega(
                 db, ot_para_sugerencia["ot_id"], None, mecanico["nombre"], texto_mensaje,
             )
+            estado_previo = ot_para_sugerencia["estado"]
+            mensaje_estado = _agente_pre_entrega_intentar_marcar_listo(db, ot_para_sugerencia, texto_mensaje)
+            estado_quedo = "listo" if (estado_previo != "listo" and "🚚" in mensaje_estado) else ""
             return _registrar(
-                mecanico["nombre"], "pre_entrega_registrada", ot_para_sugerencia["ot_id"], "", "", True,
-                f"✅ Dejé tu registro de pre entrega en la bitácora de la OT #{ot_para_sugerencia['ot_id']}.",
+                mecanico["nombre"], "pre_entrega_registrada", ot_para_sugerencia["ot_id"],
+                estado_previo, estado_quedo, True,
+                f"✅ Dejé tu registro de pre entrega en la bitácora de la OT #{ot_para_sugerencia['ot_id']}."
+                f"{mensaje_estado}",
             )
         _agente_guardar_sugerencia_diagnostico(
             db, ot_para_sugerencia["ot_id"], None, mecanico["nombre"], texto_mensaje,
@@ -6651,7 +6784,14 @@ def notificaciones_resumen():
     pruebas_ruta = db.execute(
         "SELECT COUNT(*) AS n FROM pruebas_ruta WHERE atendida = 0 AND vista = 0 AND origen = 'whatsapp'"
     ).fetchone()["n"]
-    return jsonify({"sugerencias_diagnostico": sugerencias, "pruebas_ruta": pruebas_ruta})
+    pre_entrega = db.execute(
+        "SELECT COUNT(*) AS n FROM pre_entrega WHERE atendida = 0 AND vista = 0 AND origen = 'whatsapp'"
+    ).fetchone()["n"]
+    return jsonify({
+        "sugerencias_diagnostico": sugerencias,
+        "pruebas_ruta": pruebas_ruta,
+        "pre_entrega": pre_entrega,
+    })
 
 
 @app.route("/api/notificaciones/sugerencias-diagnostico", methods=["GET"])
@@ -6668,23 +6808,36 @@ def notificaciones_pruebas_ruta():
     return jsonify(_operativo_listar_todas_pruebas_ruta_pendientes(db))
 
 
+@app.route("/api/notificaciones/pre-entrega", methods=["GET"])
+@requiere_rol("operativo")
+def notificaciones_pre_entrega():
+    db = get_db()
+    return jsonify(_operativo_listar_todas_pre_entrega_pendientes(db))
+
+
 @app.route("/api/notificaciones/marcar-vista/<int:orden_id>", methods=["POST"])
 @requiere_rol("operativo")
 def notificaciones_marcar_vista(orden_id):
     """Marca como 'vista' (Migración 24) todas las sugerencias de
-    diagnóstico y pruebas de ruta pendientes de una OT en particular -- se
-    llama sola al abrir una OT desde el link de un aviso (ver
-    abrirOtDesdeQueryParam() en operativo.js), no requiere que la persona
-    haga clic en nada aparte. A propósito NO marca 'atendida': la
-    sugerencia/prueba sigue apareciendo en el panel de la campanita hasta
-    que alguien la descarte a mano con "Marcar como revisada"/"Descartar
-    sugerencia" -- ver /api/sugerencias-diagnostico/<id>/atender y
-    /api/operativo/pruebas-ruta/<id>/atender -- esto solo saca el aviso
+    diagnóstico, pruebas de ruta y entradas de Pre entrega pendientes de
+    una OT en particular -- se llama sola al abrir una OT desde el link de
+    un aviso (ver abrirOtDesdeQueryParam() en operativo.js), no requiere
+    que la persona haga clic en nada aparte. A propósito NO marca
+    'atendida': la sugerencia/prueba/pre-entrega sigue apareciendo en el
+    panel de la campanita hasta que alguien la descarte a mano con "Marcar
+    como revisada"/"Descartar sugerencia" -- ver
+    /api/sugerencias-diagnostico/<id>/atender,
+    /api/operativo/pruebas-ruta/<id>/atender y
+    /api/operativo/pre-entrega/<id>/atender -- esto solo saca el aviso
     urgente (badge/alerta roja) de encima."""
     db = get_db()
     db.execute("UPDATE sugerencias_diagnostico SET vista = 1 WHERE ot_id = ? AND atendida = 0 AND vista = 0", (orden_id,))
     db.execute(
         "UPDATE pruebas_ruta SET vista = 1 WHERE orden_id = ? AND atendida = 0 AND vista = 0 AND origen = 'whatsapp'",
+        (orden_id,),
+    )
+    db.execute(
+        "UPDATE pre_entrega SET vista = 1 WHERE orden_id = ? AND atendida = 0 AND vista = 0 AND origen = 'whatsapp'",
         (orden_id,),
     )
     db.commit()
@@ -6708,6 +6861,29 @@ def atender_prueba_ruta(prueba_id):
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM pruebas_ruta WHERE id = ?", (prueba_id,)).fetchone()
+    return jsonify(dict(actualizada))
+
+
+@app.route("/api/operativo/pre-entrega/<int:entrada_id>/atender", methods=["POST"])
+@requiere_rol("operativo")
+def atender_pre_entrega_notificacion(entrada_id):
+    """Marca una entrada de la bitácora de Pre entrega como revisada --
+    mismo mecanismo que atender_prueba_ruta: NO borra ni modifica la
+    entrada en sí (sigue apareciendo para siempre en la bitácora "Pre
+    entrega" de la OT), solo saca el aviso pendiente de la campanita.
+    Nombre distinto a la ruta de eliminar (eliminar_pre_entrega, en
+    modulos/operativo.py) para no pisarse -- esa borra la entrada, esta
+    solo la marca como revisada."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM pre_entrega WHERE id = ?", (entrada_id,)).fetchone()
+    if not fila:
+        return jsonify({"error": "No existe esa entrada de la bitácora"}), 404
+    db.execute(
+        "UPDATE pre_entrega SET atendida = 1, atendida_por = ?, atendida_en = ? WHERE id = ?",
+        (usuario_actual(), now_iso(), entrada_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM pre_entrega WHERE id = ?", (entrada_id,)).fetchone()
     return jsonify(dict(actualizada))
 
 

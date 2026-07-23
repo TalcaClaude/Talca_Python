@@ -1148,6 +1148,10 @@
         <input type="text" id="dtef-receptor-comuna">
       </div>
     </div>
+    <div class="campo">
+      <label>Correo para enviar la factura (opcional)</label>
+      <input type="email" id="dtef-receptor-email" placeholder="cliente@correo.cl">
+    </div>
     <h3 class="subtitulo">Ítems a facturar</h3>
     <div id="dtef-items-lista"></div>
     <button type="button" class="btn btn-secundario" id="dtef-btn-agregar-item">+ Agregar ítem</button>
@@ -1165,12 +1169,32 @@
 
 <!-- Modal: Detalle de un documento (factura o nota de crédito) -->
 <div class="modal-overlay" id="modal-dte-detalle">
-  <div class="modal">
+  <div class="modal modal-ancho">
     <div class="modal-head">
       <h2 id="dted-titulo">Documento</h2>
       <button class="modal-close" data-close="modal-dte-detalle">&times;</button>
     </div>
     <div id="dted-contenido"></div>
+
+    <section class="toolbar">
+      <a class="btn btn-secundario" id="dted-btn-ver-pdf" href="#" target="_blank" rel="noopener">Ver PDF en pestaña nueva</a>
+      <a class="btn btn-secundario" id="dted-btn-descargar-pdf" href="#" download>Descargar PDF</a>
+    </section>
+
+    <iframe id="dted-pdf-preview" style="width:100%; height:420px; border:1px solid var(--borde, #333); border-radius:8px; margin-top:8px;"></iframe>
+
+    <h3 class="subtitulo">Enviar por correo</h3>
+    <div class="grid-2">
+      <div class="campo">
+        <label>Destinatario</label>
+        <input type="email" id="dted-envio-destinatario" placeholder="cliente@correo.cl">
+      </div>
+      <div class="campo" style="align-self:flex-end">
+        <button type="button" class="btn btn-primary" id="dted-btn-enviar">Enviar</button>
+      </div>
+    </div>
+    <p class="ayuda-inline" id="dted-envio-historial"></p>
+
     <div class="campo" id="dted-nc-wrap" style="display:none">
       <label>Motivo de la nota de crédito *</label>
       <input type="text" id="dted-nc-motivo" placeholder="Ej: Anula factura por error en el monto">

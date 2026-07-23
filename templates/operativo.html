@@ -931,6 +931,7 @@
       <button type="button" class="op-tab" data-opod-tab="repuestos">Carga de repuestos</button>
       <button type="button" class="op-tab" data-opod-tab="costos">Costos</button>
       <button type="button" class="op-tab" data-opod-tab="qc">Pruebas de ruta</button>
+      <button type="button" class="op-tab" data-opod-tab="factura">Factura</button>
     </div>
 
     <div class="op-tab-panel" id="opod-panel-ot">
@@ -1308,6 +1309,21 @@
           <button type="submit" class="btn btn-secundario">+ Agregar entrada a la bitácora</button>
         </div>
       </form>
+    </div>
+
+    <div class="op-tab-panel" id="opod-panel-factura" style="display:none">
+      <div id="opod-factura-sin-emitir" style="display:none">
+        <p class="ayuda-inline">Esta orden todavía no tiene una factura electrónica emitida.</p>
+        <a class="btn btn-primary" id="opod-factura-btn-ir" href="#" target="_blank" rel="noopener">Ir a Facturación electrónica</a>
+      </div>
+      <div id="opod-factura-emitida" style="display:none">
+        <p class="ayuda-inline" id="opod-factura-resumen"></p>
+        <section class="toolbar">
+          <a class="btn btn-secundario" id="opod-factura-btn-ver-pdf" href="#" target="_blank" rel="noopener">Ver PDF en pestaña nueva</a>
+          <a class="btn btn-secundario" id="opod-factura-btn-descargar-pdf" href="#" download>Descargar PDF</a>
+        </section>
+        <iframe id="opod-factura-pdf-preview" style="width:100%; height:520px; border:1px solid var(--borde, #333); border-radius:8px; margin-top:8px;"></iframe>
+      </div>
     </div>
 
   </div>

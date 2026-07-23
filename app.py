@@ -1098,6 +1098,59 @@ def init_db():
         db.execute("ALTER TABLE caja_gasto_detalles ADD COLUMN movimiento_inventario_id INTEGER REFERENCES movimientos(id)")
         db.commit()
 
+    # ---- Migración 28: Facturación electrónica (ver modulos/facturacion.py)
+    # -- emisión de DTE (factura afecta y nota de crédito, por ahora) hacia
+    # clientes, vía un proveedor externo ya certificado ante el SII (no
+    # confundir con la tabla de "Facturas" de compra a proveedores). Parte
+    # en modo 'simulado' (ver PROVEEDOR_DTE en facturacion.py) hasta que el
+    # taller tenga su cuenta y API Key con el proveedor real.
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS documentos_tributarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tipo_dte INTEGER NOT NULL,
+            estado TEXT NOT NULL DEFAULT 'borrador',
+            folio INTEGER,
+            orden_id INTEGER REFERENCES ordenes_trabajo(id),
+            documento_referencia_id INTEGER REFERENCES documentos_tributarios(id),
+            motivo_nc TEXT DEFAULT '',
+            receptor_rut TEXT NOT NULL DEFAULT '',
+            receptor_razon_social TEXT NOT NULL DEFAULT '',
+            receptor_giro TEXT DEFAULT '',
+            receptor_direccion TEXT DEFAULT '',
+            receptor_comuna TEXT DEFAULT '',
+            items_json TEXT NOT NULL DEFAULT '[]',
+            monto_neto REAL NOT NULL DEFAULT 0,
+            monto_iva REAL NOT NULL DEFAULT 0,
+            monto_total REAL NOT NULL DEFAULT 0,
+            observaciones TEXT DEFAULT '',
+            proveedor TEXT DEFAULT '',
+            respuesta_proveedor TEXT DEFAULT '',
+            pdf_url TEXT DEFAULT '',
+            error_mensaje TEXT DEFAULT '',
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            emitido_en TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS configuracion_facturacion (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            razon_social TEXT DEFAULT '',
+            rut_emisor TEXT DEFAULT '',
+            giro TEXT DEFAULT '',
+            direccion TEXT DEFAULT '',
+            comuna TEXT DEFAULT '',
+            actividad_economica TEXT DEFAULT '',
+            actualizado_en TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_documentos_tributarios_estado ON documentos_tributarios (estado);
+        CREATE INDEX IF NOT EXISTS idx_documentos_tributarios_orden_id ON documentos_tributarios (orden_id);
+        CREATE INDEX IF NOT EXISTS idx_documentos_tributarios_referencia ON documentos_tributarios (documento_referencia_id);
+        """
+    )
+    db.commit()
+
     # Datos manuales del Estado de Resultados por mes (rubros que no se
     # registran en ningún otro lugar del sistema porque vienen de
     # contabilidad/remuneraciones externas: sueldos, Previred, arriendo,
@@ -9113,6 +9166,12 @@ app.register_blueprint(bp_operativo)
 # registrar el blueprint, no llamar su init por separado.
 from modulos.convertidores import bp as bp_convertidores  # noqa: E402
 app.register_blueprint(bp_convertidores)
+
+# Facturación electrónica (DTE a clientes) -- ver modulos/facturacion.py
+# para el diseño de la capa de proveedor (EmisorDTE) que hace posible
+# cambiar de proveedor sin tocar el resto del sistema.
+from modulos.facturacion import bp as bp_facturacion  # noqa: E402
+app.register_blueprint(bp_facturacion)
 
 # Transiciones de estado que el agente de WhatsApp tiene permitido aplicar
 # (ver _agente_procesar_mensaje más arriba). A pedido del taller, el agente

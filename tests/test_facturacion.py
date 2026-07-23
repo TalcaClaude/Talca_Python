@@ -1,0 +1,152 @@
+"""Tests de Facturación Electrónica (Migración 28, modulos/facturacion.py).
+
+Cubre el flujo con el proveedor 'simulado' (default de PROVEEDOR_DTE) --
+el mismo que se prueba acá es el que va a usar el taller para probar el
+formulario, el cálculo de IVA y el historial ANTES de tener una cuenta real
+con un proveedor de facturación electrónica. No prueba contra un proveedor
+real (SimpleAPI u otro) porque esa integración todavía no está conectada a
+propósito -- ver el comentario de EmisorSimpleAPI en facturacion.py.
+"""
+import os
+import sys
+import tempfile
+import unittest
+
+_TMP_DB_FD, _TMP_DB_PATH = tempfile.mkstemp(prefix="test_taller_facturacion_", suffix=".db")
+os.close(_TMP_DB_FD)
+os.remove(_TMP_DB_PATH)
+os.environ["DB_PATH"] = _TMP_DB_PATH
+os.environ.setdefault("SECRET_KEY", "clave-de-pruebas")
+os.environ.pop("PROVEEDOR_DTE", None)  # asegura modo 'simulado' (el default)
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import app as taller_app  # noqa: E402
+
+
+class _Base(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _emitir_factura(self, **campos):
+        base = {
+            "receptor": {"rut": "12345678-9", "razon_social": "Cliente Test SpA", "giro": "Comercio"},
+            "items": [{"nombre": "Reparación", "cantidad": 1, "precio_unitario": 10000}],
+        }
+        base.update(campos)
+        return self.client.post("/api/facturacion/documentos", json=base)
+
+
+class TestConfiguracionEmisor(_Base):
+    def test_configuracion_por_defecto_viene_en_modo_simulado(self):
+        resp = self.client.get("/api/facturacion/configuracion")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["proveedor_dte"], "simulado")
+
+    def test_guardar_y_leer_configuracion(self):
+        resp = self.client.put("/api/facturacion/configuracion", json={
+            "razon_social": "Taller Mecánico Ejemplo SpA",
+            "rut_emisor": "770893703",
+            "giro": "Mantención y reparación de vehículos",
+            "direccion": "Av. Siempre Viva 123",
+            "comuna": "Santiago",
+        })
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["rut_emisor"], "77.089.370-3")  # queda formateado
+
+        resp2 = self.client.get("/api/facturacion/configuracion")
+        config = resp2.get_json()
+        self.assertEqual(config["razon_social"], "TALLER MECÁNICO EJEMPLO SPA")
+        self.assertEqual(config["comuna"], "SANTIAGO")
+
+    def test_guardar_configuracion_sin_razon_social_es_rechazado(self):
+        resp = self.client.put("/api/facturacion/configuracion", json={"rut_emisor": "770893703"})
+        self.assertEqual(resp.status_code, 400)
+
+
+class TestEmisionFactura(_Base):
+    def test_emitir_factura_calcula_iva_y_queda_emitida(self):
+        resp = self._emitir_factura(items=[{"nombre": "Cambio de aceite", "cantidad": 2, "precio_unitario": 5000}])
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        d = resp.get_json()
+        self.assertEqual(d["tipo_dte"], 33)
+        self.assertEqual(d["estado"], "emitido")
+        self.assertIsNotNone(d["folio"])
+        self.assertEqual(d["proveedor"], "simulado")
+        self.assertAlmostEqual(d["monto_neto"], 10000, delta=0.01)
+        self.assertAlmostEqual(d["monto_iva"], 1900, delta=0.01)  # 19% de 10000
+        self.assertAlmostEqual(d["monto_total"], 11900, delta=0.01)
+
+    def test_emitir_factura_sin_rut_receptor_es_rechazado(self):
+        resp = self._emitir_factura(receptor={"razon_social": "Sin RUT SpA"})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_emitir_factura_sin_items_es_rechazado(self):
+        resp = self._emitir_factura(items=[])
+        self.assertEqual(resp.status_code, 400)
+
+    def test_emitir_factura_con_item_sin_nombre_es_rechazado(self):
+        resp = self._emitir_factura(items=[{"nombre": "", "cantidad": 1, "precio_unitario": 1000}])
+        self.assertEqual(resp.status_code, 400)
+
+    def test_factura_emitida_aparece_en_el_listado(self):
+        resp = self._emitir_factura(receptor={"rut": "9-8", "razon_social": "Buscar Este Cliente"})
+        doc_id = resp.get_json()["id"]
+        listado = self.client.get("/api/facturacion/documentos?q=Buscar Este Cliente").get_json()
+        ids = [d["id"] for d in listado["documentos"]]
+        self.assertIn(doc_id, ids)
+
+    def test_ver_documento_individual(self):
+        resp = self._emitir_factura()
+        doc_id = resp.get_json()["id"]
+        detalle = self.client.get(f"/api/facturacion/documentos/{doc_id}")
+        self.assertEqual(detalle.status_code, 200)
+        self.assertEqual(detalle.get_json()["id"], doc_id)
+
+    def test_documento_inexistente_da_404(self):
+        resp = self.client.get("/api/facturacion/documentos/999999")
+        self.assertEqual(resp.status_code, 404)
+
+
+class TestNotaDeCredito(_Base):
+    def test_anular_factura_con_nota_de_credito(self):
+        factura = self._emitir_factura().get_json()
+
+        resp_nc = self.client.post(
+            f"/api/facturacion/documentos/{factura['id']}/nota-credito",
+            json={"motivo": "Anula por error en el monto"},
+        )
+        self.assertEqual(resp_nc.status_code, 201, resp_nc.get_data(as_text=True))
+        nc = resp_nc.get_json()
+        self.assertEqual(nc["tipo_dte"], 61)
+        self.assertEqual(nc["documento_referencia_id"], factura["id"])
+        self.assertEqual(nc["estado"], "emitido")
+
+        # La factura original queda anulada.
+        factura_actualizada = self.client.get(f"/api/facturacion/documentos/{factura['id']}").get_json()
+        self.assertEqual(factura_actualizada["estado"], "anulado")
+
+    def test_nota_de_credito_sin_motivo_es_rechazada(self):
+        factura = self._emitir_factura().get_json()
+        resp = self.client.post(f"/api/facturacion/documentos/{factura['id']}/nota-credito", json={})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_no_se_puede_anular_dos_veces_la_misma_factura(self):
+        factura = self._emitir_factura().get_json()
+        self.client.post(f"/api/facturacion/documentos/{factura['id']}/nota-credito", json={"motivo": "primera"})
+        resp2 = self.client.post(f"/api/facturacion/documentos/{factura['id']}/nota-credito", json={"motivo": "segunda"})
+        self.assertEqual(resp2.status_code, 400)  # ya no está 'emitido', quedó 'anulado'
+
+    def test_no_se_puede_generar_nota_de_credito_sobre_otra_nota_de_credito(self):
+        factura = self._emitir_factura().get_json()
+        nc = self.client.post(
+            f"/api/facturacion/documentos/{factura['id']}/nota-credito", json={"motivo": "primera"}
+        ).get_json()
+        resp = self.client.post(f"/api/facturacion/documentos/{nc['id']}/nota-credito", json={"motivo": "otra"})
+        self.assertEqual(resp.status_code, 400)
+
+
+if __name__ == "__main__":
+    unittest.main()

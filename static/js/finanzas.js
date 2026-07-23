@@ -14,6 +14,10 @@ const state = {
   cmfProductos: [],
   cmfProveedores: [],
   facturasPendientes: [],
+  dteConfig: null,
+  dteItems: [],
+  dteDocumentos: [],
+  dteDocumentoActivoId: null,
 };
 
 const ESTADO_CXX_LABEL = { pendiente: "Pendiente", parcial: "Parcial", pagada: "Pagada", anulada: "Anulada" };
@@ -166,6 +170,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     document.getElementById("vista-cxc").style.display = vista === "cxc" ? "block" : "none";
     document.getElementById("vista-cxp").style.display = vista === "cxp" ? "block" : "none";
     document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
+    document.getElementById("vista-dte").style.display = vista === "dte" ? "block" : "none";
     document.getElementById("vista-estado-resultados").style.display = vista === "estado-resultados" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
     const titulos = {
@@ -174,6 +179,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
       cxc: "Finanzas — Cuentas por Cobrar",
       cxp: "Finanzas — Cuentas por Pagar",
       facturas: "Finanzas — Facturas",
+      dte: "Finanzas — Facturación electrónica",
       "estado-resultados": "Finanzas — Estado de Resultados",
       reportes: "Finanzas — Reportes",
     };
@@ -183,6 +189,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     if (vista === "cxc") { cargarCxc(); cargarCxcAbonos(); }
     if (vista === "cxp") cargarCxp();
     if (vista === "facturas") cargarFacturasPendientesRecepcion();
+    if (vista === "dte") cargarDte();
     if (vista === "estado-resultados") cargarEstadoResultados();
   });
 });
@@ -2357,6 +2364,306 @@ document.getElementById("form-er-manual").addEventListener("submit", async (e) =
     await cargarEstadoResultados();
   } catch (e2) {
     toast(e2.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Facturación electrónica (DTE a clientes) -- Migración 28. No confundir
+// con la pestaña "Facturas" (arriba), que son facturas de COMPRA a
+// proveedores. El proveedor real (SimpleAPI u otro) se elige en el backend
+// (ver modulos/facturacion.py, PROVEEDOR_DTE) -- acá el frontend solo
+// habla con /api/facturacion/..., nunca directo con el proveedor.
+// ---------------------------------------------------------------------------
+
+const TIPO_DTE_LABEL = { 33: "Factura", 61: "Nota de crédito" };
+const ESTADO_DTE_LABEL = { borrador: "Borrador", emitido: "Emitido", anulado: "Anulado", error: "Con error" };
+
+async function cargarDte() {
+  await cargarDteConfiguracion();
+  await cargarDocumentosDte();
+}
+
+async function cargarDteConfiguracion() {
+  try {
+    const config = await api("/api/facturacion/configuracion");
+    state.dteConfig = config;
+    const aviso = document.getElementById("dte-aviso-simulado");
+    if (config.proveedor_dte === "simulado") {
+      aviso.textContent = "⚠️ Estás en modo de prueba (proveedor 'simulado'): las facturas que emitas acá NO se mandan al SII, solo sirven para probar el flujo. Cuando tengas tu cuenta con el proveedor real, se activa desde Railway.";
+      aviso.className = "ayuda-inline ayuda-inline--bloqueado";
+      aviso.style.display = "block";
+    } else {
+      aviso.style.display = "none";
+    }
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-dte-configuracion").addEventListener("click", () => {
+  const c = state.dteConfig || {};
+  document.getElementById("dte-config-proveedor").textContent = c.proveedor_dte || "simulado";
+  document.getElementById("dtec-razon-social").value = c.razon_social || "";
+  document.getElementById("dtec-rut-emisor").value = c.rut_emisor || "";
+  document.getElementById("dtec-giro").value = c.giro || "";
+  document.getElementById("dtec-direccion").value = c.direccion || "";
+  document.getElementById("dtec-comuna").value = c.comuna || "";
+  document.getElementById("dtec-actividad-economica").value = c.actividad_economica || "";
+  abrirModal("modal-dte-configuracion");
+});
+
+document.getElementById("form-dte-configuracion").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/facturacion/configuracion", {
+      method: "PUT",
+      body: JSON.stringify({
+        razon_social: document.getElementById("dtec-razon-social").value,
+        rut_emisor: document.getElementById("dtec-rut-emisor").value,
+        giro: document.getElementById("dtec-giro").value,
+        direccion: document.getElementById("dtec-direccion").value,
+        comuna: document.getElementById("dtec-comuna").value,
+        actividad_economica: document.getElementById("dtec-actividad-economica").value,
+      }),
+    });
+    toast("Datos del emisor guardados");
+    cerrarModal("modal-dte-configuracion");
+    await cargarDteConfiguracion();
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function cargarDocumentosDte() {
+  const tbody = document.getElementById("tbody-dte");
+  tbody.innerHTML = `<tr><td colspan="8" class="vacio">Cargando…</td></tr>`;
+  const params = new URLSearchParams();
+  const q = document.getElementById("dte-buscar").value.trim();
+  const tipo = document.getElementById("dte-filtro-tipo").value;
+  const estado = document.getElementById("dte-filtro-estado").value;
+  if (q) params.set("q", q);
+  if (tipo) params.set("tipo", tipo);
+  if (estado) params.set("estado", estado);
+  try {
+    const data = await api("/api/facturacion/documentos?" + params.toString());
+    state.dteDocumentos = data.documentos;
+    if (data.documentos.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" class="vacio">No hay documentos emitidos todavía.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.documentos.map(d => `
+      <tr data-abrir-dte="${d.id}" style="cursor:pointer">
+        <td>${fmtFecha(d.creado_en)}</td>
+        <td>${TIPO_DTE_LABEL[d.tipo_dte] || d.tipo_dte}</td>
+        <td class="mono">${d.folio ?? "—"}</td>
+        <td>${escapeHtml(d.receptor_razon_social)} <span class="ayuda-inline">(${escapeHtml(d.receptor_rut)})</span></td>
+        <td class="num mono">${fmtMoney(d.monto_total)}</td>
+        <td>${ESTADO_DTE_LABEL[d.estado] || d.estado}</td>
+        <td>${escapeHtml(d.usuario || "")}</td>
+        <td></td>
+      </tr>`).join("");
+    tbody.querySelectorAll("[data-abrir-dte]").forEach(tr => {
+      tr.addEventListener("click", () => abrirDetalleDte(Number(tr.dataset.abrirDte)));
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+  }
+}
+
+let dteBuscarTimeout;
+document.getElementById("dte-buscar").addEventListener("input", () => {
+  clearTimeout(dteBuscarTimeout);
+  dteBuscarTimeout = setTimeout(cargarDocumentosDte, 250);
+});
+document.getElementById("dte-filtro-tipo").addEventListener("change", cargarDocumentosDte);
+document.getElementById("dte-filtro-estado").addEventListener("change", cargarDocumentosDte);
+
+// ---- Emitir factura ----
+
+function renderItemsDteFactura() {
+  const cont = document.getElementById("dtef-items-lista");
+  cont.innerHTML = (state.dteItems || []).map((item, i) => `
+    <div class="grid-2" data-item-dte="${i}">
+      <div class="campo">
+        <label>Descripción</label>
+        <input type="text" data-campo-item="nombre" value="${escapeHtml(item.nombre)}">
+      </div>
+      <div class="campo">
+        <label>Cantidad</label>
+        <input type="number" data-campo-item="cantidad" min="0.01" step="0.01" value="${item.cantidad}">
+      </div>
+      <div class="campo">
+        <label>Precio unitario ($ CLP)</label>
+        <input type="number" data-campo-item="precio_unitario" min="0" step="1" value="${item.precio_unitario}">
+      </div>
+      <div class="campo" style="align-self:flex-end">
+        <button type="button" class="btn btn-secundario" data-quitar-item-dte="${i}">Quitar ítem</button>
+      </div>
+    </div>`).join("");
+  cont.querySelectorAll("[data-item-dte]").forEach(fila => {
+    const i = Number(fila.dataset.itemDte);
+    fila.querySelectorAll("[data-campo-item]").forEach(input => {
+      input.addEventListener("input", () => {
+        const campo = input.dataset.campoItem;
+        state.dteItems[i][campo] = campo === "nombre" ? input.value : Number(input.value || 0);
+        recalcularTotalesDte();
+      });
+    });
+  });
+  cont.querySelectorAll("[data-quitar-item-dte]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.dteItems.splice(Number(btn.dataset.quitarItemDte), 1);
+      renderItemsDteFactura();
+      recalcularTotalesDte();
+    });
+  });
+}
+
+function recalcularTotalesDte() {
+  const neto = round2((state.dteItems || []).reduce((s, it) => s + (Number(it.cantidad) || 0) * (Number(it.precio_unitario) || 0), 0));
+  const iva = round2(neto * 0.19);
+  const total = round2(neto + iva);
+  document.getElementById("dtef-total-neto").textContent = fmtMoney(neto);
+  document.getElementById("dtef-total-iva").textContent = fmtMoney(iva);
+  document.getElementById("dtef-total-total").textContent = fmtMoney(total);
+}
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+document.getElementById("btn-dte-nueva-factura").addEventListener("click", () => {
+  document.getElementById("dtef-orden-id").value = "";
+  document.getElementById("dtef-orden-preview").style.display = "none";
+  document.getElementById("dtef-receptor-rut").value = "";
+  document.getElementById("dtef-receptor-razon-social").value = "";
+  document.getElementById("dtef-receptor-giro").value = "";
+  document.getElementById("dtef-receptor-direccion").value = "";
+  document.getElementById("dtef-receptor-comuna").value = "";
+  document.getElementById("dtef-observaciones").value = "";
+  state.dteItems = [{ nombre: "", cantidad: 1, precio_unitario: 0 }];
+  renderItemsDteFactura();
+  recalcularTotalesDte();
+  const aviso = document.getElementById("dtef-aviso-simulado");
+  if ((state.dteConfig || {}).proveedor_dte === "simulado") {
+    aviso.textContent = "Modo de prueba: esta factura no se va a mandar al SII de verdad.";
+    aviso.style.display = "block";
+  } else {
+    aviso.style.display = "none";
+  }
+  abrirModal("modal-dte-factura");
+});
+
+document.getElementById("dtef-btn-agregar-item").addEventListener("click", () => {
+  state.dteItems.push({ nombre: "", cantidad: 1, precio_unitario: 0 });
+  renderItemsDteFactura();
+});
+
+let dteOrdenLookupTimeout;
+document.getElementById("dtef-orden-id").addEventListener("input", () => {
+  clearTimeout(dteOrdenLookupTimeout);
+  dteOrdenLookupTimeout = setTimeout(async () => {
+    const numero = document.getElementById("dtef-orden-id").value.trim();
+    const preview = document.getElementById("dtef-orden-preview");
+    if (!numero) { preview.style.display = "none"; return; }
+    try {
+      const orden = await api(`/api/operativo/ordenes/${encodeURIComponent(numero)}`);
+      const cliente = orden.cliente || {};
+      preview.textContent = `✓ OT #${orden.id} — ${cliente.nombre || ""} · valor cobrado: ${fmtMoney(orden.valor_neto || 0)}`;
+      preview.style.display = "block";
+      document.getElementById("dtef-receptor-razon-social").value = cliente.nombre || "";
+      document.getElementById("dtef-receptor-rut").value = cliente.rut || "";
+      document.getElementById("dtef-receptor-direccion").value = cliente.direccion || "";
+      // OJO: orden.items son los REPUESTOS/mano de obra a COSTO interno, no
+      // lo que se le cobra al cliente -- lo que se cobra es un solo monto
+      // por OT (orden.valor_neto, el "precio referencial" que se pactó con
+      // el cliente), así que se prellena un único ítem con ese valor en vez
+      // de copiar los ítems internos de la OT.
+      if (orden.valor_neto) {
+        state.dteItems = [{ nombre: `Reparación OT #${orden.id}`, cantidad: 1, precio_unitario: orden.valor_neto }];
+        renderItemsDteFactura();
+        recalcularTotalesDte();
+      }
+    } catch (e) {
+      preview.textContent = e.message || `No existe una orden de trabajo con el número "${numero}".`;
+      preview.style.display = "block";
+    }
+  }, 400);
+});
+
+document.getElementById("dtef-btn-emitir").addEventListener("click", async () => {
+  const payload = {
+    orden_id: document.getElementById("dtef-orden-id").value.trim() || null,
+    receptor: {
+      rut: document.getElementById("dtef-receptor-rut").value,
+      razon_social: document.getElementById("dtef-receptor-razon-social").value,
+      giro: document.getElementById("dtef-receptor-giro").value,
+      direccion: document.getElementById("dtef-receptor-direccion").value,
+      comuna: document.getElementById("dtef-receptor-comuna").value,
+    },
+    items: state.dteItems || [],
+    observaciones: document.getElementById("dtef-observaciones").value,
+  };
+  try {
+    await api("/api/facturacion/documentos", { method: "POST", body: JSON.stringify(payload) });
+    toast("Factura emitida");
+    cerrarModal("modal-dte-factura");
+    await cargarDocumentosDte();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---- Detalle / anular con nota de crédito ----
+
+async function abrirDetalleDte(id) {
+  try {
+    const d = await api(`/api/facturacion/documentos/${id}`);
+    state.dteDocumentoActivoId = id;
+    document.getElementById("dted-titulo").textContent = `${TIPO_DTE_LABEL[d.tipo_dte] || d.tipo_dte} #${d.folio ?? "—"}`;
+    const items = (() => { try { return JSON.parse(d.items_json || "[]"); } catch (e) { return []; } })();
+    const filasItems = items.map(it => `<tr><td>${escapeHtml(it.nombre)}</td><td class="num">${it.cantidad}</td><td class="num mono">${fmtMoney(it.precio_unitario)}</td><td class="num mono">${fmtMoney(it.subtotal)}</td></tr>`).join("");
+    document.getElementById("dted-contenido").innerHTML = `
+      <p><strong>Receptor:</strong> ${escapeHtml(d.receptor_razon_social)} (${escapeHtml(d.receptor_rut)})</p>
+      ${d.receptor_giro ? `<p><strong>Giro:</strong> ${escapeHtml(d.receptor_giro)}</p>` : ""}
+      ${d.receptor_direccion ? `<p><strong>Dirección:</strong> ${escapeHtml(d.receptor_direccion)} ${escapeHtml(d.receptor_comuna || "")}</p>` : ""}
+      <p><strong>Estado:</strong> ${ESTADO_DTE_LABEL[d.estado] || d.estado}</p>
+      ${d.error_mensaje ? `<p class="ayuda-inline ayuda-inline--bloqueado">${escapeHtml(d.error_mensaje)}</p>` : ""}
+      ${items.length ? `<table class="tabla"><thead><tr><th>Ítem</th><th class="num">Cant.</th><th class="num">Precio unit.</th><th class="num">Subtotal</th></tr></thead><tbody>${filasItems}</tbody></table>` : ""}
+      <p class="fac-total-linea">Neto: <strong>${fmtMoney(d.monto_neto)}</strong> — IVA: <strong>${fmtMoney(d.monto_iva)}</strong> — Total: <strong>${fmtMoney(d.monto_total)}</strong></p>
+      ${d.observaciones ? `<p><strong>Observaciones:</strong> ${escapeHtml(d.observaciones)}</p>` : ""}
+      ${d.orden_id ? `<p class="ayuda-inline">Emitida desde la OT #${d.orden_id}</p>` : ""}
+    `;
+    const puedeAnular = d.tipo_dte === 33 && d.estado === "emitido";
+    document.getElementById("dted-btn-nota-credito").style.display = puedeAnular ? "inline-block" : "none";
+    document.getElementById("dted-btn-nota-credito-confirmar").style.display = "none";
+    document.getElementById("dted-nc-wrap").style.display = "none";
+    document.getElementById("dted-nc-motivo").value = "";
+    abrirModal("modal-dte-detalle");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("dted-btn-nota-credito").addEventListener("click", () => {
+  document.getElementById("dted-nc-wrap").style.display = "block";
+  document.getElementById("dted-btn-nota-credito").style.display = "none";
+  document.getElementById("dted-btn-nota-credito-confirmar").style.display = "inline-block";
+});
+
+document.getElementById("dted-btn-nota-credito-confirmar").addEventListener("click", async () => {
+  const motivo = document.getElementById("dted-nc-motivo").value.trim();
+  if (!motivo) { toast("Indica el motivo de la nota de crédito", true); return; }
+  if (!confirm("¿Emitir la nota de crédito y anular esta factura? No se puede deshacer.")) return;
+  try {
+    await api(`/api/facturacion/documentos/${state.dteDocumentoActivoId}/nota-credito`, {
+      method: "POST", body: JSON.stringify({ motivo }),
+    });
+    toast("Nota de crédito emitida — la factura quedó anulada");
+    cerrarModal("modal-dte-detalle");
+    await cargarDocumentosDte();
+  } catch (e) {
+    toast(e.message, true);
   }
 });
 

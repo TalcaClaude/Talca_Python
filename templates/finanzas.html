@@ -41,6 +41,7 @@
     <button class="tab" data-vista="cxc">Cuentas por Cobrar</button>
     <button class="tab" data-vista="cxp">Cuentas por Pagar</button>
     <button class="tab" data-vista="facturas">Facturas</button>
+    <button class="tab" data-vista="dte">Facturación electrónica</button>
     <button class="tab" data-vista="estado-resultados">Estado de Resultados</button>
     <button class="tab" data-vista="reportes">Reportes</button>
   </nav>
@@ -390,6 +391,50 @@
         </tr>
       </thead>
       <tbody id="tbody-facturas-pendientes">
+        <tr><td colspan="8" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-dte" style="display:none">
+
+  <p class="ayuda-inline" id="dte-aviso-simulado" style="display:none"></p>
+  <p class="ayuda-inline">Emite facturas electrónicas a clientes y, si hace falta corregir o anular una ya emitida, su nota de crédito — quedan registradas acá con su folio, para no perder el historial. No confundir con la pestaña "Facturas", que son las facturas de COMPRA de tus proveedores.</p>
+  <section class="toolbar">
+    <input type="text" id="dte-buscar" placeholder="Buscar por razón social, RUT o folio…">
+    <select id="dte-filtro-tipo">
+      <option value="">Todos los documentos</option>
+      <option value="33">Facturas</option>
+      <option value="61">Notas de crédito</option>
+    </select>
+    <select id="dte-filtro-estado">
+      <option value="">Cualquier estado</option>
+      <option value="emitido">Emitido</option>
+      <option value="anulado">Anulado</option>
+      <option value="error">Con error</option>
+    </select>
+    <span style="flex:1"></span>
+    <button class="btn btn-secundario" id="btn-dte-configuracion">Datos del emisor</button>
+    <button class="btn btn-primary" id="btn-dte-nueva-factura">+ Emitir factura</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Fecha</th>
+          <th>Documento</th>
+          <th>Folio</th>
+          <th>Receptor</th>
+          <th class="num">Monto</th>
+          <th>Estado</th>
+          <th>Emitida por</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-dte">
         <tr><td colspan="8" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
@@ -1017,6 +1062,126 @@
         <button type="submit" class="btn btn-primary">Guardar datos del mes</button>
       </div>
     </form>
+  </div>
+</div>
+
+<!-- Modal: Datos del emisor (razón social, RUT, giro, dirección — van impresos en cada factura) -->
+<div class="modal-overlay" id="modal-dte-configuracion">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Datos del emisor</h2>
+      <button class="modal-close" data-close="modal-dte-configuracion">&times;</button>
+    </div>
+    <p class="ayuda-inline">Estos datos van impresos en el encabezado de cada factura que emitas — solo un administrador puede editarlos. El proveedor de facturación electrónica (hoy: <strong id="dte-config-proveedor">—</strong>) y su API Key se configuran aparte, como variable de entorno en Railway — nunca se guardan acá.</p>
+    <form id="form-dte-configuracion">
+      <div class="grid-2">
+        <div class="campo">
+          <label>Razón social *</label>
+          <input type="text" id="dtec-razon-social" required>
+        </div>
+        <div class="campo">
+          <label>RUT emisor *</label>
+          <input type="text" id="dtec-rut-emisor" required placeholder="Ej: 77.089.370-3">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Giro</label>
+        <input type="text" id="dtec-giro">
+      </div>
+      <div class="grid-2">
+        <div class="campo">
+          <label>Dirección</label>
+          <input type="text" id="dtec-direccion">
+        </div>
+        <div class="campo">
+          <label>Comuna</label>
+          <input type="text" id="dtec-comuna">
+        </div>
+      </div>
+      <div class="campo">
+        <label>Actividad económica</label>
+        <input type="text" id="dtec-actividad-economica">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-dte-configuracion">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Emitir factura -->
+<div class="modal-overlay" id="modal-dte-factura">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Emitir factura</h2>
+      <button class="modal-close" data-close="modal-dte-factura">&times;</button>
+    </div>
+    <p class="ayuda-inline" id="dtef-aviso-simulado" style="display:none"></p>
+    <div class="campo">
+      <label>Orden de trabajo (opcional — autocompleta cliente y detalle)</label>
+      <input type="text" id="dtef-orden-id" placeholder="Ej: 123" inputmode="numeric">
+      <p class="ayuda-inline" id="dtef-orden-preview" style="display:none"></p>
+    </div>
+    <h3 class="subtitulo">Receptor</h3>
+    <div class="grid-2">
+      <div class="campo">
+        <label>RUT *</label>
+        <input type="text" id="dtef-receptor-rut" required placeholder="Ej: 12.345.678-9">
+      </div>
+      <div class="campo">
+        <label>Razón social *</label>
+        <input type="text" id="dtef-receptor-razon-social" required>
+      </div>
+    </div>
+    <div class="campo">
+      <label>Giro</label>
+      <input type="text" id="dtef-receptor-giro">
+    </div>
+    <div class="grid-2">
+      <div class="campo">
+        <label>Dirección</label>
+        <input type="text" id="dtef-receptor-direccion">
+      </div>
+      <div class="campo">
+        <label>Comuna</label>
+        <input type="text" id="dtef-receptor-comuna">
+      </div>
+    </div>
+    <h3 class="subtitulo">Ítems a facturar</h3>
+    <div id="dtef-items-lista"></div>
+    <button type="button" class="btn btn-secundario" id="dtef-btn-agregar-item">+ Agregar ítem</button>
+    <p class="fac-total-linea">Neto: <strong id="dtef-total-neto">$0</strong> — IVA: <strong id="dtef-total-iva">$0</strong> — Total: <strong id="dtef-total-total">$0</strong></p>
+    <div class="campo">
+      <label>Observaciones (opcional)</label>
+      <input type="text" id="dtef-observaciones">
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" data-close="modal-dte-factura">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="dtef-btn-emitir">Emitir factura</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Detalle de un documento (factura o nota de crédito) -->
+<div class="modal-overlay" id="modal-dte-detalle">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="dted-titulo">Documento</h2>
+      <button class="modal-close" data-close="modal-dte-detalle">&times;</button>
+    </div>
+    <div id="dted-contenido"></div>
+    <div class="campo" id="dted-nc-wrap" style="display:none">
+      <label>Motivo de la nota de crédito *</label>
+      <input type="text" id="dted-nc-motivo" placeholder="Ej: Anula factura por error en el monto">
+    </div>
+    <div class="modal-actions modal-actions--split">
+      <span>
+        <button type="button" class="btn btn-danger" id="dted-btn-nota-credito" style="display:none">Anular con nota de crédito</button>
+        <button type="button" class="btn btn-danger" id="dted-btn-nota-credito-confirmar" style="display:none">Confirmar anulación</button>
+      </span>
+      <button type="button" class="btn btn-secundario" data-close="modal-dte-detalle">Cerrar</button>
+    </div>
   </div>
 </div>
 

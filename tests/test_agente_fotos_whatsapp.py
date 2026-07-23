@@ -683,5 +683,173 @@ class TestPerfilProbadorDeAutos(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+class TestPerfilEncargadoPreEntrega(unittest.TestCase):
+    """Perfil 'encargado_pre_entrega' (ver migración 30 / agente_mecanicos.tipo):
+    mismo comportamiento que 'probador_de_autos' (ver TestPerfilProbadorDeAutos
+    arriba), pero lo que manda se guarda en su propia bitácora (tabla
+    pre_entrega), pensada para dejar registrada la última revisión antes de
+    entregarle el vehículo al cliente."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre="Cliente Pre Entrega"):
+        resp = self.client.post("/api/operativo/clientes", json={"nombre": nombre})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_equipo(self, cliente_id, identificador):
+        resp = self.client.post(
+            "/api/operativo/equipos",
+            json={"cliente_id": cliente_id, "identificador": identificador, "marca": "Marca", "modelo": "Modelo"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden(self, cliente_id, equipo_id):
+        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id, "equipo_id": equipo_id})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _registrar_mecanico(self, nombre, telefono, tipo="encargado_pre_entrega"):
+        resp = self.client.post(
+            "/api/agente/mecanicos", json={"nombre": nombre, "telefono": telefono, "tipo": tipo}
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _subir_foto(self, telefono, texto=""):
+        data = {"telefono": telefono, "foto": (io.BytesIO(_imagen_jpeg_valida()), "foto.jpg")}
+        if texto:
+            data["texto"] = texto
+        return self.client.post("/api/agente/simular-mensaje-foto", data=data, content_type="multipart/form-data")
+
+    def _mandar_texto(self, telefono, texto):
+        return self.client.post("/api/agente/simular-mensaje", json={"telefono": telefono, "texto": texto})
+
+    def _pre_entrega_de(self, orden_id):
+        resp = self.client.get(f"/api/operativo/ordenes/{orden_id}")
+        return resp.get_json()["pre_entrega"]
+
+    def test_encargado_manda_solo_texto_con_ot_queda_en_bitacora_de_pre_entrega(self):
+        self._registrar_mecanico("Encargado Uno", "+56900900020")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT001")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto(
+            "+56900900020", f"ot {orden['id']} lista para la entrega\nrevisada y lavada"
+        )
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "pre_entrega_registrada")
+        self.assertEqual(data["ot_id"], orden["id"])
+
+        entradas = self._pre_entrega_de(orden["id"])
+        self.assertEqual(len(entradas), 1)
+        self.assertIn("revisada y lavada", entradas[0]["texto"])
+        self.assertEqual(entradas[0]["autor"], "ENCARGADO UNO")
+        self.assertEqual(entradas[0]["origen"], "whatsapp")
+        self.assertIsNone(entradas[0]["foto_id"])
+
+        # NO debe quedar en las otras bitácoras -- es un destino distinto.
+        sugerencias = self.client.get(f"/api/ordenes/{orden['id']}/sugerencias-diagnostico").get_json()
+        self.assertEqual(len(sugerencias), 0)
+        orden_actual = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(len(orden_actual["pruebas_ruta"]), 0)
+        self.assertEqual(orden_actual.get("diagnostico_tecnico") or "", "")
+
+    def test_encargado_manda_texto_con_patente_en_vez_de_numero_de_ot(self):
+        self._registrar_mecanico("Encargado Patente", "+56900900021")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "RPYZ70")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto("+56900900021", "RPYZ70 lista para la entrega, revisada y lavada")
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "pre_entrega_registrada")
+        self.assertEqual(data["ot_id"], orden["id"])
+
+    def test_encargado_manda_foto_con_comentario_queda_en_bitacora_vinculada_a_la_foto(self):
+        self._registrar_mecanico("Encargado Foto", "+56900900022")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT002")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp",
+                           return_value={"tipo": "otro", "patente": ""}):
+            resp = self._subir_foto(
+                "+56900900022", texto=f"ot {orden['id']} auto lavado y revisado, listo"
+            )
+
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "pre_entrega_registrada")
+
+        entradas = self._pre_entrega_de(orden["id"])
+        self.assertEqual(len(entradas), 1)
+        self.assertIn("auto lavado y revisado", entradas[0]["texto"])
+        self.assertIsNotNone(entradas[0]["foto_id"])
+
+        fotos = self.client.get(f"/api/operativo/ordenes/{orden['id']}/fotos").get_json()["fotos"]
+        self.assertEqual(len(fotos), 1)
+
+    def test_encargado_manda_texto_sin_ot_pide_el_numero(self):
+        self._registrar_mecanico("Encargado Sin OT", "+56900900023")
+        resp = self._mandar_texto("+56900900023", "listo para entregar")
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "sugerencia_sin_ot")
+        self.assertIn("pre entrega", data["respuesta_texto"].lower())
+
+    def test_varias_entradas_de_pre_entrega_de_la_misma_ot_se_acumulan_sin_pisarse(self):
+        self._registrar_mecanico("Encargado Varias", "+56900900024")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT003")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        self._mandar_texto("+56900900024", f"ot {orden['id']} primera revisión, falta lavado")
+        self._mandar_texto("+56900900024", f"ot {orden['id']} lista, lavada y revisada")
+
+        entradas = self._pre_entrega_de(orden["id"])
+        self.assertEqual(len(entradas), 2)
+        textos = {p["texto"] for p in entradas}
+        self.assertTrue(any("primera revisión" in t for t in textos))
+        self.assertTrue(any("lavada y revisada" in t for t in textos))
+
+    def test_pre_entrega_se_puede_agregar_tambien_desde_la_web(self):
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT004")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/pre-entrega",
+            json={"texto": "Revisión cargada manualmente desde el sistema"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        creada = resp.get_json()
+        self.assertEqual(creada["origen"], "web")
+        self.assertIsNone(creada["foto_id"])
+
+        entradas = self._pre_entrega_de(orden["id"])
+        self.assertEqual(len(entradas), 1)
+
+        # Y se puede eliminar.
+        resp_del = self.client.delete(f"/api/operativo/ordenes/{orden['id']}/pre-entrega/{creada['id']}")
+        self.assertEqual(resp_del.status_code, 200)
+        self.assertEqual(len(self._pre_entrega_de(orden["id"])), 0)
+
+    def test_pre_entrega_sin_texto_es_rechazada(self):
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "PENT005")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+        resp = self.client.post(f"/api/operativo/ordenes/{orden['id']}/pre-entrega", json={"texto": "  "})
+        self.assertEqual(resp.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

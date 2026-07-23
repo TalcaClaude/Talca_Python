@@ -2405,6 +2405,12 @@ def _orden_dict_detalle(db, row):
     d["pruebas_ruta"] = [dict(i) for i in db.execute(
         "SELECT * FROM pruebas_ruta WHERE orden_id = ? ORDER BY creado_en DESC", (row["id"],)
     ).fetchall()]
+    # Bitácora de "Pre entrega" (migración 30) -- misma idea que pruebas_ruta
+    # arriba, pero para la última revisión antes de entregarle el vehículo
+    # al cliente (auto revisado, lavado, etc.).
+    d["pre_entrega"] = [dict(i) for i in db.execute(
+        "SELECT * FROM pre_entrega WHERE orden_id = ? ORDER BY creado_en DESC", (row["id"],)
+    ).fetchall()]
     return d
 
 
@@ -3758,6 +3764,64 @@ def eliminar_prueba_ruta(orden_id, prueba_id):
     if fila is None:
         return jsonify({"error": "Entrada no encontrada"}), 404
     db.execute("DELETE FROM pruebas_ruta WHERE id = ?", (prueba_id,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Bitácora de "Pre entrega" (migración 30) -- mismo patrón que la bitácora
+# de pruebas de ruta de arriba, pero para la última revisión antes de
+# entregarle el vehículo al cliente (auto revisado, lavado, etc.). Se llena
+# desde acá (formulario web) o automáticamente cuando un mecánico de perfil
+# "encargado_pre_entrega" manda el resultado por WhatsApp (ver
+# _agente_guardar_pre_entrega en app.py).
+# ---------------------------------------------------------------------------
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/pre-entrega", methods=["POST"])
+def agregar_pre_entrega(orden_id):
+    db = get_db()
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    texto = (data.get("texto") or "").strip()
+    if not texto:
+        return jsonify({"error": "Escribe el resultado de la revisión de pre entrega"}), 400
+
+    foto_id = data.get("foto_id") or None
+    if foto_id:
+        try:
+            foto_id = int(foto_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Foto inválida"}), 400
+        foto = db.execute(
+            "SELECT id FROM fotos_vehiculo WHERE id = ? AND entidad_tipo = 'orden' AND entidad_id = ?",
+            (foto_id, orden_id),
+        ).fetchone()
+        if foto is None:
+            return jsonify({"error": "La foto indicada no corresponde a esta orden"}), 400
+
+    ts = now_iso()
+    cur = db.execute(
+        "INSERT INTO pre_entrega (orden_id, texto, autor, origen, foto_id, creado_en) "
+        "VALUES (?, ?, ?, 'web', ?, ?)",
+        (orden_id, texto, usuario_actual(), foto_id, ts),
+    )
+    db.commit()
+    nueva = db.execute("SELECT * FROM pre_entrega WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(dict(nueva)), 201
+
+
+@bp.route("/api/operativo/ordenes/<int:orden_id>/pre-entrega/<int:entrada_id>", methods=["DELETE"])
+def eliminar_pre_entrega(orden_id, entrada_id):
+    db = get_db()
+    fila = db.execute(
+        "SELECT * FROM pre_entrega WHERE id = ? AND orden_id = ?", (entrada_id, orden_id)
+    ).fetchone()
+    if fila is None:
+        return jsonify({"error": "Entrada no encontrada"}), 404
+    db.execute("DELETE FROM pre_entrega WHERE id = ?", (entrada_id,))
     db.commit()
     return jsonify({"ok": True})
 

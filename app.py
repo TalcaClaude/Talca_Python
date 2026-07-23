@@ -1167,6 +1167,36 @@ def init_db():
         db.execute("ALTER TABLE documentos_tributarios ADD COLUMN enviado_a TEXT DEFAULT ''")
         db.commit()
 
+    # ---- Migración 30: bitácora de "Pre entrega" por OT + perfil
+    # "encargado_pre_entrega" para el Agente de WhatsApp -- misma idea que
+    # Migración 20/21 (pruebas_ruta / "probador_de_autos"), pero para la
+    # última revisión antes de entregar el vehículo al cliente (auto
+    # revisado, lavado, etc.). Se guarda en su propia tabla (no reutiliza
+    # pruebas_ruta) porque conceptualmente es un paso distinto del proceso
+    # (control de calidad en ruta vs. revisión final antes de entrega) y el
+    # taller pidió que aparezca en su propia pestaña, no mezclada con
+    # Pruebas de ruta. Se llena desde el formulario de la pestaña "Pre
+    # entrega" (web) o automáticamente cuando un mecánico de perfil
+    # "encargado_pre_entrega" manda un mensaje por WhatsApp (con o sin
+    # foto, resuelto por N° de OT o por patente -- ver
+    # _agente_guardar_pre_entrega en app.py, mismo mecanismo de resolución
+    # de OT que ya usan "mecanico"/"probador_de_autos").
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS pre_entrega (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id) ON DELETE CASCADE,
+            texto TEXT NOT NULL,
+            autor TEXT DEFAULT '',
+            origen TEXT NOT NULL DEFAULT 'web',
+            foto_id INTEGER REFERENCES fotos_vehiculo(id),
+            creado_en TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pre_entrega_orden_id ON pre_entrega (orden_id);
+        """
+    )
+    db.commit()
+
     # Datos manuales del Estado de Resultados por mes (rubros que no se
     # registran en ningún otro lugar del sistema porque vienen de
     # contabilidad/remuneraciones externas: sueldos, Previred, arriendo,
@@ -5881,6 +5911,22 @@ def _agente_guardar_prueba_ruta(db, ot_id, foto_id, autor_nombre, texto):
     db.commit()
 
 
+def _agente_guardar_pre_entrega(db, ot_id, foto_id, autor_nombre, texto):
+    """Guarda un comentario de un mecánico de perfil 'encargado_pre_entrega'
+    (ver migración 30) como una entrada nueva en la bitácora de Pre entrega
+    de la OT (tabla pre_entrega) -- mismo patrón que
+    _agente_guardar_prueba_ruta, pensado para dejar registrada la última
+    revisión antes de entregarle el vehículo al cliente."""
+    db.execute(
+        """
+        INSERT INTO pre_entrega (orden_id, texto, autor, origen, foto_id, creado_en)
+        VALUES (?, ?, ?, 'whatsapp', ?, ?)
+        """,
+        (ot_id, texto, autor_nombre, foto_id, now_iso()),
+    )
+    db.commit()
+
+
 def _agente_listar_sugerencias_pendientes(db, ot_id):
     """Sugerencias de diagnóstico (ver _agente_guardar_sugerencia_diagnostico)
     aún no revisadas para una OT, más recientes primero."""
@@ -6134,20 +6180,24 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
             "\"Agente IA\" en Logística.",
         )
 
-    # Perfil restringido (ver migración 16/21, columna 'tipo' de
-    # agente_mecanicos): un mecánico 'mecanico' o 'probador_de_autos' puede
-    # mandar fotos, que se archivan exactamente igual que a cualquier otro
-    # mecánico, pero NO tiene permiso para cambiar diagnóstico/estado de la
-    # OT por texto. Lo que cambia entre los dos perfiles restringidos es
-    # DÓNDE queda el comentario: 'mecanico' -> sugerencia de diagnóstico
-    # (para que operativo la revise y decida); 'probador_de_autos' -> una
-    # entrada nueva en la bitácora de pruebas de ruta (queda directo, sin
-    # revisión, porque no es un diagnóstico, es un registro de lo que se
-    # probó). El permiso de escribir diagnóstico/estado sigue existiendo
-    # tal cual para un mecánico de tipo 'completo'.
+    # Perfil restringido (ver migración 16/21/30, columna 'tipo' de
+    # agente_mecanicos): un mecánico 'mecanico', 'probador_de_autos' o
+    # 'encargado_pre_entrega' puede mandar fotos, que se archivan
+    # exactamente igual que a cualquier otro mecánico, pero NO tiene
+    # permiso para cambiar diagnóstico/estado de la OT por texto. Lo que
+    # cambia entre los tres perfiles restringidos es DÓNDE queda el
+    # comentario: 'mecanico' -> sugerencia de diagnóstico (para que
+    # operativo la revise y decida); 'probador_de_autos' -> una entrada
+    # nueva en la bitácora de pruebas de ruta; 'encargado_pre_entrega' ->
+    # una entrada nueva en la bitácora de Pre entrega (los dos últimos
+    # quedan directo, sin revisión, porque no son un diagnóstico, son un
+    # registro de lo que se hizo). El permiso de escribir
+    # diagnóstico/estado sigue existiendo tal cual para un mecánico de
+    # tipo 'completo'.
     tipo_mecanico = mecanico["tipo"] if "tipo" in mecanico.keys() else "completo"
     es_probador_de_autos = tipo_mecanico == "probador_de_autos"
-    es_mecanico_restringido = tipo_mecanico in ("mecanico", "probador_de_autos")
+    es_encargado_pre_entrega = tipo_mecanico == "encargado_pre_entrega"
+    es_mecanico_restringido = tipo_mecanico in ("mecanico", "probador_de_autos", "encargado_pre_entrega")
 
     if imagen_bytes is not None:
         try:
@@ -6265,6 +6315,21 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                     f"bitácora de la OT #{ot_resuelta['ot_id']}.",
                 )
 
+            if es_encargado_pre_entrega:
+                # Perfil "encargado pre entrega": la foto ya quedó archivada
+                # arriba (eso NO cambia para nadie), y el comentario que la
+                # acompaña se guarda directo como una entrada nueva en la
+                # bitácora de Pre entrega, vinculada a la OT y a la foto
+                # recién archivada.
+                _agente_guardar_pre_entrega(
+                    db, ot_resuelta["ot_id"], foto_archivada["id"], mecanico["nombre"], texto_resto,
+                )
+                return _registrar(
+                    mecanico["nombre"], "pre_entrega_registrada", ot_resuelta["ot_id"], "", "", True,
+                    f"{nota_foto_archivada}\n✅ Dejé tu registro de pre entrega (\"{texto_resto}\") en la "
+                    f"bitácora de la OT #{ot_resuelta['ot_id']}.",
+                )
+
             if es_mecanico_restringido:
                 # Perfil restringido: la foto ya quedó archivada arriba (eso
                 # NO cambia para nadie), pero el comentario que la acompaña
@@ -6312,12 +6377,15 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
         if ot_para_sugerencia is None:
             ot_para_sugerencia = _agente_resolver_ot_por_patente_en_texto(texto_mensaje, ordenes_abiertas_texto)
         if ot_para_sugerencia is None:
-            mensaje_perfil = (
-                "Tu perfil solo puede registrar pruebas de ruta, no cambiar el diagnóstico directamente."
-                if es_probador_de_autos else
-                "Tu perfil solo puede mandar fotos y comentarios para la OT, no cambiar el diagnóstico "
-                "directamente."
-            )
+            if es_probador_de_autos:
+                mensaje_perfil = "Tu perfil solo puede registrar pruebas de ruta, no cambiar el diagnóstico directamente."
+            elif es_encargado_pre_entrega:
+                mensaje_perfil = "Tu perfil solo puede registrar la pre entrega, no cambiar el diagnóstico directamente."
+            else:
+                mensaje_perfil = (
+                    "Tu perfil solo puede mandar fotos y comentarios para la OT, no cambiar el diagnóstico "
+                    "directamente."
+                )
             return _registrar(
                 mecanico["nombre"], "sugerencia_sin_ot", None, "", "", False,
                 f"{mensaje_perfil} Indica el número de OT (ej. \"OT 3321\") o la patente del vehículo junto "
@@ -6330,6 +6398,14 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
             return _registrar(
                 mecanico["nombre"], "prueba_ruta_registrada", ot_para_sugerencia["ot_id"], "", "", True,
                 f"🚗 Dejé tu prueba de ruta registrada en la bitácora de la OT #{ot_para_sugerencia['ot_id']}.",
+            )
+        if es_encargado_pre_entrega:
+            _agente_guardar_pre_entrega(
+                db, ot_para_sugerencia["ot_id"], None, mecanico["nombre"], texto_mensaje,
+            )
+            return _registrar(
+                mecanico["nombre"], "pre_entrega_registrada", ot_para_sugerencia["ot_id"], "", "", True,
+                f"✅ Dejé tu registro de pre entrega en la bitácora de la OT #{ot_para_sugerencia['ot_id']}.",
             )
         _agente_guardar_sugerencia_diagnostico(
             db, ot_para_sugerencia["ot_id"], None, mecanico["nombre"], texto_mensaje,
@@ -6437,7 +6513,12 @@ def _validar_firma_twilio(req):
 #     guarda directo como una entrada nueva en la bitácora de pruebas de
 #     ruta de la OT (tabla pruebas_ruta, migración 20/21), no como
 #     sugerencia de diagnóstico.
-TIPOS_MECANICO_VALIDOS = ("completo", "mecanico", "probador_de_autos")
+#   - 'encargado_pre_entrega': perfil restringido -- misma idea que
+#     'probador_de_autos', pero lo que manda se guarda en la bitácora de
+#     Pre entrega de la OT (tabla pre_entrega, migración 30), pensada para
+#     dejar registrada la última revisión antes de entregarle el vehículo
+#     al cliente.
+TIPOS_MECANICO_VALIDOS = ("completo", "mecanico", "probador_de_autos", "encargado_pre_entrega")
 
 
 @app.route("/api/agente/mecanicos", methods=["GET"])

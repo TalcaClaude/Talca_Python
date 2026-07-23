@@ -931,6 +931,7 @@
       <button type="button" class="op-tab" data-opod-tab="repuestos">Carga de repuestos</button>
       <button type="button" class="op-tab" data-opod-tab="costos">Costos</button>
       <button type="button" class="op-tab" data-opod-tab="qc">Pruebas de ruta</button>
+      <button type="button" class="op-tab" data-opod-tab="pre_entrega">Pre entrega</button>
       <button type="button" class="op-tab" data-opod-tab="factura">Factura</button>
     </div>
 
@@ -1304,6 +1305,25 @@
         <div class="campo">
           <label>Foto (opcional)</label>
           <input type="file" id="oppr-foto" accept="image/*">
+        </div>
+        <div class="modal-actions modal-actions--start">
+          <button type="submit" class="btn btn-secundario">+ Agregar entrada a la bitácora</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="op-tab-panel" id="opod-panel-pre_entrega" style="display:none">
+      <h3 class="subtitulo">Bitácora de pre entrega</h3>
+      <p class="ayuda-inline">Historial de la última revisión antes de entregarle el vehículo al cliente (auto revisado, lavado, etc.) — cada entrada queda con fecha y quién la hizo, ninguna pisa a la anterior. Se llena desde acá o automáticamente cuando un "Encargado pre entrega" manda el resultado por WhatsApp.</p>
+      <div id="op-pre-entrega-lista"></div>
+      <form id="form-op-pre-entrega">
+        <div class="campo">
+          <label>Resultado de la revisión</label>
+          <textarea id="oppe-texto" rows="2" placeholder="Ej: Vehículo revisado y lavado, listo para la entrega." required></textarea>
+        </div>
+        <div class="campo">
+          <label>Foto (opcional)</label>
+          <input type="file" id="oppe-foto" accept="image/*">
         </div>
         <div class="modal-actions modal-actions--start">
           <button type="submit" class="btn btn-secundario">+ Agregar entrada a la bitácora</button>

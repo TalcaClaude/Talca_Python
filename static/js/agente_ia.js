@@ -131,6 +131,7 @@ function renderTablaMecanicosAgente() {
           <option value="completo" ${m.tipo === "completo" ? "selected" : ""}>Completo</option>
           <option value="mecanico" ${m.tipo === "mecanico" ? "selected" : ""}>Mecánico (restringido)</option>
           <option value="probador_de_autos" ${m.tipo === "probador_de_autos" ? "selected" : ""}>Probador de autos</option>
+          <option value="encargado_pre_entrega" ${m.tipo === "encargado_pre_entrega" ? "selected" : ""}>Encargado pre entrega</option>
         </select>
       </td>
       <td><span class="badge-urgencia ${m.activo ? "badge-urgencia--proximo" : "badge-urgencia--critico"}">${m.activo ? "Activo" : "Inactivo"}</span></td>
@@ -192,12 +193,14 @@ const MEC_TIPO_LABEL = {
   completo: "Completo",
   mecanico: "Mecánico (restringido)",
   probador_de_autos: "Probador de autos",
+  encargado_pre_entrega: "Encargado pre entrega",
 };
 
 const MEC_TIPO_AVISO = {
   completo: (nombre) => `¿Dar permiso completo a "${nombre}"? Va a poder cambiar diagnóstico y estado de la OT por WhatsApp.`,
   mecanico: (nombre) => `¿Cambiar a "${nombre}" a perfil "Mecánico (restringido)"? Ya no va a poder cambiar diagnóstico ni estado — su comentario quedará como sugerencia para que operativo lo revise.`,
   probador_de_autos: (nombre) => `¿Cambiar a "${nombre}" a perfil "Probador de autos"? Ya no va a poder cambiar diagnóstico ni estado — sus mensajes van a quedar directo en la bitácora de "Pruebas de ruta" de la OT que indique.`,
+  encargado_pre_entrega: (nombre) => `¿Cambiar a "${nombre}" a perfil "Encargado pre entrega"? Ya no va a poder cambiar diagnóstico ni estado — sus mensajes van a quedar directo en la bitácora de "Pre entrega" de la OT que indique.`,
 };
 
 async function cambiarTipoMecanicoAgente(id, nuevoTipo, selectEl) {

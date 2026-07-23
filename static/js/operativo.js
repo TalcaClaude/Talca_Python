@@ -1864,6 +1864,7 @@ const OPOD_TAB_LOADERS = {
   presupuesto: () => abrirPresupuestoModal(),
   repuestos: () => abrirRepuestosModal(),
   qc: () => abrirQcModal(),
+  pre_entrega: () => abrirPreEntregaTab(),
   factura: () => cargarFacturaTab(),
 };
 
@@ -3304,6 +3305,97 @@ async function eliminarPruebaRuta(pruebaId) {
     toast("Entrada eliminada.");
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderPruebasRuta(orden);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bitácora de "Pre entrega" -- mismo patrón que la bitácora de pruebas de
+// ruta de arriba (historial de entradas, nunca se sobrescribe una
+// anterior), pero para la última revisión antes de entregarle el vehículo
+// al cliente. Se llena desde el formulario de acá abajo o, automáticamente,
+// cuando un mecánico de perfil "encargado_pre_entrega" manda el resultado
+// por WhatsApp (ver _agente_guardar_pre_entrega en app.py).
+// ---------------------------------------------------------------------------
+
+async function abrirPreEntregaTab() {
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPreEntrega(orden);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+function renderPreEntrega(orden) {
+  const lista = document.getElementById("op-pre-entrega-lista");
+  const entradas = orden.pre_entrega || [];
+  if (!entradas.length) {
+    lista.innerHTML = `<p class="vacio-inline">Todavía no hay revisiones de pre entrega registradas para esta OT.</p>`;
+  } else {
+    lista.innerHTML = entradas.map(p => `
+      <div class="op-prueba-ruta-item" data-id="${p.id}">
+        ${p.foto_id ? `
+        <div class="op-sugerencia-foto" data-foto-url="/api/operativo/fotos/${p.foto_id}/archivo" data-foto-titulo="Foto de pre entrega">
+          <img src="/api/operativo/fotos/${p.foto_id}/archivo" alt="Foto de la pre entrega" loading="lazy">
+          <span class="op-sugerencia-foto-zoom">🔍 Ampliar</span>
+        </div>` : ""}
+        <p class="op-sugerencia-texto">${escapeHtml(p.texto)}</p>
+        <p class="ayuda-inline" style="margin:0 0 8px 0">
+          ${p.origen === "whatsapp" ? "📱 Por WhatsApp — " : ""}${escapeHtml(p.autor || "—")} — ${fmtFecha(p.creado_en)}
+        </p>
+        <div class="modal-actions modal-actions--start">
+          <button type="button" class="btn-link btn-link--peligro" data-eliminar-pre-entrega="${p.id}">Eliminar</button>
+        </div>
+      </div>
+    `).join("");
+    lista.querySelectorAll(".op-sugerencia-foto").forEach(el => {
+      el.addEventListener("click", () => abrirFotoZoom(el.dataset.fotoUrl, el.dataset.fotoTitulo));
+    });
+    lista.querySelectorAll("[data-eliminar-pre-entrega]").forEach(btn => {
+      btn.addEventListener("click", () => eliminarPreEntrega(parseInt(btn.dataset.eliminarPreEntrega, 10)));
+    });
+  }
+}
+
+document.getElementById("form-op-pre-entrega").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ordenId = document.getElementById("opod-id").value;
+  const texto = document.getElementById("oppe-texto").value.trim();
+  if (!texto) {
+    toast("Escribe el resultado de la revisión de pre entrega.", true);
+    return;
+  }
+  const archivoInput = document.getElementById("oppe-foto");
+  const archivo = archivoInput.files[0];
+  try {
+    let fotoId = null;
+    if (archivo) {
+      const foto = await _subirFotoEntidad("orden", ordenId, "libre", "Pre entrega", archivo);
+      fotoId = foto.id;
+    }
+    await api(`/api/operativo/ordenes/${ordenId}/pre-entrega`, {
+      method: "POST", body: JSON.stringify({ texto, foto_id: fotoId }),
+    });
+    toast("Pre entrega agregada a la bitácora.");
+    document.getElementById("form-op-pre-entrega").reset();
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPreEntrega(orden);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+async function eliminarPreEntrega(entradaId) {
+  if (!confirm("¿Eliminar esta entrada de la bitácora de pre entrega?")) return;
+  const ordenId = document.getElementById("opod-id").value;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/pre-entrega/${entradaId}`, { method: "DELETE" });
+    toast("Entrada eliminada.");
+    const orden = await api(`/api/operativo/ordenes/${ordenId}`);
+    renderPreEntrega(orden);
   } catch (e) {
     toast(e.message, true);
   }

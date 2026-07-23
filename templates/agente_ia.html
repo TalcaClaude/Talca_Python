@@ -186,6 +186,7 @@
             <option value="completo">Completo — puede mandar fotos y cambiar diagnóstico/estado de la OT</option>
             <option value="mecanico">Mecánico (restringido) — solo puede mandar fotos; su comentario queda como sugerencia</option>
             <option value="probador_de_autos">Probador de autos — sus mensajes quedan en la bitácora de pruebas de ruta</option>
+            <option value="encargado_pre_entrega">Encargado pre entrega — sus mensajes quedan en la bitácora de Pre entrega</option>
           </select>
           <p class="ayuda-inline">
             Un mecánico de perfil restringido puede mandar fotos igual que cualquiera (quedan archivadas en la
@@ -193,7 +194,10 @@
             con la foto (o solo texto), queda guardado como sugerencia para que la parte operativa lo revise.
             Un "Probador de autos" tampoco puede cambiar diagnóstico ni estado, pero su comentario NO es una
             sugerencia: queda directo como una entrada nueva en la bitácora de "Pruebas de ruta" de la OT, con
-            fecha y su nombre — para eso siempre debe indicar el número de OT en su mensaje.
+            fecha y su nombre. Un "Encargado pre entrega" funciona igual, pero sus mensajes quedan en la
+            bitácora de "Pre entrega" — pensada para dejar registrada la última revisión antes de entregarle el
+            vehículo al cliente. Ambos perfiles pueden identificar la OT por su número o por la patente del
+            vehículo (si ya está registrada en una OT abierta).
           </p>
         </div>
         <div class="modal-actions">

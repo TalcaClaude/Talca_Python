@@ -189,7 +189,13 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     if (vista === "cxc") { cargarCxc(); cargarCxcAbonos(); }
     if (vista === "cxp") cargarCxp();
     if (vista === "facturas") cargarFacturasPendientesRecepcion();
-    if (vista === "dte") cargarDte();
+    if (vista === "dte") {
+      cargarDte();
+      // Llegada desde el botón "Ir a Facturación electrónica" de la
+      // pestaña "Factura" de una OT (ver operativo.js): /finanzas?orden=123#dte
+      const ordenPrefill = new URLSearchParams(location.search).get("orden");
+      if (ordenPrefill) abrirModalNuevaFactura(ordenPrefill);
+    }
     if (vista === "estado-resultados") cargarEstadoResultados();
   });
 });
@@ -2532,7 +2538,7 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
-document.getElementById("btn-dte-nueva-factura").addEventListener("click", () => {
+function abrirModalNuevaFactura(ordenIdPrefill) {
   document.getElementById("dtef-orden-id").value = "";
   document.getElementById("dtef-orden-preview").style.display = "none";
   document.getElementById("dtef-receptor-rut").value = "";
@@ -2540,6 +2546,7 @@ document.getElementById("btn-dte-nueva-factura").addEventListener("click", () =>
   document.getElementById("dtef-receptor-giro").value = "";
   document.getElementById("dtef-receptor-direccion").value = "";
   document.getElementById("dtef-receptor-comuna").value = "";
+  document.getElementById("dtef-receptor-email").value = "";
   document.getElementById("dtef-observaciones").value = "";
   state.dteItems = [{ nombre: "", cantidad: 1, precio_unitario: 0 }];
   renderItemsDteFactura();
@@ -2552,7 +2559,17 @@ document.getElementById("btn-dte-nueva-factura").addEventListener("click", () =>
     aviso.style.display = "none";
   }
   abrirModal("modal-dte-factura");
-});
+  // Si venimos desde el botón "Ir a Facturación electrónica" de la pestaña
+  // "Factura" de una OT (ver operativo.js), se prellena el N° de OT y se
+  // dispara el mismo lookup que si el usuario lo hubiera escrito a mano.
+  if (ordenIdPrefill) {
+    const input = document.getElementById("dtef-orden-id");
+    input.value = ordenIdPrefill;
+    input.dispatchEvent(new Event("input"));
+  }
+}
+
+document.getElementById("btn-dte-nueva-factura").addEventListener("click", () => abrirModalNuevaFactura());
 
 document.getElementById("dtef-btn-agregar-item").addEventListener("click", () => {
   state.dteItems.push({ nombre: "", cantidad: 1, precio_unitario: 0 });
@@ -2574,6 +2591,7 @@ document.getElementById("dtef-orden-id").addEventListener("input", () => {
       document.getElementById("dtef-receptor-razon-social").value = cliente.nombre || "";
       document.getElementById("dtef-receptor-rut").value = cliente.rut || "";
       document.getElementById("dtef-receptor-direccion").value = cliente.direccion || "";
+      document.getElementById("dtef-receptor-email").value = cliente.email || "";
       // OJO: orden.items son los REPUESTOS/mano de obra a COSTO interno, no
       // lo que se le cobra al cliente -- lo que se cobra es un solo monto
       // por OT (orden.valor_neto, el "precio referencial" que se pactó con
@@ -2600,6 +2618,7 @@ document.getElementById("dtef-btn-emitir").addEventListener("click", async () =>
       giro: document.getElementById("dtef-receptor-giro").value,
       direccion: document.getElementById("dtef-receptor-direccion").value,
       comuna: document.getElementById("dtef-receptor-comuna").value,
+      email: document.getElementById("dtef-receptor-email").value,
     },
     items: state.dteItems || [],
     observaciones: document.getElementById("dtef-observaciones").value,
@@ -2639,11 +2658,42 @@ async function abrirDetalleDte(id) {
     document.getElementById("dted-btn-nota-credito-confirmar").style.display = "none";
     document.getElementById("dted-nc-wrap").style.display = "none";
     document.getElementById("dted-nc-motivo").value = "";
+
+    const puedeVerPdf = d.estado === "emitido" || d.estado === "anulado";
+    const pdfUrl = `/api/facturacion/documentos/${id}/pdf`;
+    document.getElementById("dted-btn-ver-pdf").href = pdfUrl;
+    document.getElementById("dted-btn-descargar-pdf").href = pdfUrl;
+    document.getElementById("dted-pdf-preview").src = puedeVerPdf ? pdfUrl : "about:blank";
+    document.getElementById("dted-pdf-preview").style.display = puedeVerPdf ? "block" : "none";
+    document.querySelectorAll("#modal-dte-detalle .toolbar, #modal-dte-detalle h3.subtitulo, #modal-dte-detalle .grid-2, #dted-envio-historial")
+      .forEach(el => { el.style.display = puedeVerPdf ? "" : "none"; });
+    document.getElementById("dted-envio-destinatario").value = d.receptor_email || "";
+    document.getElementById("dted-envio-historial").textContent = d.enviado_en
+      ? `Ya se envió el ${fmtFecha(d.enviado_en)} a ${d.enviado_a}.`
+      : "";
     abrirModal("modal-dte-detalle");
   } catch (e) {
     toast(e.message, true);
   }
 }
+
+document.getElementById("dted-btn-enviar").addEventListener("click", async () => {
+  const destinatario = document.getElementById("dted-envio-destinatario").value.trim();
+  const btn = document.getElementById("dted-btn-enviar");
+  btn.disabled = true;
+  try {
+    const data = await api(`/api/facturacion/documentos/${state.dteDocumentoActivoId}/enviar`, {
+      method: "POST", body: JSON.stringify(destinatario ? { destinatario } : {}),
+    });
+    toast(`Enviado a ${data.destinatario}`);
+    document.getElementById("dted-envio-historial").textContent = `Ya se envió el ${fmtFecha(data.documento.enviado_en)} a ${data.documento.enviado_a}.`;
+    await cargarDocumentosDte();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 document.getElementById("dted-btn-nota-credito").addEventListener("click", () => {
   document.getElementById("dted-nc-wrap").style.display = "block";

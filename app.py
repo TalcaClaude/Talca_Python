@@ -1151,6 +1151,22 @@ def init_db():
     )
     db.commit()
 
+    # ---- Migración 29: correo del receptor + registro de envío en
+    # documentos_tributarios -- para poder mandar la factura por correo al
+    # cliente (por defecto al que ya tiene registrado, pudiendo cambiarlo a
+    # mano al enviar) y dejar trazabilidad de a qué correo se mandó y
+    # cuándo, sin depender de leer los logs del servidor.
+    columnas_dte_v29 = [c[1] for c in db.execute("PRAGMA table_info(documentos_tributarios)").fetchall()]
+    if "receptor_email" not in columnas_dte_v29:
+        db.execute("ALTER TABLE documentos_tributarios ADD COLUMN receptor_email TEXT DEFAULT ''")
+        db.commit()
+    if "enviado_en" not in columnas_dte_v29:
+        db.execute("ALTER TABLE documentos_tributarios ADD COLUMN enviado_en TEXT")
+        db.commit()
+    if "enviado_a" not in columnas_dte_v29:
+        db.execute("ALTER TABLE documentos_tributarios ADD COLUMN enviado_a TEXT DEFAULT ''")
+        db.commit()
+
     # Datos manuales del Estado de Resultados por mes (rubros que no se
     # registran en ningún otro lugar del sistema porque vienen de
     # contabilidad/remuneraciones externas: sueldos, Previred, arriendo,

@@ -1862,7 +1862,41 @@ const OPOD_TAB_LOADERS = {
   presupuesto: () => abrirPresupuestoModal(),
   repuestos: () => abrirRepuestosModal(),
   qc: () => abrirQcModal(),
+  factura: () => cargarFacturaTab(),
 };
+
+// Pestaña "Factura" dentro del detalle de la OT: si la orden ya tiene una
+// factura electrónica emitida (buscada por orden_id en el módulo de
+// Facturación), se muestra la vista previa con opciones de ver/descargar;
+// si no, un botón directo a Facturación electrónica con la OT prellenada
+// (ver manejo de ?orden= en finanzas.js).
+async function cargarFacturaTab() {
+  const ordenId = document.getElementById("opod-id").value;
+  const bloqueSinEmitir = document.getElementById("opod-factura-sin-emitir");
+  const bloqueEmitida = document.getElementById("opod-factura-emitida");
+  bloqueSinEmitir.style.display = "none";
+  bloqueEmitida.style.display = "none";
+  try {
+    const data = await api(`/api/facturacion/documentos?orden_id=${encodeURIComponent(ordenId)}`);
+    const documento = (data.documentos || []).find(d => d.estado === "emitido" || d.estado === "anulado");
+    if (!documento) {
+      document.getElementById("opod-factura-btn-ir").href = `/finanzas?orden=${encodeURIComponent(ordenId)}#dte`;
+      bloqueSinEmitir.style.display = "block";
+      return;
+    }
+    const pdfUrl = `/api/facturacion/documentos/${documento.id}/pdf`;
+    document.getElementById("opod-factura-resumen").textContent =
+      `${documento.tipo_dte_label} N° ${documento.folio ?? "—"} — ${documento.receptor_razon_social} — ${fmtMoney(documento.monto_total)}` +
+      (documento.estado === "anulado" ? " (anulada por nota de crédito)" : "");
+    document.getElementById("opod-factura-btn-ver-pdf").href = pdfUrl;
+    document.getElementById("opod-factura-btn-descargar-pdf").href = pdfUrl;
+    document.getElementById("opod-factura-pdf-preview").src = pdfUrl;
+    bloqueEmitida.style.display = "block";
+  } catch (e) {
+    document.getElementById("opod-factura-btn-ir").href = `/finanzas?orden=${encodeURIComponent(ordenId)}#dte`;
+    bloqueSinEmitir.style.display = "block";
+  }
+}
 
 function activarTabOpod(nombre) {
   document.querySelectorAll("#modal-op-orden-detalle .op-tab").forEach(t => {

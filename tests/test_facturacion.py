@@ -148,5 +148,66 @@ class TestNotaDeCredito(_Base):
         self.assertEqual(resp.status_code, 400)
 
 
+class TestPdfYEnvio(_Base):
+    def test_descarga_pdf_de_documento_emitido(self):
+        factura = self._emitir_factura().get_json()
+        resp = self.client.get(f"/api/facturacion/documentos/{factura['id']}/pdf")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.mimetype, "application/pdf")
+        self.assertTrue(resp.data.startswith(b"%PDF"))
+
+    def test_pdf_de_documento_inexistente_da_404(self):
+        resp = self.client.get("/api/facturacion/documentos/999999/pdf")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_enviar_sin_correo_registrado_ni_destinatario_da_error_claro(self):
+        factura = self._emitir_factura(receptor={
+            "rut": "12345678-9", "razon_social": "Sin Correo SpA", "giro": "Comercio",
+        }).get_json()
+        resp = self.client.post(f"/api/facturacion/documentos/{factura['id']}/enviar", json={})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("correo", resp.get_json()["error"].lower())
+
+    def test_enviar_falla_con_mensaje_claro_si_no_hay_transporte_de_correo_configurado(self):
+        # En el entorno de pruebas no hay RESEND_API_KEY ni SMTP configurado
+        # -- debe fallar de forma controlada (502 con detalle), no reventar.
+        factura = self._emitir_factura(receptor={
+            "rut": "12345678-9", "razon_social": "Con Correo SpA", "giro": "Comercio",
+            "email": "cliente@correo.cl",
+        }).get_json()
+        resp = self.client.post(f"/api/facturacion/documentos/{factura['id']}/enviar", json={})
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn("correo", resp.get_json()["error"].lower())
+
+    def test_enviar_permite_destinatario_distinto_al_registrado(self):
+        factura = self._emitir_factura(receptor={
+            "rut": "12345678-9", "razon_social": "Con Correo SpA", "giro": "Comercio",
+            "email": "cliente@correo.cl",
+        }).get_json()
+        resp = self.client.post(
+            f"/api/facturacion/documentos/{factura['id']}/enviar",
+            json={"destinatario": "otro@correo.cl"},
+        )
+        # Sin transporte configurado también falla, pero lo importante acá
+        # es que no se rechaza por validación -- si fallara por falta de
+        # destinatario sería 400, acá debe ser 502 (falla en el envío).
+        self.assertEqual(resp.status_code, 502)
+
+
+class TestFiltroPorOrden(_Base):
+    def test_listado_filtra_por_orden_id(self):
+        self._emitir_factura(orden_id=None, receptor={"rut": "1-9", "razon_social": "Sin OT"})
+        # No hay una OT real en esta base de pruebas (tabla vacía), así que
+        # se prueba que el filtro no rompe y devuelve vacío para un orden_id
+        # que no tiene ninguna factura asociada.
+        resp = self.client.get("/api/facturacion/documentos?orden_id=999999")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["documentos"], [])
+
+    def test_orden_id_invalido_no_rompe_el_listado(self):
+        resp = self.client.get("/api/facturacion/documentos?orden_id=no-es-un-numero")
+        self.assertEqual(resp.status_code, 200)
+
+
 if __name__ == "__main__":
     unittest.main()

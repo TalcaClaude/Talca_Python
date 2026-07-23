@@ -1003,6 +1003,40 @@ class TestDetectorTextoConfirmaListoParaEntrega(unittest.TestCase):
             with self.subTest(frase=frase):
                 self.assertFalse(taller_app._agente_texto_confirma_listo_para_entrega(frase))
 
+    def test_negaciones_e_incertidumbre_menos_directas_no_confirman(self):
+        # Casos encontrados en una auditoría posterior: negaciones con
+        # "nunca"/"jamás"/"ni", incertidumbre con "dudo"/"duda"/"puede
+        # que"/"capaz que"/"casi", preguntas (propias o reenviadas del
+        # cliente) y condicionales con "cuando" -- ninguno de estos es una
+        # confirmación explícita, así que el detector NO debe moverlos.
+        frases = [
+            "nunca va a estar listo para la entrega a este paso",
+            "jamas va a estar listo para la entrega",
+            "casi queda listo para la entrega, manana seguro",
+            "ni de local queda listo para la entrega hoy",
+            "dudo que este listo para la entrega hoy",
+            "puede que quede listo para la entrega en la tarde",
+            "capaz que quede listo para la entrega manana",
+            "esta listo para la entrega?",
+            "el cliente pregunto si esta listo para la entrega",
+            "cuando este listo aviso para la entrega",
+        ]
+        for frase in frases:
+            with self.subTest(frase=frase):
+                self.assertFalse(taller_app._agente_texto_confirma_listo_para_entrega(frase))
+
+    def test_confirmaciones_con_puede_siguen_funcionando(self):
+        # "puede" como palabra suelta (permiso/capacidad, no incertidumbre)
+        # no debe bloquearse -- solo la frase literal "puede que"/"capaz
+        # que" cuenta como incertidumbre (ver test anterior).
+        frases = [
+            "ya se puede retirar, esta listo",
+            "auto listo, puede pasar a retirarlo",
+        ]
+        for frase in frases:
+            with self.subTest(frase=frase):
+                self.assertTrue(taller_app._agente_texto_confirma_listo_para_entrega(frase))
+
 
 if __name__ == "__main__":
     unittest.main()

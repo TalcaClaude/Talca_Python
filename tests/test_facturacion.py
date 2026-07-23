@@ -160,6 +160,31 @@ class TestPdfYEnvio(_Base):
         resp = self.client.get("/api/facturacion/documentos/999999/pdf")
         self.assertEqual(resp.status_code, 404)
 
+    def test_pdf_no_se_rompe_con_un_tag_sin_cerrar_en_observaciones(self):
+        # Auditoría de julio 2026: un "<" suelto sin cerrar en
+        # 'observaciones' (ej. "revisar <valor bomba de agua") hacía que
+        # ReportLab reventara al generar el PDF (interpreta un mini-lenguaje
+        # tipo XML dentro de un Paragraph), dejando ese documento tributario
+        # -- inmutable una vez emitido -- sin poder verse/descargarse/
+        # enviarse nunca más. Se corrigió escapando el texto libre antes de
+        # interpolarlo.
+        factura = self._emitir_factura(
+            observaciones="Revisar <valor bomba de agua en proxima visita"
+        ).get_json()
+        resp = self.client.get(f"/api/facturacion/documentos/{factura['id']}/pdf")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data.startswith(b"%PDF"))
+
+    def test_pdf_de_nota_de_credito_no_se_rompe_con_tag_sin_cerrar_en_motivo(self):
+        factura = self._emitir_factura().get_json()
+        nc = self.client.post(
+            f"/api/facturacion/documentos/{factura['id']}/nota-credito",
+            json={"motivo": "Cliente pidio <garantia extendida revisar en 6 meses"},
+        ).get_json()
+        resp = self.client.get(f"/api/facturacion/documentos/{nc['id']}/pdf")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data.startswith(b"%PDF"))
+
     def test_pdf_por_defecto_es_inline_no_se_descarga_solo(self):
         # Ver PDF en pestaña nueva / la vista previa en el <iframe> no deben
         # forzar una descarga -- solo el botón "Descargar PDF" (que agrega

@@ -517,6 +517,7 @@ def _armar_documento_pdf(db, documento):
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from xml.sax.saxutils import escape as _escape_pdf
 
     config = db.execute("SELECT * FROM configuracion_facturacion WHERE id = 1").fetchone()
     emisor = dict(config) if config else {}
@@ -611,9 +612,18 @@ def _armar_documento_pdf(db, documento):
         elementos.append(Spacer(1, 4))
 
     if es_nc:
+        # 'motivo_nc'/'observaciones' son texto libre escrito por la persona
+        # que emite la nota de crédito -- se escapa antes de interpolarlo en
+        # el Paragraph porque ReportLab interpreta un mini-lenguaje tipo XML
+        # (<b>, <font>, etc.) en el texto de un Paragraph: un "<" suelto sin
+        # cerrar (ej. "revisar <bomba de agua") hacía que la generación del
+        # PDF reventara con ValueError, dejando ese documento tributario
+        # (inmutable una vez emitido) sin poder verse/descargarse/enviarse
+        # nunca más. Ver auditoría de julio 2026.
+        motivo = _escape_pdf(documento["motivo_nc"] or documento["observaciones"] or "—")
+        folio_ref = documento["folio"] if documento["documento_referencia_id"] else "—"
         elementos.append(Paragraph(
-            f"Anula Factura Electrónica N° {documento['folio'] if documento['documento_referencia_id'] else '—'} "
-            f"— Motivo: {documento['motivo_nc'] or documento['observaciones'] or '—'}",
+            f"Anula Factura Electrónica N° {folio_ref} — Motivo: {motivo}",
             estilos["Normal"],
         ))
         elementos.append(Spacer(1, 10))
@@ -665,7 +675,9 @@ def _armar_documento_pdf(db, documento):
 
     if documento["observaciones"] and not es_nc:
         elementos.append(Spacer(1, 10))
-        elementos.append(Paragraph(f"Observaciones: {documento['observaciones']}", estilos["Normal"]))
+        # Ver comentario de más arriba (rama 'es_nc') sobre por qué se
+        # escapa este texto libre antes de interpolarlo en el Paragraph.
+        elementos.append(Paragraph(f"Observaciones: {_escape_pdf(documento['observaciones'])}", estilos["Normal"]))
 
     nombre_receptor = (documento["receptor_razon_social"] or "cliente").title()
     tipo_archivo = "NC" if es_nc else "Factura"

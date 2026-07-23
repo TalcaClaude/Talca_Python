@@ -5955,12 +5955,26 @@ _PATRON_LISTO_PARA_ENTREGA = re.compile(
     r"\blist[oa]\b[^.\n]{0,25}\b(?:entrega|entregar|retiro|retirar)\w*"
     r"|\b(?:entrega|entregar|retiro|retirar)\w*[^.\n]{0,25}\blist[oa]\b"
 )
-# Negaciones que, si aparecen en la MISMA oración que el patrón de arriba,
-# invalidan la confirmación (ej. "no está lista para la entrega, falta el
-# parachoques") -- a propósito la lista es corta y literal (no un intento de
-# NLP de negación general): cualquier otro caso ambiguo ya queda descartado
-# porque _PATRON_LISTO_PARA_ENTREGA simplemente no matchea.
-_PATRON_NEGACION_LISTO = re.compile(r"\b(no|sin|falta|faltan|todavia)\b")
+# Negaciones/incertidumbre que, si aparecen en la MISMA oración que el
+# patrón de arriba, invalidan la confirmación (ej. "no está lista para la
+# entrega, falta el parachoques", "dudo que esté lista para la entrega",
+# "el cliente preguntó si está lista para la entrega", "nunca va a estar
+# lista para la entrega a este paso") -- a propósito la lista es corta y
+# literal (no un intento de NLP de negación general), pero se amplió tras
+# una auditoría que encontró casos reales donde el patrón de arriba
+# matcheaba pese a que el mensaje NO era una confirmación (negaciones con
+# "nunca"/"jamás", incertidumbre con "dudo"/"duda", una pregunta
+# reenviada con "pregunt-", o una condición futura con "cuando"/"casi").
+# Cualquier otro caso ambiguo ya queda descartado porque
+# _PATRON_LISTO_PARA_ENTREGA simplemente no matchea.
+_PATRON_NEGACION_LISTO = re.compile(
+    r"\b(no|ni|sin|falta|faltan|todavia|nunca|jamas|dudo|duda|pregunt\w*|cuando|casi)\b"
+)
+# Frases de dos palabras que también expresan incertidumbre ("puede que",
+# "capaz que") -- se buscan como texto literal, NO como palabra suelta
+# "puede"/"capaz", porque "puede" sola SÍ aparece en confirmaciones válidas
+# (ej. "ya se puede retirar, está listo").
+_FRASES_NEGACION_LISTO = ("puede que", "capaz que")
 
 
 def _agente_texto_confirma_listo_para_entrega(texto):
@@ -5978,17 +5992,22 @@ def _agente_texto_confirma_listo_para_entrega(texto):
     modelo.
 
     Devuelve True SOLO si alguna oración del mensaje trae "listo"/"lista"
-    cerca de "entrega"/"entregar"/"retiro"/"retirar" (en cualquier orden) y
-    esa misma oración no trae una negación cercana (ej. "no está lista
-    para la entrega", "todavía falta para que quede lista"). Cualquier
-    otro caso -- texto ambiguo, sin esas palabras, o con ellas pero
-    negadas -- devuelve False, que es justamente lo que hace que la OT NO
-    se mueva de estado (ver _agente_procesar_mensaje, rama
-    'es_encargado_pre_entrega')."""
+    cerca de "entrega"/"entregar"/"retiro"/"retirar" (en cualquier orden),
+    esa misma oración no trae una negación/incertidumbre cercana (ver
+    _PATRON_NEGACION_LISTO), y la oración no es una pregunta (no trae
+    "?" -- una pregunta, propia o reenviada del cliente, no es una
+    confirmación). Cualquier otro caso -- texto ambiguo, sin esas
+    palabras, negado, dudoso, o formulado como pregunta -- devuelve
+    False, que es justamente lo que hace que la OT NO se mueva de estado
+    (ver _agente_procesar_mensaje, rama 'es_encargado_pre_entrega')."""
     texto_norm = normalizar_busqueda(texto or "")
     if not texto_norm:
         return False
     for oracion in re.split(r"[.\n]+", texto_norm):
+        if "?" in oracion:
+            continue
+        if any(frase in oracion for frase in _FRASES_NEGACION_LISTO):
+            continue
         if _PATRON_LISTO_PARA_ENTREGA.search(oracion) and not _PATRON_NEGACION_LISTO.search(oracion):
             return True
     return False

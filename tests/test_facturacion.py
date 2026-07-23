@@ -175,6 +175,22 @@ class TestPdfYEnvio(_Base):
         disposicion = resp.headers.get("Content-Disposition", "")
         self.assertIn("attachment", disposicion.lower())
 
+    def test_pdf_permite_ser_embebido_en_iframe_del_propio_sitio(self):
+        # Las cabeceras de seguridad globales (X-Frame-Options: DENY,
+        # frame-ancestors 'none', ver app.py) bloquean CUALQUIER framing,
+        # incluso del propio sitio -- eso dejaba la vista previa en <iframe>
+        # de finanzas.js/operativo.js siempre en blanco. Se relajan SOLO
+        # para esta ruta, a 'self'/SAMEORIGIN.
+        factura = self._emitir_factura().get_json()
+        resp = self.client.get(f"/api/facturacion/documentos/{factura['id']}/pdf")
+        self.assertEqual(resp.headers.get("X-Frame-Options"), "SAMEORIGIN")
+        self.assertIn("frame-ancestors 'self'", resp.headers.get("Content-Security-Policy", ""))
+
+    def test_resto_del_sitio_mantiene_x_frame_options_deny(self):
+        resp = self.client.get("/api/facturacion/configuracion")
+        self.assertEqual(resp.headers.get("X-Frame-Options"), "DENY")
+        self.assertIn("frame-ancestors 'none'", resp.headers.get("Content-Security-Policy", ""))
+
     def test_enviar_sin_correo_registrado_ni_destinatario_da_error_claro(self):
         factura = self._emitir_factura(receptor={
             "rut": "12345678-9", "razon_social": "Sin Correo SpA", "giro": "Comercio",
@@ -222,6 +238,18 @@ class TestFiltroPorOrden(_Base):
     def test_orden_id_invalido_no_rompe_el_listado(self):
         resp = self.client.get("/api/facturacion/documentos?orden_id=no-es-un-numero")
         self.assertEqual(resp.status_code, 200)
+
+    def test_busqueda_por_texto_tambien_encuentra_por_numero_de_ot(self):
+        # La tabla "Facturación electrónica" y su buscador (ver finanzas.js)
+        # ahora muestran/filtran también por N° de OT, no solo por razón
+        # social/RUT/folio -- para eso hace falta una OT real (FK).
+        cliente = self.client.post("/api/operativo/clientes", json={"nombre": "Cliente Con OT"}).get_json()
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+        factura = self._emitir_factura(orden_id=orden["id"], receptor={"rut": "1-9", "razon_social": "Cliente Con OT"}).get_json()
+
+        resp = self.client.get(f"/api/facturacion/documentos?q={orden['id']}")
+        ids = [d["id"] for d in resp.get_json()["documentos"]]
+        self.assertIn(factura["id"], ids)
 
 
 if __name__ == "__main__":

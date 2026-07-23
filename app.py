@@ -1700,8 +1700,18 @@ def _validar_csrf():
 # dominios externos no autorizados.
 @app.after_request
 def _agregar_cabeceras_seguridad(resp):
-    resp.headers["X-Frame-Options"] = "DENY"
+    # Caso especial: la vista previa de facturas/notas de crédito (finanzas.js
+    # / operativo.js) muestra el PDF adentro de un <iframe> DE ESTE MISMO
+    # sitio -- "frame-ancestors 'none'" + "X-Frame-Options: DENY" bloquean
+    # CUALQUIER framing, incluso del propio origen, así que esa vista previa
+    # quedaba siempre en blanco (aunque el mismo PDF sí abría bien en una
+    # pestaña nueva, porque ahí no hay framing de por medio). Se relaja SOLO
+    # para esta ruta puntual, a 'self' en vez de sacar la protección
+    # anti-clickjacking del resto del sitio.
+    es_pdf_dte = request.path.startswith("/api/facturacion/documentos/") and request.path.endswith("/pdf")
+    resp.headers["X-Frame-Options"] = "SAMEORIGIN" if es_pdf_dte else "DENY"
     resp.headers["X-Content-Type-Options"] = "nosniff"
+    frame_ancestors = "frame-ancestors 'self'; " if es_pdf_dte else "frame-ancestors 'none'; "
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self' 'unsafe-inline'; "
@@ -1709,7 +1719,7 @@ def _agregar_cabeceras_seguridad(resp):
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: blob:; "
         "connect-src 'self'; "
-        "frame-ancestors 'none'; "
+        + frame_ancestors +
         "base-uri 'self'; "
         "form-action 'self'"
     )
@@ -5319,6 +5329,29 @@ def _normalizar_patente(valor):
     return re.sub(r"[^A-Z0-9]", "", (valor or "").upper())
 
 
+def _agente_resolver_ot_por_patente_en_texto(texto, ordenes_abiertas):
+    """Busca, dentro de un mensaje de puro texto (sin foto -- ver rama
+    'es_mecanico_restringido' de _agente_procesar_mensaje), alguna palabra
+    que calce EXACTO con la patente de una OT abierta. No es un regex de
+    'forma de patente chilena' (eso sería frágil: formato viejo AA1234,
+    formato nuevo BBBB12, con o sin guión) -- en cambio se normaliza cada
+    palabra del mensaje (_normalizar_patente, deja solo A-Z0-9) y se compara
+    contra las patentes YA existentes entre las OT abiertas. Así solo
+    matchea patentes reales que el taller ya tiene registradas, sin
+    falsos positivos por confundir un número cualquiera con una patente."""
+    palabras = re.findall(r"[A-Za-z0-9-]{4,8}", texto or "")
+    if not palabras:
+        return None
+    candidatas = {_normalizar_patente(p) for p in palabras if _normalizar_patente(p)}
+    if not candidatas:
+        return None
+    for orden in ordenes_abiertas:
+        patente_orden = _normalizar_patente(orden.get("patente") or "")
+        if patente_orden and patente_orden in candidatas:
+            return orden
+    return None
+
+
 def _agente_listar_ordenes_abiertas(db):
     """Lista liviana (sin ítems/pagos/costos, a diferencia de _orden_dict)
     de las OT que todavía admiten cambios de estado — cliente + datos del
@@ -6263,8 +6296,11 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
         # tiene permiso para ejecutar acciones de diagnóstico/estado, así
         # que en vez de interpretarlo como una acción se intenta guardar
         # como sugerencia o como prueba de ruta (según el perfil) -- para
-        # eso sí o sí necesita traer un número de OT explícito (sin foto no
-        # hay patente que leer para resolverla sola).
+        # eso sí o sí necesita traer un número de OT O una patente que ya
+        # esté registrada en alguna OT abierta (ver
+        # _agente_resolver_ot_por_patente_en_texto -- sin foto no hay OCR,
+        # pero si el mecánico escribe la patente tal cual, igual se puede
+        # resolver sola sin pedirle el número de memoria).
         ordenes_abiertas_texto = _agente_listar_ordenes_abiertas(db)
         match_ot_numero_texto = re.search(r"\bot\s*#?\s*(\d+)\b", texto_mensaje, re.IGNORECASE)
         ot_para_sugerencia = None
@@ -6274,6 +6310,8 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
                 (o for o in ordenes_abiertas_texto if o["ot_id"] == ot_id_deseado_texto), None
             )
         if ot_para_sugerencia is None:
+            ot_para_sugerencia = _agente_resolver_ot_por_patente_en_texto(texto_mensaje, ordenes_abiertas_texto)
+        if ot_para_sugerencia is None:
             mensaje_perfil = (
                 "Tu perfil solo puede registrar pruebas de ruta, no cambiar el diagnóstico directamente."
                 if es_probador_de_autos else
@@ -6282,8 +6320,8 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
             )
             return _registrar(
                 mecanico["nombre"], "sugerencia_sin_ot", None, "", "", False,
-                f"{mensaje_perfil} Indica el número de OT (ej. \"OT 3321\") junto con tu comentario para que "
-                f"quede registrado.",
+                f"{mensaje_perfil} Indica el número de OT (ej. \"OT 3321\") o la patente del vehículo junto "
+                f"con tu comentario para que quede registrado.",
             )
         if es_probador_de_autos:
             _agente_guardar_prueba_ruta(

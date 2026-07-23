@@ -1891,7 +1891,6 @@ async function cargarFacturaTab() {
     document.getElementById("opod-factura-resumen").textContent =
       `${documento.tipo_dte_label} N° ${documento.folio ?? "—"} — ${documento.receptor_razon_social} — ${fmtMoney(documento.monto_total)}` +
       (documento.estado === "anulado" ? " (anulada por nota de crédito)" : "");
-    document.getElementById("opod-factura-btn-ver-pdf").href = pdfUrlVer;
     document.getElementById("opod-factura-btn-descargar-pdf").href = pdfUrlDescargar;
     document.getElementById("opod-factura-pdf-preview").src = pdfUrlVer;
     document.getElementById("opod-factura-pdf-preview-ampliar").href = pdfUrlVer;

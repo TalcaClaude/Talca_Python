@@ -403,7 +403,7 @@
   <p class="ayuda-inline" id="dte-aviso-simulado" style="display:none"></p>
   <p class="ayuda-inline">Emite facturas electrónicas a clientes y, si hace falta corregir o anular una ya emitida, su nota de crédito — quedan registradas acá con su folio, para no perder el historial. No confundir con la pestaña "Facturas", que son las facturas de COMPRA de tus proveedores.</p>
   <section class="toolbar">
-    <input type="text" id="dte-buscar" placeholder="Buscar por razón social, RUT o folio…">
+    <input type="text" id="dte-buscar" placeholder="Buscar por razón social, RUT, folio o N° de OT…">
     <select id="dte-filtro-tipo">
       <option value="">Todos los documentos</option>
       <option value="33">Facturas</option>
@@ -428,6 +428,7 @@
           <th>Documento</th>
           <th>Folio</th>
           <th>Receptor</th>
+          <th>OT</th>
           <th class="num">Monto</th>
           <th>Estado</th>
           <th>Emitida por</th>
@@ -435,7 +436,7 @@
         </tr>
       </thead>
       <tbody id="tbody-dte">
-        <tr><td colspan="8" class="vacio">Cargando…</td></tr>
+        <tr><td colspan="9" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>
@@ -1177,14 +1178,14 @@
     <div id="dted-contenido"></div>
 
     <section class="toolbar">
-      <a class="btn btn-secundario" id="dted-btn-ver-pdf" href="#" target="_blank" rel="noopener">Ver PDF en pestaña nueva</a>
       <a class="btn btn-secundario" id="dted-btn-descargar-pdf" href="#" download>Descargar PDF</a>
     </section>
 
     <div style="position:relative; margin-top:8px;">
       <iframe id="dted-pdf-preview" style="width:100%; height:420px; border:1px solid var(--borde, #333); border-radius:8px; pointer-events:none;"></iframe>
-      <a id="dted-pdf-preview-ampliar" href="#" target="_blank" rel="noopener" title="Haz clic para ver la factura en tamaño completo" style="position:absolute; inset:0; cursor:zoom-in;"></a>
+      <a id="dted-pdf-preview-ampliar" href="#" target="_blank" rel="noopener" title="Haz clic para ver la factura en tamaño completo (se abre en una pestaña nueva)" style="position:absolute; inset:0; cursor:zoom-in;"></a>
     </div>
+    <p class="ayuda-inline">Haz clic sobre la vista previa para abrir la factura en tamaño completo, en una pestaña nueva.</p>
 
     <h3 class="subtitulo">Enviar por correo</h3>
     <div class="grid-2">

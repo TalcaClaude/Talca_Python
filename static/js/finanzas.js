@@ -2450,7 +2450,7 @@ document.getElementById("form-dte-configuracion").addEventListener("submit", asy
 
 async function cargarDocumentosDte() {
   const tbody = document.getElementById("tbody-dte");
-  tbody.innerHTML = `<tr><td colspan="8" class="vacio">Cargando…</td></tr>`;
+  tbody.innerHTML = `<tr><td colspan="9" class="vacio">Cargando…</td></tr>`;
   const params = new URLSearchParams();
   const q = document.getElementById("dte-buscar").value.trim();
   const tipo = document.getElementById("dte-filtro-tipo").value;
@@ -2462,7 +2462,7 @@ async function cargarDocumentosDte() {
     const data = await api("/api/facturacion/documentos?" + params.toString());
     state.dteDocumentos = data.documentos;
     if (data.documentos.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="vacio">No hay documentos emitidos todavía.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" class="vacio">No hay documentos emitidos todavía.</td></tr>`;
       return;
     }
     tbody.innerHTML = data.documentos.map(d => `
@@ -2471,6 +2471,7 @@ async function cargarDocumentosDte() {
         <td>${TIPO_DTE_LABEL[d.tipo_dte] || d.tipo_dte}</td>
         <td class="mono">${d.folio ?? "—"}</td>
         <td>${escapeHtml(d.receptor_razon_social)} <span class="ayuda-inline">(${escapeHtml(d.receptor_rut)})</span></td>
+        <td class="mono">${d.orden_id ? `OT #${d.orden_id}` : "—"}</td>
         <td class="num mono">${fmtMoney(d.monto_total)}</td>
         <td>${ESTADO_DTE_LABEL[d.estado] || d.estado}</td>
         <td>${escapeHtml(d.usuario || "")}</td>
@@ -2480,7 +2481,7 @@ async function cargarDocumentosDte() {
       tr.addEventListener("click", () => abrirDetalleDte(Number(tr.dataset.abrirDte)));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar: ${e.message}</td></tr>`;
   }
 }
 
@@ -2670,7 +2671,6 @@ async function abrirDetalleDte(id) {
     const puedeVerPdf = d.estado === "emitido" || d.estado === "anulado";
     const pdfUrlVer = `/api/facturacion/documentos/${id}/pdf`;
     const pdfUrlDescargar = `/api/facturacion/documentos/${id}/pdf?descargar=1`;
-    document.getElementById("dted-btn-ver-pdf").href = pdfUrlVer;
     document.getElementById("dted-btn-descargar-pdf").href = pdfUrlDescargar;
     document.getElementById("dted-pdf-preview").src = puedeVerPdf ? pdfUrlVer : "about:blank";
     document.getElementById("dted-pdf-preview-ampliar").href = pdfUrlVer;

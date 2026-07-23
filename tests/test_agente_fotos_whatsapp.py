@@ -580,6 +580,61 @@ class TestPerfilProbadorDeAutos(unittest.TestCase):
         self.assertEqual(data["accion"], "sugerencia_sin_ot")
         self.assertIn("prueba", data["respuesta_texto"].lower())
 
+    def test_probador_manda_texto_con_patente_en_vez_de_numero_de_ot(self):
+        # No siempre el mecánico/probador se sabe el número de OT de memoria
+        # -- si escribe la patente del vehículo (tal cual está registrada en
+        # el equipo), el sistema la resuelve sola contra las OT abiertas sin
+        # necesitar el número (ver _agente_resolver_ot_por_patente_en_texto).
+        self._registrar_mecanico("Probador Patente", "+56900900014", tipo="probador_de_autos")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "RPYZ62")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto("+56900900014", "RPYZ62 vuelta corta, funcionamiento de marchas ok")
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "prueba_ruta_registrada")
+        self.assertEqual(data["ot_id"], orden["id"])
+
+        pruebas = self._pruebas_ruta_de(orden["id"])
+        self.assertEqual(len(pruebas), 1)
+        self.assertIn("vuelta corta", pruebas[0]["texto"])
+
+    def test_probador_manda_texto_con_patente_con_guion_igual_matchea(self):
+        # La patente puede venir con guión ('RP-YZ-62') o sin él -- ambas
+        # formas deben resolver a la misma OT (ver _normalizar_patente).
+        self._registrar_mecanico("Probador Patente Guion", "+56900900015", tipo="probador_de_autos")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "RPYZ63")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto("+56900900015", "RP-YZ-63 sin testigos de falla, carga combustible 1/4")
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["ot_id"], orden["id"])
+
+    def test_mecanico_restringido_manda_texto_con_patente_queda_como_sugerencia(self):
+        self._registrar_mecanico("Restringido Patente", "+56900900016", tipo="mecanico")
+        cliente = self._crear_cliente()
+        equipo = self._crear_equipo(cliente["id"], "RPYZ64")
+        orden = self._crear_orden(cliente["id"], equipo["id"])
+
+        resp = self._mandar_texto("+56900900016", "RPYZ64 el auto ya casi queda listo")
+        data = resp.get_json()
+        self.assertTrue(data["exito"], data)
+        self.assertEqual(data["accion"], "sugerencia_registrada")
+        self.assertEqual(data["ot_id"], orden["id"])
+
+    def test_texto_con_patente_que_no_corresponde_a_ninguna_ot_abierta_pide_el_numero(self):
+        # Una palabra que "parece patente" pero no está registrada en
+        # ninguna OT abierta no debe matchear cualquier cosa -- sigue
+        # pidiendo el número/patente correctos.
+        self._registrar_mecanico("Probador Patente Falsa", "+56900900017", tipo="probador_de_autos")
+        resp = self._mandar_texto("+56900900017", "ZZZZ99 vuelta corta sin novedad")
+        data = resp.get_json()
+        self.assertFalse(data["exito"])
+        self.assertEqual(data["accion"], "sugerencia_sin_ot")
+
     def test_varias_pruebas_de_ruta_de_la_misma_ot_se_acumulan_sin_pisarse(self):
         self._registrar_mecanico("Probador Cuatro", "+56900900013", tipo="probador_de_autos")
         cliente = self._crear_cliente()

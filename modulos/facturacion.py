@@ -340,7 +340,10 @@ def facturacion_listar_documentos():
     if q:
         documentos = [
             d for d in documentos
-            if coincide_busqueda(q, d.get("receptor_razon_social"), d.get("receptor_rut"), str(d.get("folio") or ""))
+            if coincide_busqueda(
+                q, d.get("receptor_razon_social"), d.get("receptor_rut"), str(d.get("folio") or ""),
+                f"OT {d['orden_id']}" if d.get("orden_id") else "",
+            )
         ]
 
     return jsonify({"documentos": documentos, "total": len(documentos)})

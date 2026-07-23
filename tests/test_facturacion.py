@@ -160,6 +160,21 @@ class TestPdfYEnvio(_Base):
         resp = self.client.get("/api/facturacion/documentos/999999/pdf")
         self.assertEqual(resp.status_code, 404)
 
+    def test_pdf_por_defecto_es_inline_no_se_descarga_solo(self):
+        # Ver PDF en pestaña nueva / la vista previa en el <iframe> no deben
+        # forzar una descarga -- solo el botón "Descargar PDF" (que agrega
+        # ?descargar=1) debe hacerlo.
+        factura = self._emitir_factura().get_json()
+        resp = self.client.get(f"/api/facturacion/documentos/{factura['id']}/pdf")
+        disposicion = resp.headers.get("Content-Disposition", "")
+        self.assertNotIn("attachment", disposicion.lower())
+
+    def test_pdf_con_descargar_fuerza_attachment(self):
+        factura = self._emitir_factura().get_json()
+        resp = self.client.get(f"/api/facturacion/documentos/{factura['id']}/pdf?descargar=1")
+        disposicion = resp.headers.get("Content-Disposition", "")
+        self.assertIn("attachment", disposicion.lower())
+
     def test_enviar_sin_correo_registrado_ni_destinatario_da_error_claro(self):
         factura = self._emitir_factura(receptor={
             "rut": "12345678-9", "razon_social": "Sin Correo SpA", "giro": "Comercio",

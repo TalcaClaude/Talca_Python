@@ -1007,10 +1007,14 @@ def _pdf_tabla(elementos, estilos, titulo_tabla, encabezados, filas, notas=""):
         elementos.append(Paragraph(notas, estilos["Normal"]))
 
 
-def _pdf_response(buffer, doc, elementos, nombre_archivo):
+def _pdf_response(buffer, doc, elementos, nombre_archivo, as_attachment=True):
+    """as_attachment=True (default, para no cambiar el comportamiento de
+    quien ya llamaba a esta función) fuerza la descarga inmediata --
+    as_attachment=False manda el PDF 'inline', para que un <iframe> o
+    'abrir en pestaña nueva' lo muestren en vez de descargarlos solos."""
     doc.build(elementos)
     buffer.seek(0)
-    return send_file(buffer, as_attachment=True, download_name=nombre_archivo, mimetype="application/pdf")
+    return send_file(buffer, as_attachment=as_attachment, download_name=nombre_archivo, mimetype="application/pdf")
 
 
 def _rango_fechas():

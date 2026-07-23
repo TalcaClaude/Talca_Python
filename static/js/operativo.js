@@ -735,6 +735,7 @@ function renderTableroOperativo() {
 
   const coincide = (orden) => coincideBusqueda(
     busqueda,
+    String(orden.id),
     orden.cliente ? orden.cliente.nombre : "",
     orden.equipo ? `${orden.equipo.marca} ${orden.equipo.modelo} ${orden.equipo.identificador}` : "",
     orden.descripcion_problema || "",
@@ -874,6 +875,7 @@ function renderListadoOperativo() {
   // garantías del resultado, no se las deja pasar sin filtrar.
   const coincide = (f) => coincideBusqueda(
     busqueda,
+    String(f.id),
     f.cliente_nombre || "",
     `${f.marca || ""} ${f.modelo || ""} ${f.patente || ""}`,
   );
@@ -1884,13 +1886,15 @@ async function cargarFacturaTab() {
       bloqueSinEmitir.style.display = "block";
       return;
     }
-    const pdfUrl = `/api/facturacion/documentos/${documento.id}/pdf`;
+    const pdfUrlVer = `/api/facturacion/documentos/${documento.id}/pdf`;
+    const pdfUrlDescargar = `/api/facturacion/documentos/${documento.id}/pdf?descargar=1`;
     document.getElementById("opod-factura-resumen").textContent =
       `${documento.tipo_dte_label} N° ${documento.folio ?? "—"} — ${documento.receptor_razon_social} — ${fmtMoney(documento.monto_total)}` +
       (documento.estado === "anulado" ? " (anulada por nota de crédito)" : "");
-    document.getElementById("opod-factura-btn-ver-pdf").href = pdfUrl;
-    document.getElementById("opod-factura-btn-descargar-pdf").href = pdfUrl;
-    document.getElementById("opod-factura-pdf-preview").src = pdfUrl;
+    document.getElementById("opod-factura-btn-ver-pdf").href = pdfUrlVer;
+    document.getElementById("opod-factura-btn-descargar-pdf").href = pdfUrlDescargar;
+    document.getElementById("opod-factura-pdf-preview").src = pdfUrlVer;
+    document.getElementById("opod-factura-pdf-preview-ampliar").href = pdfUrlVer;
     bloqueEmitida.style.display = "block";
   } catch (e) {
     document.getElementById("opod-factura-btn-ir").href = `/finanzas?orden=${encodeURIComponent(ordenId)}#dte`;

@@ -1181,7 +1181,10 @@
       <a class="btn btn-secundario" id="dted-btn-descargar-pdf" href="#" download>Descargar PDF</a>
     </section>
 
-    <iframe id="dted-pdf-preview" style="width:100%; height:420px; border:1px solid var(--borde, #333); border-radius:8px; margin-top:8px;"></iframe>
+    <div style="position:relative; margin-top:8px;">
+      <iframe id="dted-pdf-preview" style="width:100%; height:420px; border:1px solid var(--borde, #333); border-radius:8px; pointer-events:none;"></iframe>
+      <a id="dted-pdf-preview-ampliar" href="#" target="_blank" rel="noopener" title="Haz clic para ver la factura en tamaño completo" style="position:absolute; inset:0; cursor:zoom-in;"></a>
+    </div>
 
     <h3 class="subtitulo">Enviar por correo</h3>
     <div class="grid-2">

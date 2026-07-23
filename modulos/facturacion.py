@@ -678,7 +678,12 @@ def facturacion_documento_pdf(documento_id):
     if documento is None:
         return jsonify({"error": "Documento no encontrado"}), 404
     buffer, doc, elementos, nombre = _armar_documento_pdf(db, documento)
-    return _pdf_response(buffer, doc, elementos, nombre)
+    # Por defecto se manda 'inline' (para la vista previa en el <iframe> y
+    # para "Ver PDF en pestaña nueva") -- solo se fuerza la descarga cuando
+    # el botón "Descargar PDF" pide explícitamente ?descargar=1 (ver
+    # finanzas.js / operativo.js), para no descargar solo por mirarla.
+    descargar = (request.args.get("descargar") or "").strip() == "1"
+    return _pdf_response(buffer, doc, elementos, nombre, as_attachment=descargar)
 
 
 @bp.route("/api/facturacion/documentos/<int:documento_id>/enviar", methods=["POST"])

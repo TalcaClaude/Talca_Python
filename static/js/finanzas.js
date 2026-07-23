@@ -193,8 +193,16 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
       cargarDte();
       // Llegada desde el botón "Ir a Facturación electrónica" de la
       // pestaña "Factura" de una OT (ver operativo.js): /finanzas?orden=123#dte
+      // OJO: esto corre en la carga inicial de la página (activarPestanaDesdeHash()
+      // se llama apenas se define, más arriba en este mismo archivo), pero el
+      // listener "input" de #dtef-orden-id que hace el lookup recién se
+      // registra más abajo en este archivo -- si se dispara el evento acá
+      // mismo, ese listener todavía no existe y el prellenado se pierde
+      // silenciosamente. Por eso se difiere con setTimeout(0): así corre
+      // recién cuando el script completo (con todos sus listeners) ya
+      // terminó de ejecutarse.
       const ordenPrefill = new URLSearchParams(location.search).get("orden");
-      if (ordenPrefill) abrirModalNuevaFactura(ordenPrefill);
+      if (ordenPrefill) setTimeout(() => abrirModalNuevaFactura(ordenPrefill), 0);
     }
     if (vista === "estado-resultados") cargarEstadoResultados();
   });
@@ -2660,10 +2668,13 @@ async function abrirDetalleDte(id) {
     document.getElementById("dted-nc-motivo").value = "";
 
     const puedeVerPdf = d.estado === "emitido" || d.estado === "anulado";
-    const pdfUrl = `/api/facturacion/documentos/${id}/pdf`;
-    document.getElementById("dted-btn-ver-pdf").href = pdfUrl;
-    document.getElementById("dted-btn-descargar-pdf").href = pdfUrl;
-    document.getElementById("dted-pdf-preview").src = puedeVerPdf ? pdfUrl : "about:blank";
+    const pdfUrlVer = `/api/facturacion/documentos/${id}/pdf`;
+    const pdfUrlDescargar = `/api/facturacion/documentos/${id}/pdf?descargar=1`;
+    document.getElementById("dted-btn-ver-pdf").href = pdfUrlVer;
+    document.getElementById("dted-btn-descargar-pdf").href = pdfUrlDescargar;
+    document.getElementById("dted-pdf-preview").src = puedeVerPdf ? pdfUrlVer : "about:blank";
+    document.getElementById("dted-pdf-preview-ampliar").href = pdfUrlVer;
+    document.getElementById("dted-pdf-preview-ampliar").style.display = puedeVerPdf ? "block" : "none";
     document.getElementById("dted-pdf-preview").style.display = puedeVerPdf ? "block" : "none";
     document.querySelectorAll("#modal-dte-detalle .toolbar, #modal-dte-detalle h3.subtitulo, #modal-dte-detalle .grid-2, #dted-envio-historial")
       .forEach(el => { el.style.display = puedeVerPdf ? "" : "none"; });

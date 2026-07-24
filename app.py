@@ -366,8 +366,14 @@ def alerta_stock_configurada():
     return _correo_transporte_configurado() and bool(ALERTA_STOCK_DESTINATARIO)
 
 
-CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
-MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
+# CATEGORIAS_INICIALES precarga la tabla 'categorias' (campo 'categoria',
+# mostrado en la UI como "Modelo") y MODELOS_INICIALES precarga la tabla
+# 'modelos' (campo 'modelo', mostrado como "Detalle"). Por eso acá van
+# nombres de modelo de transmisión y no descripciones de pieza -- antes del
+# cambio de etiquetas estaban al revés, lo que confundía igual que el
+# problema que motivó el cambio.
+CATEGORIAS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
+MODELOS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
 
 # "Merma o pérdida" ya no es una categoría a elegir: es su propio tipo de
 # movimiento ("perdida"). "Traslado interno" se quitó por no usarse.
@@ -2259,9 +2265,10 @@ def _leer_excel_productos_masivo(archivo):
             vistos[clave] = i
 
         filas_validas.append({
-            "categoria": modelo.upper(),        # ver nota en el endpoint: MODELO va en 'categoria'
-            "modelo": descripcion.upper(),       # y DESCRIPCION va en 'modelo', para que el nombre
-            "ubicacion": ubicacion_txt.upper(),  # automático quede "MODELO - DESCRIPCION" como se pidió.
+            "categoria": modelo.upper(),        # la columna externa MODELO va en 'categoria' (mostrado
+            "modelo": descripcion.upper(),       # en la UI como "Modelo"), y DESCRIPCION va en 'modelo'
+            "ubicacion": ubicacion_txt.upper(),  # (mostrado como "Detalle"), para que el nombre
+                                                  # automático quede "MODELO - DESCRIPCION" como se pidió.
             "cantidad": max(0, cantidad_num),
             "costo_compra": max(0.0, precio_num),
         })
@@ -2481,7 +2488,7 @@ def _crear_producto_desde_datos(db, data):
         ).fetchone()
         if duplicado:
             return None, (
-                f"Ya existe un producto con esa categoría y modelo (#{duplicado[0]:04d}). "
+                f"Ya existe un producto con ese modelo y detalle (#{duplicado[0]:04d}). "
                 f"Si necesitas más stock, ingrésalo con una factura en vez de crear un producto nuevo."
             ), 400
 
@@ -2630,7 +2637,7 @@ def editar_producto(producto_id):
         ).fetchone()
         if duplicado_pm:
             return jsonify({
-                "error": f"Ya existe otro producto con esa categoría y modelo (#{duplicado_pm[0]:04d})."
+                "error": f"Ya existe otro producto con ese modelo y detalle (#{duplicado_pm[0]:04d})."
             }), 400
 
     nombre = nombre_automatico(categoria, modelo, codigo_interno, producto_id)
@@ -3214,7 +3221,7 @@ def crear_categoria():
     data = request.get_json(force=True, silent=True) or {}
     nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
-        return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
+        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
     db = get_db()
     db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (nombre,))
     db.commit()
@@ -3224,23 +3231,26 @@ def crear_categoria():
 @app.route("/api/categorias/<int:categoria_id>", methods=["PUT"])
 @requiere_rol("bodega")
 def editar_categoria(categoria_id):
-    """Renombra una categoría — y actualiza en cascada todos los productos
-    que ya la tenían asignada, para corregir errores de tipeo sin tener que
-    editar producto por producto."""
+    """Renombra un 'modelo' (el campo interno sigue llamándose 'categoria'
+    en la base de datos y en esta ruta -- ver nota de relabeling más abajo
+    en core.py/nombre_automatico -- pero de cara al taller esto es "Modelo",
+    ej. JF011, 722.6) — y actualiza en cascada todos los productos que ya
+    lo tenían asignado, para corregir errores de tipeo sin tener que editar
+    producto por producto."""
     db = get_db()
     actual = db.execute("SELECT * FROM categorias WHERE id = ?", (categoria_id,)).fetchone()
     if actual is None:
-        return jsonify({"error": "Categoría no encontrada"}), 404
+        return jsonify({"error": "Modelo no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
     nuevo_nombre = (data.get("nombre") or "").strip().upper()
     if not nuevo_nombre:
-        return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
+        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
 
     if nuevo_nombre != actual["nombre"]:
         choque = db.execute("SELECT id FROM categorias WHERE nombre = ? AND id != ?", (nuevo_nombre, categoria_id)).fetchone()
         if choque:
-            return jsonify({"error": f"Ya existe una categoría llamada '{nuevo_nombre}'. Elimina una de las dos para evitar duplicados."}), 400
+            return jsonify({"error": f"Ya existe un modelo llamado '{nuevo_nombre}'. Elimina uno de los dos para evitar duplicados."}), 400
 
     afectados = [r["id"] for r in db.execute("SELECT id FROM productos WHERE UPPER(TRIM(categoria)) = ?", (actual["nombre"],)).fetchall()]
 
@@ -3254,14 +3264,14 @@ def editar_categoria(categoria_id):
 @app.route("/api/categorias/<int:categoria_id>", methods=["DELETE"])
 @requiere_rol("bodega")
 def eliminar_categoria(categoria_id):
-    """Quita la categoría de la lista precargada. Como la categoría se
-    guarda como texto directo en cada producto (no es una llave foránea),
-    esto no le cambia el dato a los productos que ya la tenían — solo deja
-    de sugerirse para productos nuevos."""
+    """Quita el modelo de la lista precargada. Como se guarda como texto
+    directo en cada producto (no es una llave foránea), esto no le cambia
+    el dato a los productos que ya lo tenían — solo deja de sugerirse para
+    productos nuevos."""
     db = get_db()
     actual = db.execute("SELECT * FROM categorias WHERE id = ?", (categoria_id,)).fetchone()
     if actual is None:
-        return jsonify({"error": "Categoría no encontrada"}), 404
+        return jsonify({"error": "Modelo no encontrado"}), 404
     n_productos = db.execute(
         "SELECT COUNT(*) FROM productos WHERE UPPER(TRIM(categoria)) = ?", (actual["nombre"],)
     ).fetchone()[0]
@@ -3292,7 +3302,7 @@ def crear_modelo():
     data = request.get_json(force=True, silent=True) or {}
     nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
-        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
+        return jsonify({"error": "El nombre del detalle no puede estar vacío"}), 400
     db = get_db()
     db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (nombre,))
     db.commit()
@@ -3305,17 +3315,17 @@ def editar_modelo(modelo_id):
     db = get_db()
     actual = db.execute("SELECT * FROM modelos WHERE id = ?", (modelo_id,)).fetchone()
     if actual is None:
-        return jsonify({"error": "Modelo no encontrado"}), 404
+        return jsonify({"error": "Detalle no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
     nuevo_nombre = (data.get("nombre") or "").strip().upper()
     if not nuevo_nombre:
-        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
+        return jsonify({"error": "El nombre del detalle no puede estar vacío"}), 400
 
     if nuevo_nombre != actual["nombre"]:
         choque = db.execute("SELECT id FROM modelos WHERE nombre = ? AND id != ?", (nuevo_nombre, modelo_id)).fetchone()
         if choque:
-            return jsonify({"error": f"Ya existe un modelo llamado '{nuevo_nombre}'. Elimina uno de los dos para evitar duplicados."}), 400
+            return jsonify({"error": f"Ya existe un detalle llamado '{nuevo_nombre}'. Elimina uno de los dos para evitar duplicados."}), 400
 
     afectados = [r["id"] for r in db.execute("SELECT id FROM productos WHERE UPPER(TRIM(modelo)) = ?", (actual["nombre"],)).fetchall()]
 
@@ -3332,7 +3342,7 @@ def eliminar_modelo(modelo_id):
     db = get_db()
     actual = db.execute("SELECT * FROM modelos WHERE id = ?", (modelo_id,)).fetchone()
     if actual is None:
-        return jsonify({"error": "Modelo no encontrado"}), 404
+        return jsonify({"error": "Detalle no encontrado"}), 404
     n_productos = db.execute(
         "SELECT COUNT(*) FROM productos WHERE UPPER(TRIM(modelo)) = ?", (actual["nombre"],)
     ).fetchone()[0]
@@ -3967,7 +3977,7 @@ CARGA_MASIVA_CACHE = {}
 CARGA_MASIVA_TTL_SEGUNDOS = 30 * 60
 CARGA_MASIVA_ENCABEZADOS = [
     "N° Factura", "Fecha (AAAA-MM-DD)", "Proveedor", "RUT Proveedor",
-    "ID Producto", "Categoría", "Modelo", "Cantidad", "Precio Unitario",
+    "ID Producto", "Modelo", "Detalle", "Cantidad", "Precio Unitario",
 ]
 
 
@@ -4194,7 +4204,7 @@ def _llamar_claude_vision_clasificar_foto_whatsapp(imagen_bytes, mime_type):
 def _buscar_producto_por_texto(db, texto):
     """Intenta encontrar, entre los productos existentes, el que mejor
     calza con una descripción de texto libre (típicamente sacada de una
-    foto de factura escaneada por IA — ahí no hay ID ni categoría/modelo
+    foto de factura escaneada por IA — ahí no hay ID ni modelo/detalle
     exactos como en la carga masiva por Excel, solo el nombre que puso el
     proveedor). Usa comparación de texto simple (difflib), sin
     dependencias nuevas. Umbral conservador a propósito: es mejor dejar la
@@ -4242,7 +4252,7 @@ def carga_masiva_plantilla():
     _autoancho(ws)
 
     ws_ref = wb.create_sheet("Productos (referencia)")
-    ws_ref.append(["ID Producto", "Categoría", "Modelo", "Nombre", "Stock actual"])
+    ws_ref.append(["ID Producto", "Modelo", "Detalle", "Nombre", "Stock actual"])
     _estilo_encabezado(ws_ref)
     for p in db.execute(PRODUCTO_SELECT + " ORDER BY p.categoria, p.modelo").fetchall():
         d = row_to_dict(p)
@@ -4258,7 +4268,7 @@ def carga_masiva_plantilla():
         "Proveedor: nombre del proveedor. Si no existe todavía en el sistema, se crea automáticamente.",
         "RUT Proveedor: opcional. Solo se usa si hay que crear el proveedor (si ya existe, se respeta el RUT que ya tiene guardado).",
         "ID Producto: el número de producto tal como aparece en el sistema (columna 'ID Producto' de la hoja Productos (referencia), sin el '#'). Es la forma más segura de identificar el producto.",
-        "Categoría / Modelo: alternativa si no se tiene el ID Producto — deben coincidir exactamente con un producto existente (no distingue mayúsculas/minúsculas).",
+        "Modelo / Detalle: alternativa si no se tiene el ID Producto — deben coincidir exactamente con un producto existente (no distingue mayúsculas/minúsculas).",
         "Cantidad: número entero mayor a 0.",
         "Precio Unitario: número, puede tener decimales. No puede ser negativo.",
         "El stock se ingresa automáticamente al confirmar la carga, igual que al crear una factura manual.",
@@ -4294,11 +4304,27 @@ def _carga_masiva_leer_excel(archivo):
         "proveedor": "proveedor",
         "rut proveedor": "rut_proveedor",
         "id producto": "producto_id",
-        "categoría": "categoria", "categoria": "categoria",
-        "modelo": "modelo",
         "cantidad": "cantidad",
         "precio unitario": "precio_unitario",
     }
+
+    # Las columnas de "Categoría"/"Modelo" se renombraron a "Modelo"/"Detalle"
+    # (mismos campos internos 'categoria'/'modelo' de siempre, solo cambió la
+    # etiqueta). Para que las plantillas viejas ya descargadas (con columnas
+    # "Categoría" y "Modelo") se sigan leyendo igual que antes, se detecta
+    # cuál juego de encabezados trae el archivo: si aparece "Categoría" en el
+    # encabezado, es una plantilla vieja y "Modelo" ahí significa el campo
+    # 'modelo'; si no aparece, es una plantilla nueva y "Modelo" significa el
+    # campo 'categoria' (con "Detalle" para el campo 'modelo').
+    encabezado_norm = {_norm(col) for col in encabezado}
+    es_plantilla_vieja = "categoría" in encabezado_norm or "categoria" in encabezado_norm
+    if es_plantilla_vieja:
+        mapa_columnas["categoría"] = "categoria"
+        mapa_columnas["categoria"] = "categoria"
+        mapa_columnas["modelo"] = "modelo"
+    else:
+        mapa_columnas["modelo"] = "categoria"
+        mapa_columnas["detalle"] = "modelo"
 
     indices = {}
     for i, col in enumerate(encabezado):
@@ -4334,9 +4360,9 @@ def _carga_masiva_leer_excel(archivo):
 def _carga_masiva_resolver_producto(db, fila):
     """Devuelve (producto, error, texto_original). 'error' solo se llena
     cuando la fila ni siquiera trae con qué IDENTIFICAR un producto (ni ID
-    ni categoría/modelo) o cuando lo que trae es basura (un ID no
+    ni modelo/detalle) o cuando lo que trae es basura (un ID no
     numérico) -- eso sigue bloqueando la factura, porque no hay ni un
-    nombre que mostrarle a Bodega. Si en cambio el ID/categoría/modelo
+    nombre que mostrarle a Bodega. Si en cambio el ID/modelo/detalle
     están bien formados pero no calzan con ningún producto del catálogo,
     NO es un error: se arma un texto_original descriptivo y la línea queda
     'producto nuevo, pendiente de crear' (ver _carga_masiva_revalidar_grupo
@@ -4356,7 +4382,7 @@ def _carga_masiva_resolver_producto(db, fila):
     categoria = (fila.get("categoria") or "").strip()
     modelo = (fila.get("modelo") or "").strip()
     if not categoria and not modelo:
-        return None, f"Fila {fila['fila']}: falta 'ID Producto' o 'Categoría'/'Modelo' para identificar el producto", None
+        return None, f"Fila {fila['fila']}: falta 'ID Producto' o 'Modelo'/'Detalle' para identificar el producto", None
     producto = db.execute(
         "SELECT * FROM productos WHERE UPPER(categoria) = UPPER(?) AND UPPER(modelo) = UPPER(?)",
         (categoria, modelo),
@@ -5304,7 +5330,7 @@ def crear_y_vincular_producto_pendiente(pendiente_id, indice):
     _carga_masiva_revalidar_grupo), pero Finanzas no puede crear productos
     (ver hallazgo #3 de la revisión técnica -- eso quedó reservado a
     Bodega). Acá Bodega, revisando el pendiente antes de aprobarlo, crea
-    el producto que falta con sus propios datos (categoría, modelo,
+    el producto que falta con sus propios datos (modelo, detalle,
     ubicación) y esta línea queda vinculada en el mismo paso, sin tener
     que ir a Logística aparte y después volver a editar la factura a
     mano.
@@ -8645,7 +8671,7 @@ def dashboard():
 def logistica_dashboard_graficos():
     """Gráficos del dashboard de Logística: movimientos mensuales
     (entradas vs salidas, últimos 12 meses) y valor de inventario por
-    categoría (top 8) — mismo patrón que /api/operativo/dashboard/graficos
+    modelo (top 8) — mismo patrón que /api/operativo/dashboard/graficos
     y /api/finanzas/resumen/graficos."""
     db = get_db()
     hoy = datetime.now()
@@ -8671,7 +8697,7 @@ def logistica_dashboard_graficos():
         movimientos_mensual.append({"mes": pref, "entradas": entradas, "salidas": abs(salidas)})
 
     valor_por_categoria = [
-        {"categoria": r["categoria"] or "(sin categoría)", "valor": r["valor"]}
+        {"categoria": r["categoria"] or "(sin modelo)", "valor": r["valor"]}
         for r in db.execute(
             """
             SELECT categoria, SUM((stock_disponible + stock_reservado) * costo_compra) AS valor
@@ -9251,7 +9277,7 @@ def reporte_inventario():
     ])
 
     encabezados = [
-        "N° sistema", "Código interno", "Categoría", "Modelo", "Ubicación",
+        "N° sistema", "Código interno", "Modelo", "Detalle", "Ubicación",
         "Stock disponible", "Stock reservado", "Stock en merma", "Stock total",
         "Stock mínimo", "Costo promedio", "Valor total",
     ]
@@ -9274,13 +9300,13 @@ def reporte_inventario():
     _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
-    # Segunda hoja: valorizado agrupado por categoría, para ver dónde está
+    # Segunda hoja: valorizado agrupado por modelo, para ver dónde está
     # concentrado el dinero invertido en inventario.
-    ws2 = wb.create_sheet("Por categoría")
-    ws2.append(["Categoría", "N° de productos", "Unidades totales", "Valor total"])
+    ws2 = wb.create_sheet("Por modelo")
+    ws2.append(["Modelo", "N° de productos", "Unidades totales", "Valor total"])
     por_categoria = {}
     for p in productos:
-        cat = p["categoria"] or "(sin categoría)"
+        cat = p["categoria"] or "(sin modelo)"
         acc = por_categoria.setdefault(cat, {"n": 0, "unidades": 0, "valor": 0})
         acc["n"] += 1
         acc["unidades"] += p["stock_total"]
@@ -9319,7 +9345,7 @@ def reporte_stock():
         ("Productos sin ningún movimiento", len(sin_movimiento)),
     ])
     fila_encabezado = ws.max_row + 1
-    ws.append(["N° sistema", "Producto", "Categoría", "Stock disponible", "Stock mínimo", "Diferencia", "Ubicación"])
+    ws.append(["N° sistema", "Producto", "Modelo", "Stock disponible", "Stock mínimo", "Diferencia", "Ubicación"])
     for p in criticos:
         ws.append([
             p["id_sistema"], p["nombre"], p["categoria"], p["stock_disponible"],
@@ -9329,7 +9355,7 @@ def reporte_stock():
     _autoancho(ws)
 
     ws2 = wb.create_sheet("Sin movimiento")
-    ws2.append(["N° sistema", "Producto", "Categoría", "Stock total", "Valor", "Creado el"])
+    ws2.append(["N° sistema", "Producto", "Modelo", "Stock total", "Valor", "Creado el"])
     for p in sin_movimiento:
         ws2.append([
             p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"],
@@ -9362,21 +9388,21 @@ def reporte_rotacion():
         ("Inmovilizados", len(datos["inmovilizados"])),
     ])
     fila_encabezado = ws.max_row + 1
-    ws.append(["N° sistema", "Producto", "Categoría", "Salidas en el período", "N° movimientos", "Tendencia"])
+    ws.append(["N° sistema", "Producto", "Modelo", "Salidas en el período", "N° movimientos", "Tendencia"])
     for p in datos["mas_utilizados"]:
         ws.append([p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"], p["n_movimientos"], p["tendencia"]])
     _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     ws2 = wb.create_sheet("Baja rotación")
-    ws2.append(["N° sistema", "Producto", "Categoría", "Salidas en el período"])
+    ws2.append(["N° sistema", "Producto", "Modelo", "Salidas en el período"])
     for p in datos["baja_rotacion"]:
         ws2.append([p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"]])
     _estilo_encabezado(ws2)
     _autoancho(ws2)
 
     ws3 = wb.create_sheet("Inmovilizados")
-    ws3.append(["N° sistema", "Producto", "Categoría", "Stock total", "Valor"])
+    ws3.append(["N° sistema", "Producto", "Modelo", "Stock total", "Valor"])
     for p in datos["inmovilizados"]:
         ws3.append([p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"], round(p["stock_total"] * p["costo_compra"], 2)])
     _estilo_encabezado(ws3)
@@ -9426,13 +9452,13 @@ def reporte_inventario_pdf():
     ]
     _pdf_tabla(
         elementos, estilos, f"Detalle por producto — valor total: {fmt_money_pdf(valor_general)}",
-        ["N°", "Código", "Categoría", "Modelo", "Ubicación", "Disp.", "Reserv.", "Merma", "Total", "Costo prom.", "Valor"],
+        ["N°", "Código", "Modelo", "Detalle", "Ubicación", "Disp.", "Reserv.", "Merma", "Total", "Costo prom.", "Valor"],
         filas,
     )
 
     por_categoria = {}
     for p in productos:
-        cat = p["categoria"] or "(sin categoría)"
+        cat = p["categoria"] or "(sin modelo)"
         acc = por_categoria.setdefault(cat, {"n": 0, "unidades": 0, "valor": 0})
         acc["n"] += 1
         acc["unidades"] += p["stock_total"]
@@ -9441,7 +9467,7 @@ def reporte_inventario_pdf():
         [cat, acc["n"], acc["unidades"], fmt_money_pdf(acc["valor"])]
         for cat, acc in sorted(por_categoria.items(), key=lambda kv: kv[1]["valor"], reverse=True)
     ]
-    _pdf_tabla(elementos, estilos, "Valorizado por categoría", ["Categoría", "N° productos", "Unidades", "Valor"], filas_cat)
+    _pdf_tabla(elementos, estilos, "Valorizado por modelo", ["Modelo", "N° productos", "Unidades", "Valor"], filas_cat)
 
     nombre = f"inventario_valorizado_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     return _pdf_response(buffer, doc, elementos, nombre)
@@ -9474,7 +9500,7 @@ def reporte_stock_pdf():
     ]
     _pdf_tabla(
         elementos, estilos, f"Stock crítico ({len(criticos)} producto(s))",
-        ["N°", "Producto", "Categoría", "Disponible", "Mínimo", "Diferencia", "Ubicación"],
+        ["N°", "Producto", "Modelo", "Disponible", "Mínimo", "Diferencia", "Ubicación"],
         filas_criticos,
     )
 
@@ -9484,7 +9510,7 @@ def reporte_stock_pdf():
     ]
     _pdf_tabla(
         elementos, estilos, f"Sin ningún movimiento registrado ({len(sin_movimiento)} producto(s))",
-        ["N°", "Producto", "Categoría", "Stock total", "Valor", "Creado el"],
+        ["N°", "Producto", "Modelo", "Stock total", "Valor", "Creado el"],
         filas_sin_mov,
     )
 
@@ -9511,18 +9537,18 @@ def reporte_rotacion_pdf():
 
     _pdf_tabla(
         elementos, estilos, "Más utilizados",
-        ["N°", "Producto", "Categoría", "Salidas", "N° mov.", "Tendencia"],
+        ["N°", "Producto", "Modelo", "Salidas", "N° mov.", "Tendencia"],
         [[p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"], p["n_movimientos"], p["tendencia"]]
          for p in datos["mas_utilizados"]],
     )
     _pdf_tabla(
         elementos, estilos, "Baja rotación",
-        ["N°", "Producto", "Categoría", "Salidas en el período"],
+        ["N°", "Producto", "Modelo", "Salidas en el período"],
         [[p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"]] for p in datos["baja_rotacion"]],
     )
     _pdf_tabla(
         elementos, estilos, "Inmovilizados (sin salidas en el período)",
-        ["N°", "Producto", "Categoría", "Stock total", "Valor"],
+        ["N°", "Producto", "Modelo", "Stock total", "Valor"],
         [[p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"], fmt_money_pdf(p["stock_total"] * p["costo_compra"])]
          for p in datos["inmovilizados"]],
     )

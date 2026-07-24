@@ -256,8 +256,8 @@ function afpAbrirDetalle(id) {
               Crear este producto en Logística
             </button>
             <div class="afp-form-crear-producto" data-indice="${idx}" style="display:none;margin-top:6px">
-              <input type="text" class="afp-crear-categoria" placeholder="Categoría (ej. EMBRAGUE)" style="margin-bottom:4px">
-              <input type="text" class="afp-crear-modelo" placeholder="Modelo (ej. ABC 2020)" style="margin-bottom:4px" value="${l.texto_original ? afpEscapeHtml(l.texto_original) : ""}">
+              <input type="text" class="afp-crear-categoria" placeholder="Modelo (ej. JF011)" style="margin-bottom:4px">
+              <input type="text" class="afp-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px" value="${l.texto_original ? afpEscapeHtml(l.texto_original) : ""}">
               <button type="button" class="btn btn-primario btn-chico afp-btn-crear-confirmar" data-indice="${idx}">Crear y vincular</button>
             </div>
           ` : ""}
@@ -288,7 +288,7 @@ function afpAbrirDetalle(id) {
       const categoria = form.querySelector(".afp-crear-categoria").value.trim();
       const modelo = form.querySelector(".afp-crear-modelo").value.trim();
       if (!categoria && !modelo) {
-        afpToast("Ingresa al menos categoría o modelo para crear el producto", true);
+        afpToast("Ingresa al menos modelo o detalle para crear el producto", true);
         return;
       }
       try {

@@ -1650,8 +1650,8 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
           Crear este producto en Logística
         </button>
         <div class="pfr-linea-crear-form" style="display:none;margin-top:6px">
-          <input type="text" class="pfr-crear-categoria" placeholder="Categoría (ej. EMBRAGUE)" style="margin-bottom:4px">
-          <input type="text" class="pfr-crear-modelo" placeholder="Modelo (ej. ABC 2020)" style="margin-bottom:4px">
+          <input type="text" class="pfr-crear-categoria" placeholder="Modelo (ej. JF011)" style="margin-bottom:4px">
+          <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px">
           <button type="button" class="btn btn-primario btn-chico pfr-crear-confirmar">Crear y vincular</button>
         </div>
       ` : ""}
@@ -1699,7 +1699,7 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
       formCrear.style.display = formCrear.style.display === "none" ? "block" : "none";
       if (formCrear.style.display === "block" && !div.querySelector(".pfr-crear-categoria").value) {
         // Ayuda: si Finanzas ya tipeó una descripción libre, se usa como
-        // punto de partida para el modelo -- Bodega igual puede corregirla.
+        // punto de partida para el detalle -- Bodega igual puede corregirla.
         div.querySelector(".pfr-crear-modelo").value = inputNombreNuevo.value || "";
       }
     });
@@ -1707,7 +1707,7 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
       const categoria = div.querySelector(".pfr-crear-categoria").value.trim();
       const modelo = div.querySelector(".pfr-crear-modelo").value.trim();
       if (!categoria && !modelo) {
-        toast("Ingresa al menos categoría o modelo para crear el producto", true);
+        toast("Ingresa al menos modelo o detalle para crear el producto", true);
         return;
       }
       try {

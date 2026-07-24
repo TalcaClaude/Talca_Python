@@ -121,7 +121,7 @@
       <div id="log-chart-movimientos">Cargando…</div>
     </div>
     <div class="chart-card">
-      <h3>Valor de inventario por categoría</h3>
+      <h3>Valor de inventario por modelo</h3>
       <p class="chart-sub">Top 8 — costo de compra × stock</p>
       <div id="log-chart-valor-categoria">Cargando…</div>
     </div>
@@ -132,9 +132,9 @@
   <section class="vista" id="vista-productos" style="display:none">
 
   <section class="toolbar">
-    <input type="text" id="buscar" placeholder="Buscar por código, nombre, descripción, modelo o ubicación…">
+    <input type="text" id="buscar" placeholder="Buscar por código, nombre, descripción, detalle o ubicación…">
     <select id="filtro-categoria">
-      <option value="">Todas las categorías</option>
+      <option value="">Todos los modelos</option>
     </select>
     <label class="toggle-critico">
       <input type="checkbox" id="filtro-criticos">
@@ -144,7 +144,7 @@
       <input type="checkbox" id="filtro-sin-ubicacion">
       Sin ubicación <span class="contador-badge" id="contador-sin-ubicacion" style="display:none"></span>
     </label>
-    <button type="button" class="btn btn-secundario" id="btn-gestion-categorias">Gestionar categorías/modelos</button>
+    <button type="button" class="btn btn-secundario" id="btn-gestion-categorias">Gestionar modelos/detalles</button>
   </section>
 
   <section class="tabla-wrap">
@@ -153,8 +153,8 @@
         <tr>
           <th>N°</th>
           <th>Producto</th>
-          <th>Categoría</th>
           <th>Modelo</th>
+          <th>Detalle</th>
           <th>Ubicación</th>
           <th class="num">Disponible</th>
           <th class="num">Reservado</th>
@@ -178,7 +178,7 @@
   <p class="bodega-intro" style="margin: 0 0 14px;">Bodega única, organizada en <strong>pasillos</strong> → <strong>estanterías</strong> → <strong>niveles</strong>. Lo ideal es un producto por ubicación para encontrarlo rápido, pero el sistema no lo impide: si hace falta, una misma ubicación puede guardar más de un producto.</p>
 
   <section class="toolbar">
-    <input type="text" id="buscar-bodega" placeholder="Buscar por código de ubicación, pasillo/estante/nivel, producto, categoría o modelo…">
+    <input type="text" id="buscar-bodega" placeholder="Buscar por código de ubicación, pasillo/estante/nivel, producto, modelo o detalle…">
     <button class="btn btn-primary" id="btn-nueva-ubicacion">+ Nueva ubicación</button>
   </section>
 
@@ -326,7 +326,7 @@
       <thead id="thead-mermas">
         <tr>
           <th>Producto</th>
-          <th>Categoría</th>
+          <th>Modelo</th>
           <th>Proveedor</th>
           <th class="num" id="mermas-th-cantidad">En merma</th>
           <th class="num" id="mermas-th-valor">Valor</th>
@@ -462,7 +462,7 @@
 
     <div class="dash-panel">
       <h3 class="dash-titulo">Inventario completo y valorizado</h3>
-      <p class="bodega-intro">Todos los productos con su stock, costo promedio y valor total — más una hoja aparte con el valor agrupado por categoría.</p>
+      <p class="bodega-intro">Todos los productos con su stock, costo promedio y valor total — más una hoja aparte con el valor agrupado por modelo.</p>
       <p class="reportes-contador" id="rep-contador-inventario">Cargando…</p>
       <div class="reportes-botones">
         <a class="btn btn-secundario" href="/api/reportes/inventario">Descargar Excel</a>
@@ -606,21 +606,21 @@
       </div>
       <div class="grid-2">
         <div class="campo">
-          <label>Categoría *</label>
+          <label>Modelo *</label>
           <div class="campo-select-mas">
-            <select id="f-categoria"><option value="">Sin categoría</option></select>
-            <button type="button" class="btn-link" data-nuevo="categoria">+ Nueva</button>
+            <select id="f-categoria"><option value="">Sin modelo</option></select>
+            <button type="button" class="btn-link" data-nuevo="categoria">+ Nuevo</button>
           </div>
         </div>
         <div class="campo">
-          <label>Modelo *</label>
+          <label>Detalle *</label>
           <div class="campo-select-mas">
-            <select id="f-modelo"><option value="">Sin modelo</option></select>
+            <select id="f-modelo"><option value="">Sin detalle</option></select>
             <button type="button" class="btn-link" data-nuevo="modelo">+ Nuevo</button>
           </div>
         </div>
       </div>
-      <p class="ayuda-inline">La categoría y el modelo identifican al producto en el sistema: no puede haber dos productos con la misma combinación. Si necesitas más stock de algo que ya existe, ingrésalo con una factura en vez de crear un producto nuevo.</p>
+      <p class="ayuda-inline">El modelo y el detalle identifican al producto en el sistema: no puede haber dos productos con la misma combinación. Si necesitas más stock de algo que ya existe, ingrésalo con una factura en vez de crear un producto nuevo.</p>
       <div class="campo">
         <label>Ubicación física</label>
         <div class="campo-ubicacion">
@@ -867,7 +867,7 @@
   </div>
 </div>
 
-<!-- Modal: Alta rápida de categoría/modelo (reemplaza el prompt() que se usaba antes) -->
+<!-- Modal: Alta rápida de modelo/detalle (reemplaza el prompt() que se usaba antes) -->
 <div class="modal-overlay" id="modal-alta-rapida">
   <div class="modal">
     <div class="modal-head">
@@ -963,19 +963,19 @@
   </div>
 </div>
 
-<!-- Modal: Gestión de categorías y modelos -->
+<!-- Modal: Gestión de modelos y detalles -->
 <div class="modal-overlay" id="modal-gestion-categorias">
   <div class="modal modal-ancho">
     <div class="modal-head">
-      <h2>Gestionar categorías y modelos</h2>
+      <h2>Gestionar modelos y detalles</h2>
       <button class="modal-close" data-close="modal-gestion-categorias">&times;</button>
     </div>
-    <p class="ayuda-inline">Aquí puedes corregir un nombre mal ingresado (se actualiza automáticamente en todos los productos que lo usan), o agregar/eliminar categorías y modelos de la lista precargada. Eliminar una categoría o modelo de esta lista NO borra el dato en los productos que ya la tienen: solo deja de sugerirse para productos nuevos.</p>
+    <p class="ayuda-inline">Aquí puedes corregir un nombre mal ingresado (se actualiza automáticamente en todos los productos que lo usan), o agregar/eliminar modelos y detalles de la lista precargada. Eliminar un modelo o detalle de esta lista NO borra el dato en los productos que ya lo tienen: solo deja de sugerirse para productos nuevos.</p>
     <div class="grid-2">
       <div>
-        <h3>Categorías</h3>
+        <h3>Modelos</h3>
         <div class="campo-select-mas">
-          <input type="text" id="gc-nueva-categoria" placeholder="Nueva categoría">
+          <input type="text" id="gc-nueva-categoria" placeholder="Nuevo modelo">
           <button type="button" class="btn-link" id="gc-btn-agregar-categoria">+ Agregar</button>
         </div>
         <div class="tabla-wrap">
@@ -990,9 +990,9 @@
         </div>
       </div>
       <div>
-        <h3>Modelos</h3>
+        <h3>Detalles</h3>
         <div class="campo-select-mas">
-          <input type="text" id="gc-nuevo-modelo" placeholder="Nuevo modelo">
+          <input type="text" id="gc-nuevo-modelo" placeholder="Nuevo detalle">
           <button type="button" class="btn-link" id="gc-btn-agregar-modelo">+ Agregar</button>
         </div>
         <div class="tabla-wrap">

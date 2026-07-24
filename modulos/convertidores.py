@@ -1158,6 +1158,7 @@ def eliminar_convertidor(convertidor_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR CONVERTIDOR #{convertidor_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
+                recalcular_costo_promedio=False,
             )
 
     # Si este convertidor tenía a su vez OTRO convertidor de stock cargado
@@ -1337,6 +1338,7 @@ def eliminar_item_convertidor(convertidor_id, item_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE CONVERTIDOR #{convertidor_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
+                recalcular_costo_promedio=False,
             )
     elif item["tipo"] == "convertidor" and item["convertidor_hijo_id"]:
         # Libera el convertidor de stock que estaba cargado como repuesto

@@ -2818,7 +2818,7 @@ def eliminar_orden(orden_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ORDEN #{orden_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
-                proveedor_id=item["proveedor_id"],
+                proveedor_id=item["proveedor_id"], recalcular_costo_promedio=False,
             )
 
     db.execute("UPDATE garantias SET orden_origen_id = NULL WHERE orden_origen_id = ?", (orden_id,))
@@ -3135,7 +3135,7 @@ def eliminar_item_orden(orden_id, item_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE ORDEN #{orden_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
-                proveedor_id=item["proveedor_id"],
+                proveedor_id=item["proveedor_id"], recalcular_costo_promedio=False,
             )
 
     if item["tipo"] == "convertidor_torque" and item["convertidor_id"]:
@@ -4140,7 +4140,7 @@ def eliminar_garantia(garantia_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR GARANTÍA #{garantia_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
-                proveedor_id=item["proveedor_id"],
+                proveedor_id=item["proveedor_id"], recalcular_costo_promedio=False,
             )
 
     db.execute("DELETE FROM garantias WHERE id = ?", (garantia_id,))
@@ -4292,7 +4292,7 @@ def eliminar_item_garantia(garantia_id, item_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE GARANTÍA #{garantia_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
-                proveedor_id=item["proveedor_id"],
+                proveedor_id=item["proveedor_id"], recalcular_costo_promedio=False,
             )
 
     if item["tipo"] == "convertidor_torque" and item["convertidor_id"]:

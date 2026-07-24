@@ -701,11 +701,24 @@ def _stockprov_bucket_get(db, producto_id, proveedor_id):
     ).fetchone()
 
 
-def _stockprov_bucket_entrada(db, producto_id, proveedor_id, cantidad, costo_unitario):
+def _stockprov_bucket_entrada(db, producto_id, proveedor_id, cantidad, costo_unitario, recalcular_costo=True):
     """Suma unidades al balde de stock de un proveedor específico (o NULL =
-    sin proveedor conocido, ej. stock inicial o entrada sin factura) y
-    recalcula el costo promedio de ESE balde en particular (independiente
-    del costo promedio general del producto). Crea el balde si no existía."""
+    sin proveedor conocido, ej. stock inicial o entrada sin factura) y, por
+    defecto, recalcula el costo promedio de ESE balde en particular
+    (independiente del costo promedio general del producto). Crea el
+    balde si no existía.
+
+    recalcular_costo=False se usa para DEVOLUCIONES de stock (ver
+    _aplicar_entrada_stock más abajo, que es quien decide cuándo pasar
+    esto en False): esas unidades ya habían sido contempladas en el costo
+    promedio de este balde la primera vez que entraron (por la factura
+    original) -- la salida NUNCA tocó ese promedio (ver
+    _stockprov_bucket_salida), así que su reverso (la devolución) tampoco
+    debe tocarlo, para no "contar la compra dos veces". Si el balde ya no
+    existía (se vació del todo antes de la devolución, lo que borra la
+    fila -- ver _stockprov_bucket_salida), igual se recrea usando
+    'costo_unitario' tal cual (es el costo real conocido de esas
+    unidades, no una compra nueva que haya que ponderar con nada más)."""
     bucket = _stockprov_bucket_get(db, producto_id, proveedor_id)
     ts = now_iso()
     if bucket is None:
@@ -717,7 +730,7 @@ def _stockprov_bucket_entrada(db, producto_id, proveedor_id, cantidad, costo_uni
     cantidad_actual = bucket["cantidad"]
     nueva_cantidad = cantidad_actual + cantidad
     nuevo_costo = bucket["costo_promedio"]
-    if costo_unitario is not None:
+    if recalcular_costo and costo_unitario is not None:
         valor_actual = cantidad_actual * bucket["costo_promedio"]
         valor_nuevo = cantidad * costo_unitario
         nuevo_costo = (valor_actual + valor_nuevo) / nueva_cantidad if nueva_cantidad > 0 else costo_unitario
@@ -801,7 +814,7 @@ def _stockprov_descontar_preferido(db, producto_id, proveedor_id_preferido, cant
         _stockprov_descontar_automatico(db, producto_id, restante)
 
 
-def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra", proveedor_id=None):
+def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra", proveedor_id=None, recalcular_costo_promedio=True):
     """Aplica una entrada de stock a un producto, recalculando el Costo
     Promedio Ponderado si se informa costo_unitario, y deja el movimiento
     registrado con la referencia a la factura si corresponde.
@@ -817,13 +830,28 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
     esa trazabilidad (ver eliminar_item_orden/eliminar_item_garantia en
     modulos/operativo.py). Si no hay ninguno de los dos, cae en "sin
     proveedor conocido", igual que siempre.
-    """
+
+    recalcular_costo_promedio=False (reportado por el taller, julio 2026):
+    se usa para DEVOLUCIONES de stock -- al eliminar un ítem que ya había
+    salido antes, esas unidades ya habían sido contempladas en el Costo
+    Promedio Ponderado (general Y del balde de su proveedor) la primera
+    vez que entraron de verdad, por la factura original. Una salida NUNCA
+    toca ese promedio (ver _aplicar_salida_stock, a propósito), así que su
+    reverso tampoco debe tocarlo -- si se recalculara como si fuera una
+    compra nueva sería "contar la compra dos veces", y además se rompía
+    en el caso límite de que el stock hubiera llegado a 0 antes de la
+    devolución: ahí la fórmula ponderada normal pierde toda la historia
+    previa (el "valor actual" en stock era 0) y el promedio quedaba pegado
+    al costo de esa única devolución, ignorando por completo el histórico
+    real del producto. Con este parámetro en False, la cantidad se suma
+    igual pero el costo (general y del balde) queda exactamente como
+    estaba antes de la devolución."""
     stock_actual = producto_row["stock_disponible"]
     costo_actual = producto_row["costo_compra"]
     nuevo_stock = stock_actual + cantidad
 
     nuevo_costo_promedio = costo_actual
-    if costo_unitario is not None:
+    if recalcular_costo_promedio and costo_unitario is not None:
         valor_actual = stock_actual * costo_actual
         valor_nuevo = cantidad * costo_unitario
         nuevo_costo_promedio = (valor_actual + valor_nuevo) / nuevo_stock if nuevo_stock > 0 else costo_unitario
@@ -859,7 +887,10 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
             proveedor_id_entrada = None
     else:
         proveedor_id_entrada = proveedor_id
-    _stockprov_bucket_entrada(db, producto_row["id"], proveedor_id_entrada, cantidad, costo_unitario)
+    _stockprov_bucket_entrada(
+        db, producto_row["id"], proveedor_id_entrada, cantidad, costo_unitario,
+        recalcular_costo=recalcular_costo_promedio,
+    )
     _recalcular_stock_minimo(db, producto_row["id"])
     return nuevo_stock
 

@@ -2496,6 +2496,23 @@ svg .chart-punto-hover {
    ver ambos a la vez, no queden uno encima del otro. */
 .notif-flotante { bottom: 88px; }
 
+/* Aviso de facturas rechazadas (solo Finanzas/admin, ver afrSondear en
+   alerta_facturas_pendientes.js) -- se apila arriba de los dos anteriores
+   por la misma razón (un admin puede llegar a ver los tres a la vez). */
+.afr-flotante { bottom: 156px; }
+.afr-flotante button { background: var(--advertencia, #d98c2c); }
+
+/* Historial de una factura pendiente de recepción (creada / rechazada /
+   corregida / aprobada) -- ver abrirDetalleFacturaPendiente en
+   finanzas.js y afpAbrirDetalle en alerta_facturas_pendientes.js. */
+.pfd-historial, .afp-historial {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  padding-left: 18px;
+  margin: 4px 0 12px;
+}
+.pfd-historial li, .afp-historial li { margin-bottom: 4px; }
+
 .pfr-plazos-rapidos {
   display: flex;
   gap: 8px;

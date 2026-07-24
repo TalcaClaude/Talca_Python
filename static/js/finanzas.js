@@ -188,7 +188,17 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     if (vista === "caja") cargarCaja();
     if (vista === "cxc") { cargarCxc(); cargarCxcAbonos(); }
     if (vista === "cxp") cargarCxp();
-    if (vista === "facturas") cargarFacturasPendientesRecepcion();
+    if (vista === "facturas") {
+      // Llegada desde el aviso rojo de facturas rechazadas (ver afrAbrirLista
+      // en alerta_facturas_pendientes.js): /finanzas?ver_pendiente=123#facturas
+      // -- abre directo el detalle de esa factura (con su nota de rechazo y
+      // el botón "Corregir y reingresar" ya visible) apenas termina de cargar
+      // la lista completa, de la que depende abrirDetalleFacturaPendiente.
+      cargarFacturasPendientesRecepcion().then(() => {
+        const verPendientePrefill = new URLSearchParams(location.search).get("ver_pendiente");
+        if (verPendientePrefill) abrirDetalleFacturaPendiente(parseInt(verPendientePrefill, 10));
+      });
+    }
     if (vista === "dte") {
       cargarDte();
       // Llegada desde el botón "Ir a Facturación electrónica" de la
@@ -1405,6 +1415,12 @@ document.getElementById("form-cxp-pago").addEventListener("submit", async (e) =>
 // ---------------------------------------------------------------------------
 
 const ESTADO_PFR_LABEL = { pendiente: "Pendiente de revisión", aprobada: "Aprobada", rechazada: "Rechazada", eliminada: "Eliminada" };
+const EVENTO_HISTORIAL_PFR_LABEL = {
+  creada: "Registrada",
+  rechazada: "Rechazada por Bodega",
+  corregida_reingresada: "Corregida y reingresada",
+  aprobada: "Aprobada",
+};
 const ORIGEN_PFR_LABEL = { manual: "Manual", excel: "Excel", foto: "Foto", whatsapp: "WhatsApp" };
 
 async function cargarFacturasPendientesRecepcion() {
@@ -1419,7 +1435,11 @@ async function cargarFacturasPendientesRecepcion() {
     const etiquetaCondicion = { contado: "Contado", credito: "Crédito", mixto: "Mixto" };
     tbody.innerHTML = data.pendientes.map(p => {
       const acciones = [
-        p.estado === "pendiente" ? `<button type="button" class="btn btn-secundario btn-chico" data-pfr-editar="${p.id}">Editar</button>` : "",
+        // "rechazada" también puede editarse -- es justo el camino para
+        // corregirla y que vuelva sola a la cola de revisión (ver
+        // editar_factura_pendiente_recepcion en app.py), sin tener que
+        // volver a escribirla de cero.
+        (p.estado === "pendiente" || p.estado === "rechazada") ? `<button type="button" class="btn btn-secundario btn-chico" data-pfr-editar="${p.id}">${p.estado === "rechazada" ? "Corregir y reingresar" : "Editar"}</button>` : "",
         p.origen === "whatsapp" ? `<a class="btn btn-secundario btn-chico" href="/api/facturas/pendientes-recepcion/${p.id}/foto" target="_blank" rel="noopener">Ver foto</a>` : "",
       ].filter(Boolean).join(" ");
       return `
@@ -1506,18 +1526,41 @@ async function abrirDetalleFacturaPendiente(id) {
     <p><strong>Origen:</strong> ${ORIGEN_PFR_LABEL[p.origen] || p.origen || "—"}</p>
     <p><strong>Registrada por:</strong> ${escapeHtml(p.creado_por) || "—"}</p>
     ${p.estado === "rechazada" && p.nota_rechazo ? `<p><strong>Motivo de rechazo:</strong> ${escapeHtml(p.nota_rechazo)}</p>` : ""}
+    ${(p.historial && p.historial.length) ? `
+      <h3 class="subtitulo">Historial</h3>
+      <ul class="pfd-historial">
+        ${p.historial.map(h => `<li>${escapeHtml(fmtFecha(h.fecha))} — ${EVENTO_HISTORIAL_PFR_LABEL[h.evento] || h.evento} (${escapeHtml(h.usuario) || "—"})${h.nota ? `: "${escapeHtml(h.nota)}"` : ""}</li>`).join("")}
+      </ul>` : ""}
   `;
 
-  document.getElementById("pfd-lineas").innerHTML = lineasParaMostrar.map(l => `
+  document.getElementById("pfd-lineas").innerHTML = lineasParaMostrar.map(l => {
+    const sinResolver = l.producto_id == null;
+    const nombreCelda = sinResolver
+      ? `⚠️ Producto nuevo, falta crear${l.texto_original ? ` — "${escapeHtml(l.texto_original)}"` : ""}`
+      : (escapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`);
+    return `
     <tr>
-      <td>${escapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}</td>
+      <td>${nombreCelda}</td>
       <td class="num mono">${l.cantidad}</td>
       <td class="num mono">${fmtMoney(l.precio_unitario)}</td>
       <td>${facturaReal ? (l.aplicada ? "Ingresada a stock" : "No aplicada") : "—"}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
-  if (p.estado === "pendiente") {
+  const hayLineasSinResolver = p.estado === "pendiente" && lineasParaMostrar.some(l => l.producto_id == null);
+  if (hayLineasSinResolver) {
+    document.getElementById("pfd-info").innerHTML += `
+      <p class="ayuda-inline ayuda-inline--bloqueado">
+        Esta factura tiene productos que todavía no existen en el catálogo — Bodega tiene que crearlos
+        (botón "Editar" → "Crear este producto en Logística" en cada línea) antes de poder aprobarla.
+      </p>`;
+  }
+
+  if (p.estado === "pendiente" || p.estado === "rechazada") {
+    document.getElementById("pfd-btn-editar").textContent = p.estado === "rechazada" ? "Corregir y reingresar" : "Editar";
     document.getElementById("pfd-btn-editar").style.display = "";
+  } else {
+    document.getElementById("pfd-btn-editar").textContent = "Editar";
   }
   if (pfdFacturaIdReal) {
     document.getElementById("pfd-btn-eliminar").style.display = "";
@@ -1577,16 +1620,41 @@ function actualizarTotalFacturaPendiente() {
   document.getElementById("pfr-total-vivo").textContent = fmtMoney(total);
 }
 
-function filaLineaFacturaPendiente(productos, linea) {
+// ctx = { pendienteId, indice } -- solo se pasan cuando la línea pertenece
+// a un pendiente YA GUARDADO (pantalla de "Editar"), porque el botón
+// "Crear este producto" llama a un endpoint que necesita un pendiente_id +
+// índice de línea reales. En "Registrar factura" (todavía no existe el
+// pendiente) esos dos vienen null y el botón no se muestra -- ahí Finanzas
+// solo puede DESCRIBIR el producto nuevo, no crearlo (ver hallazgo: crear
+// productos es exclusivo de Bodega).
+function filaLineaFacturaPendiente(productos, linea, ctx) {
+  ctx = ctx || {};
   const div = document.createElement("div");
   div.className = "fac-linea-row";
+  const sinResolverAlAbrir = !!(linea && linea.producto_id == null && (linea.texto_original || linea.cantidad != null));
+  const puedeCrearProducto = ctx.pendienteId != null && ctx.indice != null &&
+    state.sesion && (state.sesion.rol === "admin" || (state.sesion.modulos || []).includes("bodega"));
   div.innerHTML = `
     <div class="campo">
       <label>Producto</label>
       <select class="pfr-linea-producto-id">
         <option value="">Selecciona un producto…</option>
+        <option value="__nuevo__">✏️ No está en el catálogo — describir para Bodega</option>
         ${productos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("")}
       </select>
+      <input type="text" class="pfr-linea-nombre-nuevo" placeholder="¿Qué producto es? (ej. Kit de embrague ABC 2020)"
+             style="display:none;margin-top:6px"
+             value="${linea && linea.texto_original ? escapeHtml(linea.texto_original) : ""}">
+      ${puedeCrearProducto ? `
+        <button type="button" class="btn btn-secundario btn-chico pfr-linea-crear-producto" style="display:none;margin-top:6px">
+          Crear este producto en Logística
+        </button>
+        <div class="pfr-linea-crear-form" style="display:none;margin-top:6px">
+          <input type="text" class="pfr-crear-categoria" placeholder="Modelo (ej. JF011)" style="margin-bottom:4px">
+          <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px">
+          <button type="button" class="btn btn-primario btn-chico pfr-crear-confirmar">Crear y vincular</button>
+        </div>
+      ` : ""}
     </div>
     <div class="campo">
       <label>Cantidad</label>
@@ -1598,15 +1666,74 @@ function filaLineaFacturaPendiente(productos, linea) {
     </div>
     <button type="button" class="fac-linea-quitar">Quitar</button>
   `;
-  if (linea && linea.producto_id) {
-    div.querySelector(".pfr-linea-producto-id").value = linea.producto_id;
+
+  const select = div.querySelector(".pfr-linea-producto-id");
+  const inputNombreNuevo = div.querySelector(".pfr-linea-nombre-nuevo");
+  const btnCrear = div.querySelector(".pfr-linea-crear-producto");
+  const formCrear = div.querySelector(".pfr-linea-crear-form");
+
+  function sincronizarVisibilidad() {
+    const esNuevo = select.value === "__nuevo__";
+    inputNombreNuevo.style.display = esNuevo ? "block" : "none";
+    if (btnCrear) btnCrear.style.display = esNuevo ? "inline-block" : "none";
+    if (formCrear && !esNuevo) formCrear.style.display = "none";
   }
+
+  if (linea && linea.producto_id) {
+    select.value = linea.producto_id;
+  } else if (sinResolverAlAbrir) {
+    select.value = "__nuevo__";
+  }
+  sincronizarVisibilidad();
+
+  select.addEventListener("change", sincronizarVisibilidad);
   div.querySelector(".fac-linea-quitar").addEventListener("click", () => {
     div.remove();
     actualizarTotalFacturaPendiente();
   });
   div.querySelector(".pfr-linea-cantidad").addEventListener("input", actualizarTotalFacturaPendiente);
   div.querySelector(".pfr-linea-precio").addEventListener("input", actualizarTotalFacturaPendiente);
+
+  if (btnCrear) {
+    btnCrear.addEventListener("click", () => {
+      formCrear.style.display = formCrear.style.display === "none" ? "block" : "none";
+      if (formCrear.style.display === "block" && !div.querySelector(".pfr-crear-categoria").value) {
+        // Ayuda: si Finanzas ya tipeó una descripción libre, se usa como
+        // punto de partida para el detalle -- Bodega igual puede corregirla.
+        div.querySelector(".pfr-crear-modelo").value = inputNombreNuevo.value || "";
+      }
+    });
+    div.querySelector(".pfr-crear-confirmar").addEventListener("click", async () => {
+      const categoria = div.querySelector(".pfr-crear-categoria").value.trim();
+      const modelo = div.querySelector(".pfr-crear-modelo").value.trim();
+      if (!categoria && !modelo) {
+        toast("Ingresa al menos modelo o detalle para crear el producto", true);
+        return;
+      }
+      try {
+        const data = await api(
+          `/api/facturas/pendientes-recepcion/${ctx.pendienteId}/lineas/${ctx.indice}/crear-producto`,
+          { method: "POST", body: JSON.stringify({ categoria, modelo }) },
+        );
+        toast(`Producto "${data.producto.nombre}" creado y vinculado a esta línea`);
+        pfrProductosCache = [...pfrProductosCache, data.producto];
+        // Re-renderiza la línea ya resuelta, sin perder cantidad/precio que
+        // el usuario haya alcanzado a corregir en esta misma edición.
+        const cantidadActual = div.querySelector(".pfr-linea-cantidad").value;
+        const precioActual = div.querySelector(".pfr-linea-precio").value;
+        const nuevaFila = filaLineaFacturaPendiente(
+          pfrProductosCache,
+          { producto_id: data.producto.id, cantidad: cantidadActual, precio_unitario: precioActual },
+          ctx,
+        );
+        div.replaceWith(nuevaFila);
+        actualizarTotalFacturaPendiente();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+  }
+
   return div;
 }
 
@@ -1633,6 +1760,7 @@ document.getElementById("btn-nueva-factura-pendiente").addEventListener("click",
   document.getElementById("pfr-seccion-condicion").style.display = "block";
   document.getElementById("pfr-aviso-condicion-fija").style.display = "none";
   document.getElementById("pfr-aviso-origen").style.display = "none";
+  document.getElementById("pfr-aviso-rechazo").style.display = "none";
   document.getElementById("pfr-foto-whatsapp").style.display = "none";
   document.getElementById("pfr-producto-resultados").style.display = "none";
   try {
@@ -1654,11 +1782,21 @@ async function abrirEdicionFacturaPendiente(id) {
     const [p] = await Promise.all([api(`/api/facturas/pendientes-recepcion/${id}`), pfrCargarCatalogos()]);
     document.getElementById("form-factura-pendiente").reset();
     document.getElementById("pfr-id").value = p.id;
-    document.getElementById("pfr-titulo").textContent = `Editar factura pendiente #${p.id}`;
-    document.getElementById("pfr-btn-guardar").textContent = "Guardar cambios";
     document.getElementById("pfr-numero").value = p.numero || "";
     document.getElementById("pfr-proveedor-id").value = p.proveedor_id || "";
     document.getElementById("pfr-fecha").value = (p.fecha || "").slice(0, 10);
+
+    const avisoRechazo = document.getElementById("pfr-aviso-rechazo");
+    if (p.estado === "rechazada") {
+      document.getElementById("pfr-titulo").textContent = `Corregir y reingresar factura #${p.id}`;
+      document.getElementById("pfr-btn-guardar").textContent = "Corregir y reingresar";
+      avisoRechazo.textContent = `Bodega rechazó esta factura${p.nota_rechazo ? `: "${p.nota_rechazo}"` : ""}. Corrige lo que corresponda y guarda -- vuelve sola a la cola de revisión, sin perder el registro de que fue rechazada.`;
+      avisoRechazo.style.display = "block";
+    } else {
+      document.getElementById("pfr-titulo").textContent = `Editar factura pendiente #${p.id}`;
+      document.getElementById("pfr-btn-guardar").textContent = "Guardar cambios";
+      avisoRechazo.style.display = "none";
+    }
 
     const etiquetaCondicion = { contado: "Al contado", credito: `A crédito, ${p.plazo_dias_credito} días`, mixto: `Mixto — ${p.porcentaje_contado}% contado` };
     document.getElementById("pfr-seccion-condicion").style.display = "none";
@@ -1680,8 +1818,11 @@ async function abrirEdicionFacturaPendiente(id) {
 
     const cont = document.getElementById("pfr-lineas");
     cont.innerHTML = "";
-    (p.lineas && p.lineas.length ? p.lineas : [{}]).forEach(linea => {
-      cont.appendChild(filaLineaFacturaPendiente(pfrProductosCache, linea));
+    (p.lineas && p.lineas.length ? p.lineas : [{}]).forEach((linea, idx) => {
+      // ctx con pendienteId+indice reales (idx calza 1:1 con lineas_json en
+      // el backend, ver _factura_pendiente_recepcion_dict) -- habilita el
+      // botón "Crear este producto" para líneas sin resolver.
+      cont.appendChild(filaLineaFacturaPendiente(pfrProductosCache, linea, { pendienteId: p.id, indice: idx }));
     });
     actualizarTotalFacturaPendiente();
     document.getElementById("pfr-producto-resultados").style.display = "none";
@@ -1788,17 +1929,33 @@ document.querySelectorAll(".pfr-plazos-rapidos [data-plazo]").forEach(btn => {
 document.getElementById("form-factura-pendiente").addEventListener("submit", async (e) => {
   e.preventDefault();
   const filas = Array.from(document.querySelectorAll("#pfr-lineas .fac-linea-row"));
-  const lineas = filas.map(fila => ({
-    producto_id: fila.querySelector(".pfr-linea-producto-id").value,
-    cantidad: fila.querySelector(".pfr-linea-cantidad").value,
-    precio_unitario: fila.querySelector(".pfr-linea-precio").value,
-  }));
-  if (lineas.some(l => !l.producto_id)) {
-    toast("Selecciona un producto en cada línea (o quítala)", true);
-    return;
+  const lineas = [];
+  for (const fila of filas) {
+    const valorSelect = fila.querySelector(".pfr-linea-producto-id").value;
+    const cantidad = fila.querySelector(".pfr-linea-cantidad").value;
+    const precio_unitario = fila.querySelector(".pfr-linea-precio").value;
+    if (valorSelect === "__nuevo__") {
+      // Producto que todavía no existe en el catálogo: Finanzas solo lo
+      // DESCRIBE (no lo crea, eso es exclusivo de Bodega -- ver hallazgo
+      // #3). La línea queda sin producto_id y la factura igual se guarda
+      // como pendiente; Bodega la completa después desde "Editar" (botón
+      // "Crear este producto en Logística").
+      const nombreNuevo = fila.querySelector(".pfr-linea-nombre-nuevo").value.trim();
+      if (!nombreNuevo) {
+        toast("Describe el producto en cada línea marcada como \"No está en el catálogo\" (o quítala)", true);
+        return;
+      }
+      lineas.push({ producto_nuevo_nombre: nombreNuevo, cantidad, precio_unitario });
+    } else if (!valorSelect) {
+      toast("Selecciona un producto en cada línea (o quítala)", true);
+      return;
+    } else {
+      lineas.push({ producto_id: valorSelect, cantidad, precio_unitario });
+    }
   }
 
   const id = document.getElementById("pfr-id").value;
+  const eraCorreccionDeRechazo = document.getElementById("pfr-aviso-rechazo").style.display !== "none";
 
   try {
     if (id) {
@@ -1811,7 +1968,12 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
           lineas,
         }),
       });
-      toast("Factura pendiente actualizada");
+      toast(eraCorreccionDeRechazo ? "Factura corregida y reingresada a la cola de revisión de Bodega" : "Factura pendiente actualizada");
+      // Si se corrigió una rechazada, el aviso rojo ⚠️ (afr-flotante, ver
+      // alerta_facturas_pendientes.js) debe apagarse de inmediato en vez de
+      // esperar hasta 25s al próximo sondeo automático -- typeof por si esta
+      // página no cargó ese script.
+      if (eraCorreccionDeRechazo && typeof afrSondear === "function") afrSondear();
     } else {
       const condicion = document.querySelector('input[name="pfr-condicion"]:checked').value;
       await api("/api/facturas/pendientes-recepcion", {

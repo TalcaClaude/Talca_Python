@@ -366,8 +366,14 @@ def alerta_stock_configurada():
     return _correo_transporte_configurado() and bool(ALERTA_STOCK_DESTINATARIO)
 
 
-CATEGORIAS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
-MODELOS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
+# CATEGORIAS_INICIALES precarga la tabla 'categorias' (campo 'categoria',
+# mostrado en la UI como "Modelo") y MODELOS_INICIALES precarga la tabla
+# 'modelos' (campo 'modelo', mostrado como "Detalle"). Por eso acá van
+# nombres de modelo de transmisión y no descripciones de pieza -- antes del
+# cambio de etiquetas estaban al revés, lo que confundía igual que el
+# problema que motivó el cambio.
+CATEGORIAS_INICIALES = ["JF011", "JF015", "722.9", "722.6", "MPS6", "10R80"]
+MODELOS_INICIALES = ["Cuerpo de Válvulas", "Discos de Hierro", "Discos de Fricción", "Kit de Sellos"]
 
 # "Merma o pérdida" ya no es una categoría a elegir: es su propio tipo de
 # movimiento ("perdida"). "Traslado interno" se quitó por no usarse.
@@ -1439,6 +1445,19 @@ def init_db():
         db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN foto_archivo TEXT DEFAULT ''")
         db.commit()
 
+    # ---- Migración 32: historial permanente por factura pendiente de
+    # recepción (creada / rechazada+nota / corregida y reingresada /
+    # aprobada). Antes, rechazar una factura la dejaba trabada: no había
+    # forma de corregirla y volver a mandarla sin recrearla desde cero
+    # (perdiendo el número, proveedor, líneas ya cargadas), y una vez que
+    # volvía a aprobarse no quedaba ningún rastro de que alguna vez fue
+    # rechazada (revisado_por/revisado_en/nota_rechazo se sobrescriben en
+    # cada paso). historial_json es un registro que solo crece, nunca se
+    # sobrescribe ni se borra -- ver _registrar_historial_pendiente.
+    if "historial_json" not in columnas_ffp:
+        db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN historial_json TEXT NOT NULL DEFAULT '[]'")
+        db.commit()
+
     # ---- Migración 16: perfil restringido de "mecánico" para el agente de
     # WhatsApp. Un mecánico registrado en agente_mecanicos puede ser de tipo
     # 'completo' (comportamiento de siempre: puede mandar fotos Y cambiar
@@ -2246,9 +2265,10 @@ def _leer_excel_productos_masivo(archivo):
             vistos[clave] = i
 
         filas_validas.append({
-            "categoria": modelo.upper(),        # ver nota en el endpoint: MODELO va en 'categoria'
-            "modelo": descripcion.upper(),       # y DESCRIPCION va en 'modelo', para que el nombre
-            "ubicacion": ubicacion_txt.upper(),  # automático quede "MODELO - DESCRIPCION" como se pidió.
+            "categoria": modelo.upper(),        # la columna externa MODELO va en 'categoria' (mostrado
+            "modelo": descripcion.upper(),       # en la UI como "Modelo"), y DESCRIPCION va en 'modelo'
+            "ubicacion": ubicacion_txt.upper(),  # (mostrado como "Detalle"), para que el nombre
+                                                  # automático quede "MODELO - DESCRIPCION" como se pidió.
             "cantidad": max(0, cantidad_num),
             "costo_compra": max(0.0, precio_num),
         })
@@ -2257,6 +2277,7 @@ def _leer_excel_productos_masivo(archivo):
 
 
 @app.route("/api/productos/importar-excel/previsualizar", methods=["POST"])
+@requiere_rol("bodega")
 def productos_importar_excel_previsualizar():
     """Primer paso de 'Importar Excel' (reemplazo completo del catálogo):
     lee el archivo y devuelve un resumen (cuántas filas se importarían,
@@ -2296,6 +2317,7 @@ def productos_importar_excel_previsualizar():
 
 
 @app.route("/api/productos/importar-excel/confirmar", methods=["POST"])
+@requiere_rol("bodega")
 def productos_importar_excel_confirmar():
     """Reemplaza TODO el catálogo de productos por el contenido del Excel
     — acción destructiva e irreversible (no hay 'deshacer'), por eso exige
@@ -2400,6 +2422,7 @@ def productos_importar_excel_confirmar():
 
 
 @app.route("/api/productos/<int:producto_id>", methods=["GET"])
+@requiere_rol("bodega")
 def obtener_producto(producto_id):
     db = get_db()
     row = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
@@ -2431,21 +2454,32 @@ def _stock_minimo_detalle(db, producto_id):
 
 
 @app.route("/api/productos", methods=["POST"])
+@requiere_rol("bodega")
 def crear_producto():
     data = request.get_json(force=True, silent=True) or {}
+    db = get_db()
+    nuevo, error, status = _crear_producto_desde_datos(db, data)
+    if error:
+        return jsonify({"error": error}), status
+    return jsonify(nuevo), 201
 
+
+def _crear_producto_desde_datos(db, data):
+    """Núcleo de crear_producto() -- factorizado para poder reusarlo desde
+    crear_y_vincular_producto_pendiente() (Bodega crea un producto nuevo
+    directo desde una línea de factura sin resolver), sin duplicar toda la
+    validación. Devuelve (producto_dict, None, 201) si se creó, o
+    (None, mensaje_error, status_code) si no."""
     codigo_interno = (data.get("codigo_interno") or "").strip().upper()
     categoria = (data.get("categoria") or "").strip().upper()
     modelo = (data.get("modelo") or "").strip().upper()
-
-    db = get_db()
 
     if codigo_interno:
         existe = db.execute(
             "SELECT id FROM productos WHERE codigo_interno = ?", (codigo_interno,)
         ).fetchone()
         if existe:
-            return jsonify({"error": f"Ya existe un producto con código '{codigo_interno}'"}), 400
+            return None, f"Ya existe un producto con código '{codigo_interno}'", 400
 
     if categoria or modelo:
         duplicado = db.execute(
@@ -2453,10 +2487,10 @@ def crear_producto():
             (categoria, modelo),
         ).fetchone()
         if duplicado:
-            return jsonify({
-                "error": f"Ya existe un producto con esa categoría y modelo (#{duplicado[0]:04d}). "
-                         f"Si necesitas más stock, ingrésalo con una factura en vez de crear un producto nuevo."
-            }), 400
+            return None, (
+                f"Ya existe un producto con ese modelo y detalle (#{duplicado[0]:04d}). "
+                f"Si necesitas más stock, ingrésalo con una factura en vez de crear un producto nuevo."
+            ), 400
 
     ts = now_iso()
     try:
@@ -2465,17 +2499,17 @@ def crear_producto():
         stock_minimo = int(data.get("stock_minimo") or 0)
         costo_compra = float(data.get("costo_compra") or 0)
     except (TypeError, ValueError):
-        return jsonify({"error": "Stock y costo deben ser números"}), 400
+        return None, "Stock y costo deben ser números", 400
 
     ubicacion_id = data.get("ubicacion_id") or None
     if ubicacion_id:
         try:
             ubicacion_id = int(ubicacion_id)
         except (TypeError, ValueError):
-            return jsonify({"error": "Ubicación inválida"}), 400
+            return None, "Ubicación inválida", 400
         existe_ubi = db.execute("SELECT id FROM ubicaciones WHERE id = ?", (ubicacion_id,)).fetchone()
         if not existe_ubi:
-            return jsonify({"error": "La ubicación seleccionada no existe"}), 400
+            return None, "La ubicación seleccionada no existe", 400
         # Nota: una ubicación puede tener más de un producto (es normal en
         # una bodega real), así que aquí no se valida "ocupación".
 
@@ -2540,10 +2574,11 @@ def crear_producto():
     db.commit()
 
     nuevo = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (nuevo_id,)).fetchone()
-    return jsonify(row_to_dict(nuevo)), 201
+    return row_to_dict(nuevo), None, 201
 
 
 @app.route("/api/productos/<int:producto_id>", methods=["PUT"])
+@requiere_rol("bodega")
 def editar_producto(producto_id):
     db = get_db()
     row = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
@@ -2602,7 +2637,7 @@ def editar_producto(producto_id):
         ).fetchone()
         if duplicado_pm:
             return jsonify({
-                "error": f"Ya existe otro producto con esa categoría y modelo (#{duplicado_pm[0]:04d})."
+                "error": f"Ya existe otro producto con ese modelo y detalle (#{duplicado_pm[0]:04d})."
             }), 400
 
     nombre = nombre_automatico(categoria, modelo, codigo_interno, producto_id)
@@ -2641,6 +2676,7 @@ def editar_producto(producto_id):
 
 
 @app.route("/api/productos/<int:producto_id>", methods=["DELETE"])
+@requiere_rol("bodega")
 def eliminar_producto(producto_id):
     db = get_db()
     row = db.execute("SELECT id FROM productos WHERE id = ?", (producto_id,)).fetchone()
@@ -2699,6 +2735,7 @@ def _borrar_foto_producto(nombre_archivo):
 
 
 @app.route("/api/productos/<int:producto_id>/foto", methods=["POST"])
+@requiere_rol("bodega")
 def subir_foto_producto(producto_id):
     db = get_db()
     producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
@@ -2730,6 +2767,7 @@ def subir_foto_producto(producto_id):
 
 
 @app.route("/api/productos/<int:producto_id>/foto", methods=["DELETE"])
+@requiere_rol("bodega")
 def eliminar_foto_producto(producto_id):
     db = get_db()
     producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
@@ -2748,6 +2786,7 @@ def eliminar_foto_producto(producto_id):
 
 
 @app.route("/api/productos/foto/<path:nombre_archivo>", methods=["GET"])
+@requiere_rol("bodega")
 def obtener_foto_producto(nombre_archivo):
     nombre_seguro = secure_filename(nombre_archivo)
     ruta = os.path.join(FOTOS_DIR, nombre_seguro)
@@ -2761,6 +2800,7 @@ def obtener_foto_producto(nombre_archivo):
 # ---------------------------------------------------------------------------
 
 @app.route("/api/productos/<int:producto_id>/movimiento", methods=["POST"])
+@requiere_rol("bodega")
 def registrar_movimiento(producto_id):
     db = get_db()
     _iniciar_transaccion_stock(db)
@@ -2949,6 +2989,7 @@ def registrar_movimiento(producto_id):
 # ---------------------------------------------------------------------------
 
 @app.route("/api/ubicaciones", methods=["GET"])
+@requiere_rol("bodega")
 def listar_ubicaciones():
     db = get_db()
     ubis = db.execute(
@@ -2975,6 +3016,7 @@ def listar_ubicaciones():
 
 
 @app.route("/api/ubicaciones", methods=["POST"])
+@requiere_rol("bodega")
 def crear_ubicacion():
     data = request.get_json(force=True, silent=True) or {}
     db = get_db()
@@ -3007,6 +3049,7 @@ def crear_ubicacion():
 
 
 @app.route("/api/ubicaciones/rango", methods=["POST"])
+@requiere_rol("bodega")
 def crear_ubicaciones_rango():
     """Crea de una sola vez todas las ubicaciones de un rango (ej. pasillo
     1 a 3, estantería 1 a 10, nivel 1 a 5 = hasta 150 ubicaciones), en vez
@@ -3072,6 +3115,7 @@ def crear_ubicaciones_rango():
 
 
 @app.route("/api/ubicaciones/<int:ubicacion_id>/reasignar", methods=["PUT"])
+@requiere_rol("bodega")
 def reasignar_ubicacion(ubicacion_id):
     """Mueve de una sola vez TODOS los productos que hay en `ubicacion_id`
     hacia otra ubicación — para reorganizar la bodega sin editar producto
@@ -3104,6 +3148,7 @@ def reasignar_ubicacion(ubicacion_id):
 
 
 @app.route("/api/ubicaciones/<int:ubicacion_id>", methods=["DELETE"])
+@requiere_rol("bodega")
 def eliminar_ubicacion(ubicacion_id):
     db = get_db()
     row = db.execute("SELECT id FROM ubicaciones WHERE id = ?", (ubicacion_id,)).fetchone()
@@ -3155,6 +3200,7 @@ def _recalcular_nombres_afectados(db, ids_productos):
 
 
 @app.route("/api/categorias", methods=["GET"])
+@requiere_rol("bodega")
 def listar_categorias():
     db = get_db()
     rows = db.execute(
@@ -3170,11 +3216,12 @@ def listar_categorias():
 
 
 @app.route("/api/categorias", methods=["POST"])
+@requiere_rol("bodega")
 def crear_categoria():
     data = request.get_json(force=True, silent=True) or {}
     nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
-        return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
+        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
     db = get_db()
     db.execute("INSERT OR IGNORE INTO categorias (nombre) VALUES (?)", (nombre,))
     db.commit()
@@ -3182,24 +3229,28 @@ def crear_categoria():
 
 
 @app.route("/api/categorias/<int:categoria_id>", methods=["PUT"])
+@requiere_rol("bodega")
 def editar_categoria(categoria_id):
-    """Renombra una categoría — y actualiza en cascada todos los productos
-    que ya la tenían asignada, para corregir errores de tipeo sin tener que
-    editar producto por producto."""
+    """Renombra un 'modelo' (el campo interno sigue llamándose 'categoria'
+    en la base de datos y en esta ruta -- ver nota de relabeling más abajo
+    en core.py/nombre_automatico -- pero de cara al taller esto es "Modelo",
+    ej. JF011, 722.6) — y actualiza en cascada todos los productos que ya
+    lo tenían asignado, para corregir errores de tipeo sin tener que editar
+    producto por producto."""
     db = get_db()
     actual = db.execute("SELECT * FROM categorias WHERE id = ?", (categoria_id,)).fetchone()
     if actual is None:
-        return jsonify({"error": "Categoría no encontrada"}), 404
+        return jsonify({"error": "Modelo no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
     nuevo_nombre = (data.get("nombre") or "").strip().upper()
     if not nuevo_nombre:
-        return jsonify({"error": "El nombre de la categoría no puede estar vacío"}), 400
+        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
 
     if nuevo_nombre != actual["nombre"]:
         choque = db.execute("SELECT id FROM categorias WHERE nombre = ? AND id != ?", (nuevo_nombre, categoria_id)).fetchone()
         if choque:
-            return jsonify({"error": f"Ya existe una categoría llamada '{nuevo_nombre}'. Elimina una de las dos para evitar duplicados."}), 400
+            return jsonify({"error": f"Ya existe un modelo llamado '{nuevo_nombre}'. Elimina uno de los dos para evitar duplicados."}), 400
 
     afectados = [r["id"] for r in db.execute("SELECT id FROM productos WHERE UPPER(TRIM(categoria)) = ?", (actual["nombre"],)).fetchall()]
 
@@ -3211,15 +3262,16 @@ def editar_categoria(categoria_id):
 
 
 @app.route("/api/categorias/<int:categoria_id>", methods=["DELETE"])
+@requiere_rol("bodega")
 def eliminar_categoria(categoria_id):
-    """Quita la categoría de la lista precargada. Como la categoría se
-    guarda como texto directo en cada producto (no es una llave foránea),
-    esto no le cambia el dato a los productos que ya la tenían — solo deja
-    de sugerirse para productos nuevos."""
+    """Quita el modelo de la lista precargada. Como se guarda como texto
+    directo en cada producto (no es una llave foránea), esto no le cambia
+    el dato a los productos que ya lo tenían — solo deja de sugerirse para
+    productos nuevos."""
     db = get_db()
     actual = db.execute("SELECT * FROM categorias WHERE id = ?", (categoria_id,)).fetchone()
     if actual is None:
-        return jsonify({"error": "Categoría no encontrada"}), 404
+        return jsonify({"error": "Modelo no encontrado"}), 404
     n_productos = db.execute(
         "SELECT COUNT(*) FROM productos WHERE UPPER(TRIM(categoria)) = ?", (actual["nombre"],)
     ).fetchone()[0]
@@ -3229,6 +3281,7 @@ def eliminar_categoria(categoria_id):
 
 
 @app.route("/api/modelos", methods=["GET"])
+@requiere_rol("bodega")
 def listar_modelos():
     db = get_db()
     rows = db.execute(
@@ -3244,11 +3297,12 @@ def listar_modelos():
 
 
 @app.route("/api/modelos", methods=["POST"])
+@requiere_rol("bodega")
 def crear_modelo():
     data = request.get_json(force=True, silent=True) or {}
     nombre = (data.get("nombre") or "").strip().upper()
     if not nombre:
-        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
+        return jsonify({"error": "El nombre del detalle no puede estar vacío"}), 400
     db = get_db()
     db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (nombre,))
     db.commit()
@@ -3256,21 +3310,22 @@ def crear_modelo():
 
 
 @app.route("/api/modelos/<int:modelo_id>", methods=["PUT"])
+@requiere_rol("bodega")
 def editar_modelo(modelo_id):
     db = get_db()
     actual = db.execute("SELECT * FROM modelos WHERE id = ?", (modelo_id,)).fetchone()
     if actual is None:
-        return jsonify({"error": "Modelo no encontrado"}), 404
+        return jsonify({"error": "Detalle no encontrado"}), 404
 
     data = request.get_json(force=True, silent=True) or {}
     nuevo_nombre = (data.get("nombre") or "").strip().upper()
     if not nuevo_nombre:
-        return jsonify({"error": "El nombre del modelo no puede estar vacío"}), 400
+        return jsonify({"error": "El nombre del detalle no puede estar vacío"}), 400
 
     if nuevo_nombre != actual["nombre"]:
         choque = db.execute("SELECT id FROM modelos WHERE nombre = ? AND id != ?", (nuevo_nombre, modelo_id)).fetchone()
         if choque:
-            return jsonify({"error": f"Ya existe un modelo llamado '{nuevo_nombre}'. Elimina uno de los dos para evitar duplicados."}), 400
+            return jsonify({"error": f"Ya existe un detalle llamado '{nuevo_nombre}'. Elimina uno de los dos para evitar duplicados."}), 400
 
     afectados = [r["id"] for r in db.execute("SELECT id FROM productos WHERE UPPER(TRIM(modelo)) = ?", (actual["nombre"],)).fetchall()]
 
@@ -3282,11 +3337,12 @@ def editar_modelo(modelo_id):
 
 
 @app.route("/api/modelos/<int:modelo_id>", methods=["DELETE"])
+@requiere_rol("bodega")
 def eliminar_modelo(modelo_id):
     db = get_db()
     actual = db.execute("SELECT * FROM modelos WHERE id = ?", (modelo_id,)).fetchone()
     if actual is None:
-        return jsonify({"error": "Modelo no encontrado"}), 404
+        return jsonify({"error": "Detalle no encontrado"}), 404
     n_productos = db.execute(
         "SELECT COUNT(*) FROM productos WHERE UPPER(TRIM(modelo)) = ?", (actual["nombre"],)
     ).fetchone()[0]
@@ -3315,6 +3371,7 @@ def listar_proveedores():
 
 
 @app.route("/api/proveedores", methods=["POST"])
+@requiere_rol("bodega")
 def crear_proveedor():
     data = request.get_json(force=True, silent=True) or {}
     nombre = (data.get("nombre") or "").strip().upper()
@@ -3349,6 +3406,7 @@ def crear_proveedor():
 
 
 @app.route("/api/proveedores/<int:proveedor_id>", methods=["PUT"])
+@requiere_rol("bodega")
 def editar_proveedor(proveedor_id):
     db = get_db()
     row = db.execute("SELECT * FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone()
@@ -3399,6 +3457,7 @@ def editar_proveedor(proveedor_id):
 
 
 @app.route("/api/proveedores/<int:proveedor_id>", methods=["DELETE"])
+@requiere_rol("bodega")
 def eliminar_proveedor(proveedor_id):
     db = get_db()
     row = db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone()
@@ -3570,6 +3629,7 @@ def _factura_detalle(db, factura_row):
 
 
 @app.route("/api/facturas", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
 def listar_facturas():
     db = get_db()
     proveedor_id = request.args.get("proveedor_id", "").strip()
@@ -3603,6 +3663,7 @@ def listar_facturas():
 
 
 @app.route("/api/facturas/<int:factura_id>", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
 def obtener_factura(factura_id):
     db = get_db()
     row = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
@@ -3612,6 +3673,7 @@ def obtener_factura(factura_id):
 
 
 @app.route("/api/facturas/numero/<path:numero>", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
 def obtener_factura_por_numero(numero):
     db = get_db()
     row = db.execute(FACTURA_SELECT + " WHERE f.numero = ?", (numero,)).fetchone()
@@ -3915,7 +3977,7 @@ CARGA_MASIVA_CACHE = {}
 CARGA_MASIVA_TTL_SEGUNDOS = 30 * 60
 CARGA_MASIVA_ENCABEZADOS = [
     "N° Factura", "Fecha (AAAA-MM-DD)", "Proveedor", "RUT Proveedor",
-    "ID Producto", "Categoría", "Modelo", "Cantidad", "Precio Unitario",
+    "ID Producto", "Modelo", "Detalle", "Cantidad", "Precio Unitario",
 ]
 
 
@@ -4142,7 +4204,7 @@ def _llamar_claude_vision_clasificar_foto_whatsapp(imagen_bytes, mime_type):
 def _buscar_producto_por_texto(db, texto):
     """Intenta encontrar, entre los productos existentes, el que mejor
     calza con una descripción de texto libre (típicamente sacada de una
-    foto de factura escaneada por IA — ahí no hay ID ni categoría/modelo
+    foto de factura escaneada por IA — ahí no hay ID ni modelo/detalle
     exactos como en la carga masiva por Excel, solo el nombre que puso el
     proveedor). Usa comparación de texto simple (difflib), sin
     dependencias nuevas. Umbral conservador a propósito: es mejor dejar la
@@ -4170,6 +4232,7 @@ def _buscar_producto_por_texto(db, texto):
 
 
 @app.route("/api/facturas/carga-masiva/plantilla", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
 def carga_masiva_plantilla():
     """Descarga un Excel de ejemplo con las columnas esperadas, más una hoja
     de referencia con los productos actuales (su ID y nombre) para que sea
@@ -4189,7 +4252,7 @@ def carga_masiva_plantilla():
     _autoancho(ws)
 
     ws_ref = wb.create_sheet("Productos (referencia)")
-    ws_ref.append(["ID Producto", "Categoría", "Modelo", "Nombre", "Stock actual"])
+    ws_ref.append(["ID Producto", "Modelo", "Detalle", "Nombre", "Stock actual"])
     _estilo_encabezado(ws_ref)
     for p in db.execute(PRODUCTO_SELECT + " ORDER BY p.categoria, p.modelo").fetchall():
         d = row_to_dict(p)
@@ -4205,7 +4268,7 @@ def carga_masiva_plantilla():
         "Proveedor: nombre del proveedor. Si no existe todavía en el sistema, se crea automáticamente.",
         "RUT Proveedor: opcional. Solo se usa si hay que crear el proveedor (si ya existe, se respeta el RUT que ya tiene guardado).",
         "ID Producto: el número de producto tal como aparece en el sistema (columna 'ID Producto' de la hoja Productos (referencia), sin el '#'). Es la forma más segura de identificar el producto.",
-        "Categoría / Modelo: alternativa si no se tiene el ID Producto — deben coincidir exactamente con un producto existente (no distingue mayúsculas/minúsculas).",
+        "Modelo / Detalle: alternativa si no se tiene el ID Producto — deben coincidir exactamente con un producto existente (no distingue mayúsculas/minúsculas).",
         "Cantidad: número entero mayor a 0.",
         "Precio Unitario: número, puede tener decimales. No puede ser negativo.",
         "El stock se ingresa automáticamente al confirmar la carga, igual que al crear una factura manual.",
@@ -4241,11 +4304,27 @@ def _carga_masiva_leer_excel(archivo):
         "proveedor": "proveedor",
         "rut proveedor": "rut_proveedor",
         "id producto": "producto_id",
-        "categoría": "categoria", "categoria": "categoria",
-        "modelo": "modelo",
         "cantidad": "cantidad",
         "precio unitario": "precio_unitario",
     }
+
+    # Las columnas de "Categoría"/"Modelo" se renombraron a "Modelo"/"Detalle"
+    # (mismos campos internos 'categoria'/'modelo' de siempre, solo cambió la
+    # etiqueta). Para que las plantillas viejas ya descargadas (con columnas
+    # "Categoría" y "Modelo") se sigan leyendo igual que antes, se detecta
+    # cuál juego de encabezados trae el archivo: si aparece "Categoría" en el
+    # encabezado, es una plantilla vieja y "Modelo" ahí significa el campo
+    # 'modelo'; si no aparece, es una plantilla nueva y "Modelo" significa el
+    # campo 'categoria' (con "Detalle" para el campo 'modelo').
+    encabezado_norm = {_norm(col) for col in encabezado}
+    es_plantilla_vieja = "categoría" in encabezado_norm or "categoria" in encabezado_norm
+    if es_plantilla_vieja:
+        mapa_columnas["categoría"] = "categoria"
+        mapa_columnas["categoria"] = "categoria"
+        mapa_columnas["modelo"] = "modelo"
+    else:
+        mapa_columnas["modelo"] = "categoria"
+        mapa_columnas["detalle"] = "modelo"
 
     indices = {}
     for i, col in enumerate(encabezado):
@@ -4279,28 +4358,39 @@ def _carga_masiva_leer_excel(archivo):
 
 
 def _carga_masiva_resolver_producto(db, fila):
+    """Devuelve (producto, error, texto_original). 'error' solo se llena
+    cuando la fila ni siquiera trae con qué IDENTIFICAR un producto (ni ID
+    ni modelo/detalle) o cuando lo que trae es basura (un ID no
+    numérico) -- eso sigue bloqueando la factura, porque no hay ni un
+    nombre que mostrarle a Bodega. Si en cambio el ID/modelo/detalle
+    están bien formados pero no calzan con ningún producto del catálogo,
+    NO es un error: se arma un texto_original descriptivo y la línea queda
+    'producto nuevo, pendiente de crear' (ver _carga_masiva_revalidar_grupo
+    y aprobar_factura_pendiente_recepcion) en vez de descartar la factura
+    completa por un solo repuesto que todavía no existe."""
     pid = fila.get("producto_id")
     if pid is not None and str(pid).strip() != "":
         try:
             pid_int = int(float(pid))
         except (TypeError, ValueError):
-            return None, f"Fila {fila['fila']}: 'ID Producto' inválido ({pid!r})"
+            return None, f"Fila {fila['fila']}: 'ID Producto' inválido ({pid!r})", None
         producto = db.execute("SELECT * FROM productos WHERE id = ?", (pid_int,)).fetchone()
         if not producto:
-            return None, f"Fila {fila['fila']}: no existe ningún producto con ID {pid_int}"
-        return producto, None
+            return None, None, f"ID Producto {pid_int} (no existe todavía en el catálogo)"
+        return producto, None, None
 
     categoria = (fila.get("categoria") or "").strip()
     modelo = (fila.get("modelo") or "").strip()
     if not categoria and not modelo:
-        return None, f"Fila {fila['fila']}: falta 'ID Producto' o 'Categoría'/'Modelo' para identificar el producto"
+        return None, f"Fila {fila['fila']}: falta 'ID Producto' o 'Modelo'/'Detalle' para identificar el producto", None
     producto = db.execute(
         "SELECT * FROM productos WHERE UPPER(categoria) = UPPER(?) AND UPPER(modelo) = UPPER(?)",
         (categoria, modelo),
     ).fetchone()
     if not producto:
-        return None, f"Fila {fila['fila']}: no se encontró un producto con categoría '{categoria}' y modelo '{modelo}'"
-    return producto, None
+        descripcion = " / ".join(p for p in (categoria, modelo) if p)
+        return None, None, descripcion or None
+    return producto, None, None
 
 
 def _buscar_proveedor_existente(db, nombre, rut):
@@ -4341,6 +4431,7 @@ def _carga_masiva_resolver_proveedor(db, nombre, rut, proveedores_nuevos_en_este
 
 
 @app.route("/api/facturas/carga-masiva/previsualizar", methods=["POST"])
+@requiere_rol("finanzas", "bodega")
 def carga_masiva_previsualizar():
     _carga_masiva_limpiar_cache()
     archivo = request.files.get("archivo")
@@ -4392,7 +4483,7 @@ def carga_masiva_previsualizar():
             if es_nuevo and prov_nombre:
                 proveedores_nuevos_vistos[prov_nombre.upper()] = "NUEVO"
 
-        producto, error_producto = _carga_masiva_resolver_producto(db, fila)
+        producto, error_producto, texto_original_producto = _carga_masiva_resolver_producto(db, fila)
         if error_producto:
             errores_fila.append(error_producto)
 
@@ -4418,6 +4509,7 @@ def carga_masiva_previsualizar():
             "cantidad": cantidad_ok,
             "precio_unitario": precio_ok,
             "errores": errores_fila,
+            "texto_original": texto_original_producto,
         })
         if errores_fila:
             grupo["errores"].extend(errores_fila)
@@ -4460,7 +4552,16 @@ def _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes):
     """Recalcula errores/valida de UN grupo (factura) de la previsualización,
     después de que el usuario corrigió algo a mano (producto/cantidad/precio
     de una línea). No vuelve a leer el Excel: solo re-chequea con los valores
-    que hay ahora mismo en el grupo cacheado."""
+    que hay ahora mismo en el grupo cacheado.
+
+    Una línea sin producto_id NO bloquea la factura (antes sí, con "falta
+    identificar el producto") -- se deja pasar como "producto nuevo,
+    pendiente de que Bodega lo cree" (ver texto_original), igual que ya
+    hacía WhatsApp. Bloquear la factura completa por un solo repuesto que
+    todavía no existe en el catálogo obligaba a Finanzas a descartarla
+    entera; ahora queda igual como pendiente de recepción, con esa línea
+    sin resolver, y Bodega la completa antes de poder aprobarla (ver
+    aprobar_factura_pendiente_recepcion)."""
     errores = []
 
     if grupo["numero"] in numeros_existentes:
@@ -4471,7 +4572,7 @@ def _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes):
         errores_linea = []
 
         if linea["producto_id"] is None:
-            errores_linea.append(f"Fila {linea['fila']}: falta identificar el producto")
+            pass  # producto nuevo, pendiente de crear -- no bloquea (ver docstring)
         else:
             producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
             if not producto:
@@ -4505,6 +4606,7 @@ def _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes):
 
 
 @app.route("/api/facturas/carga-masiva/corregir-linea", methods=["POST"])
+@requiere_rol("finanzas", "bodega")
 def carga_masiva_corregir_linea():
     """Aplica una corrección manual (producto/cantidad/precio) a UNA línea de
     la previsualización de carga masiva, sin tener que volver a subir el
@@ -4559,6 +4661,7 @@ def carga_masiva_corregir_linea():
 
 
 @app.route("/api/facturas/carga-masiva/corregir-proveedor", methods=["POST"])
+@requiere_rol("finanzas", "bodega")
 def carga_masiva_corregir_proveedor():
     """Corrige el proveedor de UNA factura de la previsualización — a
     diferencia de las líneas (producto/cantidad/precio), el proveedor no se
@@ -4606,6 +4709,7 @@ def carga_masiva_corregir_proveedor():
 
 
 @app.route("/api/facturas/escanear-foto", methods=["POST"])
+@requiere_rol("finanzas", "bodega")
 def escanear_foto_factura():
     """Sube una foto de una factura de compra y usa IA (Claude, con
     visión) para leer proveedor, fecha, número y líneas — para no tener que
@@ -4863,6 +4967,7 @@ def _factura_pendiente_recepcion_dict(db, row):
     d["lineas"] = json.loads(d.pop("lineas_json") or "[]")
     recibidas = d.pop("lineas_recibidas_json", None)
     d["lineas_recibidas"] = json.loads(recibidas) if recibidas else None
+    d["historial"] = json.loads(d.pop("historial_json", None) or "[]")
     d["monto_total"] = round(sum(l["cantidad"] * l["precio_unitario"] for l in d["lineas"]), 2)
     if d["proveedor_id"]:
         prov = db.execute("SELECT nombre FROM proveedores WHERE id = ?", (d["proveedor_id"],)).fetchone()
@@ -4870,6 +4975,28 @@ def _factura_pendiente_recepcion_dict(db, row):
     else:
         d["proveedor_nombre"] = ""
     return d
+
+
+def _registrar_historial_pendiente(db, pendiente_id, evento, nota=None):
+    """Agrega un evento al historial de una factura pendiente de recepción
+    (historial_json) -- a diferencia de 'estado' (que solo refleja la
+    situación ACTUAL) esto es un registro que nunca se sobrescribe ni se
+    borra: permite ver, en una misma factura, que fue rechazada una vez,
+    corregida, y aprobada después, sin perder ese rastro (a pedido del
+    taller). No hace commit -- queda a cargo de quien llama, que ya tiene
+    su propio commit al final de la misma operación."""
+    fila = db.execute(
+        "SELECT historial_json FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)
+    ).fetchone()
+    historial = json.loads((fila["historial_json"] if fila else None) or "[]")
+    entrada = {"evento": evento, "usuario": usuario_actual(), "fecha": now_iso()}
+    if nota:
+        entrada["nota"] = nota
+    historial.append(entrada)
+    db.execute(
+        "UPDATE facturas_finanzas_pendientes SET historial_json = ? WHERE id = ?",
+        (json.dumps(historial), pendiente_id),
+    )
 
 
 @app.route("/api/facturas/pendientes-recepcion", methods=["GET"])
@@ -4902,6 +5029,25 @@ def contador_facturas_pendientes_recepcion():
         "SELECT COUNT(*) FROM facturas_finanzas_pendientes WHERE estado = 'pendiente'"
     ).fetchone()[0]
     return jsonify({"pendientes": n})
+
+
+@app.route("/api/facturas/pendientes-recepcion/rechazadas/contador", methods=["GET"])
+@requiere_rol("finanzas")
+def contador_facturas_rechazadas():
+    """Aviso global flotante simétrico al de arriba, pero para Finanzas: a
+    diferencia de 'cuántas tengo pendientes de aprobar' (que es simplemente
+    su propio trabajo de todos los días, visible en su pantalla sin
+    necesidad de avisos), que Bodega haya rechazado una factura SÍ es una
+    excepción que amerita un aviso activo -- si nadie se entera, la factura
+    queda trabada esperando una corrección que nunca llega. Deja de contar
+    en cuanto se corrige y reingresa (vuelve a 'pendiente', ver
+    editar_factura_pendiente_recepcion) — no hace falta un flag de 'vista'
+    aparte para esto."""
+    db = get_db()
+    n = db.execute(
+        "SELECT COUNT(*) FROM facturas_finanzas_pendientes WHERE estado = 'rechazada'"
+    ).fetchone()[0]
+    return jsonify({"rechazadas": n})
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>", methods=["GET"])
@@ -4960,15 +5106,21 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
             return None, f"Ya hay una factura pendiente de recepción con el número '{numero}'"
 
     ts = now_iso()
+    # El primer evento del historial usa 'creado_por' (el parámetro, no
+    # usuario_actual()) porque este mismo punto de entrada también lo llama
+    # el pipeline del agente de WhatsApp fuera de una sesión con login (ver
+    # docstring más arriba) -- ahí 'creado_por' ya trae algo como "Agente
+    # WhatsApp", que es más preciso que "Sistema".
+    historial_inicial = json.dumps([{"evento": "creada", "usuario": creado_por, "fecha": ts}])
     cur = db.execute(
         """
         INSERT INTO facturas_finanzas_pendientes
             (numero, proveedor_id, fecha, lineas_json, condicion_pago, porcentaje_contado,
-             plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?)
+             plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo, historial_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?)
         """,
         (numero, proveedor_id, fecha, json.dumps(lineas_validadas), condicion_pago, porcentaje_contado,
-         plazo_dias_credito, creado_por, ts, origen, foto_archivo),
+         plazo_dias_credito, creado_por, ts, origen, foto_archivo, historial_inicial),
     )
     db.commit()
     nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -4982,20 +5134,52 @@ def _validar_lineas_pendiente(db, lineas_in):
     productos repetidos) solo tiene sentido cuando el usuario las tipeó a
     mano; Excel/foto/WhatsApp arman sus 'lineas_validadas' con su propia
     lógica de matching contra el catálogo (ver _carga_masiva_revalidar_grupo)
-    y pueden traer líneas sin producto_id todavía por resolver."""
+    y pueden traer líneas sin producto_id todavía por resolver.
+
+    Una línea manual también puede venir SIN producto_id si en cambio trae
+    'producto_nuevo_nombre' no vacío -- es el caso de una factura que trae
+    un repuesto que todavía no existe en el catálogo (ver hallazgo
+    planteado por el taller: Finanzas no crea productos, pero necesita
+    poder dejar la factura registrada igual). Esa línea queda con
+    producto_id=None y 'texto_original' con lo que describió Finanzas,
+    exactamente en el mismo formato que ya usan Excel/foto/WhatsApp para
+    líneas sin resolver -- Bodega la completa después desde la pantalla de
+    editar el pendiente (ver crear_y_vincular_producto_pendiente), y
+    aprobar_factura_pendiente_recepcion sigue exigiendo que toda línea
+    tenga un producto_id real antes de poder aprobar la factura."""
     lineas_validadas = []
     productos_vistos = set()
     for i, linea in enumerate(lineas_in, start=1):
         try:
-            producto_id = int(linea.get("producto_id"))
             cantidad = int(linea.get("cantidad"))
             precio_unitario = float(linea.get("precio_unitario"))
         except (TypeError, ValueError):
-            return None, f"Línea {i}: producto, cantidad y precio deben ser válidos"
+            return None, f"Línea {i}: la cantidad y el precio deben ser válidos"
         if cantidad <= 0:
             return None, f"Línea {i}: la cantidad debe ser mayor a 0"
         if precio_unitario < 0:
             return None, f"Línea {i}: el precio no puede ser negativo"
+
+        producto_id_raw = linea.get("producto_id")
+        producto_nuevo_nombre = (linea.get("producto_nuevo_nombre") or "").strip()
+
+        if producto_id_raw in (None, "", 0, "0"):
+            if not producto_nuevo_nombre:
+                return None, (
+                    f"Línea {i}: elige un producto del catálogo, o describe el producto nuevo "
+                    f"para que Bodega lo cree antes de aprobar la factura"
+                )
+            lineas_validadas.append({
+                "producto_id": None, "producto_nombre": None,
+                "cantidad": cantidad, "precio_unitario": precio_unitario,
+                "texto_original": producto_nuevo_nombre,
+            })
+            continue
+
+        try:
+            producto_id = int(producto_id_raw)
+        except (TypeError, ValueError):
+            return None, f"Línea {i}: producto inválido"
         producto = db.execute("SELECT id, nombre FROM productos WHERE id = ?", (producto_id,)).fetchone()
         if not producto:
             return None, f"Línea {i}: el producto seleccionado no existe"
@@ -5053,19 +5237,24 @@ def crear_factura_pendiente_recepcion():
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>", methods=["PUT"])
 @requiere_rol("finanzas", "bodega")
 def editar_factura_pendiente_recepcion(pendiente_id):
-    """Corrige una factura pendiente de recepción ANTES de aprobarla o
-    rechazarla — pensado sobre todo para las que llegan por WhatsApp con
-    datos incompletos (folio no leído, producto que la IA no pudo
-    matchear contra el catálogo): finanzas o bodega puede completar el
-    número, el proveedor, o resolver una línea a un producto real antes de
-    que se pueda aprobar (aprobar_factura_pendiente_recepcion exige que
-    todas las líneas recibidas tengan un producto_id válido)."""
+    """Corrige una factura pendiente de recepción ANTES de aprobarla, o
+    DESPUÉS de que Bodega la rechazó — pensado tanto para las que llegan
+    por WhatsApp con datos incompletos (folio no leído, producto que la IA
+    no pudo matchear contra el catálogo) como para el camino normal de
+    rechazo: Bodega rechaza con una nota (ver
+    rechazar_factura_pendiente_recepcion) y quien la subió corrige acá lo
+    que estaba mal SIN tener que volver a escribir toda la factura de
+    cero, y al guardar vuelve sola a la cola de revisión ('pendiente') —
+    la nota de rechazo y quién/cuándo rechazó quedan para siempre en
+    historial_json (ver _registrar_historial_pendiente), no se pierden solo
+    porque se corrigió y se volvió a aprobar después."""
     db = get_db()
     fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
     if fila is None:
         return jsonify({"error": "No se encontró ese pendiente"}), 404
-    if fila["estado"] != "pendiente":
+    if fila["estado"] not in ("pendiente", "rechazada"):
         return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede editar."}), 400
+    estaba_rechazada = fila["estado"] == "rechazada"
 
     data = request.get_json(force=True, silent=True) or {}
     numero = (data.get("numero") if "numero" in data else fila["numero"]) or ""
@@ -5105,17 +5294,88 @@ def editar_factura_pendiente_recepcion(pendiente_id):
         if ya_pendiente:
             return jsonify({"error": f"Ya hay una factura pendiente de recepción con el número '{numero}'"}), 400
 
-    db.execute(
-        """
-        UPDATE facturas_finanzas_pendientes
-        SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?
-        WHERE id = ?
-        """,
-        (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
-    )
+    if estaba_rechazada:
+        db.execute(
+            """
+            UPDATE facturas_finanzas_pendientes
+            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, estado = 'pendiente'
+            WHERE id = ?
+            """,
+            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
+        )
+        _registrar_historial_pendiente(db, pendiente_id, "corregida_reingresada")
+    else:
+        db.execute(
+            """
+            UPDATE facturas_finanzas_pendientes
+            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?
+            WHERE id = ?
+            """,
+            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
+        )
     db.commit()
     actualizada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
     return jsonify(_factura_pendiente_recepcion_dict(db, actualizada))
+
+
+@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/lineas/<int:indice>/crear-producto", methods=["POST"])
+@requiere_rol("bodega")
+def crear_y_vincular_producto_pendiente(pendiente_id, indice):
+    """Crea un producto nuevo y lo vincula de inmediato a UNA línea sin
+    resolver de una factura pendiente de recepción -- el punto de
+    resolución para el hueco que reportó el taller: una factura puede
+    traer un repuesto que todavía no existe en el catálogo (Excel, foto
+    escaneada, WhatsApp o el formulario manual ya la dejan pasar igual con
+    esa línea en 'producto_id: None', ver _validar_lineas_pendiente /
+    _carga_masiva_revalidar_grupo), pero Finanzas no puede crear productos
+    (ver hallazgo #3 de la revisión técnica -- eso quedó reservado a
+    Bodega). Acá Bodega, revisando el pendiente antes de aprobarlo, crea
+    el producto que falta con sus propios datos (modelo, detalle,
+    ubicación) y esta línea queda vinculada en el mismo paso, sin tener
+    que ir a Logística aparte y después volver a editar la factura a
+    mano.
+
+    Restringido a 'bodega' a propósito -- es la misma regla que ya rige
+    crear_producto(), solo que llamada desde otro lugar de la interfaz.
+    'indice' es la posición de la línea dentro de lineas_json (0-based,
+    en el mismo orden que ya devuelve el pendiente al listarlo/verlo) --
+    no el número de fila del Excel, que puede repetirse o no venir."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if fila["estado"] != "pendiente":
+        return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede editar."}), 400
+
+    lineas = json.loads(fila["lineas_json"])
+    if indice < 0 or indice >= len(lineas):
+        return jsonify({"error": "Esa línea no existe en esta factura"}), 404
+    linea = lineas[indice]
+    if linea.get("producto_id") is not None:
+        return jsonify({"error": "Esta línea ya está vinculada a un producto -- no hace falta crear uno nuevo"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    # El nuevo producto nace SIN stock ni costo (ambos en 0): la cantidad y
+    # el precio que trae la factura se aplican recién al aprobarla, igual
+    # que a cualquier otro producto que ya existía -- si se precargara acá
+    # el stock/costo de la línea, se contaría dos veces (una al "crear", otra
+    # al aprobar), el mismo error de fondo que ya se corrigió esta sesión
+    # para las devoluciones de stock.
+    datos_producto = {k: v for k, v in data.items() if k not in ("stock_disponible", "costo_compra")}
+    nuevo, error, status = _crear_producto_desde_datos(db, datos_producto)
+    if error:
+        return jsonify({"error": error}), status
+
+    linea["producto_id"] = nuevo["id"]
+    linea["producto_nombre"] = nuevo["nombre"]
+    lineas[indice] = linea
+    db.execute(
+        "UPDATE facturas_finanzas_pendientes SET lineas_json = ? WHERE id = ?",
+        (json.dumps(lineas), pendiente_id),
+    )
+    db.commit()
+    actualizada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    return jsonify({"producto": nuevo, "pendiente": _factura_pendiente_recepcion_dict(db, actualizada)}), 201
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/aprobar", methods=["POST"])
@@ -5181,6 +5441,7 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
         """,
         (factura_id, json.dumps(lineas_recibidas_registro), usuario_actual(), ts, pendiente_id),
     )
+    _registrar_historial_pendiente(db, pendiente_id, "aprobada")
     db.commit()
 
     nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
@@ -5208,6 +5469,7 @@ def rechazar_factura_pendiente_recepcion(pendiente_id):
         """,
         (usuario_actual(), ts, nota, pendiente_id),
     )
+    _registrar_historial_pendiente(db, pendiente_id, "rechazada", nota=nota)
     db.commit()
     return jsonify({"ok": True})
 
@@ -5305,8 +5567,22 @@ def carga_masiva_confirmar():
         lineas_validadas = []
         lineas_ok = True
         for linea in grupo["lineas"]:
+            if linea["cantidad"] is None or linea["precio_unitario"] is None:
+                lineas_ok = False
+                break
+            if linea["producto_id"] is None:
+                # Producto que todavía no existe en el catálogo -- se deja
+                # pasar igual (queda pendiente de que Bodega lo cree, ver
+                # aprobar_factura_pendiente_recepcion) en vez de descartar
+                # la factura completa por un solo repuesto sin matchear.
+                lineas_validadas.append({
+                    "producto_id": None, "producto_nombre": None,
+                    "cantidad": linea["cantidad"], "precio_unitario": linea["precio_unitario"],
+                    "texto_original": linea.get("texto_original"),
+                })
+                continue
             producto = db.execute("SELECT id, nombre FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
-            if not producto or linea["cantidad"] is None or linea["precio_unitario"] is None:
+            if not producto:
                 lineas_ok = False
                 break
             lineas_validadas.append({
@@ -6673,6 +6949,7 @@ TIPOS_MECANICO_VALIDOS = ("completo", "mecanico", "probador_de_autos", "encargad
 
 
 @app.route("/api/agente/mecanicos", methods=["GET"])
+@requiere_rol("operativo")
 def listar_mecanicos_agente():
     db = get_db()
     filas = db.execute("SELECT * FROM agente_mecanicos ORDER BY nombre").fetchall()
@@ -6680,6 +6957,7 @@ def listar_mecanicos_agente():
 
 
 @app.route("/api/agente/mecanicos", methods=["POST"])
+@requiere_rol("operativo")
 def crear_mecanico_agente():
     db = get_db()
     data = request.get_json(force=True, silent=True) or {}
@@ -6705,6 +6983,7 @@ def crear_mecanico_agente():
 
 
 @app.route("/api/agente/mecanicos/<int:mecanico_id>", methods=["PUT"])
+@requiere_rol("operativo")
 def editar_mecanico_agente(mecanico_id):
     db = get_db()
     fila = db.execute("SELECT * FROM agente_mecanicos WHERE id = ?", (mecanico_id,)).fetchone()
@@ -6727,6 +7006,7 @@ def editar_mecanico_agente(mecanico_id):
 
 
 @app.route("/api/agente/mecanicos/<int:mecanico_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_mecanico_agente(mecanico_id):
     db = get_db()
     db.execute("DELETE FROM agente_mecanicos WHERE id = ?", (mecanico_id,))
@@ -6973,6 +7253,7 @@ def ia_dictado_diagnostico():
 
 
 @app.route("/api/agente/simular-mensaje", methods=["POST"])
+@requiere_rol("operativo")
 def simular_mensaje_agente():
     """Deja probar el agente completo (IA + validación de transición +
     cambio de estado real) desde el navegador, sin necesitar una cuenta de
@@ -6991,6 +7272,7 @@ def simular_mensaje_agente():
 
 
 @app.route("/api/agente/simular-mensaje-voz", methods=["POST"])
+@requiere_rol("operativo")
 def simular_mensaje_voz_agente():
     """Igual que /api/agente/simular-mensaje, pero para probar notas de
     voz sin necesitar una cuenta de WhatsApp real: recibe un archivo de
@@ -7015,6 +7297,7 @@ def simular_mensaje_voz_agente():
 
 
 @app.route("/api/agente/simular-mensaje-foto", methods=["POST"])
+@requiere_rol("operativo")
 def simular_mensaje_foto_agente():
     """Igual que /api/agente/simular-mensaje, pero para probar el análisis
     de fotos sin necesitar una cuenta de WhatsApp real: recibe una imagen
@@ -7042,6 +7325,7 @@ def simular_mensaje_foto_agente():
 
 
 @app.route("/api/agente/mensajes", methods=["GET"])
+@requiere_rol("operativo")
 def listar_mensajes_agente():
     db = get_db()
     filas = db.execute("SELECT * FROM agente_mensajes ORDER BY id DESC LIMIT 100").fetchall()
@@ -7144,6 +7428,7 @@ def webhook_whatsapp():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/resumen", methods=["GET"])
+@requiere_rol("bodega")
 def resumen():
     db = get_db()
     row = db.execute(
@@ -7165,6 +7450,7 @@ def resumen():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/estado", methods=["GET"])
+@requiere_rol()
 def estado_sistema():
     db = get_db()
     existe_archivo = os.path.exists(DB_PATH)
@@ -7699,6 +7985,7 @@ def iniciar_hilo_respaldos():
 
 
 @app.route("/api/backup/estado-automatico", methods=["GET"])
+@requiere_rol()
 def backup_estado_automatico():
     db = get_db()
     historial = db.execute(
@@ -7713,6 +8000,7 @@ def backup_estado_automatico():
 
 
 @app.route("/api/backup/probar-automatico", methods=["POST"])
+@requiere_rol()
 def backup_probar_automatico():
     exito, detalle = _enviar_respaldo_por_correo()
     _registrar_respaldo_log(exito, detalle)
@@ -7831,6 +8119,7 @@ def iniciar_hilo_alertas_stock():
 
 
 @app.route("/api/alertas-stock/estado", methods=["GET"])
+@requiere_rol("bodega")
 def alertas_stock_estado():
     db = get_db()
     historial = db.execute(
@@ -7847,6 +8136,7 @@ def alertas_stock_estado():
 
 
 @app.route("/api/alertas-stock/probar", methods=["POST"])
+@requiere_rol("bodega")
 def alertas_stock_probar():
     exito, detalle, n_productos, correo_enviado = _enviar_alerta_stock_critico(forzar_aunque_vacio=True)
     _registrar_alerta_stock_log(exito, detalle, n_productos, correo_enviado)
@@ -7894,6 +8184,7 @@ def iniciar_hilo_recalculo_stock_minimo():
 
 
 @app.route("/api/planificacion/recalcular-todos", methods=["POST"])
+@requiere_rol("bodega")
 def planificacion_recalcular_todos():
     db = get_db()
     n = _recalcular_stock_minimo_todos(db)
@@ -7905,6 +8196,7 @@ def planificacion_recalcular_todos():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/movimientos", methods=["GET"])
+@requiere_rol("bodega")
 def listar_movimientos():
     db = get_db()
 
@@ -7994,6 +8286,7 @@ def listar_movimientos():
 # ---------------------------------------------------------------------------
 
 @app.route("/api/productos/<int:producto_id>/proveedores-origen", methods=["GET"])
+@requiere_rol("bodega")
 def proveedores_origen_producto(producto_id):
     """Para el formulario de 'Registrar movimiento' cuando el tipo es
     Pérdida: solo deja elegir un proveedor que efectivamente le haya
@@ -8027,6 +8320,7 @@ def stock_proveedores_producto(producto_id):
 
 
 @app.route("/api/mermas", methods=["GET"])
+@requiere_rol("bodega")
 def listar_mermas():
     """Módulo 7: Mermas.
 
@@ -8129,6 +8423,7 @@ def listar_mermas():
 
 
 @app.route("/api/productos/<int:producto_id>/merma/descartar", methods=["POST"])
+@requiere_rol("bodega")
 def descartar_merma(producto_id):
     db = get_db()
     _iniciar_transaccion_stock(db)
@@ -8166,6 +8461,7 @@ def descartar_merma(producto_id):
 
 
 @app.route("/api/productos/<int:producto_id>/merma/revertir", methods=["POST"])
+@requiere_rol("bodega")
 def revertir_merma(producto_id):
     """Deshace una pérdida: devuelve unidades de stock_merma a
     stock_disponible (a diferencia de 'Descartar', que las elimina para
@@ -8225,6 +8521,7 @@ def revertir_merma(producto_id):
 
 
 @app.route("/api/productos/<int:producto_id>/merma/origenes", methods=["GET"])
+@requiere_rol("bodega")
 def merma_origenes(producto_id):
     """Historial completo de compras (ingresos con factura) de este
     producto, para dar contexto — por ejemplo, para decidir a qué
@@ -8271,6 +8568,7 @@ def merma_origenes(producto_id):
 # ---------------------------------------------------------------------------
 
 @app.route("/api/dashboard", methods=["GET"])
+@requiere_rol("bodega")
 def dashboard():
     db = get_db()
 
@@ -8369,10 +8667,11 @@ def dashboard():
 
 
 @app.route("/api/logistica/dashboard/graficos", methods=["GET"])
+@requiere_rol("bodega")
 def logistica_dashboard_graficos():
     """Gráficos del dashboard de Logística: movimientos mensuales
     (entradas vs salidas, últimos 12 meses) y valor de inventario por
-    categoría (top 8) — mismo patrón que /api/operativo/dashboard/graficos
+    modelo (top 8) — mismo patrón que /api/operativo/dashboard/graficos
     y /api/finanzas/resumen/graficos."""
     db = get_db()
     hoy = datetime.now()
@@ -8398,7 +8697,7 @@ def logistica_dashboard_graficos():
         movimientos_mensual.append({"mes": pref, "entradas": entradas, "salidas": abs(salidas)})
 
     valor_por_categoria = [
-        {"categoria": r["categoria"] or "(sin categoría)", "valor": r["valor"]}
+        {"categoria": r["categoria"] or "(sin modelo)", "valor": r["valor"]}
         for r in db.execute(
             """
             SELECT categoria, SUM((stock_disponible + stock_reservado) * costo_compra) AS valor
@@ -8617,6 +8916,7 @@ def _calcular_rotacion(dias):
 
 
 @app.route("/api/rotacion", methods=["GET"])
+@requiere_rol("bodega")
 def rotacion():
     try:
         dias = int(request.args.get("dias", 90))
@@ -8725,6 +9025,7 @@ def _calcular_planificacion(dias=60):
 
 
 @app.route("/api/planificacion", methods=["GET"])
+@requiere_rol("bodega")
 def planificacion():
     try:
         dias = int(request.args.get("dias", 60))
@@ -8891,6 +9192,7 @@ def _repuestos_tipicos_modelo(db, equipo_ids, modelos_por_descripcion, total_mod
 
 
 @app.route("/api/logistica/repuestos-tipicos-modelos", methods=["GET"])
+@requiere_rol("bodega")
 def logistica_repuestos_tipicos_modelos():
     db = get_db()
     placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
@@ -8957,6 +9259,7 @@ def logistica_repuestos_tipicos_modelos():
 
 
 @app.route("/api/reportes/inventario", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_inventario():
     """Módulo 11: Inventario completo y valorizado, exportado a Excel."""
     db = get_db()
@@ -8974,7 +9277,7 @@ def reporte_inventario():
     ])
 
     encabezados = [
-        "N° sistema", "Código interno", "Categoría", "Modelo", "Ubicación",
+        "N° sistema", "Código interno", "Modelo", "Detalle", "Ubicación",
         "Stock disponible", "Stock reservado", "Stock en merma", "Stock total",
         "Stock mínimo", "Costo promedio", "Valor total",
     ]
@@ -8997,13 +9300,13 @@ def reporte_inventario():
     _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
-    # Segunda hoja: valorizado agrupado por categoría, para ver dónde está
+    # Segunda hoja: valorizado agrupado por modelo, para ver dónde está
     # concentrado el dinero invertido en inventario.
-    ws2 = wb.create_sheet("Por categoría")
-    ws2.append(["Categoría", "N° de productos", "Unidades totales", "Valor total"])
+    ws2 = wb.create_sheet("Por modelo")
+    ws2.append(["Modelo", "N° de productos", "Unidades totales", "Valor total"])
     por_categoria = {}
     for p in productos:
-        cat = p["categoria"] or "(sin categoría)"
+        cat = p["categoria"] or "(sin modelo)"
         acc = por_categoria.setdefault(cat, {"n": 0, "unidades": 0, "valor": 0})
         acc["n"] += 1
         acc["unidades"] += p["stock_total"]
@@ -9018,6 +9321,7 @@ def reporte_inventario():
 
 
 @app.route("/api/reportes/stock", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_stock():
     """Módulo 11: Stock crítico y productos sin movimiento, a Excel."""
     db = get_db()
@@ -9041,7 +9345,7 @@ def reporte_stock():
         ("Productos sin ningún movimiento", len(sin_movimiento)),
     ])
     fila_encabezado = ws.max_row + 1
-    ws.append(["N° sistema", "Producto", "Categoría", "Stock disponible", "Stock mínimo", "Diferencia", "Ubicación"])
+    ws.append(["N° sistema", "Producto", "Modelo", "Stock disponible", "Stock mínimo", "Diferencia", "Ubicación"])
     for p in criticos:
         ws.append([
             p["id_sistema"], p["nombre"], p["categoria"], p["stock_disponible"],
@@ -9051,7 +9355,7 @@ def reporte_stock():
     _autoancho(ws)
 
     ws2 = wb.create_sheet("Sin movimiento")
-    ws2.append(["N° sistema", "Producto", "Categoría", "Stock total", "Valor", "Creado el"])
+    ws2.append(["N° sistema", "Producto", "Modelo", "Stock total", "Valor", "Creado el"])
     for p in sin_movimiento:
         ws2.append([
             p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"],
@@ -9065,6 +9369,7 @@ def reporte_stock():
 
 
 @app.route("/api/reportes/rotacion", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_rotacion():
     """Módulo 11: Rotación y consumo por período, a Excel (Módulo 8 + 11)."""
     try:
@@ -9083,21 +9388,21 @@ def reporte_rotacion():
         ("Inmovilizados", len(datos["inmovilizados"])),
     ])
     fila_encabezado = ws.max_row + 1
-    ws.append(["N° sistema", "Producto", "Categoría", "Salidas en el período", "N° movimientos", "Tendencia"])
+    ws.append(["N° sistema", "Producto", "Modelo", "Salidas en el período", "N° movimientos", "Tendencia"])
     for p in datos["mas_utilizados"]:
         ws.append([p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"], p["n_movimientos"], p["tendencia"]])
     _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
     ws2 = wb.create_sheet("Baja rotación")
-    ws2.append(["N° sistema", "Producto", "Categoría", "Salidas en el período"])
+    ws2.append(["N° sistema", "Producto", "Modelo", "Salidas en el período"])
     for p in datos["baja_rotacion"]:
         ws2.append([p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"]])
     _estilo_encabezado(ws2)
     _autoancho(ws2)
 
     ws3 = wb.create_sheet("Inmovilizados")
-    ws3.append(["N° sistema", "Producto", "Categoría", "Stock total", "Valor"])
+    ws3.append(["N° sistema", "Producto", "Modelo", "Stock total", "Valor"])
     for p in datos["inmovilizados"]:
         ws3.append([p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"], round(p["stock_total"] * p["costo_compra"], 2)])
     _estilo_encabezado(ws3)
@@ -9126,6 +9431,7 @@ def reporte_rotacion():
 
 
 @app.route("/api/reportes/inventario/pdf", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_inventario_pdf():
     db = get_db()
     rows = db.execute(PRODUCTO_SELECT + " ORDER BY p.nombre COLLATE NOCASE").fetchall()
@@ -9146,13 +9452,13 @@ def reporte_inventario_pdf():
     ]
     _pdf_tabla(
         elementos, estilos, f"Detalle por producto — valor total: {fmt_money_pdf(valor_general)}",
-        ["N°", "Código", "Categoría", "Modelo", "Ubicación", "Disp.", "Reserv.", "Merma", "Total", "Costo prom.", "Valor"],
+        ["N°", "Código", "Modelo", "Detalle", "Ubicación", "Disp.", "Reserv.", "Merma", "Total", "Costo prom.", "Valor"],
         filas,
     )
 
     por_categoria = {}
     for p in productos:
-        cat = p["categoria"] or "(sin categoría)"
+        cat = p["categoria"] or "(sin modelo)"
         acc = por_categoria.setdefault(cat, {"n": 0, "unidades": 0, "valor": 0})
         acc["n"] += 1
         acc["unidades"] += p["stock_total"]
@@ -9161,13 +9467,14 @@ def reporte_inventario_pdf():
         [cat, acc["n"], acc["unidades"], fmt_money_pdf(acc["valor"])]
         for cat, acc in sorted(por_categoria.items(), key=lambda kv: kv[1]["valor"], reverse=True)
     ]
-    _pdf_tabla(elementos, estilos, "Valorizado por categoría", ["Categoría", "N° productos", "Unidades", "Valor"], filas_cat)
+    _pdf_tabla(elementos, estilos, "Valorizado por modelo", ["Modelo", "N° productos", "Unidades", "Valor"], filas_cat)
 
     nombre = f"inventario_valorizado_{datetime.now().strftime('%Y-%m-%d')}.pdf"
     return _pdf_response(buffer, doc, elementos, nombre)
 
 
 @app.route("/api/reportes/stock/pdf", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_stock_pdf():
     db = get_db()
     criticos = [row_to_dict(r) for r in db.execute(
@@ -9193,7 +9500,7 @@ def reporte_stock_pdf():
     ]
     _pdf_tabla(
         elementos, estilos, f"Stock crítico ({len(criticos)} producto(s))",
-        ["N°", "Producto", "Categoría", "Disponible", "Mínimo", "Diferencia", "Ubicación"],
+        ["N°", "Producto", "Modelo", "Disponible", "Mínimo", "Diferencia", "Ubicación"],
         filas_criticos,
     )
 
@@ -9203,7 +9510,7 @@ def reporte_stock_pdf():
     ]
     _pdf_tabla(
         elementos, estilos, f"Sin ningún movimiento registrado ({len(sin_movimiento)} producto(s))",
-        ["N°", "Producto", "Categoría", "Stock total", "Valor", "Creado el"],
+        ["N°", "Producto", "Modelo", "Stock total", "Valor", "Creado el"],
         filas_sin_mov,
     )
 
@@ -9212,6 +9519,7 @@ def reporte_stock_pdf():
 
 
 @app.route("/api/reportes/rotacion/pdf", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_rotacion_pdf():
     try:
         dias = int(request.args.get("dias", 90))
@@ -9229,18 +9537,18 @@ def reporte_rotacion_pdf():
 
     _pdf_tabla(
         elementos, estilos, "Más utilizados",
-        ["N°", "Producto", "Categoría", "Salidas", "N° mov.", "Tendencia"],
+        ["N°", "Producto", "Modelo", "Salidas", "N° mov.", "Tendencia"],
         [[p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"], p["n_movimientos"], p["tendencia"]]
          for p in datos["mas_utilizados"]],
     )
     _pdf_tabla(
         elementos, estilos, "Baja rotación",
-        ["N°", "Producto", "Categoría", "Salidas en el período"],
+        ["N°", "Producto", "Modelo", "Salidas en el período"],
         [[p["id_sistema"], p["nombre"], p["categoria"], p["total_salida_periodo"]] for p in datos["baja_rotacion"]],
     )
     _pdf_tabla(
         elementos, estilos, "Inmovilizados (sin salidas en el período)",
-        ["N°", "Producto", "Categoría", "Stock total", "Valor"],
+        ["N°", "Producto", "Modelo", "Stock total", "Valor"],
         [[p["id_sistema"], p["nombre"], p["categoria"], p["stock_total"], fmt_money_pdf(p["stock_total"] * p["costo_compra"])]
          for p in datos["inmovilizados"]],
     )
@@ -9277,6 +9585,7 @@ def _movimientos_para_reporte(desde, hasta):
 
 
 @app.route("/api/reportes/movimientos", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_movimientos():
     desde, hasta = _rango_fechas()
     filas_db = _movimientos_para_reporte(desde, hasta)
@@ -9306,6 +9615,7 @@ def reporte_movimientos():
 
 
 @app.route("/api/reportes/movimientos/pdf", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_movimientos_pdf():
     desde, hasta = _rango_fechas()
     filas_db = _movimientos_para_reporte(desde, hasta)
@@ -9355,6 +9665,7 @@ def _facturas_para_reporte(desde, hasta):
 
 
 @app.route("/api/reportes/compras", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_compras():
     desde, hasta = _rango_fechas()
     facturas = _facturas_para_reporte(desde, hasta)
@@ -9386,6 +9697,7 @@ def reporte_compras():
 
 
 @app.route("/api/reportes/compras/pdf", methods=["GET"])
+@requiere_rol("bodega")
 def reporte_compras_pdf():
     desde, hasta = _rango_fechas()
     facturas = _facturas_para_reporte(desde, hasta)
@@ -9414,6 +9726,7 @@ def reporte_compras_pdf():
 
 
 @app.route("/api/reportes/resumen", methods=["GET"])
+@requiere_rol("bodega")
 def reportes_resumen():
     """Contadores rápidos de qué trae cada reporte (Módulo 11), para
     mostrarlos en la pestaña Reportes ANTES de descargar el archivo — así se
@@ -9561,6 +9874,7 @@ def _gastos_mes(db, prefijo_mes):
 
 
 @app.route("/api/panel-dueno", methods=["GET"])
+@requiere_rol()
 def panel_dueno():
     db = get_db()
     hoy = datetime.now()

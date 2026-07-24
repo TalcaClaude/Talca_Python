@@ -1179,6 +1179,7 @@ def _cliente_dict(db, row):
 
 
 @bp.route("/api/operativo/clientes", methods=["GET"])
+@requiere_rol("operativo")
 def listar_clientes():
     db = get_db()
     q = (request.args.get("q") or "").strip()
@@ -1197,6 +1198,7 @@ def listar_clientes():
 
 
 @bp.route("/api/operativo/clientes/<int:cliente_id>", methods=["GET"])
+@requiere_rol("operativo")
 def obtener_cliente(cliente_id):
     db = get_db()
     row = db.execute("SELECT * FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
@@ -1210,6 +1212,7 @@ def obtener_cliente(cliente_id):
 
 
 @bp.route("/api/operativo/clientes", methods=["POST"])
+@requiere_rol("operativo")
 def crear_cliente():
     db = get_db()
     data = request.get_json(force=True, silent=True) or {}
@@ -1236,6 +1239,7 @@ def crear_cliente():
 
 
 @bp.route("/api/operativo/clientes/<int:cliente_id>", methods=["PUT"])
+@requiere_rol("operativo")
 def editar_cliente(cliente_id):
     db = get_db()
     row = db.execute("SELECT * FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
@@ -1265,6 +1269,7 @@ def editar_cliente(cliente_id):
 
 
 @bp.route("/api/operativo/clientes/<int:cliente_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_cliente(cliente_id):
     db = get_db()
     row = db.execute("SELECT * FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
@@ -1288,6 +1293,7 @@ def eliminar_cliente(cliente_id):
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/operativo/equipos", methods=["GET"])
+@requiere_rol("operativo")
 def listar_equipos():
     db = get_db()
     cliente_id = request.args.get("cliente_id")
@@ -1319,6 +1325,7 @@ def listar_equipos():
 
 
 @bp.route("/api/operativo/equipos", methods=["POST"])
+@requiere_rol("operativo")
 def crear_equipo():
     db = get_db()
     data = request.get_json(force=True, silent=True) or {}
@@ -1366,6 +1373,7 @@ def crear_equipo():
 
 
 @bp.route("/api/operativo/equipos/<int:equipo_id>", methods=["PUT"])
+@requiere_rol("operativo")
 def editar_equipo(equipo_id):
     db = get_db()
     row = db.execute("SELECT * FROM equipos WHERE id = ?", (equipo_id,)).fetchone()
@@ -1411,6 +1419,7 @@ def editar_equipo(equipo_id):
 
 
 @bp.route("/api/operativo/equipos/<int:equipo_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_equipo(equipo_id):
     db = get_db()
     row = db.execute("SELECT * FROM equipos WHERE id = ?", (equipo_id,)).fetchone()
@@ -1769,6 +1778,7 @@ def resumen_utilidad_mes(db):
 
 
 @bp.route("/api/operativo/dashboard", methods=["GET"])
+@requiere_rol("operativo")
 def dashboard_operativo():
     """KPIs para el dashboard del módulo Operativo:
       - ots_abiertas: órdenes cuyo estado no es un estado cerrado (entregado/cancelado).
@@ -1972,6 +1982,7 @@ def dashboard_operativo():
 
 
 @bp.route("/api/operativo/dashboard/graficos", methods=["GET"])
+@requiere_rol("operativo")
 def dashboard_operativo_graficos():
     """Datos para los gráficos del dashboard de Operativo (separado del
     endpoint de KPIs de arriba porque son consultas más pesadas y no todas
@@ -2218,6 +2229,7 @@ def api_seguimiento_publico():
 
 
 @bp.route("/api/operativo/ordenes", methods=["GET"])
+@requiere_rol("operativo")
 def listar_ordenes():
     """Con la migración histórica (~3.000 OT cerradas) el listado sin filtro
     dejaría de ser útil para el día a día -- Operativo es para el mes a mes,
@@ -2385,6 +2397,7 @@ def _listado_garantias_liviano(db, desde=None, hasta=None):
 
 
 @bp.route("/api/operativo/listado", methods=["GET"])
+@requiere_rol("operativo")
 def listado_operativo():
     """Alimenta la pestaña 'Listado': a diferencia de listar_ordenes (que
     por defecto acota a las OT abiertas + las cerradas del mes en curso,
@@ -2449,6 +2462,7 @@ def _orden_dict_detalle(db, row):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>", methods=["GET"])
+@requiere_rol("operativo")
 def obtener_orden(orden_id):
     db = get_db()
     row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
@@ -2484,6 +2498,7 @@ def _asignar_id_correlativo(db):
 
 
 @bp.route("/api/operativo/ordenes", methods=["POST"])
+@requiere_rol("operativo")
 def crear_orden():
     db = get_db()
     _iniciar_transaccion_correlativo(db)
@@ -2662,6 +2677,7 @@ def _actualizar_campos_orden_por_agente(db, orden_id, campos):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>", methods=["PUT"])
+@requiere_rol("operativo")
 def editar_orden(orden_id):
     db = get_db()
     row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
@@ -2790,6 +2806,7 @@ def editar_orden(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_orden(orden_id):
     # No existía forma de borrar una orden completa (solo ítems sueltos
     # dentro de ella) — hacía falta para poder limpiar órdenes de prueba
@@ -2832,6 +2849,7 @@ def eliminar_orden(orden_id):
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/pagos", methods=["POST"])
+@requiere_rol("operativo")
 def agregar_pago_orden(orden_id):
     db = get_db()
     orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
@@ -2868,6 +2886,7 @@ def agregar_pago_orden(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/pagos/<int:pago_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_pago_orden(orden_id, pago_id):
     db = get_db()
     row = db.execute(
@@ -2960,6 +2979,7 @@ def registrar_salida_directa_a_orden(db, orden_id, producto_id, cantidad, catego
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/items", methods=["POST"])
+@requiere_rol("operativo")
 def agregar_item_orden(orden_id):
     db = get_db()
     _iniciar_transaccion_stock(db)  # puede consumir stock si el ítem es un repuesto
@@ -3113,6 +3133,7 @@ def agregar_item_orden(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/items/<int:item_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_item_orden(orden_id, item_id):
     db = get_db()
     _iniciar_transaccion_stock(db)  # puede devolver stock si el ítem era un repuesto
@@ -3154,6 +3175,7 @@ def eliminar_item_orden(orden_id, item_id):
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/operativo/equipos/<int:equipo_id>/historial", methods=["GET"])
+@requiere_rol("operativo")
 def historial_equipo(equipo_id):
     db = get_db()
     equipo = db.execute("SELECT * FROM equipos WHERE id = ?", (equipo_id,)).fetchone()
@@ -3175,6 +3197,7 @@ def historial_equipo(equipo_id):
 
 
 @bp.route("/api/operativo/equipos/<int:equipo_id>/bloqueo", methods=["GET"])
+@requiere_rol("operativo")
 def bloqueo_equipo(equipo_id):
     """Chequeo rápido para avisar ANTES de intentar crear una OT o una
     garantía si el vehículo ya tiene una abierta — se llama apenas se
@@ -3242,6 +3265,7 @@ def _presupuesto_dict(db, orden_id, presupuesto_iva):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/items", methods=["POST"])
+@requiere_rol("operativo")
 def agregar_item_presupuesto(orden_id):
     db = get_db()
     orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
@@ -3281,6 +3305,7 @@ def agregar_item_presupuesto(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/items/<int:item_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_item_presupuesto(orden_id, item_id):
     db = get_db()
     item = db.execute(
@@ -3295,6 +3320,7 @@ def eliminar_item_presupuesto(orden_id, item_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto", methods=["PUT"])
+@requiere_rol("operativo")
 def actualizar_presupuesto(orden_id):
     """Cambia el estado del presupuesto (pendiente/enviado/aprobado/rechazado),
     el IVA, el diagnóstico (resumen para el cliente) y las notas. Al quedar
@@ -3500,6 +3526,7 @@ def _armar_presupuesto_pdf(db, orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/pdf", methods=["GET"])
+@requiere_rol("operativo")
 def presupuesto_pdf(orden_id):
     """Genera el presupuesto en PDF, listo para descargar y enviárselo al
     cliente (por correo, WhatsApp, etc.). Usa los mismos datos que ya se
@@ -3512,6 +3539,7 @@ def presupuesto_pdf(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/presupuesto/enviar", methods=["POST"])
+@requiere_rol("operativo")
 def presupuesto_enviar(orden_id):
     """Manda el mismo PDF del presupuesto directo al correo registrado del
     cliente, con copia a los correos del taller configurados en
@@ -3581,6 +3609,7 @@ def presupuesto_enviar(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/orden-imprimible/pdf", methods=["GET"])
+@requiere_rol("operativo")
 def orden_imprimible_pdf(orden_id):
     """Documento imprimible que se le entrega al cliente como comprobante
     oficial de la orden de trabajo: todos los datos de la recepción (cliente
@@ -3699,6 +3728,7 @@ def orden_imprimible_pdf(orden_id):
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/qc/items", methods=["POST"])
+@requiere_rol("operativo")
 def agregar_item_qc(orden_id):
     db = get_db()
     orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
@@ -3724,6 +3754,7 @@ def agregar_item_qc(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/qc/items/<int:item_id>", methods=["PUT"])
+@requiere_rol("operativo")
 def editar_item_qc(orden_id, item_id):
     db = get_db()
     item = db.execute(
@@ -3746,6 +3777,7 @@ def editar_item_qc(orden_id, item_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/qc/items/<int:item_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_item_qc(orden_id, item_id):
     db = get_db()
     item = db.execute(
@@ -3759,6 +3791,7 @@ def eliminar_item_qc(orden_id, item_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/qc", methods=["PUT"])
+@requiere_rol("operativo")
 def actualizar_qc(orden_id):
     """Resultado general del control de calidad. 'rechazado' devuelve la
     orden a 'reparacion' automáticamente (algo hay que corregir antes de
@@ -3815,6 +3848,7 @@ def actualizar_qc(orden_id):
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/pruebas-ruta", methods=["POST"])
+@requiere_rol("operativo")
 def agregar_prueba_ruta(orden_id):
     db = get_db()
     orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
@@ -3851,6 +3885,7 @@ def agregar_prueba_ruta(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/pruebas-ruta/<int:prueba_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_prueba_ruta(orden_id, prueba_id):
     db = get_db()
     fila = db.execute(
@@ -3873,6 +3908,7 @@ def eliminar_prueba_ruta(orden_id, prueba_id):
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/pre-entrega", methods=["POST"])
+@requiere_rol("operativo")
 def agregar_pre_entrega(orden_id):
     db = get_db()
     orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
@@ -3909,6 +3945,7 @@ def agregar_pre_entrega(orden_id):
 
 
 @bp.route("/api/operativo/ordenes/<int:orden_id>/pre-entrega/<int:entrada_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_pre_entrega(orden_id, entrada_id):
     db = get_db()
     fila = db.execute(
@@ -3957,6 +3994,7 @@ def _garantia_dict(db, row):
 
 
 @bp.route("/api/operativo/garantias", methods=["POST"])
+@requiere_rol("operativo")
 def crear_garantia():
     db = get_db()
     _iniciar_transaccion_correlativo(db)  # ver _asignar_id_correlativo más abajo
@@ -4055,6 +4093,7 @@ def crear_garantia():
 
 
 @bp.route("/api/operativo/garantias", methods=["GET"])
+@requiere_rol("operativo")
 def listar_garantias():
     db = get_db()
     estado = (request.args.get("estado") or "").strip()
@@ -4069,6 +4108,7 @@ def listar_garantias():
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>", methods=["GET"])
+@requiere_rol("operativo")
 def obtener_garantia(garantia_id):
     db = get_db()
     row = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
@@ -4078,6 +4118,7 @@ def obtener_garantia(garantia_id):
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>", methods=["PUT"])
+@requiere_rol("operativo")
 def editar_garantia(garantia_id):
     db = get_db()
     row = db.execute("SELECT * FROM garantias WHERE id = ?", (garantia_id,)).fetchone()
@@ -4116,6 +4157,7 @@ def editar_garantia(garantia_id):
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_garantia(garantia_id):
     # No existía forma de borrar una garantía completa (solo ítems sueltos
     # dentro de ella) — hace falta para limpiar datos de prueba. Antes de
@@ -4149,6 +4191,7 @@ def eliminar_garantia(garantia_id):
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>/items", methods=["POST"])
+@requiere_rol("operativo")
 def agregar_item_garantia(garantia_id):
     db = get_db()
     _iniciar_transaccion_stock(db)
@@ -4276,6 +4319,7 @@ def agregar_item_garantia(garantia_id):
 
 
 @bp.route("/api/operativo/garantias/<int:garantia_id>/items/<int:item_id>", methods=["DELETE"])
+@requiere_rol("operativo")
 def eliminar_item_garantia(garantia_id, item_id):
     db = get_db()
     _iniciar_transaccion_stock(db)
@@ -4344,6 +4388,7 @@ def _ordenes_para_reporte(desde, hasta):
 
 
 @bp.route("/api/operativo/reportes/ordenes", methods=["GET"])
+@requiere_rol("operativo")
 def reporte_ordenes():
     desde, hasta = _rango_fechas()
     ordenes = _ordenes_para_reporte(desde, hasta)
@@ -4387,6 +4432,7 @@ def reporte_ordenes():
 
 
 @bp.route("/api/operativo/reportes/ordenes/pdf", methods=["GET"])
+@requiere_rol("operativo")
 def reporte_ordenes_pdf():
     desde, hasta = _rango_fechas()
     ordenes = _ordenes_para_reporte(desde, hasta)
@@ -4424,6 +4470,7 @@ def reporte_ordenes_pdf():
 
 
 @bp.route("/api/operativo/reportes/garantias", methods=["GET"])
+@requiere_rol("operativo")
 def reporte_garantias():
     """Excel con el detalle de garantías del período y dos resúmenes
     (por responsable y por equipo) — para detectar qué técnico, modelo o
@@ -4502,6 +4549,7 @@ def reporte_garantias():
 
 
 @bp.route("/api/operativo/reportes/resumen", methods=["GET"])
+@requiere_rol("operativo")
 def reportes_operativo_resumen():
     """Contadores rápidos de órdenes y garantías, para mostrarlos en la
     pestaña Reportes del módulo Operativo ANTES de descargar el archivo."""

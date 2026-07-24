@@ -325,8 +325,11 @@ def coincide_busqueda(consulta, *campos):
 
 def nombre_automatico(categoria, modelo, codigo_interno, id_num):
     """El producto ya no tiene un campo 'nombre' editable: se arma solo a
-    partir de categoría + modelo (los datos que realmente lo identifican),
-    con respaldos razonables si esos vienen vacíos."""
+    partir de los dos campos que lo identifican (categoria + modelo en la
+    base de datos -- de cara al taller son "Modelo" + "Detalle", ver
+    relabeling en las rutas /api/categorias, /api/modelos y en el frontend;
+    los nombres de columna internos no cambiaron), con respaldos
+    razonables si esos vienen vacíos."""
     partes = [p for p in [(categoria or "").strip(), (modelo or "").strip()] if p]
     if partes:
         return " - ".join(partes)

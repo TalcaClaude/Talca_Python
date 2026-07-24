@@ -488,7 +488,7 @@ async function cargarCategoriasYMarcas() {
 function renderSelectCategoria(seleccionActual) {
   const select = document.getElementById("f-categoria");
   const actual = seleccionActual !== undefined ? seleccionActual : select.value;
-  select.innerHTML = '<option value="">Sin categoría</option>' +
+  select.innerHTML = '<option value="">Sin modelo</option>' +
     state.categoriasDisponibles.map(c => `<option value="${escapeHtml(c.nombre)}">${escapeHtml(c.nombre)}</option>`).join("");
   select.value = actual || "";
 }
@@ -496,17 +496,20 @@ function renderSelectCategoria(seleccionActual) {
 function renderSelectModelo(seleccionActual) {
   const select = document.getElementById("f-modelo");
   const actual = seleccionActual !== undefined ? seleccionActual : select.value;
-  select.innerHTML = '<option value="">Sin modelo</option>' +
+  select.innerHTML = '<option value="">Sin detalle</option>' +
     state.modelosDisponibles.map(m => `<option value="${escapeHtml(m.nombre)}">${escapeHtml(m.nombre)}</option>`).join("");
   select.value = actual || "";
 }
 
+// Nombres de función y de la tabla interna ("categoria"/"modelo") se
+// mantienen sin cambio -- ver relabeling en app.py/core.py -- solo el
+// texto que ve el taller pasa a ser "Modelo"/"Detalle".
 const ETIQUETAS_ALTA_RAPIDA = {
-  categoria: { texto: "categoría", render: renderSelectCategoria },
-  modelo: { texto: "modelo", render: renderSelectModelo },
+  categoria: { texto: "modelo", render: renderSelectCategoria },
+  modelo: { texto: "detalle", render: renderSelectModelo },
 };
 
-// Alta rápida de categoría/modelo: antes usaba prompt(), que no deja ver el
+// Alta rápida de modelo/detalle: antes usaba prompt(), que no deja ver el
 // resto del formulario ni valida nada en vivo. Se reemplaza por un modal
 // chico y reutilizable (un solo campo de texto), siguiendo el mismo patrón
 // de callback que ya se usa para mermas y "nuevo proveedor" desde factura.
@@ -565,7 +568,7 @@ function renderGestionCategorias() {
   const tbody = document.getElementById("tbody-gestion-categorias");
   const lista = state.categoriasDisponibles;
   if (!lista.length) {
-    tbody.innerHTML = `<tr><td colspan="3" class="vacio">No hay categorías cargadas.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="3" class="vacio">No hay modelos cargados.</td></tr>`;
     return;
   }
   tbody.innerHTML = lista.map(c => `
@@ -580,13 +583,13 @@ function renderGestionCategorias() {
 
   tbody.querySelectorAll("[data-editar-categoria]").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const nuevo = prompt(`Nuevo nombre para la categoría "${btn.dataset.nombre}":`, btn.dataset.nombre);
+      const nuevo = prompt(`Nuevo nombre para el modelo "${btn.dataset.nombre}":`, btn.dataset.nombre);
       if (!nuevo || !nuevo.trim() || nuevo.trim().toUpperCase() === btn.dataset.nombre) return;
       try {
         const r = await api(`/api/categorias/${btn.dataset.editarCategoria}`, {
           method: "PUT", body: JSON.stringify({ nombre: nuevo.trim() }),
         });
-        toast(`Categoría renombrada (${r.productos_actualizados} producto(s) actualizados)`);
+        toast(`Modelo renombrado (${r.productos_actualizados} producto(s) actualizados)`);
         await Promise.all([cargarCategoriasYMarcas(), cargarProductos()]);
       } catch (e) {
         toast(e.message, true);
@@ -596,10 +599,10 @@ function renderGestionCategorias() {
 
   tbody.querySelectorAll("[data-eliminar-categoria]").forEach(btn => {
     btn.addEventListener("click", async () => {
-      if (!confirm(`¿Quitar "${btn.dataset.nombre}" de la lista de categorías precargadas? Los productos que ya la tienen NO se modifican.`)) return;
+      if (!confirm(`¿Quitar "${btn.dataset.nombre}" de la lista de modelos precargados? Los productos que ya lo tienen NO se modifican.`)) return;
       try {
         await api(`/api/categorias/${btn.dataset.eliminarCategoria}`, { method: "DELETE" });
-        toast("Categoría eliminada de la lista");
+        toast("Modelo eliminado de la lista");
         await Promise.all([cargarCategoriasYMarcas(), cargarProductos()]);
       } catch (e) {
         toast(e.message, true);
@@ -612,7 +615,7 @@ function renderGestionModelos() {
   const tbody = document.getElementById("tbody-gestion-modelos");
   const lista = state.modelosDisponibles;
   if (!lista.length) {
-    tbody.innerHTML = `<tr><td colspan="3" class="vacio">No hay modelos cargados.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="3" class="vacio">No hay detalles cargados.</td></tr>`;
     return;
   }
   tbody.innerHTML = lista.map(m => `
@@ -627,13 +630,13 @@ function renderGestionModelos() {
 
   tbody.querySelectorAll("[data-editar-modelo]").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const nuevo = prompt(`Nuevo nombre para el modelo "${btn.dataset.nombre}":`, btn.dataset.nombre);
+      const nuevo = prompt(`Nuevo nombre para el detalle "${btn.dataset.nombre}":`, btn.dataset.nombre);
       if (!nuevo || !nuevo.trim() || nuevo.trim().toUpperCase() === btn.dataset.nombre) return;
       try {
         const r = await api(`/api/modelos/${btn.dataset.editarModelo}`, {
           method: "PUT", body: JSON.stringify({ nombre: nuevo.trim() }),
         });
-        toast(`Modelo renombrado (${r.productos_actualizados} producto(s) actualizados)`);
+        toast(`Detalle renombrado (${r.productos_actualizados} producto(s) actualizados)`);
         await Promise.all([cargarCategoriasYMarcas(), cargarProductos()]);
       } catch (e) {
         toast(e.message, true);
@@ -643,10 +646,10 @@ function renderGestionModelos() {
 
   tbody.querySelectorAll("[data-eliminar-modelo]").forEach(btn => {
     btn.addEventListener("click", async () => {
-      if (!confirm(`¿Quitar "${btn.dataset.nombre}" de la lista de modelos precargados? Los productos que ya lo tienen NO se modifican.`)) return;
+      if (!confirm(`¿Quitar "${btn.dataset.nombre}" de la lista de detalles precargados? Los productos que ya lo tienen NO se modifican.`)) return;
       try {
         await api(`/api/modelos/${btn.dataset.eliminarModelo}`, { method: "DELETE" });
-        toast("Modelo eliminado de la lista");
+        toast("Detalle eliminado de la lista");
         await Promise.all([cargarCategoriasYMarcas(), cargarProductos()]);
       } catch (e) {
         toast(e.message, true);
@@ -669,7 +672,7 @@ document.getElementById("gc-btn-agregar-categoria").addEventListener("click", as
   try {
     await api("/api/categorias", { method: "POST", body: JSON.stringify({ nombre }) });
     input.value = "";
-    toast("Categoría agregada");
+    toast("Modelo agregado");
     await cargarCategoriasYMarcas();
     renderGestionCategorias();
   } catch (e) {
@@ -684,7 +687,7 @@ document.getElementById("gc-btn-agregar-modelo").addEventListener("click", async
   try {
     await api("/api/modelos", { method: "POST", body: JSON.stringify({ nombre }) });
     input.value = "";
-    toast("Modelo agregado");
+    toast("Detalle agregado");
     await cargarCategoriasYMarcas();
     renderGestionModelos();
   } catch (e) {
@@ -789,7 +792,7 @@ function renderPaginacionProductos() {
 function renderCategorias() {
   const select = document.getElementById("filtro-categoria");
   const actual = select.value;
-  select.innerHTML = '<option value="">Todas las categorías</option>' +
+  select.innerHTML = '<option value="">Todos los modelos</option>' +
     state.categorias.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
   select.value = actual;
 }
@@ -811,8 +814,8 @@ function renderTabla() {
     } else {
       ubicacionTexto = "—";
     }
-    // El nombre visible se arma como "Categoría - Modelo" (o el código
-    // interno / "Producto #N" si faltan ambos) — con Categoría y Modelo ya
+    // El nombre visible se arma como "Modelo - Detalle" (o el código
+    // interno / "Producto #N" si faltan ambos) — con Modelo y Detalle ya
     // como columnas propias, mostrar aquí la descripción es lo que aporta
     // información distinta; si no hay descripción cargada, se usa el
     // nombre como respaldo para no dejar la fila vacía.
@@ -1131,8 +1134,8 @@ function renderDetalle(p) {
   ficha.innerHTML = `
     <dt>N° de sistema</dt><dd class="mono">#${escapeHtml(p.id_sistema)}</dd>
     <dt>Código interno</dt><dd class="mono">${escapeHtml(p.codigo_interno) || "—"}</dd>
-    <dt>Categoría</dt><dd>${escapeHtml(p.categoria) || "—"}</dd>
-    <dt>Modelo</dt><dd>${escapeHtml(p.modelo) || "—"}</dd>
+    <dt>Modelo</dt><dd>${escapeHtml(p.categoria) || "—"}</dd>
+    <dt>Detalle</dt><dd>${escapeHtml(p.modelo) || "—"}</dd>
     <dt>Ubicación</dt><dd>${ubicacionTexto}</dd>
     <dt>Descripción</dt><dd>${escapeHtml(p.descripcion) || "—"}</dd>
     <dt>Disponible</dt><dd class="mono">${p.stock_disponible}</dd>
@@ -1909,8 +1912,8 @@ async function cargarRepuestosTipicosModelos() {
 }
 
 function nombreCortoProducto(p) {
-  // Para el gráfico de rotación no hace falta el ID: basta categoría +
-  // modelo (que es justo lo que identifica al producto para el taller).
+  // Para el gráfico de rotación no hace falta el ID: basta modelo +
+  // detalle (que es justo lo que identifica al producto para el taller).
   const partes = [p.categoria, p.modelo].filter(Boolean);
   return partes.length ? partes.join(" — ") : p.nombre;
 }

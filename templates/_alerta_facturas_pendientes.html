@@ -11,6 +11,37 @@
   </button>
 </div>
 
+<!-- Aviso para Finanzas: facturas que Bodega rechazó y todavía no se han
+     corregido y reingresado (ver afrSondear/afrAbrirLista en
+     alerta_facturas_pendientes.js) -- simétrico al de arriba, pero al
+     revés de la relación: acá es Bodega avisándole a Finanzas. -->
+<div class="afp-flotante afr-flotante" id="afr-flotante" style="display:none">
+  <button type="button" id="afr-btn-flotante">
+    <span class="afp-flotante-icono">⚠️</span>
+    <span id="afr-flotante-texto">0 facturas rechazadas</span>
+  </button>
+</div>
+
+<div class="modal-overlay" id="afr-modal-lista">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Facturas rechazadas por Bodega</h2>
+      <button class="modal-close" data-close="afr-modal-lista">&times;</button>
+    </div>
+    <p class="ayuda-inline">Bodega rechazó estas facturas porque algo no calzaba con lo que llegó físicamente. Corrígelas y vuelve a enviarlas — no hace falta volver a escribirlas de cero, el número, proveedor y productos ya cargados se mantienen.</p>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr><th>Factura</th><th>Proveedor</th><th class="num">Monto facturado</th><th>Motivo del rechazo</th><th></th></tr>
+        </thead>
+        <tbody id="afr-tbody-lista">
+          <tr><td colspan="5" class="vacio">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="afp-modal-lista">
   <div class="modal modal-ancho">
     <div class="modal-head">

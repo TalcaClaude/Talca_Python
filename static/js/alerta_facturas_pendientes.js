@@ -154,13 +154,19 @@ function afpAbrirDetalle(id) {
   `;
 
   const tbody = document.getElementById("afp-tbody-lineas");
-  tbody.innerHTML = p.lineas.map(l => `
+  tbody.innerHTML = p.lineas.map(l => {
+    const sinResolver = l.producto_id == null;
+    const nombreCelda = sinResolver
+      ? `⚠️ Producto nuevo, falta crear${l.texto_original ? ` — "${afpEscapeHtml(l.texto_original)}"` : ""}`
+      : (afpEscapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`);
+    return `
     <tr>
-      <td>${afpEscapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}</td>
+      <td>${nombreCelda}</td>
       <td class="num mono">${l.cantidad}</td>
       <td class="num mono">${afpFmtMoney(l.precio_unitario)}</td>
       <td class="num mono">${afpFmtMoney(l.cantidad * l.precio_unitario)}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   // El backend siempre rechaza aprobar/rechazar si el rol no es
   // bodega/admin (ver @requiere_rol en app.py) — acá solo se evita
@@ -168,8 +174,20 @@ function afpAbrirDetalle(id) {
   // revisión visible en modo solo-lectura para cualquier otro rol
   // (transparencia: finanzas puede ver que su factura sigue pendiente,
   // aunque no pueda resolverla ella misma).
-  document.getElementById("afp-btn-aprobar").style.display = afpPuedeBodega ? "" : "none";
+  const hayLineasSinResolver = p.lineas.some(l => l.producto_id == null);
+  document.getElementById("afp-btn-aprobar").style.display = (afpPuedeBodega && !hayLineasSinResolver) ? "" : "none";
   document.getElementById("afp-btn-rechazar").style.display = afpPuedeBodega ? "" : "none";
+  let avisoProductoNuevo = document.getElementById("afp-aviso-producto-nuevo");
+  if (!avisoProductoNuevo) {
+    avisoProductoNuevo = document.createElement("p");
+    avisoProductoNuevo.id = "afp-aviso-producto-nuevo";
+    avisoProductoNuevo.className = "ayuda-inline ayuda-inline--bloqueado";
+    document.getElementById("afp-tbody-lineas").closest("table").after(avisoProductoNuevo);
+  }
+  avisoProductoNuevo.textContent = "Esta factura tiene productos que todavía no existen en el catálogo — "
+    + "créalos primero desde Finanzas → Cuentas por Pagar → Editar esta factura (\"Crear este producto en Logística\" "
+    + "en cada línea) antes de poder aprobarla.";
+  avisoProductoNuevo.style.display = (afpPuedeBodega && hayLineasSinResolver) ? "block" : "none";
   const campoNotaRechazo = document.getElementById("afp-nota-rechazo").closest(".campo");
   campoNotaRechazo.style.display = afpPuedeBodega ? "" : "none";
   let avisoSoloLectura = document.getElementById("afp-aviso-solo-lectura");

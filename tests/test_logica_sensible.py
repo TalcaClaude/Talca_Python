@@ -1803,10 +1803,16 @@ class TestEscanearFotoFactura(unittest.TestCase):
         # La línea sin match debe traer el texto original de la IA, para
         # mostrarlo como ayuda en la previsualización.
         self.assertEqual(linea_sin_matchear["texto_original"], "ZZZ-NOPE-9999 TEXTO INVENTADO SIN RELACION")
+        self.assertEqual(linea_sin_matchear["errores"], [])
 
-        # La factura completa no puede estar "valida" todavía: tiene una
-        # línea sin producto asignado.
-        self.assertFalse(grupo["valida"])
+        # Una línea sin producto asignado YA NO bloquea la factura completa
+        # (antes sí) -- puede quedar como pendiente de recepción igual, con
+        # esa línea sin resolver; Bodega la completa después (creando el
+        # producto que falta, ver crear_y_vincular_producto_pendiente) antes
+        # de poder aprobarla (aprobar_factura_pendiente_recepcion sigue
+        # exigiendo producto_id en todas las líneas para APROBAR).
+        self.assertTrue(grupo["valida"])
+        self.assertEqual(grupo["errores"], [])
 
     def test_corregir_linea_y_proveedor_deja_la_factura_lista_para_confirmar(self):
         with taller_app.app.app_context():
@@ -3378,6 +3384,223 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         despues = self.client.get("/api/facturas/pendientes-recepcion/contador").get_json()["pendientes"]
         # Se crearon 2, se aprobó 1 -> debe quedar 1 más que "antes".
         self.assertEqual(despues, antes + 1)
+
+
+class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
+    """Hallazgo planteado por el taller: una factura puede traer un
+    repuesto que todavía no existe en el catálogo. Antes, los cuatro
+    caminos para registrar una factura (manual, Excel, foto, WhatsApp)
+    exigían que el producto ya existiera -- si no, la línea (o la factura
+    completa, según el camino) quedaba bloqueada, sin ninguna forma de
+    avanzar. Ahora todos dejan pasar la línea igual, sin resolver, y la
+    factura queda como pendiente de recepción -- pero como Finanzas no
+    puede crear productos (hallazgo #3 de la revisión técnica), alguien de
+    Bodega tiene que crear el producto que falta y vincularlo a esa línea
+    (ver crear_y_vincular_producto_pendiente) ANTES de poder aprobar la
+    factura -- aprobar_factura_pendiente_recepcion sigue exigiendo
+    producto_id real en todas las líneas, eso no cambió."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin = taller_app.app.test_client()
+        cls.admin.post("/login", data={"username": "admin", "password": "taller2026"})
+        cls._contador = 0
+
+    def _nuevo_username(self, prefijo):
+        type(self)._contador += 1
+        return f"{prefijo}_{type(self)._contador}"
+
+    def _crear_usuario_y_login(self, modulos):
+        username = self._nuevo_username("pnf")
+        resp = self.admin.post(
+            "/api/admin/usuarios",
+            json={"username": username, "password": "clave123456", "nombre": username,
+                  "es_admin": False, "modulos": modulos},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        client = taller_app.app.test_client()
+        resp_login = client.post("/login", data={"username": username, "password": "clave123456"})
+        self.assertEqual(resp_login.status_code, 302)
+        return client
+
+    def _crear_pendiente_con_producto_nuevo(self, numero, nombre_nuevo="Kit de embrague ABC 2020",
+                                              cantidad=3, precio_unitario=15000):
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_nuevo_nombre": nombre_nuevo, "cantidad": cantidad, "precio_unitario": precio_unitario}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    # ---- Entrada manual (Finanzas) puede describir un producto nuevo ----
+
+    def test_finanzas_puede_registrar_factura_con_producto_que_no_existe_todavia(self):
+        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-001")
+        linea = pendiente["lineas"][0]
+        self.assertIsNone(linea["producto_id"])
+        self.assertEqual(linea["texto_original"], "Kit de embrague ABC 2020")
+        self.assertEqual(linea["cantidad"], 3)
+        self.assertEqual(pendiente["estado"], "pendiente")
+
+    def test_linea_manual_sin_producto_id_ni_nombre_nuevo_se_rechaza(self):
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PROD-NUEVO-002",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"cantidad": 1, "precio_unitario": 1000}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("describe el producto nuevo", resp.get_json()["error"])
+
+    # ---- No se puede aprobar hasta que Bodega resuelva la línea ----
+
+    def test_no_se_puede_aprobar_con_una_linea_sin_producto_vinculado(self):
+        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-003")
+        resp = self.admin.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("todavía no está asociada a un producto", resp.get_json()["error"])
+
+    # ---- Crear y vincular: quién puede, y qué pasa cuando ----
+
+    def test_solo_bodega_puede_crear_y_vincular_el_producto(self):
+        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-004")
+        client_finanzas = self._crear_usuario_y_login(["finanzas"])
+        resp = client_finanzas.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
+            json={"categoria": "EMBRAGUE", "modelo": "ABC 2020"},
+        )
+        self.assertEqual(resp.status_code, 403)
+
+        client_bodega = self._crear_usuario_y_login(["bodega"])
+        resp2 = client_bodega.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
+            json={"categoria": "EMBRAGUE", "modelo": "ABC 2020"},
+        )
+        self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
+
+    def test_crear_y_vincular_producto_deja_la_linea_resuelta_y_permite_aprobar(self):
+        pendiente = self._crear_pendiente_con_producto_nuevo(
+            "FACT-PROD-NUEVO-005", nombre_nuevo="Bomba de agua XYZ", cantidad=2, precio_unitario=45000,
+        )
+        resp = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
+            json={"categoria": "BOMBA DE AGUA", "modelo": "XYZ"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        cuerpo = resp.get_json()
+        producto_nuevo = cuerpo["producto"]
+        pendiente_actualizado = cuerpo["pendiente"]
+
+        # El producto nace SIN stock ni costo -- eso se aplica recién al
+        # aprobar la factura, para no contar la compra dos veces (mismo
+        # principio ya corregido esta sesión para las devoluciones de stock).
+        self.assertEqual(producto_nuevo["stock_disponible"], 0)
+        self.assertEqual(producto_nuevo["costo_compra"], 0)
+
+        linea_resuelta = pendiente_actualizado["lineas"][0]
+        self.assertEqual(linea_resuelta["producto_id"], producto_nuevo["id"])
+        self.assertEqual(linea_resuelta["producto_nombre"], producto_nuevo["nombre"])
+
+        # Ahora sí se puede aprobar, y el stock/costo se aplican tal como
+        # venían en la factura (ni más, ni menos -- ver test siguiente para
+        # la verificación numérica exacta).
+        resp_aprobar = self.admin.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp_aprobar.status_code, 201, resp_aprobar.get_data(as_text=True))
+
+        producto_final = self.admin.get(f"/api/productos/{producto_nuevo['id']}").get_json()
+        self.assertEqual(producto_final["stock_disponible"], 2)
+        self.assertEqual(producto_final["costo_compra"], 45000)
+
+    def test_crear_y_vincular_rechaza_indice_invalido(self):
+        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-006")
+        resp = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/5/crear-producto",
+            json={"categoria": "X", "modelo": "Y"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_crear_y_vincular_rechaza_si_la_linea_ya_tiene_producto(self):
+        producto = self.admin.post(
+            "/api/productos", json={"nombre": "Producto ya vinculado", "stock_disponible": 0, "costo_compra": 500},
+        ).get_json()
+        resp_pend = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PROD-NUEVO-007",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 500}],
+                "condicion_pago": "credito",
+            },
+        )
+        pendiente = resp_pend.get_json()
+        resp = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
+            json={"categoria": "X", "modelo": "Y"},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("ya está vinculada", resp.get_json()["error"])
+
+    def test_crear_y_vincular_rechaza_si_la_factura_ya_fue_procesada(self):
+        producto = self.admin.post(
+            "/api/productos", json={"nombre": "Producto para rechazo procesada", "stock_disponible": 0, "costo_compra": 500},
+        ).get_json()
+        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-008")
+        # Se rechaza la factura completa -- ya no debería poder tocarse.
+        self.admin.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar", json={})
+        resp = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
+            json={"categoria": "X", "modelo": "Y"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    # ---- Excel: una fila sin match ya no bloquea toda la factura ----
+
+    def test_excel_con_producto_sin_match_queda_pendiente_en_vez_de_omitirse(self):
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["N° Factura", "Fecha", "Proveedor", "RUT Proveedor", "ID Producto",
+                   "Categoría", "Modelo", "Cantidad", "Precio Unitario"])
+        ws.append(["FACT-EXCEL-NUEVO-001", "2026-07-08", "Proveedor Excel Nuevo", "",
+                   "", "AMORTIGUADOR", "TEST-EXCEL-NUEVO", 4, 20000])
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        resp_preview = self.admin.post(
+            "/api/facturas/carga-masiva/previsualizar",
+            data={"archivo": (buffer, "carga.xlsx")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(resp_preview.status_code, 200, resp_preview.get_data(as_text=True))
+        data = resp_preview.get_json()
+        grupo = data["facturas"][0]
+        # Ya NO bloquea: la fila con categoría/modelo que no matchea queda
+        # como "producto nuevo, pendiente de crear", no como error.
+        self.assertTrue(grupo["valida"])
+        self.assertEqual(grupo["errores"], [])
+        self.assertIsNone(grupo["lineas"][0]["producto_id"])
+        self.assertIn("AMORTIGUADOR", grupo["lineas"][0]["texto_original"])
+
+        resp_confirmar = self.admin.post(
+            "/api/facturas/carga-masiva/confirmar", json={"token": data["token"], "condicion_pago": "credito"},
+        )
+        self.assertEqual(resp_confirmar.status_code, 200, resp_confirmar.get_data(as_text=True))
+        confirmadas = resp_confirmar.get_json()
+        self.assertIn("FACT-EXCEL-NUEVO-001", confirmadas["creadas"])
+
+        pendientes = self.admin.get("/api/facturas/pendientes-recepcion?estado=pendiente").get_json()["pendientes"]
+        pendiente_creado = next(p for p in pendientes if p["numero"] == "FACT-EXCEL-NUEVO-001")
+        self.assertIsNone(pendiente_creado["lineas"][0]["producto_id"])
 
 
 class TestRolesYPermisos(unittest.TestCase):

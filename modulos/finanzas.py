@@ -305,6 +305,7 @@ def _caja_resumen_medio(db, medio_pago):
 
 
 @bp.route("/api/caja/resumen", methods=["GET"])
+@requiere_rol("finanzas")
 def caja_resumen():
     """Devuelve el resumen desglosado por medio_pago (antes era un solo
     bloque para toda Caja Chica). El frontend arma 3 tarjetas a partir de
@@ -329,6 +330,7 @@ def caja_resumen():
 # ---------------------------------------------------------------------------
 
 @bp.route("/api/finanzas/resumen", methods=["GET"])
+@requiere_rol("finanzas")
 def finanzas_resumen():
     desde, hasta = _rango_fechas()
     if not desde and not hasta:
@@ -338,6 +340,7 @@ def finanzas_resumen():
 
 
 @bp.route("/api/finanzas/resumen/graficos", methods=["GET"])
+@requiere_rol("finanzas")
 def finanzas_resumen_graficos():
     """Datos para los gráficos del dashboard de Finanzas:
       - tendencia_mensual: ingresos (pagos_orden) vs gastos (caja_movimientos
@@ -462,6 +465,7 @@ def finanzas_resumen_graficos():
 
 
 @bp.route("/api/caja/movimientos", methods=["GET"])
+@requiere_rol("finanzas")
 def caja_listar_movimientos():
     db = get_db()
 
@@ -519,6 +523,7 @@ def caja_listar_movimientos():
 
 
 @bp.route("/api/caja/gasto", methods=["POST"])
+@requiere_rol("finanzas")
 def caja_crear_gasto():
     """Crea un "gasto" de Caja Chica -- ojo, esto es apenas el RETIRO (banco,
     tarjeta o vía Cristian), no la rendición: a propósito solo pide monto,
@@ -565,6 +570,7 @@ def caja_crear_gasto():
 
 
 @bp.route("/api/caja/gasto/<int:gasto_id>/boleta", methods=["POST"])
+@requiere_rol("finanzas")
 def caja_agregar_boleta(gasto_id):
     """Agrega una boleta/factura (rendición parcial) contra un gasto ya
     registrado. Puede llamarse varias veces sobre el mismo gasto -- ej. un
@@ -671,6 +677,7 @@ def caja_agregar_boleta(gasto_id):
 
 
 @bp.route("/api/caja/boleta/<int:detalle_id>", methods=["PUT"])
+@requiere_rol("finanzas")
 def caja_editar_boleta(detalle_id):
     db = get_db()
     detalle = db.execute("SELECT * FROM caja_gasto_detalles WHERE id = ?", (detalle_id,)).fetchone()
@@ -736,6 +743,7 @@ def caja_editar_boleta(detalle_id):
 
 
 @bp.route("/api/caja/boleta/<int:detalle_id>", methods=["DELETE"])
+@requiere_rol("finanzas")
 def caja_eliminar_boleta(detalle_id):
     db = get_db()
     detalle = db.execute("SELECT * FROM caja_gasto_detalles WHERE id = ?", (detalle_id,)).fetchone()
@@ -763,6 +771,7 @@ def caja_eliminar_boleta(detalle_id):
 
 
 @bp.route("/api/caja/gasto/<int:gasto_id>/cerrar", methods=["PUT"])
+@requiere_rol("finanzas")
 def caja_cerrar_gasto(gasto_id):
     """Cierra (o reabre) un gasto manualmente aunque sus boletas no
     justifiquen el 100% del monto -- para el vuelto que queda disponible en
@@ -784,6 +793,7 @@ def caja_cerrar_gasto(gasto_id):
 
 
 @bp.route("/api/caja/aporte", methods=["POST"])
+@requiere_rol("finanzas")
 def caja_crear_aporte():
     db = get_db()
     data = request.form
@@ -823,6 +833,7 @@ def caja_crear_aporte():
 
 
 @bp.route("/api/caja/movimiento/<int:mov_id>", methods=["DELETE"])
+@requiere_rol("finanzas")
 def caja_eliminar_movimiento(mov_id):
     db = get_db()
     row = db.execute("SELECT * FROM caja_movimientos WHERE id = ?", (mov_id,)).fetchone()
@@ -861,6 +872,7 @@ def caja_eliminar_movimiento(mov_id):
 
 
 @bp.route("/api/caja/movimiento/<int:mov_id>", methods=["PUT"])
+@requiere_rol("finanzas")
 def caja_editar_movimiento(mov_id):
     """Editar un gasto o aporte. Desde la Migración 25, un "gasto" (retiro)
     solo tiene monto/medio de pago/fecha propios -- categoría, proveedor,
@@ -924,6 +936,7 @@ def caja_editar_movimiento(mov_id):
 
 
 @bp.route("/api/caja/comprobante/<path:nombre_archivo>", methods=["GET"])
+@requiere_rol("finanzas")
 def caja_ver_comprobante(nombre_archivo):
     nombre_seguro = secure_filename(nombre_archivo)
     ruta = os.path.join(COMPROBANTES_DIR, nombre_seguro)
@@ -990,6 +1003,7 @@ def caja_vaciar():
 
 
 @bp.route("/api/caja/pendientes", methods=["GET"])
+@requiere_rol("finanzas")
 def caja_gastos_pendientes():
     """Lista los gastos (retiros) que todavía tienen algo por hacer -- les
     falta documentar parte de su monto con una boleta, o ya tienen alguna
@@ -1027,6 +1041,7 @@ def caja_gastos_pendientes():
 
 
 @bp.route("/api/caja/rendicion", methods=["POST"])
+@requiere_rol("finanzas")
 def caja_crear_rendicion():
     """Genera una Rendición a partir de BOLETAS individuales (Migración 26,
     ya cargadas contra algún gasto con caja_agregar_boleta) -- no de gastos
@@ -1153,6 +1168,7 @@ def _rendicion_tuvo_reposicion(db, rendicion_id):
 
 
 @bp.route("/api/caja/rendiciones", methods=["GET"])
+@requiere_rol("finanzas")
 def caja_listar_rendiciones():
     db = get_db()
     rows = db.execute("SELECT * FROM caja_rendiciones ORDER BY fecha DESC, id DESC").fetchall()
@@ -1170,6 +1186,7 @@ def caja_listar_rendiciones():
 
 
 @bp.route("/api/caja/rendicion/<int:rendicion_id>", methods=["GET"])
+@requiere_rol("finanzas")
 def caja_detalle_rendicion(rendicion_id):
     db = get_db()
     rendicion = db.execute("SELECT * FROM caja_rendiciones WHERE id = ?", (rendicion_id,)).fetchone()
@@ -1233,6 +1250,7 @@ def _orden_valor_total(orden_row):
 
 
 @bp.route("/api/finanzas/cxc", methods=["GET"])
+@requiere_rol("finanzas")
 def finanzas_listar_cxc():
     """Lista las Cuentas por Cobrar "cerradas" (una por OT que llegó a
     'listo' o 'entregado' con precio > 0), con datos del cliente/equipo y
@@ -1274,6 +1292,7 @@ def finanzas_listar_cxc():
 
 
 @bp.route("/api/finanzas/cxc/abonos", methods=["GET"])
+@requiere_rol("finanzas")
 def finanzas_listar_cxc_abonos():
     """Lista las OTs que ya tienen el presupuesto aprobado (están en
     reparación o más adelante, ver ESTADOS_CXC_ABONO) y todavía no alcanzan
@@ -1415,6 +1434,7 @@ def finanzas_anular_cxp_manual(cxp_id):
 
 
 @bp.route("/api/finanzas/cxp", methods=["GET"])
+@requiere_rol("finanzas")
 def finanzas_listar_cxp():
     """Lista las Cuentas por Pagar (una por factura de compra registrada),
     con datos del proveedor/factura y el saldo pendiente calculado a
@@ -1589,6 +1609,7 @@ def _boletas_texto(g):
 
 
 @bp.route("/api/reportes/caja-gastos", methods=["GET"])
+@requiere_rol("finanzas")
 def reporte_caja_gastos():
     desde, hasta = _rango_fechas()
     gastos = _gastos_caja_para_reporte(desde, hasta)
@@ -1630,6 +1651,7 @@ def reporte_caja_gastos():
 
 
 @bp.route("/api/reportes/caja-gastos/pdf", methods=["GET"])
+@requiere_rol("finanzas")
 def reporte_caja_gastos_pdf():
     desde, hasta = _rango_fechas()
     gastos = _gastos_caja_para_reporte(desde, hasta)
@@ -1773,6 +1795,7 @@ def _resumen_financiero(desde, hasta):
 
 
 @bp.route("/api/reportes/finanzas-resumen", methods=["GET"])
+@requiere_rol("finanzas")
 def reporte_finanzas_resumen():
     desde, hasta = _rango_fechas()
     if not desde and not hasta:
@@ -1823,6 +1846,7 @@ def reporte_finanzas_resumen():
 
 
 @bp.route("/api/reportes/finanzas-resumen/pdf", methods=["GET"])
+@requiere_rol("finanzas")
 def reporte_finanzas_resumen_pdf():
     desde, hasta = _rango_fechas()
     if not desde and not hasta:

@@ -20,6 +20,7 @@ Cómo correrlos:
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -319,6 +320,340 @@ class TestFuncionesNucleoModulos(unittest.TestCase):
             session["modulos"] = ["bodega"]
             resultado = vista()
             self.assertEqual(resultado[1], 403)
+
+
+class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
+    """Hallazgo #3 (y #6) del informe de revisión técnica: las pantallas de
+    cada módulo estaban protegidas, pero la mayoría de las rutas de API que
+    esas pantallas consumen solo exigían tener sesión iniciada, sin importar
+    a qué módulo -- un usuario con acceso ÚNICAMENTE a Bodega podía llamar
+    directamente la API de Finanzas u Operativo (ver el resumen financiero,
+    listar clientes, crear una orden de trabajo, etc.) con solo escribir la
+    URL correcta. Se agregó @requiere_rol("finanzas")/@requiere_rol("operativo")
+    a todas las rutas de esos dos módulos que no lo tenían (más los
+    endpoints de mecánicos/Agente de WhatsApp, que dependen del módulo
+    'operativo' -- ver /agente-ia en app.py). Los dos endpoints de
+    seguimiento público por patente quedan deliberadamente afuera: están
+    pensados para usarse sin sesión iniciada (ver RUTAS_PUBLICAS).
+
+    Además cubre la extensión pedida por el taller a Logística
+    (productos/proveedores/ubicaciones/categorías/modelos/movimientos/
+    mermas/dashboard/reportes de inventario): decisión explícita de que
+    CREAR/EDITAR/ELIMINAR quede restringido a 'bodega' (antes cualquier
+    sesión iniciada podía tocarlo), pero LEER el listado de productos, el
+    listado de proveedores y el stock por proveedor de un producto se dejó
+    abierto a cualquier módulo con sesión iniciada -- porque Operativo
+    (agregar un repuesto a una OT), Convertidores (agregar un repuesto a un
+    convertidor) y Finanzas (elegir producto/proveedor al registrar una
+    compra de emergencia o cargar una factura) dependen de leer esos datos
+    desde su propio frontend; restringirlos habría roto esos tres flujos ya
+    existentes. Las rutas de Facturas que no tenían protección quedaron con
+    @requiere_rol("finanzas", "bodega") -- el mismo patrón que ya usaban
+    las de 'pendientes de recepción' desde antes de esta revisión. Y cuatro
+    rutas que resultaron ser de uso exclusivo de admin (el diagnóstico de
+    disco duplicado con /api/admin/diagnostico-disco, el respaldo
+    automático, y el Panel Principal que cruza Finanzas+Operativo y que la
+    propia página ya limitaba a admin) quedaron con @requiere_rol() sin
+    argumentos, igual que sus rutas hermanas de administración."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin = taller_app.app.test_client()
+        cls.admin.post("/login", data={"username": "admin", "password": "taller2026"})
+        cls._contador = 0
+
+    def _nuevo_username(self, prefijo):
+        type(self)._contador += 1
+        return f"{prefijo}_{type(self)._contador}"
+
+    def _crear_usuario(self, modulos=None, es_admin=False, password="clave123456"):
+        username = self._nuevo_username("acc")
+        resp = self.admin.post(
+            "/api/admin/usuarios",
+            json={
+                "username": username, "password": password, "nombre": username,
+                "es_admin": es_admin,
+                "modulos": modulos or [],
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return username
+
+    def _login_como(self, username, password="clave123456"):
+        client = taller_app.app.test_client()
+        resp = client.post("/login", data={"username": username, "password": password})
+        self.assertEqual(resp.status_code, 302, resp.get_data(as_text=True))
+        return client
+
+    # ---- Barrido sistemático: TODA ruta registrada de estos dos módulos
+    #      (más los endpoints de agente/mecánicos) debe rechazar a alguien
+    #      que solo tiene 'bodega'. Esto es justamente lo que faltaba antes
+    #      de esta corrección -- si en el futuro alguien agrega una ruta
+    #      nueva a Finanzas u Operativo y se olvida del decorador, este test
+    #      la detecta sin que nadie tenga que acordarse de agregarla a mano. ----
+
+    _ENDPOINTS_AGENTE_MECANICOS = {
+        "listar_mecanicos_agente", "crear_mecanico_agente", "editar_mecanico_agente",
+        "eliminar_mecanico_agente", "simular_mensaje_agente", "simular_mensaje_voz_agente",
+        "simular_mensaje_foto_agente", "listar_mensajes_agente",
+    }
+    _ENDPOINTS_LOGISTICA_BODEGA = {
+        "productos_importar_excel_previsualizar", "productos_importar_excel_confirmar",
+        "obtener_producto", "crear_producto", "editar_producto", "eliminar_producto",
+        "subir_foto_producto", "eliminar_foto_producto", "obtener_foto_producto", "registrar_movimiento",
+        "listar_ubicaciones", "crear_ubicacion", "crear_ubicaciones_rango", "reasignar_ubicacion",
+        "eliminar_ubicacion", "listar_categorias", "crear_categoria", "editar_categoria", "eliminar_categoria",
+        "listar_modelos", "crear_modelo", "editar_modelo", "eliminar_modelo",
+        "crear_proveedor", "editar_proveedor", "eliminar_proveedor",
+        "resumen", "alertas_stock_estado", "alertas_stock_probar", "planificacion_recalcular_todos",
+        "listar_movimientos", "proveedores_origen_producto", "listar_mermas",
+        "descartar_merma", "revertir_merma", "merma_origenes", "dashboard", "logistica_dashboard_graficos",
+        "rotacion", "planificacion", "logistica_repuestos_tipicos_modelos",
+        "reporte_inventario", "reporte_stock", "reporte_rotacion", "reporte_inventario_pdf",
+        "reporte_stock_pdf", "reporte_rotacion_pdf", "reporte_movimientos", "reporte_movimientos_pdf",
+        "reporte_compras", "reporte_compras_pdf", "reportes_resumen",
+    }
+    # Estas tres quedaron deliberadamente ABIERTAS a cualquier módulo con
+    # sesión iniciada (no solo Bodega) porque Operativo (agregar un repuesto
+    # a una OT), Convertidores (agregar un repuesto a un convertidor) y
+    # Finanzas (elegir producto/proveedor al registrar una compra de
+    # emergencia o cargar una factura) las llaman directamente desde su
+    # propio frontend -- restringirlas habría roto esos tres flujos. Ver
+    # decisión explícita del taller: "Bodega crea/edita, todos pueden leer".
+    _ENDPOINTS_LOGISTICA_LECTURA_ABIERTA = {
+        "listar_productos", "listar_proveedores", "stock_proveedores_producto",
+    }
+    _ENDPOINTS_FACTURAS_FINANZAS_O_BODEGA = {
+        "listar_facturas", "obtener_factura", "obtener_factura_por_numero",
+        "carga_masiva_plantilla", "carga_masiva_previsualizar", "carga_masiva_corregir_linea",
+        "carga_masiva_corregir_proveedor", "escanear_foto_factura",
+    }
+    _ENDPOINTS_SOLO_ADMIN = {
+        "estado_sistema", "backup_estado_automatico", "backup_probar_automatico", "panel_dueno",
+    }
+    _ENDPOINTS_PUBLICOS_EXCLUIDOS = {
+        "operativo.seguimiento_publico", "operativo.api_seguimiento_publico",
+    }
+
+    @staticmethod
+    def _ruta_concreta(regla):
+        """Convierte el patrón de una regla de Flask (ej.
+        '/api/operativo/ordenes/<int:orden_id>/items') en una URL concreta
+        rellenando cualquier parámetro con un valor de relleno -- no importa
+        que el recurso no exista, porque @requiere_rol corre ANTES de que
+        la vista toque la base de datos (es el decorador más externo)."""
+        patron = str(regla)
+
+        def relleno(m):
+            conversor = m.group(1)
+            return "999999" if conversor == "int" else "zzz"
+
+        return re.sub(r"<(?:(\w+):)?(\w+)>", relleno, patron)
+
+    def _rutas_de(self, nombres_endpoint):
+        rutas = []
+        for regla in taller_app.app.url_map.iter_rules():
+            endpoint = regla.endpoint
+            if endpoint not in nombres_endpoint or endpoint in self._ENDPOINTS_PUBLICOS_EXCLUIDOS:
+                continue
+            metodos = (regla.methods or set()) - {"HEAD", "OPTIONS"}
+            for metodo in metodos:
+                rutas.append((endpoint, metodo, self._ruta_concreta(regla)))
+        return rutas
+
+    def _rutas_protegidas(self):
+        rutas = []
+        for regla in taller_app.app.url_map.iter_rules():
+            endpoint = regla.endpoint
+            es_de_los_modulos = (
+                endpoint.startswith("finanzas.") or endpoint.startswith("operativo.")
+                or endpoint in self._ENDPOINTS_AGENTE_MECANICOS
+                or endpoint in self._ENDPOINTS_LOGISTICA_BODEGA
+                or endpoint in self._ENDPOINTS_FACTURAS_FINANZAS_O_BODEGA
+                or endpoint in self._ENDPOINTS_SOLO_ADMIN
+            )
+            if not es_de_los_modulos or endpoint in self._ENDPOINTS_PUBLICOS_EXCLUIDOS:
+                continue
+            metodos = (regla.methods or set()) - {"HEAD", "OPTIONS"}
+            for metodo in metodos:
+                rutas.append((endpoint, metodo, self._ruta_concreta(regla)))
+        return rutas
+
+    def test_todas_las_rutas_protegidas_rechazan_a_un_usuario_de_modulo_no_relacionado(self):
+        # 'convertidores' no da acceso a NINGUNA de estas rutas (Finanzas,
+        # Operativo, Agente, Logística/Bodega, Facturas ni las de solo-admin)
+        # -- es el control negativo universal: si el barrido encuentra
+        # aunque sea una que SÍ deja pasar a este usuario, es una ruta que
+        # quedó sin el decorador correcto.
+        username = self._crear_usuario(modulos=["convertidores"])
+        client = self._login_como(username)
+        rutas = self._rutas_protegidas()
+        # Si esto falla, es porque el barrido no encontró nada que proteger
+        # -- probablemente un cambio en cómo se registran las rutas/blueprints.
+        self.assertGreater(len(rutas), 135, "el barrido debería cubrir >135 rutas entre todos los grupos")
+        fallos = []
+        for endpoint, metodo, ruta in rutas:
+            resp = client.open(ruta, method=metodo, json={})
+            if resp.status_code != 403:
+                fallos.append((endpoint, metodo, ruta, resp.status_code))
+        self.assertEqual(fallos, [], f"rutas que NO devolvieron 403 a un usuario de otro módulo: {fallos}")
+
+    def test_usuario_sin_ningun_modulo_tambien_queda_bloqueado(self):
+        # Caso límite: alguien creado sin ningún módulo (ver
+        # test_usuario_sin_modulos_va_a_sin_acceso más arriba) tampoco debe
+        # poder colarse por la API aunque nunca aterrice en ninguna pantalla.
+        username = self._crear_usuario(modulos=["bodega"])
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            db.execute("UPDATE usuarios SET modulos_json = '[]' WHERE username = ?", (username,))
+            db.commit()
+        client = self._login_como(username)
+        resp = client.get("/api/finanzas/resumen")
+        self.assertEqual(resp.status_code, 403)
+
+    # ---- Logística restringida a 'bodega' (decisión explícita del taller
+    #      para el hallazgo #3, tras dejarlo pendiente el resto de esta
+    #      revisión) + Facturas (finanzas O bodega, ya era el criterio
+    #      usado en 'pendientes de recepción') + rutas de solo-admin. ----
+
+    def test_usuario_bodega_si_puede_usar_logistica_y_facturas(self):
+        username = self._crear_usuario(modulos=["bodega"])
+        client = self._login_como(username)
+        for endpoint, metodo, ruta in self._rutas_de(self._ENDPOINTS_LOGISTICA_BODEGA):
+            resp = client.open(ruta, method=metodo, json={})
+            self.assertNotEqual(resp.status_code, 403, f"{endpoint} {metodo} {ruta} -> {resp.status_code}")
+        for endpoint, metodo, ruta in self._rutas_de(self._ENDPOINTS_FACTURAS_FINANZAS_O_BODEGA):
+            resp = client.open(ruta, method=metodo, json={})
+            self.assertNotEqual(resp.status_code, 403, f"{endpoint} {metodo} {ruta} -> {resp.status_code}")
+
+    def test_usuario_finanzas_tambien_puede_usar_facturas_pero_no_escribir_en_logistica(self):
+        username = self._crear_usuario(modulos=["finanzas"])
+        client = self._login_como(username)
+        for endpoint, metodo, ruta in self._rutas_de(self._ENDPOINTS_FACTURAS_FINANZAS_O_BODEGA):
+            resp = client.open(ruta, method=metodo, json={})
+            self.assertNotEqual(resp.status_code, 403, f"{endpoint} {metodo} {ruta} -> {resp.status_code}")
+        # Puede LEER el catálogo de productos (lo necesita para su propio
+        # flujo de compra de emergencia/carga de facturas)...
+        self.assertEqual(client.get("/api/productos").status_code, 200)
+        # ...pero no puede CREAR uno, ni tocar el resto de Logística
+        # (ubicaciones, categorías, dashboard, etc.), que sigue siendo
+        # exclusivo de Bodega.
+        resp_crear = client.post("/api/productos", json={"nombre": "Intruso"})
+        self.assertEqual(resp_crear.status_code, 403)
+        self.assertEqual(client.get("/api/logistica/dashboard/graficos").status_code, 403)
+
+    def test_usuario_operativo_no_puede_escribir_en_logistica_ni_tocar_facturas(self):
+        username = self._crear_usuario(modulos=["operativo"])
+        client = self._login_como(username)
+        # Igual que Finanzas: puede leer el catálogo (lo necesita para
+        # agregar repuestos a una OT) pero no crear/editar productos ni
+        # entrar a Facturas (que es finanzas O bodega, no operativo).
+        self.assertEqual(client.get("/api/productos").status_code, 200)
+        resp_crear = client.post("/api/productos", json={"nombre": "Intruso"})
+        self.assertEqual(resp_crear.status_code, 403)
+        self.assertEqual(client.get("/api/facturas").status_code, 403)
+
+    def test_operativo_convertidores_y_finanzas_pueden_leer_catalogo_y_stock_por_proveedor(self):
+        # Escenario real: agregar un repuesto a una OT/Convertidor, o elegir
+        # producto/proveedor al registrar una compra de emergencia -- las
+        # tres pantallas necesitan poder leer esto aunque no sea "su"
+        # módulo. Ver _ENDPOINTS_LOGISTICA_LECTURA_ABIERTA.
+        resp_prod = self.admin.post(
+            "/api/productos", json={"nombre": "Producto lectura cruzada", "stock_disponible": 0, "costo_compra": 0}
+        )
+        self.assertEqual(resp_prod.status_code, 201, resp_prod.get_data(as_text=True))
+        producto_id = resp_prod.get_json()["id"]
+        for modulo in ("operativo", "convertidores", "finanzas", "bodega"):
+            username = self._crear_usuario(modulos=[modulo])
+            client = self._login_como(username)
+            self.assertEqual(client.get("/api/productos").status_code, 200, modulo)
+            self.assertEqual(client.get("/api/proveedores").status_code, 200, modulo)
+            resp_stock = client.get(f"/api/productos/{producto_id}/stock-proveedores")
+            self.assertEqual(resp_stock.status_code, 200, f"[{modulo}] {resp_stock.get_data(as_text=True)}")
+
+    def test_pero_esa_lectura_abierta_no_sirve_para_escribir(self):
+        # La lectura de /api/productos y /api/proveedores es abierta, pero
+        # crear/editar/eliminar sigue siendo solo de Bodega -- confirma que
+        # no se "filtró" de más al resolver el escenario anterior.
+        for modulo in ("operativo", "convertidores", "finanzas"):
+            username = self._crear_usuario(modulos=[modulo])
+            client = self._login_como(username)
+            self.assertEqual(client.post("/api/productos", json={"nombre": "X"}).status_code, 403)
+            self.assertEqual(client.post("/api/proveedores", json={"nombre": "X"}).status_code, 403)
+
+    def test_rutas_de_solo_admin_rechazan_incluso_a_bodega_y_finanzas(self):
+        # panel-dueno, estado_sistema y el respaldo automático son
+        # transversales (cruzan Finanzas+Operativo, o son diagnóstico de
+        # infraestructura) -- ni siquiera Bodega o Finanzas deberían
+        # entrar, solo admin.
+        for modulo in ("bodega", "finanzas", "operativo"):
+            username = self._crear_usuario(modulos=[modulo])
+            client = self._login_como(username)
+            for endpoint, metodo, ruta in self._rutas_de(self._ENDPOINTS_SOLO_ADMIN):
+                resp = client.open(ruta, method=metodo, json={})
+                self.assertEqual(resp.status_code, 403, f"[{modulo}] {endpoint} {metodo} {ruta} -> {resp.status_code}")
+
+    # ---- Reproducción literal de los escenarios descritos en el informe ----
+
+    def test_usuario_bodega_no_ve_el_resumen_financiero(self):
+        username = self._crear_usuario(modulos=["bodega"])
+        client = self._login_como(username)
+        resp = client.get("/finanzas")
+        self.assertEqual(resp.status_code, 302)  # la pantalla ya lo bloqueaba
+        resp_api = client.get("/api/finanzas/resumen")
+        self.assertEqual(resp_api.status_code, 403)  # pero la API, antes, no
+
+    def test_usuario_bodega_no_puede_listar_clientes_de_operativo(self):
+        username = self._crear_usuario(modulos=["bodega"])
+        client = self._login_como(username)
+        resp = client.get("/api/operativo/clientes")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_usuario_bodega_no_puede_crear_un_cliente_ni_una_orden_de_trabajo(self):
+        username = self._crear_usuario(modulos=["bodega"])
+        client = self._login_como(username)
+        resp_cliente = client.post("/api/operativo/clientes", json={"nombre": "Intruso"})
+        self.assertEqual(resp_cliente.status_code, 403)
+        resp_orden = client.post("/api/operativo/ordenes", json={"cliente_id": 1, "equipo_id": 1})
+        self.assertEqual(resp_orden.status_code, 403)
+
+    def test_endpoints_de_mecanicos_y_agente_exigen_modulo_operativo(self):
+        username = self._crear_usuario(modulos=["bodega"])
+        client = self._login_como(username)
+        self.assertEqual(client.get("/api/agente/mecanicos").status_code, 403)
+        self.assertEqual(
+            client.post("/api/agente/mecanicos", json={"nombre": "X", "telefono": "+56911111111"}).status_code, 403
+        )
+        self.assertEqual(
+            client.post("/api/agente/simular-mensaje", json={"telefono": "+56911111111", "texto": "hola"}).status_code,
+            403,
+        )
+        self.assertEqual(client.get("/api/agente/mensajes").status_code, 403)
+
+    # ---- Control positivo: el módulo correcto SÍ puede seguir trabajando
+    #      con normalidad (que no se haya bloqueado de más). ----
+
+    def test_usuario_finanzas_si_puede_usar_su_propia_api(self):
+        username = self._crear_usuario(modulos=["finanzas"])
+        client = self._login_como(username)
+        resp = client.get("/api/finanzas/resumen")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+    def test_usuario_operativo_si_puede_usar_su_propia_api(self):
+        username = self._crear_usuario(modulos=["operativo"])
+        client = self._login_como(username)
+        resp = client.get("/api/operativo/clientes")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        resp_agente = client.get("/api/agente/mecanicos")
+        self.assertEqual(resp_agente.status_code, 200, resp_agente.get_data(as_text=True))
+
+    def test_seguimiento_publico_sigue_funcionando_sin_sesion(self):
+        # Este NO debe quedar protegido -- es la página pública que un
+        # cliente usa sin iniciar sesión para ver el estado de su vehículo.
+        cliente_anonimo = taller_app.app.test_client()
+        resp = cliente_anonimo.get("/api/seguimiento?patente=ZZZZ99")
+        self.assertEqual(resp.status_code, 200)
 
 
 if __name__ == "__main__":

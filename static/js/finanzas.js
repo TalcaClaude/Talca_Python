@@ -863,26 +863,47 @@ function wireGastoCard(cont, g) {
       }
     }
 
-    selectRubro.addEventListener("change", () => {
-      const esOt = selectRubro.value === "gastos_por_ot";
-      ordenWrap.style.display = esOt ? "flex" : "none";
-      if (!esOt) { ordenInput.value = ""; ordenPreview.style.display = "none"; ordenEncontrada = null; }
-    });
-    ordenInput.addEventListener("input", () => {
-      clearTimeout(ordenLookupTimeout);
-      ordenLookupTimeout = setTimeout(buscarOrden, 400);
-    });
-
     // Migración 27: "compra de emergencia" (ingresa stock al inventario) se
     // pregunta acá, boleta por boleta -- recién al cargar la boleta se sabe
     // qué se compró de verdad (ver caja_agregar_boleta).
     const chkEmergencia = formBoleta.querySelector("[data-campo-emergencia]");
     const camposEmergencia = formBoleta.querySelector("[data-emergencia-campos]");
     const selectProducto = formBoleta.querySelector("[data-campo-producto-id]");
+
+    // Una boleta no puede ser "compra de emergencia" (ingresa el repuesto al
+    // inventario) y "Gastos por OT" (carga ese mismo monto como costo de la
+    // orden) al mismo tiempo -- el repuesto ya se cobraría dos veces (ver
+    // hallazgo #10 del informe de revisión, y la misma validación del lado
+    // del servidor en caja_agregar_boleta). Se mantienen mutuamente
+    // excluyentes en la interfaz para que el error nunca llegue a mostrarse.
+    selectRubro.addEventListener("change", () => {
+      const esOt = selectRubro.value === "gastos_por_ot";
+      ordenWrap.style.display = esOt ? "flex" : "none";
+      if (!esOt) { ordenInput.value = ""; ordenPreview.style.display = "none"; ordenEncontrada = null; }
+      if (esOt && chkEmergencia.checked) {
+        chkEmergencia.checked = false;
+        camposEmergencia.style.display = "none";
+        selectProducto.value = "";
+        toast("Se desmarcó \"compra de emergencia\": una boleta no puede ser las dos cosas a la vez", true);
+      }
+    });
+    ordenInput.addEventListener("input", () => {
+      clearTimeout(ordenLookupTimeout);
+      ordenLookupTimeout = setTimeout(buscarOrden, 400);
+    });
+
     chkEmergencia.addEventListener("change", async () => {
       camposEmergencia.style.display = chkEmergencia.checked ? "block" : "none";
       if (chkEmergencia.checked && selectProducto.options.length <= 1) {
         await poblarProductosEmergencia(selectProducto);
+      }
+      if (chkEmergencia.checked && selectRubro.value === "gastos_por_ot") {
+        selectRubro.value = "";
+        ordenWrap.style.display = "none";
+        ordenInput.value = "";
+        ordenPreview.style.display = "none";
+        ordenEncontrada = null;
+        toast("Se cambió el rubro a \"Sin clasificar\": una boleta no puede ser \"Gastos por OT\" y \"compra de emergencia\" a la vez", true);
       }
     });
 
@@ -890,6 +911,10 @@ function wireGastoCard(cont, g) {
       e.preventDefault();
       if (selectRubro.value === "gastos_por_ot" && !ordenEncontrada) {
         toast("Indica una orden de trabajo válida para \"Gastos por OT\"", true);
+        return;
+      }
+      if (chkEmergencia.checked && selectRubro.value === "gastos_por_ot") {
+        toast("Una boleta no puede ser \"compra de emergencia\" y \"Gastos por OT\" al mismo tiempo", true);
         return;
       }
       const fd = new FormData();

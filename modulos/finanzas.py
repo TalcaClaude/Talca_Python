@@ -227,6 +227,36 @@ def _gasto_estado_boletas(db, gasto_id, monto_gasto, cerrado_manualmente):
     return boletas, monto_justificado, monto_pendiente, monto_rendido, monto_por_rendir, listo_para_rendir
 
 
+def _fmt_clp(monto):
+    """Formatea un monto en pesos chilenos para un mensaje de error (mismo
+    separador de miles que fmtMoney en el frontend)."""
+    return "$" + f"{round(monto):,}".replace(",", ".")
+
+
+def _validar_boleta_no_excede_retiro(db, gasto, monto_nuevo, excluir_detalle_id=None):
+    """Antes de agregar o editar una boleta, revisa que la suma de todas las
+    boletas del retiro (excluyendo la que se está editando, si corresponde)
+    no supere el monto efectivamente retirado. Sin este chequeo el exceso se
+    absorbía en silencio (monto_pendiente quedaba en 0 por el max(...,0) de
+    _gasto_estado_boletas) y, si se rendía con reposición automática, el
+    saldo de Caja Chica terminaba inflado por dinero que nunca existió
+    (hallazgo #11 del informe de revisión). Devuelve un mensaje de error, o
+    None si el monto es válido."""
+    query = "SELECT COALESCE(SUM(monto), 0) AS total FROM caja_gasto_detalles WHERE gasto_id = ?"
+    params = [gasto["id"]]
+    if excluir_detalle_id is not None:
+        query += " AND id != ?"
+        params.append(excluir_detalle_id)
+    ya_justificado = db.execute(query, params).fetchone()["total"]
+    disponible = round(gasto["monto"] - ya_justificado, 2)
+    if monto_nuevo > disponible + 0.01:
+        return (f"Esta boleta de {_fmt_clp(monto_nuevo)} deja el total justificado por sobre lo retirado "
+                f"({_fmt_clp(gasto['monto'])}). Disponible para justificar en este retiro: "
+                f"{_fmt_clp(max(disponible, 0))}. Revisa el monto, o registra un retiro adicional si "
+                "efectivamente se gastó más de lo retirado.")
+    return None
+
+
 def _caja_movimiento_dict(db, row):
     d = dict(row)
     d["tiene_comprobante"] = bool(d.get("comprobante_archivo"))
@@ -599,6 +629,10 @@ def caja_agregar_boleta(gasto_id):
     except (TypeError, ValueError):
         return jsonify({"error": "El monto de la boleta debe ser un número mayor a 0"}), 400
 
+    error_excede = _validar_boleta_no_excede_retiro(db, gasto, monto)
+    if error_excede:
+        return jsonify({"error": error_excede}), 400
+
     try:
         rubro_gav = _rubro_gav_valido(data.get("rubro_gav"))
     except ValueError as e:
@@ -630,6 +664,16 @@ def caja_agregar_boleta(gasto_id):
     producto_id = (data.get("producto_id") or "").strip()
     movimiento_inventario_id = None
     if producto_id:
+        # Una boleta no puede ser "compra de emergencia" (ingresa el repuesto
+        # al inventario, con su propio costo) Y "Gastos por OT" (carga ese
+        # mismo monto como costo de la orden) a la vez -- el repuesto recién
+        # ingresado ya se cobrará como costo de la orden cuando efectivamente
+        # se use desde Operativo, así que marcar ambas cosas duplicaría el
+        # gasto (hallazgo #10 del informe de revisión).
+        if rubro_gav == "gastos_por_ot":
+            return jsonify({"error": "Esta boleta no puede ser \"compra de emergencia\" y \"Gastos por OT\" al mismo "
+                                      "tiempo: el repuesto ingresado ya se cobrará como costo de la orden cuando se "
+                                      "use, así que marcar ambas cosas cuenta el gasto dos veces. Elige una de las dos."}), 400
         try:
             producto_id = int(producto_id)
             cantidad = int(data.get("cantidad") or 0)
@@ -697,6 +741,10 @@ def caja_editar_boleta(detalle_id):
             raise ValueError
     except (TypeError, ValueError):
         return jsonify({"error": "El monto de la boleta debe ser un número mayor a 0"}), 400
+
+    error_excede = _validar_boleta_no_excede_retiro(db, gasto, monto, excluir_detalle_id=detalle_id)
+    if error_excede:
+        return jsonify({"error": error_excede}), 400
 
     try:
         rubro_gav = _rubro_gav_valido(data.get("rubro_gav"))
@@ -1120,9 +1168,19 @@ def caja_crear_rendicion():
     )
     rendicion_id = cur.lastrowid
 
+    # OJO: se vincula exactamente la misma lista `boletas` ya filtrada arriba
+    # (ids válidos y con rendicion_id todavía nulo) -- NO la lista cruda
+    # `detalle_ids` que llegó del cliente. Antes se usaba `detalle_ids` acá,
+    # lo que en teoría podía re-vincular a esta rendición una boleta que ya
+    # pertenecía a una rendición anterior (si venía en la selección por
+    # error, ej. una pestaña desactualizada) -- descuadrando qué boleta
+    # quedó en qué rendición sin que el total ($) coincidiera con lo
+    # realmente vinculado (hallazgo #9 del informe de revisión).
+    ids_a_vincular = [b["id"] for b in boletas]
+    placeholders_vincular = ",".join("?" for _ in ids_a_vincular)
     db.execute(
-        f"UPDATE caja_gasto_detalles SET rendicion_id = ? WHERE id IN ({placeholders})",
-        [rendicion_id] + detalle_ids,
+        f"UPDATE caja_gasto_detalles SET rendicion_id = ? WHERE id IN ({placeholders_vincular})",
+        [rendicion_id] + ids_a_vincular,
     )
 
     # Reposición automática (opcional, tildada por defecto): el saldo vuelve

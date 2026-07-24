@@ -551,6 +551,123 @@ class TestCajaChica(unittest.TestCase):
         # defecto, este saldo no se habría movido.
         self.assertAlmostEqual(despues["saldo_disponible"] - antes["saldo_disponible"], 7000, delta=0.01)
 
+    def test_rendicion_solo_vincula_las_boletas_realmente_incluidas_en_su_total(self):
+        """Hallazgo #9 del informe de revisión (Julio 2026): al generar una
+        rendición, el total se calcula descartando boletas que en el camino
+        ya quedaron rendidas por otra rendición (ej. una pestaña con el
+        listado desactualizado) -- pero antes se guardaba qué boletas
+        quedan vinculadas usando la lista cruda enviada por el cliente, sin
+        aplicar ese mismo descarte. Eso podía "robarle" una boleta a una
+        rendición anterior sin que su total cambiara, dejando ambas
+        rendiciones descuadradas respecto a lo que realmente contienen."""
+        gasto_a = self._crear_gasto(4000)
+        boleta_a = self.client.post(
+            f"/api/caja/gasto/{gasto_a['id']}/boleta", data={"monto": "4000"}
+        ).get_json()["boletas"][0]
+        gasto_b = self._crear_gasto(6000)
+        boleta_b = self.client.post(
+            f"/api/caja/gasto/{gasto_b['id']}/boleta", data={"monto": "6000"}
+        ).get_json()["boletas"][0]
+
+        resp_a = self.client.post("/api/caja/rendicion", json={"detalle_ids": [boleta_a["id"]]})
+        self.assertEqual(resp_a.status_code, 201, resp_a.get_data(as_text=True))
+        rendicion_a_id = resp_a.get_json()["id"]
+
+        # Rendición B se genera con boleta_a (ya rendida en A, por error o
+        # listado desactualizado) Y boleta_b -- el sistema debe descartar
+        # boleta_a silenciosamente y rendir solo boleta_b.
+        resp_b = self.client.post(
+            "/api/caja/rendicion", json={"detalle_ids": [boleta_a["id"], boleta_b["id"]]}
+        )
+        self.assertEqual(resp_b.status_code, 201, resp_b.get_data(as_text=True))
+        rendicion_b = resp_b.get_json()
+        self.assertAlmostEqual(rendicion_b["total"], 6000, delta=0.01)
+
+        detalle_a = self.client.get(f"/api/caja/rendicion/{rendicion_a_id}").get_json()
+        detalle_b = self.client.get(f"/api/caja/rendicion/{rendicion_b['id']}").get_json()
+
+        # boleta_a debe seguir perteneciendo a la rendición A (su total de
+        # $4.000 sigue respaldado por esa misma boleta), y la rendición B
+        # solo debe contener boleta_b -- nunca las dos con boleta_a.
+        self.assertEqual([b["id"] for b in detalle_a["boletas"]], [boleta_a["id"]])
+        self.assertEqual([b["id"] for b in detalle_b["boletas"]], [boleta_b["id"]])
+
+    def test_boleta_no_puede_ser_compra_de_emergencia_y_gasto_por_ot_a_la_vez(self):
+        """Hallazgo #10 del informe de revisión: nada impedía marcar una
+        misma boleta como "compra de emergencia" (ingresa el repuesto al
+        inventario) Y como "gastos por OT" (carga ese mismo monto como
+        costo de la orden) -- duplicando el gasto cuando ese repuesto
+        efectivamente se usa en la orden."""
+        producto = self.client.post(
+            "/api/productos", json={"nombre": "Producto - boleta emergencia+OT", "stock_disponible": 0}
+        ).get_json()
+        cliente = self.client.post("/api/operativo/clientes", json={"nombre": "Cliente boleta doble"}).get_json()
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+
+        gasto = self._crear_gasto(50000)
+        resp = self.client.post(
+            f"/api/caja/gasto/{gasto['id']}/boleta",
+            data={
+                "monto": "50000", "rubro_gav": "gastos_por_ot", "orden_id": str(orden["id"]),
+                "producto_id": str(producto["id"]), "cantidad": "1",
+            },
+        )
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("compra de emergencia", resp.get_json()["error"].lower())
+
+        # La misma boleta, pero SOLO como compra de emergencia (sin rubro
+        # "gastos_por_ot"), debe seguir funcionando normalmente.
+        resp_ok = self.client.post(
+            f"/api/caja/gasto/{gasto['id']}/boleta",
+            data={"monto": "50000", "producto_id": str(producto["id"]), "cantidad": "1"},
+        )
+        self.assertEqual(resp_ok.status_code, 201, resp_ok.get_data(as_text=True))
+
+    def test_boletas_no_pueden_exceder_el_monto_del_retiro(self):
+        """Hallazgo #11 del informe de revisión: ni al agregar ni al editar
+        una boleta se validaba que la suma de boletas de un retiro no
+        superara el monto efectivamente retirado -- el exceso se absorbía
+        en silencio (quedaba en $0 "pendiente"), y si se rendía con
+        reposición automática, el saldo de Caja Chica terminaba inflado con
+        dinero que nunca existió."""
+        gasto = self._crear_gasto(10000)
+
+        # Primera boleta dentro del monto retirado: ok.
+        resp1 = self.client.post(
+            f"/api/caja/gasto/{gasto['id']}/boleta", data={"monto": "7000", "numero_documento": "B-1"}
+        )
+        self.assertEqual(resp1.status_code, 201, resp1.get_data(as_text=True))
+        boleta1 = resp1.get_json()["boletas"][0]
+
+        # Segunda boleta que deja el total justificado ($15.000) por sobre
+        # lo retirado ($10.000): debe rechazarse, no absorberse en silencio.
+        resp2 = self.client.post(
+            f"/api/caja/gasto/{gasto['id']}/boleta", data={"monto": "8000", "numero_documento": "B-2"}
+        )
+        self.assertEqual(resp2.status_code, 400, resp2.get_data(as_text=True))
+
+        # Una boleta que SÍ cabe en lo que queda disponible (10.000 - 7.000
+        # = 3.000) se sigue aceptando normalmente.
+        resp3 = self.client.post(
+            f"/api/caja/gasto/{gasto['id']}/boleta", data={"monto": "3000", "numero_documento": "B-3"}
+        )
+        self.assertEqual(resp3.status_code, 201, resp3.get_data(as_text=True))
+
+        # Editar la primera boleta para subirla de forma que también exceda
+        # el monto retirado debe rechazarse igual (7000 -> 9000 dejaría
+        # 9000 + 3000 = 12000 > 10000 retirado).
+        resp_edit = self.client.put(
+            f"/api/caja/boleta/{boleta1['id']}", data={"monto": "9000", "numero_documento": "B-1"}
+        )
+        self.assertEqual(resp_edit.status_code, 400, resp_edit.get_data(as_text=True))
+
+        # Pero editarla a un monto que sigue cabiendo (7000 -> 6000, dejando
+        # 6000 + 3000 = 9000 <= 10000) debe aceptarse.
+        resp_edit_ok = self.client.put(
+            f"/api/caja/boleta/{boleta1['id']}", data={"monto": "6000", "numero_documento": "B-1"}
+        )
+        self.assertEqual(resp_edit_ok.status_code, 200, resp_edit_ok.get_data(as_text=True))
+
 
 class TestOperativo(unittest.TestCase):
     """Un repuesto cargado a una orden de trabajo tiene que consumir stock

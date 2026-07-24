@@ -4832,15 +4832,27 @@ def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes,
 # mercadería llegue físicamente — a diferencia de crear_factura(), acá NO
 # se aplica el stock ni se genera la CxP todavía. Alguien tiene que
 # contrastar esta factura contra lo que llegó de verdad al taller y
-# aprobarla (ajustando cantidades por línea si algo no calzó) o
-# rechazarla; solo al aprobar se crea la factura real (_registrar_factura,
-# con las condiciones de pago ya definidas) y recién ahí se aplica el
-# stock y se generan las Cuentas por Pagar. No hay un rol "Bodega"
-# separado en este sistema — cualquier sesión iniciada puede aprobar o
-# rechazar, igual que ya pasa con las facturas de WhatsApp — pero para que
-# esto no quede escondido como pasaba con "Pendientes de WhatsApp" (solo
-# se veía si entrabas a Facturas), estas quedan avisadas con un aviso
-# global bloqueante en cualquier pantalla (ver alerta_facturas_pendientes.js).
+# aprobarla o rechazarla; solo al aprobar se crea la factura real
+# (_registrar_factura, con las condiciones de pago ya definidas) y recién
+# ahí se aplica el stock y se generan las Cuentas por Pagar. No hay un rol
+# "Bodega" separado en este sistema — cualquier sesión iniciada puede
+# aprobar o rechazar, igual que ya pasa con las facturas de WhatsApp — pero
+# para que esto no quede escondido como pasaba con "Pendientes de
+# WhatsApp" (solo se veía si entrabas a Facturas), estas quedan avisadas
+# con un aviso global bloqueante en cualquier pantalla (ver
+# alerta_facturas_pendientes.js).
+#
+# IMPORTANTE (corregido a pedido del taller — antes se podía "ajustar" la
+# cantidad recibida por línea al momento de aprobar, para casos en que
+# llegó menos de lo pactado): quien APRUEBA una recepción nunca modifica
+# los datos de la factura. Si algo no calza contra lo que llegó
+# físicamente (cantidad, precio, lo que sea), el conducto es SIEMPRE
+# rechazarla con una nota explicando el motivo (ver
+# rechazar_factura_pendiente_recepcion) para que quien la subió la
+# corrija (PUT .../pendientes-recepcion/<id>, editar_factura_pendiente_recepcion)
+# y la reingrese — nunca que la misma persona que revisa la reescriba de
+# paso al aprobarla. Aprobar aplica la factura EXACTAMENTE como está
+# cargada, sin excepción.
 # ---------------------------------------------------------------------------
 
 CONDICIONES_PAGO_VALIDAS = {"contado", "credito", "mixto"}
@@ -5109,14 +5121,15 @@ def editar_factura_pendiente_recepcion(pendiente_id):
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/aprobar", methods=["POST"])
 @requiere_rol("bodega")
 def aprobar_factura_pendiente_recepcion(pendiente_id):
-    """Aprueba la recepción: recibe (opcionalmente) las cantidades
-    efectivamente contadas físicamente por línea — si una línea no viene en
-    'lineas_recibidas', se asume que llegó tal cual estaba facturada. Una
-    línea con cantidad_recibida = 0 simplemente no se carga (ej. no llegó
-    nada de ese producto). El monto de la(s) CxP generada(s) siempre se
-    calcula sobre lo efectivamente recibido, no sobre lo facturado — si
-    llegó menos de lo pactado, se le paga al proveedor solo por lo que
-    llegó."""
+    """Aprueba la recepción: aplica la factura EXACTAMENTE como quedó
+    cargada (mismas cantidades, mismos precios) — quien aprueba no puede
+    modificar ningún dato acá. Si lo que llegó físicamente no calza con lo
+    facturado, el camino correcto es rechazar la factura (con una nota
+    explicando el motivo) para que quien la subió la corrija y la
+    reingrese; nunca "ajustarla" de paso al aprobarla (a pedido del
+    taller, corregido: antes se aceptaba un cuerpo 'lineas_recibidas' que
+    permitía justo eso, dejando entrar una cantidad de ítems distinta a la
+    facturada por el mismo folio/monto — se sacó por completo)."""
     db = get_db()
     fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
     if fila is None:
@@ -5131,28 +5144,14 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
     if ya_existe:
         return jsonify({"error": f"Ya existe una factura registrada con el número '{fila['numero']}'"}), 400
 
-    data = request.get_json(force=True, silent=True) or {}
-    lineas_recibidas_in = data.get("lineas_recibidas")
     lineas_facturadas = json.loads(fila["lineas_json"])
-
-    cantidades_por_producto = {}
-    if lineas_recibidas_in is not None:
-        for lr in lineas_recibidas_in:
-            try:
-                pid = int(lr.get("producto_id"))
-                cant = int(lr.get("cantidad_recibida"))
-            except (TypeError, ValueError):
-                return jsonify({"error": "Las cantidades recibidas deben ser números válidos"}), 400
-            if cant < 0:
-                return jsonify({"error": "Una cantidad recibida no puede ser negativa"}), 400
-            cantidades_por_producto[pid] = cant
 
     _iniciar_transaccion_stock(db)
 
     lineas_validadas = []
     lineas_recibidas_registro = []
     for l in lineas_facturadas:
-        cantidad_recibida = cantidades_por_producto.get(l["producto_id"], l["cantidad"]) if lineas_recibidas_in is not None else l["cantidad"]
+        cantidad_recibida = l["cantidad"]
         lineas_recibidas_registro.append({"producto_id": l["producto_id"], "cantidad_recibida": cantidad_recibida})
         if cantidad_recibida <= 0:
             continue

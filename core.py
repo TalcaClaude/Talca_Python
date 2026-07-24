@@ -665,13 +665,28 @@ def _recalcular_stock_minimo(db, producto_id):
 
 
 # ---------------------------------------------------------------------------
-# Stock por proveedor (stock_proveedores): a diferencia del Costo Promedio
-# Ponderado general de productos.costo_compra (que sigue siendo el único
-# costo "oficial" usado en todos los reportes/costeos), esta tabla lleva un
-# balde de cantidad + costo promedio propio POR proveedor, para poder saber
-# de qué proveedor viene el stock disponible y no mezclar calidades/costos
+# Stock por proveedor (stock_proveedores): esta tabla lleva un balde de
+# cantidad + costo promedio propio POR proveedor, para poder saber de qué
+# proveedor viene el stock disponible y no mezclar calidades/costos
 # distintos bajo un mismo número. Mismo patrón que merma_proveedores
 # (app.py), pero para stock vivo en vez de merma.
+#
+# productos.costo_compra (el Costo Promedio Ponderado GENERAL, mezclando
+# todos los proveedores históricos) sigue existiendo y sigue siendo el que
+# se usa en reportes/valorización agregada de inventario (ej. "valor total
+# del inventario") -- ahí sí tiene sentido como una foto general. Pero
+# desde que existe este desglose por proveedor, dejó de ser confiable para
+# costear una salida/consumo real puntual: al ser una media móvil de TODA
+# la historia de compras del producto, puede arrastrar para siempre el
+# costo de un proveedor que ya ni siquiera tiene stock vivo, mostrando un
+# costo que no corresponde a ninguna unidad físicamente disponible ahora
+# mismo. Por eso, en todo lugar donde se cobra/costea una unidad que
+# efectivamente sale de bodega (ítems de OT/garantía, ver
+# agregar_item_orden/agregar_item_garantia en modulos/operativo.py) el
+# costo se resuelve SIEMPRE contra el balde de stock_proveedores real (el
+# que corresponde al proveedor elegido, o el único balde vivo si no hay
+# ambigüedad) y costo_compra queda solo como último recurso para el caso
+# límite de que no exista ningún balde vivo (dato legado/inconsistencia).
 # ---------------------------------------------------------------------------
 
 def _stockprov_bucket_get(db, producto_id, proveedor_id):
@@ -786,11 +801,22 @@ def _stockprov_descontar_preferido(db, producto_id, proveedor_id_preferido, cant
         _stockprov_descontar_automatico(db, producto_id, restante)
 
 
-def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra"):
+def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra", proveedor_id=None):
     """Aplica una entrada de stock a un producto, recalculando el Costo
     Promedio Ponderado si se informa costo_unitario, y deja el movimiento
     registrado con la referencia a la factura si corresponde.
     Devuelve el nuevo stock disponible.
+
+    El balde de stock_proveedores que recibe esta entrada (ver
+    _stockprov_bucket_entrada más abajo) se resuelve así: si hay factura,
+    del proveedor de esa factura (como ya hacía, sin cambios); si no hay
+    factura pero se informó 'proveedor_id' a mano, se usa ese -- pensado
+    para devoluciones de stock (ej. al eliminar un ítem de una OT/garantía)
+    que necesitan volver EXACTAMENTE al mismo balde de donde habían
+    salido, en vez de caer siempre en "sin proveedor conocido" perdiendo
+    esa trazabilidad (ver eliminar_item_orden/eliminar_item_garantia en
+    modulos/operativo.py). Si no hay ninguno de los dos, cae en "sin
+    proveedor conocido", igual que siempre.
     """
     stock_actual = producto_row["stock_disponible"]
     costo_actual = producto_row["costo_compra"]
@@ -823,16 +849,16 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
         ),
     )
     # El proveedor de esta entrada se toma de la factura si la hay (y tiene
-    # proveedor asignado); si no, queda en el balde "sin proveedor conocido"
-    # -- esto pasa siempre, automáticamente, sin que nadie tenga que elegir
-    # nada a mano (a diferencia de la salida, acá el dato ya existe en la
-    # factura).
-    proveedor_id_entrada = None
+    # proveedor asignado); si no hay factura pero se informó 'proveedor_id'
+    # a mano (ver docstring de arriba), se usa ese; si no hay ninguno de
+    # los dos, queda en el balde "sin proveedor conocido".
     if factura is not None:
         try:
             proveedor_id_entrada = factura["proveedor_id"]
         except (IndexError, KeyError):
             proveedor_id_entrada = None
+    else:
+        proveedor_id_entrada = proveedor_id
     _stockprov_bucket_entrada(db, producto_row["id"], proveedor_id_entrada, cantidad, costo_unitario)
     _recalcular_stock_minimo(db, producto_row["id"])
     return nuevo_stock

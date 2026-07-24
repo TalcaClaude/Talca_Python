@@ -577,6 +577,22 @@ def init_operativo_db(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_convertidor_id ON orden_items (convertidor_id)")
     db.commit()
 
+    # orden_items.proveedor_id: de qué balde de stock_proveedores salió
+    # específicamente este ítem de tipo 'repuesto' (NULL = balde "sin
+    # proveedor conocido", igual que en stock_proveedores -- nunca "no se
+    # sabe", ver _stockprov_buckets_producto). Antes no se guardaba, así
+    # que al eliminar el ítem (devolviendo el stock, ver
+    # eliminar_item_orden) la devolución siempre caía en el balde "sin
+    # proveedor conocido" sin importar de cuál había salido en realidad --
+    # a pedido del taller: el producto "volvía" con proveedor genérico y
+    # precio promediado, perdiendo la trazabilidad real. Con esta columna,
+    # la devolución puede ir de vuelta exactamente al mismo balde de donde
+    # salió. Se agrega ACÁ, antes de la reparación de FK de más abajo, con
+    # el mismo criterio que convertidor_id arriba.
+    if "proveedor_id" not in columnas_orden_items:
+        db.execute("ALTER TABLE orden_items ADD COLUMN proveedor_id INTEGER REFERENCES proveedores(id)")
+        db.commit()
+
     # Repara orden_items si su llave foránea convertidor_id quedó
     # apuntando a 'convertidores_torque_legado...' en vez de
     # 'convertidores_torque' (mismo mecanismo que ya se documentó arriba
@@ -601,7 +617,8 @@ def init_operativo_db(db):
             creado_en TEXT NOT NULL,
             detalle TEXT DEFAULT '',
             aplica_iva INTEGER NOT NULL DEFAULT 0,
-            convertidor_id INTEGER REFERENCES convertidores_torque(id)
+            convertidor_id INTEGER REFERENCES convertidores_torque(id),
+            proveedor_id INTEGER REFERENCES proveedores(id)
         );
     """
     _reparar_fk_hacia_tabla_renombrada(
@@ -611,7 +628,7 @@ def init_operativo_db(db):
         [
             "id", "orden_id", "tipo", "producto_id", "descripcion", "cantidad",
             "costo_unitario", "movimiento_id", "usuario", "creado_en",
-            "detalle", "aplica_iva", "convertidor_id",
+            "detalle", "aplica_iva", "convertidor_id", "proveedor_id",
         ],
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_orden_id ON orden_items (orden_id)")
@@ -636,6 +653,22 @@ def init_operativo_db(db):
     db.execute("CREATE INDEX IF NOT EXISTS idx_garantia_items_convertidor_id ON garantia_items (convertidor_id)")
     db.commit()
 
+    # garantia_items.proveedor_id: de qué balde de stock_proveedores salió
+    # específicamente este ítem de tipo 'repuesto' (NULL = balde "sin
+    # proveedor conocido", igual que en stock_proveedores -- nunca "no se
+    # sabe", ver _stockprov_buckets_producto). Antes no se guardaba, así
+    # que al eliminar el ítem (devolviendo el stock, ver
+    # eliminar_item_garantia) la devolución siempre caía en el balde "sin
+    # proveedor conocido" sin importar de cuál había salido en realidad --
+    # a pedido del taller: el producto "volvía" con proveedor genérico y
+    # precio promediado, perdiendo la trazabilidad real. Con esta columna,
+    # la devolución puede ir de vuelta exactamente al mismo balde de donde
+    # salió. Se agrega ACÁ, antes de la reparación de FK de más abajo, con
+    # el mismo criterio que convertidor_id arriba.
+    if "proveedor_id" not in columnas_garantia_items:
+        db.execute("ALTER TABLE garantia_items ADD COLUMN proveedor_id INTEGER REFERENCES proveedores(id)")
+        db.commit()
+
     # Repara garantia_items si su llave foránea convertidor_id quedó
     # apuntando a 'convertidores_torque_legado...' -- mismo mecanismo que
     # ya se documentó arriba para orden_items.convertidor_id. Se corre en
@@ -654,7 +687,8 @@ def init_operativo_db(db):
             creado_en TEXT NOT NULL,
             detalle TEXT DEFAULT '',
             aplica_iva INTEGER NOT NULL DEFAULT 0,
-            convertidor_id INTEGER REFERENCES convertidores_torque(id)
+            convertidor_id INTEGER REFERENCES convertidores_torque(id),
+            proveedor_id INTEGER REFERENCES proveedores(id)
         );
     """
     _reparar_fk_hacia_tabla_renombrada(
@@ -664,7 +698,7 @@ def init_operativo_db(db):
         [
             "id", "garantia_id", "tipo", "producto_id", "descripcion", "cantidad",
             "costo_unitario", "movimiento_id", "usuario", "creado_en",
-            "detalle", "aplica_iva", "convertidor_id",
+            "detalle", "aplica_iva", "convertidor_id", "proveedor_id",
         ],
     )
     db.commit()
@@ -2784,6 +2818,7 @@ def eliminar_orden(orden_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ORDEN #{orden_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
+                proveedor_id=item["proveedor_id"],
             )
 
     db.execute("UPDATE garantias SET orden_origen_id = NULL WHERE orden_origen_id = ?", (orden_id,))
@@ -2912,10 +2947,10 @@ def registrar_salida_directa_a_orden(db, orden_id, producto_id, cantidad, catego
         """
         INSERT INTO orden_items (
             orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
-            movimiento_id, usuario, creado_en, detalle, aplica_iva
-        ) VALUES (?, 'repuesto', ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            movimiento_id, usuario, creado_en, detalle, aplica_iva, proveedor_id
+        ) VALUES (?, 'repuesto', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         """,
-        (orden_id, producto_id, producto["nombre"], cantidad, costo_unitario, movimiento_id, usuario, ts, detalle_item),
+        (orden_id, producto_id, producto["nombre"], cantidad, costo_unitario, movimiento_id, usuario, ts, detalle_item, proveedor_id),
     )
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
 
@@ -2955,6 +2990,7 @@ def agregar_item_orden(orden_id):
     ts = now_iso()
     producto_id = None
     movimiento_id = None
+    proveedor_id_salida = None
     descripcion = (data.get("descripcion") or "").strip().upper()
 
     if tipo == "repuesto":
@@ -2966,23 +3002,31 @@ def agregar_item_orden(orden_id):
         if producto is None:
             return jsonify({"error": "El producto indicado no existe"}), 400
 
-        # Si este repuesto tiene stock vivo de MÁS DE UN proveedor a la vez,
-        # hay que saber de cuál específico están saliendo estas unidades --
-        # antes se elegía "mejor esfuerzo" sin preguntar (ver
-        # _stockprov_descontar_automatico en core.py) y el costo que quedaba
-        # en la OT era siempre el Costo Promedio Ponderado general del
-        # producto, que no necesariamente correspondía al proveedor
-        # realmente descontado. Con 0 o 1 proveedores con stock no hace
-        # falta preguntar nada -- se sigue comportando EXACTAMENTE igual que
-        # antes (mismo camino automático, mismo costo). Mismo patrón ya
+        # De qué balde de stock_proveedores salen estas unidades. Si hay
+        # MÁS DE UN proveedor con stock vivo a la vez, hay que preguntar
+        # cuál (antes se elegía "mejor esfuerzo" sin preguntar, ver
+        # _stockprov_descontar_automatico en core.py). Mismo patrón ya
         # usado en Logística -> Registrar movimiento (ver
         # /api/productos/<id>/stock-proveedores y cargarProveedoresSalida en
         # app.js), reutilizando el mismo endpoint para no duplicar criterio.
+        #
+        # Corregido a pedido del taller: incluso con 0 o 1 proveedor NO se
+        # usa el Costo Promedio Ponderado general del producto
+        # (producto["costo_compra"]) como costo del ítem -- ese número es
+        # una media móvil de TODA la historia de compras y puede quedar
+        # "pegado" a un valor que no corresponde a ninguna unidad
+        # físicamente disponible ahora (ej. arrastra el costo de un
+        # proveedor que ya se agotó). Con exactamente un balde vivo, se usa
+        # el costo propio de ESE balde (que es, por definición, el costo
+        # real de las unidades que efectivamente se están usando) y se
+        # descuenta ESTRICTAMENTE de ahí -- ya no hace falta "mejor
+        # esfuerzo" porque no hay ambigüedad posible con un solo balde.
+        # costo_compra queda solo como último recurso para el caso límite
+        # de que no exista ningún balde vivo (dato legado/inconsistencia).
         from app import _stockprov_buckets_producto
         baldes_proveedor, _permite_sin_proveedor = _stockprov_buckets_producto(db, producto_id)
 
         costo_unitario = producto["costo_compra"]
-        proveedor_id_salida = None
         proveedor_manual = False
         if len(baldes_proveedor) > 1:
             if "proveedor_id" not in data:
@@ -3006,6 +3050,11 @@ def agregar_item_orden(orden_id):
                 }), 400
             proveedor_manual = True
             costo_unitario = balde_elegido["costo_promedio"]
+        elif len(baldes_proveedor) == 1:
+            unico = baldes_proveedor[0]
+            proveedor_id_salida = unico["proveedor_id"]
+            proveedor_manual = True
+            costo_unitario = unico["costo_promedio"]
 
         # Un costo distinto informado a mano (poco común, pero ya existía)
         # sigue teniendo prioridad por sobre cualquiera de los dos casos de
@@ -3050,10 +3099,10 @@ def agregar_item_orden(orden_id):
         """
         INSERT INTO orden_items (
             orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
-            movimiento_id, usuario, creado_en, detalle, aplica_iva
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            movimiento_id, usuario, creado_en, detalle, aplica_iva, proveedor_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva),
+        (orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva, proveedor_id_salida),
     )
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
     db.commit()
@@ -3075,13 +3124,18 @@ def eliminar_item_orden(orden_id, item_id):
         # Se devuelve el stock consumido, igual que una devolución normal
         # de inventario — usa _aplicar_entrada_stock para que el Costo
         # Promedio Ponderado se recalcule de forma consistente con
-        # cualquier otra entrada del sistema.
+        # cualquier otra entrada del sistema. proveedor_id=item["proveedor_id"]
+        # hace que vuelva EXACTAMENTE al mismo balde de stock_proveedores
+        # de donde había salido (corregido a pedido del taller: antes
+        # siempre volvía al balde "sin proveedor conocido" sin importar de
+        # cuál había salido en realidad).
         producto = db.execute("SELECT * FROM productos WHERE id = ?", (item["producto_id"],)).fetchone()
         if producto is not None:
             _aplicar_entrada_stock(
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE ORDEN #{orden_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
+                proveedor_id=item["proveedor_id"],
             )
 
     if item["tipo"] == "convertidor_torque" and item["convertidor_id"]:
@@ -4086,6 +4140,7 @@ def eliminar_garantia(garantia_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR GARANTÍA #{garantia_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
+                proveedor_id=item["proveedor_id"],
             )
 
     db.execute("DELETE FROM garantias WHERE id = ?", (garantia_id,))
@@ -4118,6 +4173,7 @@ def agregar_item_garantia(garantia_id):
     ts = now_iso()
     producto_id = None
     movimiento_id = None
+    proveedor_id_salida = None
     descripcion = (data.get("descripcion") or "").strip().upper()
 
     if tipo == "repuesto":
@@ -4129,16 +4185,19 @@ def agregar_item_garantia(garantia_id):
         if producto is None:
             return jsonify({"error": "El producto indicado no existe"}), 400
 
-        # Mismo criterio que agregar_item_orden() para ítems de OT: si hay
-        # stock de más de un proveedor a la vez, hay que preguntar de cuál
-        # específico salen estas unidades (importa todavía más acá -- una
-        # garantía es justamente el caso en que se necesita saber con
-        # certeza qué repuesto, de qué proveedor, se usó).
+        # Mismo criterio que agregar_item_orden() para ítems de OT: de qué
+        # balde de stock_proveedores salen estas unidades, preguntando si
+        # hay más de uno con stock vivo a la vez (importa todavía más acá
+        # -- una garantía es justamente el caso en que se necesita saber
+        # con certeza qué repuesto, de qué proveedor, se usó). Con
+        # exactamente un balde vivo tampoco se usa el Costo Promedio
+        # Ponderado general del producto -- se usa el costo propio de ESE
+        # balde (ver comentario largo en agregar_item_orden() para el
+        # detalle completo de por qué).
         from app import _stockprov_buckets_producto
         baldes_proveedor, _permite_sin_proveedor = _stockprov_buckets_producto(db, producto_id)
 
         costo_unitario = producto["costo_compra"]
-        proveedor_id_salida = None
         proveedor_manual = False
         if len(baldes_proveedor) > 1:
             if "proveedor_id" not in data:
@@ -4162,6 +4221,11 @@ def agregar_item_garantia(garantia_id):
                 }), 400
             proveedor_manual = True
             costo_unitario = balde_elegido["costo_promedio"]
+        elif len(baldes_proveedor) == 1:
+            unico = baldes_proveedor[0]
+            proveedor_id_salida = unico["proveedor_id"]
+            proveedor_manual = True
+            costo_unitario = unico["costo_promedio"]
 
         if data.get("costo_unitario") not in (None, ""):
             try:
@@ -4199,10 +4263,10 @@ def agregar_item_garantia(garantia_id):
         """
         INSERT INTO garantia_items (
             garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
-            movimiento_id, usuario, creado_en, detalle, aplica_iva
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            movimiento_id, usuario, creado_en, detalle, aplica_iva, proveedor_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva),
+        (garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva, proveedor_id_salida),
     )
     db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (ts, garantia_id))
     db.commit()
@@ -4228,6 +4292,7 @@ def eliminar_item_garantia(garantia_id, item_id):
                 db, producto, int(round(item["cantidad"])), item["costo_unitario"],
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE GARANTÍA #{garantia_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
+                proveedor_id=item["proveedor_id"],
             )
 
     if item["tipo"] == "convertidor_torque" and item["convertidor_id"]:

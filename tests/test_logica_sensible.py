@@ -3302,13 +3302,16 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 400)
 
-    def test_aprobar_con_cantidad_recibida_menor_ajusta_stock_y_monto_de_cxp(self):
-        # Se facturaron 10 unidades pero solo llegaron físicamente 6 — el
-        # stock que se aplica y lo que se le debe al proveedor tienen que
-        # reflejar lo que de verdad llegó, no lo que decía la factura.
-        producto = self._crear_producto_http("Producto - recepcion parcial", stock_disponible=0)
+    def test_aprobar_ignora_lineas_recibidas_y_siempre_aplica_lo_facturado(self):
+        # Corregido a pedido del taller: quien aprueba NO puede modificar
+        # la cantidad recibida -- si antes se mandaba un 'lineas_recibidas'
+        # con una cantidad distinta a la facturada (ej. para reflejar que
+        # llegó menos de lo pactado), el sistema simplemente lo ignora y
+        # aplica la factura tal cual quedó cargada. Si algo no calza, el
+        # camino es rechazar la factura, no "ajustarla" al aprobar.
+        producto = self._crear_producto_http("Producto - aprobar ignora ajuste", stock_disponible=0)
         pendiente = self._crear_pendiente(
-            "FACT-PEND-PARCIAL-001", producto["id"], cantidad=10, precio_unitario=1000, condicion_pago="credito",
+            "FACT-PEND-IGNORA-001", producto["id"], cantidad=10, precio_unitario=1000, condicion_pago="credito",
         )
         resp = self.client.post(
             f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar",
@@ -3317,22 +3320,21 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
 
         actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
-        self.assertEqual(actualizado["stock_disponible"], 6)
+        self.assertEqual(actualizado["stock_disponible"], 10)
 
         with taller_app.app.app_context():
             db = taller_app.get_db()
-            factura = db.execute("SELECT * FROM facturas WHERE numero = ?", ("FACT-PEND-PARCIAL-001",)).fetchone()
+            factura = db.execute("SELECT * FROM facturas WHERE numero = ?", ("FACT-PEND-IGNORA-001",)).fetchone()
             cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
-        self.assertEqual(cxp["monto_total"], 6000)
+        self.assertEqual(cxp["monto_total"], 10000)
 
-    def test_aprobar_con_cantidad_recibida_cero_no_falla_por_falta_de_lineas_validas(self):
-        producto = self._crear_producto_http("Producto - recepcion nada llego", stock_disponible=0)
-        pendiente = self._crear_pendiente("FACT-PEND-CERO-001", producto["id"], cantidad=5, precio_unitario=1000)
-        resp = self.client.post(
-            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar",
-            json={"lineas_recibidas": [{"producto_id": producto["id"], "cantidad_recibida": 0}]},
-        )
-        self.assertEqual(resp.status_code, 400)
+    def test_aprobar_sin_cuerpo_aplica_todas_las_lineas_facturadas(self):
+        producto = self._crear_producto_http("Producto - aprobar sin cuerpo", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-SINCUERPO-001", producto["id"], cantidad=5, precio_unitario=1000)
+        resp = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(actualizado["stock_disponible"], 5)
 
     def test_rechazar_no_aplica_stock_ni_crea_factura(self):
         producto = self._crear_producto_http("Producto - pendiente rechazada", stock_disponible=0)

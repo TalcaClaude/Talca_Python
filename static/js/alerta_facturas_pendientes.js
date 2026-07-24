@@ -158,10 +158,8 @@ function afpAbrirDetalle(id) {
     <tr>
       <td>${afpEscapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}</td>
       <td class="num mono">${l.cantidad}</td>
-      <td class="num afp-linea-recibido">
-        <input type="number" min="0" step="1" value="${l.cantidad}" data-producto-id="${l.producto_id}" class="afp-input-recibido" ${afpPuedeBodega ? "" : "disabled"}>
-      </td>
       <td class="num mono">${afpFmtMoney(l.precio_unitario)}</td>
+      <td class="num mono">${afpFmtMoney(l.cantidad * l.precio_unitario)}</td>
     </tr>`).join("");
 
   // El backend siempre rechaza aprobar/rechazar si el rol no es
@@ -197,15 +195,11 @@ document.getElementById("afp-btn-aprobar")?.addEventListener("click", async () =
   // confirmación igual que "Rechazar factura" (ver más abajo), que ya la
   // tenía. Antes esta quedaba como la única sin confirmar pese a ser la más
   // riesgosa de las dos.
-  if (!confirm("¿Aprobar esta recepción? Se va a generar stock y una cuenta por pagar de inmediato. Esto no se puede deshacer desde acá.")) return;
-  const lineasRecibidas = [...document.querySelectorAll(".afp-input-recibido")].map(inp => ({
-    producto_id: parseInt(inp.dataset.productoId, 10),
-    cantidad_recibida: parseInt(inp.value || "0", 10),
-  }));
+  if (!confirm("¿Aprobar esta recepción? Se va a generar stock y una cuenta por pagar de inmediato, exactamente como quedó facturada. Esto no se puede deshacer desde acá.")) return;
   try {
     await afpApi(`/api/facturas/pendientes-recepcion/${id}/aprobar`, {
       method: "POST",
-      body: JSON.stringify({ lineas_recibidas: lineasRecibidas }),
+      body: JSON.stringify({}),
     });
     afpToast("Recepción aprobada — stock y cuentas por pagar generados");
     afpCerrarModal("afp-modal-detalle");

@@ -2496,15 +2496,6 @@ svg .chart-punto-hover {
    ver ambos a la vez, no queden uno encima del otro. */
 .notif-flotante { bottom: 88px; }
 
-.afp-linea-recibido input {
-  width: 90px;
-}
-
-.afp-linea-diff {
-  color: var(--danger, #d9534f);
-  font-weight: 600;
-}
-
 .pfr-plazos-rapidos {
   display: flex;
   gap: 8px;

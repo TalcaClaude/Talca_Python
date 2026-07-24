@@ -803,6 +803,31 @@ class TestConvertidoresSeguridad(_BaseConvertidores):
         resp = self._agregar_item(creado["id"], tipo="convertidor", convertidor_hijo_id="no-numero")
         self.assertEqual(resp.status_code, 400)
 
+    def test_eliminar_item_repuesto_no_recalcula_el_promedio_ponderado(self):
+        # Mismo bug reportado por el taller para OT/garantía (ver
+        # tests/test_stock_proveedores.py::TestDevolucionAlEliminarNoRecalculaPromedioPonderado),
+        # pero para convertidores: al eliminar un ítem de repuesto ya
+        # consumido, el stock se devuelve pero NO debe volver a ponderar el
+        # Costo Promedio Ponderado -- esas unidades ya habían sido
+        # contempladas la primera vez que entraron. Se agota el stock por
+        # completo (queda en 0) antes de devolverlo, que es justo el caso
+        # límite donde el bug se manifestaba con más fuerza.
+        producto = self._crear_producto_http("Repuesto convertidor CPP", stock_disponible=5, costo_compra=1000)
+        creado = self._crear_convertidor_ok(origen_tipo="stock_taller")
+        resp = self._agregar_item(creado["id"], tipo="repuesto", producto_id=producto["id"], cantidad=5)
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        item = resp.get_json()
+
+        en_cero = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(en_cero["stock_disponible"], 0)
+
+        resp_del = self.client.delete(f"/api/convertidores/{creado['id']}/items/{item['id']}")
+        self.assertEqual(resp_del.status_code, 200, resp_del.get_data(as_text=True))
+
+        restaurado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(restaurado["stock_disponible"], 5)
+        self.assertEqual(restaurado["costo_compra"], 1000)
+
 
 if __name__ == "__main__":
     unittest.main()

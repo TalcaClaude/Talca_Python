@@ -38,16 +38,16 @@
       <button class="modal-close" data-close="afp-modal-detalle">&times;</button>
     </div>
     <dl id="afp-detalle-ficha"></dl>
-    <h3 class="subtitulo">Líneas — ajusta "Recibido" si algo no calzó con lo físico</h3>
+    <h3 class="subtitulo">Líneas</h3>
     <div class="tabla-wrap">
       <table class="tabla">
         <thead>
-          <tr><th>Producto</th><th class="num">Facturado</th><th class="num">Recibido</th><th class="num">Precio unit.</th></tr>
+          <tr><th>Producto</th><th class="num">Cantidad</th><th class="num">Precio unit.</th><th class="num">Subtotal</th></tr>
         </thead>
         <tbody id="afp-tbody-lineas"></tbody>
       </table>
     </div>
-    <p class="ayuda-inline">Si una línea queda en 0, ese producto simplemente no se carga al inventario. Lo que se le pague al proveedor se calcula sobre lo recibido, no sobre lo facturado.</p>
+    <p class="ayuda-inline">Revisa que la factura sea correcta antes de aprobar — al aprobar se aplica exactamente como está cargada, sin poder modificarla acá. Si algo no calza con lo que llegó físicamente (cantidad, precio, lo que sea), recházala con una nota explicando el motivo; quien la subió podrá corregirla y volver a enviarla.</p>
     <div class="campo">
       <label>Nota (obligatoria solo si vas a rechazar)</label>
       <input type="text" id="afp-nota-rechazo" placeholder="Ej: Llegó incompleta / dañada, se coordina con el proveedor">

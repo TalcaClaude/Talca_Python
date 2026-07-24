@@ -300,5 +300,633 @@ class TestPerdidaSigueDescontandoElBalde(_BaseStockProveedores):
         self.assertEqual(data["proveedores"][0]["cantidad"], 3)
 
 
+class TestCargaDeRepuestosEnOtExigeProveedorConMasDeUno(_BaseStockProveedores):
+    """Auditoría de julio 2026: al agregar un repuesto desde la pestaña
+    "Carga de repuestos" de una OT (agregar_item_orden en operativo.py), si
+    el producto tenía stock de más de un proveedor a la vez, el sistema
+    elegía uno solo "mejor esfuerzo" sin preguntar (ver
+    _stockprov_descontar_automatico) y usaba el Costo Promedio Ponderado
+    general del producto, no el costo real del proveedor efectivamente
+    descontado. Ahora, con más de un proveedor, hay que indicar
+    explícitamente de cuál -- con 0 o 1 proveedor, el comportamiento sigue
+    siendo exactamente el de antes (no se pide nada)."""
+
+    def test_con_un_solo_proveedor_no_pide_elegir_y_se_comporta_como_antes(self):
+        producto = self._crear_producto_http("Rodamiento - un solo proveedor", stock_disponible=0)
+        proveedor = self._crear_proveedor("Único Proveedor SpA")
+        self._crear_factura_aplicada("FACT-CR-001", producto["id"], proveedor_id=proveedor["id"], cantidad=5, precio_unitario=3000)
+        cliente = self._crear_cliente("Cliente carga repuestos A")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["costo_unitario"], 3000)
+
+    def test_con_dos_proveedores_sin_elegir_uno_es_rechazado(self):
+        producto = self._crear_producto_http("Rodamiento - dos proveedores OT", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Rodamientos")
+        chino = self._crear_proveedor("Proveedor Chino Rodamientos")
+        self._crear_factura_aplicada("FACT-CR-002A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-CR-002B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente carga repuestos B")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1},
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertTrue(data["requiere_proveedor"])
+        self.assertEqual(len(data["proveedores"]), 2)
+
+        # No se aplicó nada -- ni se agregó el ítem ni se tocó el stock.
+        orden_actualizada = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(len(orden_actualizada["items"]), 0)
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[casanova["id"]], 5)
+        self.assertEqual(por_proveedor[chino["id"]], 5)
+
+    def test_con_dos_proveedores_eligiendo_uno_usa_su_costo_y_descuenta_ese_balde(self):
+        producto = self._crear_producto_http("Rodamiento - elige proveedor OT", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Rodamientos 2")
+        chino = self._crear_proveedor("Proveedor Chino Rodamientos 2")
+        self._crear_factura_aplicada("FACT-CR-003A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-CR-003B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente carga repuestos C")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2, "proveedor_id": chino["id"]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        item = resp.get_json()
+        # El costo que queda en la OT es el del proveedor Chino (1500), NO
+        # el Costo Promedio Ponderado general del producto (que mezcla
+        # ambos proveedores).
+        self.assertEqual(item["costo_unitario"], 1500)
+
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[chino["id"]], 3)  # 5 - 2
+        self.assertEqual(por_proveedor[casanova["id"]], 5)  # intacto
+
+    def test_con_proveedor_que_no_tiene_stock_de_este_producto_es_rechazado(self):
+        producto = self._crear_producto_http("Rodamiento - proveedor invalido OT", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Rodamientos 3")
+        chino = self._crear_proveedor("Proveedor Chino Rodamientos 3")
+        otro = self._crear_proveedor("Proveedor Sin Stock De Este Producto")
+        self._crear_factura_aplicada("FACT-CR-004A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-CR-004B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente carga repuestos D")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1, "proveedor_id": otro["id"]},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.get_json()["requiere_proveedor"])
+
+    def test_costo_explicito_sigue_teniendo_prioridad_sobre_el_del_proveedor_elegido(self):
+        producto = self._crear_producto_http("Rodamiento - costo explicito OT", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Rodamientos 4")
+        chino = self._crear_proveedor("Proveedor Chino Rodamientos 4")
+        self._crear_factura_aplicada("FACT-CR-005A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-CR-005B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente carga repuestos E")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={
+                "tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1,
+                "proveedor_id": chino["id"], "costo_unitario": 9999,
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["costo_unitario"], 9999)
+        # El balde igual se descontó del proveedor elegido -- el costo
+        # explícito solo cambia lo que queda registrado en la OT, no de
+        # dónde sale el stock.
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[chino["id"]], 4)
+
+    def test_con_stock_sin_proveedor_conocido_mas_un_proveedor_real_tambien_pide_elegir(self):
+        # "Sin proveedor conocido" (stock inicial/sin factura) cuenta como
+        # un balde más -- si además hay un proveedor real con stock, sigue
+        # siendo "más de un proveedor a la vez" y hay que preguntar.
+        producto = self._crear_producto_http("Rodamiento - sin proveedor + real", stock_disponible=3, costo_compra=1000)
+        real = self._crear_proveedor("Proveedor Real Con Stock")
+        self._crear_factura_aplicada("FACT-CR-006", producto["id"], proveedor_id=real["id"], cantidad=4, precio_unitario=2500)
+        cliente = self._crear_cliente("Cliente carga repuestos F")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.get_json()["requiere_proveedor"])
+
+        # Eligiendo "sin proveedor conocido" explícitamente (null) también
+        # funciona.
+        resp2 = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1, "proveedor_id": None},
+        )
+        self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
+        self.assertEqual(resp2.get_json()["costo_unitario"], 1000)
+
+
+class TestCargaDeRepuestosEnGarantiaExigeProveedorConMasDeUno(_BaseStockProveedores):
+    """Mismo criterio que TestCargaDeRepuestosEnOtExigeProveedorConMasDeUno,
+    pero para los ítems de una Garantía (agregar_item_garantia) -- ahí
+    importa todavía más saber con certeza de qué proveedor salió el
+    repuesto, porque es justo el caso de "el auto volvió por un problema"."""
+
+    def _crear_garantia(self, cliente_id):
+        resp = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente_id, "motivo": "Reclamo de repuesto en garantia"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def test_con_dos_proveedores_sin_elegir_uno_es_rechazado(self):
+        producto = self._crear_producto_http("Sello - dos proveedores garantia", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Sellos")
+        chino = self._crear_proveedor("Proveedor Chino Sellos")
+        self._crear_factura_aplicada("FACT-GAR-001A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-GAR-001B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente garantia A")
+        garantia = self._crear_garantia(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.get_json()["requiere_proveedor"])
+
+    def test_con_dos_proveedores_eligiendo_uno_usa_su_costo_y_descuenta_ese_balde(self):
+        producto = self._crear_producto_http("Sello - elige proveedor garantia", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Sellos 2")
+        chino = self._crear_proveedor("Proveedor Chino Sellos 2")
+        self._crear_factura_aplicada("FACT-GAR-002A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-GAR-002B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente garantia B")
+        garantia = self._crear_garantia(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1, "proveedor_id": casanova["id"]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["costo_unitario"], 4000)
+
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[casanova["id"]], 4)
+        self.assertEqual(por_proveedor[chino["id"]], 5)
+
+
+class TestCostoUnitarioUsaBaldeEspecificoNoPromedioGlobal(_BaseStockProveedores):
+    """Reportado por el taller (julio 2026) sobre el desglose por
+    proveedor: al ingresar un lote caro de un repuesto que ya tenía stock
+    barato de otro proveedor, el Costo Promedio Ponderado GENERAL del
+    producto (productos.costo_compra) sube como corresponde -- pero ese
+    número es una media móvil de TODA la historia de compras, así que
+    puede quedar "pegado" a un valor que ya no corresponde a ninguna
+    unidad realmente disponible (ej. si el balde caro que lo hizo subir ya
+    se agotó, el único balde que queda vivo es el barato, pero el CPP
+    general sigue reflejando la mezcla histórica). Con exactamente UN
+    balde vivo no debe haber ambigüedad: el costo tiene que ser el de ESE
+    balde, nunca el CPP general."""
+
+    def test_con_un_solo_balde_vivo_usa_su_costo_aunque_el_promedio_general_este_mas_alto(self):
+        producto = self._crear_producto_http("Friction Kit 01J", stock_disponible=0)
+        barato = self._crear_proveedor("Proveedor Barato FK")
+        caro = self._crear_proveedor("Proveedor Caro FK")
+        # 5 unidades a 1.000 (barato) + 5 a 5.000 (caro) -> CPP general
+        # queda en 3.000, muy por sobre el costo real del balde barato.
+        self._crear_factura_aplicada("FACT-CPP-001A", producto["id"], proveedor_id=barato["id"], cantidad=5, precio_unitario=1000)
+        self._crear_factura_aplicada("FACT-CPP-001B", producto["id"], proveedor_id=caro["id"], cantidad=5, precio_unitario=5000)
+
+        actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(actualizado["costo_compra"], 3000)
+
+        cliente = self._crear_cliente("Cliente CPP A")
+        orden = self._crear_orden(cliente["id"])
+
+        # Se agota por completo el balde caro (eligiéndolo explícitamente,
+        # como exige el sistema con más de un proveedor con stock vivo) --
+        # después de esto, el ÚNICO balde que queda vivo es el barato.
+        resp_drena = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 5, "proveedor_id": caro["id"]},
+        )
+        self.assertEqual(resp_drena.status_code, 201, resp_drena.get_data(as_text=True))
+        self.assertEqual(resp_drena.get_json()["costo_unitario"], 5000)
+
+        # El CPP general del producto NUNCA baja con una salida -- sigue en
+        # 3.000, un número que ya no corresponde a ninguna unidad viva.
+        actualizado2 = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(actualizado2["costo_compra"], 3000)
+
+        # Ahora se agrega OTRO ítem del mismo repuesto -- con un solo
+        # balde vivo (el barato) no debería preguntar nada, y el costo que
+        # quede en la OT tiene que ser el REAL del balde barato (1.000),
+        # nunca los 3.000 del CPP general que ya no reflejan nada vivo.
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["costo_unitario"], 1000)
+
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[barato["id"]], 4)
+        self.assertNotIn(caro["id"], por_proveedor)
+
+
+class TestEliminarItemDevuelveStockAlBaldeDeProveedorCorrecto(_BaseStockProveedores):
+    """Reportado por el taller (julio 2026): al eliminar un ítem de
+    repuesto de una OT/garantía, el stock se devolvía SIEMPRE al balde
+    "sin proveedor conocido" sin importar de cuál proveedor había salido
+    en realidad -- el producto "volvía" al sistema con proveedor genérico
+    y costo promediado, perdiendo la trazabilidad real. Ahora el ítem
+    guarda de qué balde salió (orden_items.proveedor_id /
+    garantia_items.proveedor_id) y la devolución va exactamente de vuelta
+    a ese mismo balde."""
+
+    def test_eliminar_item_de_ot_devuelve_al_balde_del_proveedor_elegido_no_al_generico(self):
+        producto = self._crear_producto_http("Oil Filter 01J", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova OF")
+        chino = self._crear_proveedor("Proveedor Chino OF")
+        self._crear_factura_aplicada("FACT-ELIM-001A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-ELIM-001B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente eliminar item A")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2, "proveedor_id": chino["id"]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        item = resp.get_json()
+        self.assertEqual(item["proveedor_id"], chino["id"])
+
+        antes = self._stock_proveedores(producto["id"])
+        por_proveedor_antes = {b["proveedor_id"]: b["cantidad"] for b in antes["proveedores"]}
+        self.assertEqual(por_proveedor_antes[chino["id"]], 3)
+        self.assertEqual(por_proveedor_antes[casanova["id"]], 5)
+
+        resp_del = self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item['id']}")
+        self.assertEqual(resp_del.status_code, 200, resp_del.get_data(as_text=True))
+
+        despues = self._stock_proveedores(producto["id"])
+        por_proveedor_despues = {b["proveedor_id"]: b["cantidad"] for b in despues["proveedores"]}
+        # Vuelve exactamente al balde de Chino (de donde había salido), no
+        # al balde "sin proveedor conocido" ni al de Casanova.
+        self.assertEqual(por_proveedor_despues[chino["id"]], 5)
+        self.assertEqual(por_proveedor_despues[casanova["id"]], 5)
+        self.assertNotIn(None, por_proveedor_despues)
+
+    def test_agregar_eliminar_y_volver_a_agregar_mantiene_la_trazabilidad_por_proveedor(self):
+        # Reproduce el caso puntual descrito por el taller: cargar un
+        # repuesto en la OT, eliminarlo, y volver a cargarlo -- el sistema
+        # tiene que seguir sabiendo cuántas unidades y a qué costo tiene
+        # cada proveedor, sin que aparezca un balde "genérico" fantasma.
+        producto = self._crear_producto_http("Steel Kit 01J", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova SK")
+        chino = self._crear_proveedor("Proveedor Chino SK")
+        self._crear_factura_aplicada("FACT-ELIM-002A", producto["id"], proveedor_id=casanova["id"], cantidad=3, precio_unitario=800000)
+        self._crear_factura_aplicada("FACT-ELIM-002B", producto["id"], proveedor_id=chino["id"], cantidad=3, precio_unitario=200000)
+        cliente = self._crear_cliente("Cliente eliminar item B")
+        orden = self._crear_orden(cliente["id"])
+
+        resp1 = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1, "proveedor_id": casanova["id"]},
+        )
+        self.assertEqual(resp1.status_code, 201, resp1.get_data(as_text=True))
+        item1 = resp1.get_json()
+
+        resp_del = self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item1['id']}")
+        self.assertEqual(resp_del.status_code, 200)
+
+        # Vuelve a estar íntegro: 3 y 3, ningún balde "sin proveedor".
+        stock_restaurado = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_restaurado["proveedores"]}
+        self.assertEqual(por_proveedor[casanova["id"]], 3)
+        self.assertEqual(por_proveedor[chino["id"]], 3)
+        self.assertNotIn(None, por_proveedor)
+
+        # Se vuelve a cargar -- sigue habiendo 2 proveedores con stock
+        # vivo, así que el sistema tiene que volver a pedir cuál (no
+        # "adivinar" ni caer en un balde genérico).
+        resp2_sin_elegir = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1},
+        )
+        self.assertEqual(resp2_sin_elegir.status_code, 400)
+        self.assertTrue(resp2_sin_elegir.get_json()["requiere_proveedor"])
+
+        resp2 = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1, "proveedor_id": chino["id"]},
+        )
+        self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
+        self.assertEqual(resp2.get_json()["costo_unitario"], 200000)
+
+    def test_eliminar_item_de_garantia_devuelve_al_balde_del_proveedor_elegido(self):
+        producto = self._crear_producto_http("Brake Pad 01J", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova BP")
+        chino = self._crear_proveedor("Proveedor Chino BP")
+        self._crear_factura_aplicada("FACT-ELIM-003A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-ELIM-003B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente eliminar item garantia")
+        resp_gar = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente["id"], "motivo": "Prueba eliminar item garantia"},
+        )
+        self.assertEqual(resp_gar.status_code, 201, resp_gar.get_data(as_text=True))
+        garantia = resp_gar.get_json()
+
+        resp = self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2, "proveedor_id": chino["id"]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        item = resp.get_json()
+        self.assertEqual(item["proveedor_id"], chino["id"])
+
+        resp_del = self.client.delete(f"/api/operativo/garantias/{garantia['id']}/items/{item['id']}")
+        self.assertEqual(resp_del.status_code, 200, resp_del.get_data(as_text=True))
+
+        despues = self._stock_proveedores(producto["id"])
+        por_proveedor_despues = {b["proveedor_id"]: b["cantidad"] for b in despues["proveedores"]}
+        self.assertEqual(por_proveedor_despues[chino["id"]], 5)
+        self.assertEqual(por_proveedor_despues[casanova["id"]], 5)
+        self.assertNotIn(None, por_proveedor_despues)
+
+    def test_eliminar_orden_completa_devuelve_stock_al_balde_correcto(self):
+        producto = self._crear_producto_http("Gasket 01J", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova GK")
+        chino = self._crear_proveedor("Proveedor Chino GK")
+        self._crear_factura_aplicada("FACT-ELIM-004A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-ELIM-004B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente eliminar orden completa")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2, "proveedor_id": chino["id"]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+        resp_del = self.client.delete(f"/api/operativo/ordenes/{orden['id']}")
+        self.assertEqual(resp_del.status_code, 200, resp_del.get_data(as_text=True))
+
+        despues = self._stock_proveedores(producto["id"])
+        por_proveedor_despues = {b["proveedor_id"]: b["cantidad"] for b in despues["proveedores"]}
+        self.assertEqual(por_proveedor_despues[chino["id"]], 5)
+        self.assertEqual(por_proveedor_despues[casanova["id"]], 5)
+        self.assertNotIn(None, por_proveedor_despues)
+
+
+class TestDevolucionAlEliminarNoRecalculaPromedioPonderado(_BaseStockProveedores):
+    """Reportado por el taller (julio 2026), como seguimiento de la
+    corrección anterior: al devolver stock por eliminar un ítem de OT/
+    garantía/convertidor, el Costo Promedio Ponderado (general del
+    producto Y del balde del proveedor específico) NO debe volver a
+    calcularse -- esas unidades ya habían sido contempladas la primera vez
+    que entraron de verdad (por la factura original). Tratar la devolución
+    como si fuera una compra nueva es "contar la compra dos veces", y se
+    manifestaba con más fuerza justo en el caso límite de sacar TODO el
+    stock de un producto (queda en 0, el balde se borra) y después
+    devolverlo: ahí la fórmula ponderada normal pierde toda la historia
+    previa y el promedio queda "pegado" al costo de esa única devolución,
+    ignorando el histórico real -- exactamente el bug descrito por el
+    taller ("cuando queda 1 producto o 0 [...] toma el valor promedio de
+    ese último producto y no toma el histórico")."""
+
+    def test_drenar_ambos_proveedores_por_completo_y_devolver_restaura_el_estado_previo_exacto(self):
+        # Reproduce el escenario pedido explícitamente por el taller:
+        # sacar TODOS los productos (con 2+ proveedores) del sistema
+        # asignándolos a una OT, y reingresarlos eliminándolos de ahí.
+        producto = self._crear_producto_http("Perno 01J - CPP", stock_disponible=0)
+        barato = self._crear_proveedor("Perno Barato SpA")
+        caro = self._crear_proveedor("Perno Caro SpA")
+        self._crear_factura_aplicada("FACT-DEV-001A", producto["id"], proveedor_id=barato["id"], cantidad=5, precio_unitario=1000)
+        self._crear_factura_aplicada("FACT-DEV-001B", producto["id"], proveedor_id=caro["id"], cantidad=5, precio_unitario=5000)
+
+        estado_inicial = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(estado_inicial["costo_compra"], 3000)  # (5*1000 + 5*5000) / 10
+        baldes_inicial = self._stock_proveedores(producto["id"])
+        por_proveedor_inicial = {b["proveedor_id"]: (b["cantidad"], b["costo_promedio"]) for b in baldes_inicial["proveedores"]}
+        self.assertEqual(por_proveedor_inicial[barato["id"]], (5, 1000))
+        self.assertEqual(por_proveedor_inicial[caro["id"]], (5, 5000))
+
+        cliente = self._crear_cliente("Cliente devolucion promedio A")
+        orden = self._crear_orden(cliente["id"])
+
+        resp_barato = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 5, "proveedor_id": barato["id"]},
+        )
+        self.assertEqual(resp_barato.status_code, 201, resp_barato.get_data(as_text=True))
+        item_barato = resp_barato.get_json()
+
+        resp_caro = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 5, "proveedor_id": caro["id"]},
+        )
+        self.assertEqual(resp_caro.status_code, 201, resp_caro.get_data(as_text=True))
+        item_caro = resp_caro.get_json()
+
+        # El producto quedó en 0 unidades disponibles -- ningún balde vivo,
+        # justo el caso límite donde el bug se manifestaba.
+        en_cero = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(en_cero["stock_disponible"], 0)
+        self.assertEqual(self._stock_proveedores(producto["id"])["proveedores"], [])
+
+        # Se eliminan ambos ítems -- se devuelven ambos lotes al stock.
+        self.assertEqual(
+            self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item_barato['id']}").status_code, 200
+        )
+        self.assertEqual(
+            self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item_caro['id']}").status_code, 200
+        )
+
+        estado_final = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(estado_final["stock_disponible"], 10)
+        self.assertEqual(estado_final["costo_compra"], 3000)  # NO debe haber cambiado
+
+        baldes_final = self._stock_proveedores(producto["id"])
+        por_proveedor_final = {b["proveedor_id"]: (b["cantidad"], b["costo_promedio"]) for b in baldes_final["proveedores"]}
+        self.assertEqual(por_proveedor_final[barato["id"]], (5, 1000))
+        self.assertEqual(por_proveedor_final[caro["id"]], (5, 5000))
+
+    def test_orden_de_eliminacion_no_importa(self):
+        # Mismo escenario que el anterior, pero eliminando primero el ítem
+        # CARO y después el barato -- el resultado final tiene que ser
+        # idéntico sin importar el orden.
+        producto = self._crear_producto_http("Tuerca 01J - CPP", stock_disponible=0)
+        barato = self._crear_proveedor("Tuerca Barata SpA")
+        caro = self._crear_proveedor("Tuerca Cara SpA")
+        self._crear_factura_aplicada("FACT-DEV-002A", producto["id"], proveedor_id=barato["id"], cantidad=3, precio_unitario=2000)
+        self._crear_factura_aplicada("FACT-DEV-002B", producto["id"], proveedor_id=caro["id"], cantidad=3, precio_unitario=8000)
+
+        cliente = self._crear_cliente("Cliente devolucion promedio B")
+        orden = self._crear_orden(cliente["id"])
+
+        item_barato = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 3, "proveedor_id": barato["id"]},
+        ).get_json()
+        item_caro = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 3, "proveedor_id": caro["id"]},
+        ).get_json()
+
+        self.assertEqual(
+            self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item_caro['id']}").status_code, 200
+        )
+        self.assertEqual(
+            self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item_barato['id']}").status_code, 200
+        )
+
+        estado_final = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(estado_final["costo_compra"], 5000)  # (3*2000 + 3*8000) / 6, sin cambios
+        baldes_final = self._stock_proveedores(producto["id"])
+        por_proveedor_final = {b["proveedor_id"]: (b["cantidad"], b["costo_promedio"]) for b in baldes_final["proveedores"]}
+        self.assertEqual(por_proveedor_final[barato["id"]], (3, 2000))
+        self.assertEqual(por_proveedor_final[caro["id"]], (3, 8000))
+
+    def test_devolucion_de_garantia_tampoco_recalcula_el_promedio(self):
+        producto = self._crear_producto_http("Empaquetadura 01J - CPP", stock_disponible=0)
+        barato = self._crear_proveedor("Empaquetadura Barata")
+        caro = self._crear_proveedor("Empaquetadura Cara")
+        self._crear_factura_aplicada("FACT-DEV-003A", producto["id"], proveedor_id=barato["id"], cantidad=4, precio_unitario=1500)
+        self._crear_factura_aplicada("FACT-DEV-003B", producto["id"], proveedor_id=caro["id"], cantidad=4, precio_unitario=6000)
+
+        cliente = self._crear_cliente("Cliente devolucion garantia promedio")
+        resp_gar = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente["id"], "motivo": "Prueba devolucion promedio garantia"},
+        )
+        garantia = resp_gar.get_json()
+
+        item_barato = self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 4, "proveedor_id": barato["id"]},
+        ).get_json()
+        item_caro = self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 4, "proveedor_id": caro["id"]},
+        ).get_json()
+
+        costo_antes = self.client.get(f"/api/productos/{producto['id']}").get_json()["costo_compra"]
+        self.assertEqual(costo_antes, 3750)  # (4*1500 + 4*6000) / 8
+
+        self.client.delete(f"/api/operativo/garantias/{garantia['id']}/items/{item_barato['id']}")
+        self.client.delete(f"/api/operativo/garantias/{garantia['id']}/items/{item_caro['id']}")
+
+        estado_final = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(estado_final["costo_compra"], 3750)
+        baldes_final = self._stock_proveedores(producto["id"])
+        por_proveedor_final = {b["proveedor_id"]: (b["cantidad"], b["costo_promedio"]) for b in baldes_final["proveedores"]}
+        self.assertEqual(por_proveedor_final[barato["id"]], (4, 1500))
+        self.assertEqual(por_proveedor_final[caro["id"]], (4, 6000))
+
+    def test_eliminar_garantia_completa_tampoco_recalcula_el_promedio(self):
+        producto = self._crear_producto_http("Anillo 01J - CPP", stock_disponible=0)
+        barato = self._crear_proveedor("Anillo Barato")
+        caro = self._crear_proveedor("Anillo Caro")
+        self._crear_factura_aplicada("FACT-DEV-004A", producto["id"], proveedor_id=barato["id"], cantidad=2, precio_unitario=1000)
+        self._crear_factura_aplicada("FACT-DEV-004B", producto["id"], proveedor_id=caro["id"], cantidad=2, precio_unitario=9000)
+
+        cliente = self._crear_cliente("Cliente eliminar garantia completa promedio")
+        resp_gar = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente["id"], "motivo": "Prueba eliminar garantia completa promedio"},
+        )
+        garantia = resp_gar.get_json()
+
+        self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2, "proveedor_id": barato["id"]},
+        )
+        self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2, "proveedor_id": caro["id"]},
+        )
+
+        costo_antes = self.client.get(f"/api/productos/{producto['id']}").get_json()["costo_compra"]
+        self.assertEqual(costo_antes, 5000)  # (2*1000 + 2*9000) / 4
+
+        resp_del = self.client.delete(f"/api/operativo/garantias/{garantia['id']}")
+        self.assertEqual(resp_del.status_code, 200, resp_del.get_data(as_text=True))
+
+        estado_final = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(estado_final["costo_compra"], 5000)
+        baldes_final = self._stock_proveedores(producto["id"])
+        por_proveedor_final = {b["proveedor_id"]: (b["cantidad"], b["costo_promedio"]) for b in baldes_final["proveedores"]}
+        self.assertEqual(por_proveedor_final[barato["id"]], (2, 1000))
+        self.assertEqual(por_proveedor_final[caro["id"]], (2, 9000))
+
+    def test_despues_de_devolver_una_compra_nueva_de_verdad_pondera_contra_el_historico_real(self):
+        # Confirma que la corrección no rompe el caso normal: después de un
+        # ciclo de consumo + devolución (que no debe tocar el promedio),
+        # una compra GENUINA nueva (una factura real) sí tiene que seguir
+        # ponderando -- y tiene que hacerlo contra el promedio histórico
+        # real preservado, no contra un promedio que hubiera quedado roto
+        # por la devolución.
+        producto = self._crear_producto_http("Sello 01J - CPP", stock_disponible=0)
+        barato = self._crear_proveedor("Sello Barato")
+        caro = self._crear_proveedor("Sello Caro")
+        self._crear_factura_aplicada("FACT-DEV-005A", producto["id"], proveedor_id=barato["id"], cantidad=5, precio_unitario=1000)
+        self._crear_factura_aplicada("FACT-DEV-005B", producto["id"], proveedor_id=caro["id"], cantidad=5, precio_unitario=5000)
+        # costo_compra = 3000 acá (5*1000 + 5*5000) / 10
+
+        cliente = self._crear_cliente("Cliente compra nueva tras devolucion")
+        orden = self._crear_orden(cliente["id"])
+
+        item_barato = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 5, "proveedor_id": barato["id"]},
+        ).get_json()
+        item_caro = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 5, "proveedor_id": caro["id"]},
+        ).get_json()
+        # Stock queda en 0 acá.
+
+        self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item_barato['id']}")
+        self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item_caro['id']}")
+        # Después de devolver ambos: stock = 10, costo_compra sigue en 3000
+        # (no 5000, que sería el bug de "toma el valor del último producto").
+
+        # Ahora entra una factura GENUINAMENTE nueva: 10 unidades a 4000 de
+        # un tercer proveedor. El promedio nuevo tiene que ponderar contra
+        # el histórico real (3000 sobre 10 unidades), no contra un
+        # histórico corrompido.
+        tercero = self._crear_proveedor("Sello Tercero")
+        self._crear_factura_aplicada("FACT-DEV-005C", producto["id"], proveedor_id=tercero["id"], cantidad=10, precio_unitario=4000)
+
+        estado_final = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        # (10*3000 + 10*4000) / 20 = 3500
+        self.assertEqual(estado_final["costo_compra"], 3500)
+
+
 if __name__ == "__main__":
     unittest.main()

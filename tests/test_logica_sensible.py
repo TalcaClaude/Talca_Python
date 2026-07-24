@@ -3385,6 +3385,120 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         # Se crearon 2, se aprobó 1 -> debe quedar 1 más que "antes".
         self.assertEqual(despues, antes + 1)
 
+    # ---- Corregir y reingresar una factura rechazada (a pedido del taller:
+    # antes, una vez rechazada, quedaba trabada -- no había forma de
+    # corregirla sin recrearla de cero; y ni Finanzas se enteraba de que
+    # había sido rechazada más que entrando a mirar la lista a mano) ----
+
+    _contador_usuarios_fpr = 0
+
+    def _crear_usuario_y_login(self, modulos):
+        type(self)._contador_usuarios_fpr += 1
+        username = f"fpr_{type(self)._contador_usuarios_fpr}"
+        resp = self.client.post(
+            "/api/admin/usuarios",
+            json={"username": username, "password": "clave123456", "nombre": username,
+                  "es_admin": False, "modulos": modulos},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        cliente = taller_app.app.test_client()
+        resp_login = cliente.post("/login", data={"username": username, "password": "clave123456"})
+        self.assertEqual(resp_login.status_code, 302)
+        return cliente
+
+    def test_no_se_podia_editar_una_rechazada_ahora_si_y_vuelve_a_pendiente(self):
+        producto = self._crear_producto_http("Producto - corregir rechazada", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-CORRIGE-001", producto["id"], cantidad=2, precio_unitario=5000)
+        self.client.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar",
+            json={"nota": "El precio no calza con lo pactado"},
+        )
+        rechazada = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
+        self.assertEqual(rechazada["estado"], "rechazada")
+
+        # La corrección: mismo número, misma factura, solo se ajusta el
+        # precio -- no hace falta volver a escribir todo de cero.
+        resp_editar = self.client.put(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}",
+            json={"lineas": [{"producto_id": producto["id"], "cantidad": 2, "precio_unitario": 4500}]},
+        )
+        self.assertEqual(resp_editar.status_code, 200, resp_editar.get_data(as_text=True))
+        corregida = resp_editar.get_json()
+        self.assertEqual(corregida["estado"], "pendiente")
+        self.assertEqual(corregida["lineas"][0]["precio_unitario"], 4500)
+
+        # Y ahora que volvió a 'pendiente', se puede aprobar normalmente.
+        resp_aprobar = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(resp_aprobar.status_code, 201, resp_aprobar.get_data(as_text=True))
+        actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(actualizado["stock_disponible"], 2)
+        self.assertEqual(actualizado["costo_compra"], 4500)
+
+    def test_una_factura_aprobada_sigue_sin_poder_editarse(self):
+        # Regresión: el fix de "editar una rechazada" no debe abrir la
+        # puerta a editar una que YA fue aprobada -- eso sigue prohibido
+        # (aprobar aplica stock/CxP de inmediato; "corregirla" después
+        # dejaría esos montos ya aplicados desincronizados de la factura).
+        producto = self._crear_producto_http("Producto - no editar aprobada", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-NOEDITAR-001", producto["id"])
+        self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        resp = self.client.put(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}",
+            json={"lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1}]},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_historial_registra_todo_el_ciclo_sin_perder_el_rechazo_previo(self):
+        producto = self._crear_producto_http("Producto - historial completo", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-HIST-001", producto["id"], cantidad=1, precio_unitario=1000)
+
+        creada = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
+        self.assertEqual([h["evento"] for h in creada["historial"]], ["creada"])
+
+        self.client.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar",
+            json={"nota": "Cantidad no calza"},
+        )
+        self.client.put(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}",
+            json={"lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}]},
+        )
+        self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+
+        final = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
+        eventos = [h["evento"] for h in final["historial"]]
+        self.assertEqual(eventos, ["creada", "rechazada", "corregida_reingresada", "aprobada"])
+        # La nota del rechazo original sigue disponible en el historial,
+        # aunque el estado actual ya sea 'aprobada' y nota_rechazo (el
+        # campo suelto, no el historial) ya no se muestre en el detalle.
+        evento_rechazo = next(h for h in final["historial"] if h["evento"] == "rechazada")
+        self.assertEqual(evento_rechazo["nota"], "Cantidad no calza")
+
+    def test_contador_de_rechazadas_es_solo_para_finanzas_no_para_bodega(self):
+        cliente_bodega = self._crear_usuario_y_login(["bodega"])
+        resp_bodega = cliente_bodega.get("/api/facturas/pendientes-recepcion/rechazadas/contador")
+        self.assertEqual(resp_bodega.status_code, 403)
+
+        cliente_finanzas = self._crear_usuario_y_login(["finanzas"])
+        resp_finanzas = cliente_finanzas.get("/api/facturas/pendientes-recepcion/rechazadas/contador")
+        self.assertEqual(resp_finanzas.status_code, 200)
+
+    def test_contador_de_rechazadas_baja_al_corregir_y_reingresar(self):
+        producto = self._crear_producto_http("Producto - contador rechazadas", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-CONTADOR-RECH-001", producto["id"])
+        antes = self.client.get("/api/facturas/pendientes-recepcion/rechazadas/contador").get_json()["rechazadas"]
+
+        self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar", json={"nota": "x"})
+        despues_rechazo = self.client.get("/api/facturas/pendientes-recepcion/rechazadas/contador").get_json()["rechazadas"]
+        self.assertEqual(despues_rechazo, antes + 1)
+
+        self.client.put(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}",
+            json={"lineas": [{"producto_id": producto["id"], "cantidad": 5, "precio_unitario": 1000}]},
+        )
+        despues_correccion = self.client.get("/api/facturas/pendientes-recepcion/rechazadas/contador").get_json()["rechazadas"]
+        self.assertEqual(despues_correccion, antes)
+
 
 class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
     """Hallazgo planteado por el taller: una factura puede traer un

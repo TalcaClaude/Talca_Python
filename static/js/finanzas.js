@@ -188,7 +188,17 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     if (vista === "caja") cargarCaja();
     if (vista === "cxc") { cargarCxc(); cargarCxcAbonos(); }
     if (vista === "cxp") cargarCxp();
-    if (vista === "facturas") cargarFacturasPendientesRecepcion();
+    if (vista === "facturas") {
+      // Llegada desde el aviso rojo de facturas rechazadas (ver afrAbrirLista
+      // en alerta_facturas_pendientes.js): /finanzas?ver_pendiente=123#facturas
+      // -- abre directo el detalle de esa factura (con su nota de rechazo y
+      // el botón "Corregir y reingresar" ya visible) apenas termina de cargar
+      // la lista completa, de la que depende abrirDetalleFacturaPendiente.
+      cargarFacturasPendientesRecepcion().then(() => {
+        const verPendientePrefill = new URLSearchParams(location.search).get("ver_pendiente");
+        if (verPendientePrefill) abrirDetalleFacturaPendiente(parseInt(verPendientePrefill, 10));
+      });
+    }
     if (vista === "dte") {
       cargarDte();
       // Llegada desde el botón "Ir a Facturación electrónica" de la
@@ -1405,6 +1415,12 @@ document.getElementById("form-cxp-pago").addEventListener("submit", async (e) =>
 // ---------------------------------------------------------------------------
 
 const ESTADO_PFR_LABEL = { pendiente: "Pendiente de revisión", aprobada: "Aprobada", rechazada: "Rechazada", eliminada: "Eliminada" };
+const EVENTO_HISTORIAL_PFR_LABEL = {
+  creada: "Registrada",
+  rechazada: "Rechazada por Bodega",
+  corregida_reingresada: "Corregida y reingresada",
+  aprobada: "Aprobada",
+};
 const ORIGEN_PFR_LABEL = { manual: "Manual", excel: "Excel", foto: "Foto", whatsapp: "WhatsApp" };
 
 async function cargarFacturasPendientesRecepcion() {
@@ -1419,7 +1435,11 @@ async function cargarFacturasPendientesRecepcion() {
     const etiquetaCondicion = { contado: "Contado", credito: "Crédito", mixto: "Mixto" };
     tbody.innerHTML = data.pendientes.map(p => {
       const acciones = [
-        p.estado === "pendiente" ? `<button type="button" class="btn btn-secundario btn-chico" data-pfr-editar="${p.id}">Editar</button>` : "",
+        // "rechazada" también puede editarse -- es justo el camino para
+        // corregirla y que vuelva sola a la cola de revisión (ver
+        // editar_factura_pendiente_recepcion en app.py), sin tener que
+        // volver a escribirla de cero.
+        (p.estado === "pendiente" || p.estado === "rechazada") ? `<button type="button" class="btn btn-secundario btn-chico" data-pfr-editar="${p.id}">${p.estado === "rechazada" ? "Corregir y reingresar" : "Editar"}</button>` : "",
         p.origen === "whatsapp" ? `<a class="btn btn-secundario btn-chico" href="/api/facturas/pendientes-recepcion/${p.id}/foto" target="_blank" rel="noopener">Ver foto</a>` : "",
       ].filter(Boolean).join(" ");
       return `
@@ -1506,6 +1526,11 @@ async function abrirDetalleFacturaPendiente(id) {
     <p><strong>Origen:</strong> ${ORIGEN_PFR_LABEL[p.origen] || p.origen || "—"}</p>
     <p><strong>Registrada por:</strong> ${escapeHtml(p.creado_por) || "—"}</p>
     ${p.estado === "rechazada" && p.nota_rechazo ? `<p><strong>Motivo de rechazo:</strong> ${escapeHtml(p.nota_rechazo)}</p>` : ""}
+    ${(p.historial && p.historial.length) ? `
+      <h3 class="subtitulo">Historial</h3>
+      <ul class="pfd-historial">
+        ${p.historial.map(h => `<li>${escapeHtml(fmtFecha(h.fecha))} — ${EVENTO_HISTORIAL_PFR_LABEL[h.evento] || h.evento} (${escapeHtml(h.usuario) || "—"})${h.nota ? `: "${escapeHtml(h.nota)}"` : ""}</li>`).join("")}
+      </ul>` : ""}
   `;
 
   document.getElementById("pfd-lineas").innerHTML = lineasParaMostrar.map(l => {
@@ -1531,8 +1556,11 @@ async function abrirDetalleFacturaPendiente(id) {
       </p>`;
   }
 
-  if (p.estado === "pendiente") {
+  if (p.estado === "pendiente" || p.estado === "rechazada") {
+    document.getElementById("pfd-btn-editar").textContent = p.estado === "rechazada" ? "Corregir y reingresar" : "Editar";
     document.getElementById("pfd-btn-editar").style.display = "";
+  } else {
+    document.getElementById("pfd-btn-editar").textContent = "Editar";
   }
   if (pfdFacturaIdReal) {
     document.getElementById("pfd-btn-eliminar").style.display = "";
@@ -1732,6 +1760,7 @@ document.getElementById("btn-nueva-factura-pendiente").addEventListener("click",
   document.getElementById("pfr-seccion-condicion").style.display = "block";
   document.getElementById("pfr-aviso-condicion-fija").style.display = "none";
   document.getElementById("pfr-aviso-origen").style.display = "none";
+  document.getElementById("pfr-aviso-rechazo").style.display = "none";
   document.getElementById("pfr-foto-whatsapp").style.display = "none";
   document.getElementById("pfr-producto-resultados").style.display = "none";
   try {
@@ -1753,11 +1782,21 @@ async function abrirEdicionFacturaPendiente(id) {
     const [p] = await Promise.all([api(`/api/facturas/pendientes-recepcion/${id}`), pfrCargarCatalogos()]);
     document.getElementById("form-factura-pendiente").reset();
     document.getElementById("pfr-id").value = p.id;
-    document.getElementById("pfr-titulo").textContent = `Editar factura pendiente #${p.id}`;
-    document.getElementById("pfr-btn-guardar").textContent = "Guardar cambios";
     document.getElementById("pfr-numero").value = p.numero || "";
     document.getElementById("pfr-proveedor-id").value = p.proveedor_id || "";
     document.getElementById("pfr-fecha").value = (p.fecha || "").slice(0, 10);
+
+    const avisoRechazo = document.getElementById("pfr-aviso-rechazo");
+    if (p.estado === "rechazada") {
+      document.getElementById("pfr-titulo").textContent = `Corregir y reingresar factura #${p.id}`;
+      document.getElementById("pfr-btn-guardar").textContent = "Corregir y reingresar";
+      avisoRechazo.textContent = `Bodega rechazó esta factura${p.nota_rechazo ? `: "${p.nota_rechazo}"` : ""}. Corrige lo que corresponda y guarda -- vuelve sola a la cola de revisión, sin perder el registro de que fue rechazada.`;
+      avisoRechazo.style.display = "block";
+    } else {
+      document.getElementById("pfr-titulo").textContent = `Editar factura pendiente #${p.id}`;
+      document.getElementById("pfr-btn-guardar").textContent = "Guardar cambios";
+      avisoRechazo.style.display = "none";
+    }
 
     const etiquetaCondicion = { contado: "Al contado", credito: `A crédito, ${p.plazo_dias_credito} días`, mixto: `Mixto — ${p.porcentaje_contado}% contado` };
     document.getElementById("pfr-seccion-condicion").style.display = "none";
@@ -1916,6 +1955,7 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
   }
 
   const id = document.getElementById("pfr-id").value;
+  const eraCorreccionDeRechazo = document.getElementById("pfr-aviso-rechazo").style.display !== "none";
 
   try {
     if (id) {
@@ -1928,7 +1968,12 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
           lineas,
         }),
       });
-      toast("Factura pendiente actualizada");
+      toast(eraCorreccionDeRechazo ? "Factura corregida y reingresada a la cola de revisión de Bodega" : "Factura pendiente actualizada");
+      // Si se corrigió una rechazada, el aviso rojo ⚠️ (afr-flotante, ver
+      // alerta_facturas_pendientes.js) debe apagarse de inmediato en vez de
+      // esperar hasta 25s al próximo sondeo automático -- typeof por si esta
+      // página no cargó ese script.
+      if (eraCorreccionDeRechazo && typeof afrSondear === "function") afrSondear();
     } else {
       const condicion = document.querySelector('input[name="pfr-condicion"]:checked').value;
       await api("/api/facturas/pendientes-recepcion", {

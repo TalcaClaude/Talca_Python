@@ -36,6 +36,19 @@ function afpFmtMoney(n) {
   return "$" + Math.round(n).toLocaleString("es-CL");
 }
 
+function afpFmtFecha(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString("es-CL", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+const AFP_EVENTO_HISTORIAL_LABEL = {
+  creada: "Registrada",
+  rechazada: "Rechazada por Bodega",
+  corregida_reingresada: "Corregida y reingresada",
+  aprobada: "Aprobada",
+};
+
 function afpToast(msg, isError = false) {
   const el = document.getElementById("afp-toast");
   if (!el) return;
@@ -61,7 +74,7 @@ function afpCerrarModal(id) {
   el.style.zIndex = "";
 }
 
-document.querySelectorAll('[data-close="afp-modal-lista"], [data-close="afp-modal-detalle"]').forEach(btn => {
+document.querySelectorAll('[data-close="afp-modal-lista"], [data-close="afp-modal-detalle"], [data-close="afr-modal-lista"]').forEach(btn => {
   btn.addEventListener("click", () => afpCerrarModal(btn.dataset.close));
 });
 
@@ -103,6 +116,65 @@ async function afpSondear() {
     // fondo en cada pantalla de la app.
   }
 }
+
+// ---------------------------------------------------------------------------
+// Aviso para Finanzas: facturas rechazadas por Bodega que todavía no se
+// corrigieron y reingresaron. Mismo patrón que afpSondear/afpAbrirLista de
+// arriba, pero apuntando al endpoint de contador de rechazadas (solo
+// finanzas/admin, ver contador_facturas_rechazadas en app.py) -- si el
+// usuario actual no es finanzas, ese fetch simplemente devuelve 403 y el
+// catch de abajo lo deja en silencio, igual que ya hace afpSondear con
+// bodega. El botón "Corregir y reingresar" de cada fila NO abre un modal
+// propio acá (la edición completa -- catálogo, autocompletar, crear
+// producto -- vive solo en finanzas.js/finanzas.html) sino que navega
+// directo a la pantalla de Facturas con esa factura ya abierta en modo
+// detalle (?ver_pendiente=<id>, ver activarPestanaDesdeHash() en
+// finanzas.js), desde donde el botón "Editar" ya habilitado hace el resto.
+// ---------------------------------------------------------------------------
+
+async function afrSondear() {
+  const flotante = document.getElementById("afr-flotante");
+  if (!flotante) return;
+  try {
+    const d = await afpApi("/api/facturas/pendientes-recepcion/rechazadas/contador");
+    const texto = document.getElementById("afr-flotante-texto");
+    if (d.rechazadas > 0) {
+      flotante.style.display = "block";
+      texto.textContent = d.rechazadas === 1 ? "1 factura rechazada" : `${d.rechazadas} facturas rechazadas`;
+    } else {
+      flotante.style.display = "none";
+    }
+  } catch (e) {
+    // Silencioso a propósito -- ver comentario de afpSondear más arriba;
+    // acá además es el caso normal para cualquiera que no sea finanzas.
+  }
+}
+
+async function afrAbrirLista() {
+  const tbody = document.getElementById("afr-tbody-lista");
+  if (!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="5" class="vacio">Cargando…</td></tr>`;
+  afpAbrirModal("afr-modal-lista");
+  try {
+    const data = await afpApi("/api/facturas/pendientes-recepcion?estado=rechazada");
+    if (data.pendientes.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="5" class="vacio">No hay facturas rechazadas pendientes de corregir. 👍</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.pendientes.map(p => `
+      <tr>
+        <td>${afpEscapeHtml(p.numero) || "(sin folio)"}</td>
+        <td>${afpEscapeHtml(p.proveedor_nombre) || "—"}</td>
+        <td class="num mono">${afpFmtMoney(p.monto_total)}</td>
+        <td>${afpEscapeHtml(p.nota_rechazo) || "—"}</td>
+        <td><a class="btn btn-secundario" href="/finanzas?ver_pendiente=${p.id}#facturas">Corregir y reingresar</a></td>
+      </tr>`).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+  }
+}
+
+document.getElementById("afr-btn-flotante")?.addEventListener("click", afrAbrirLista);
 
 async function afpAbrirLista() {
   const tbody = document.getElementById("afp-tbody-lista");
@@ -153,12 +225,46 @@ function afpAbrirDetalle(id) {
     <dt>Registrada por</dt><dd>${afpEscapeHtml(p.creado_por) || "—"}</dd>
   `;
 
+  // Si esta factura ya pasó antes por un rechazo (se corrigió y volvió a
+  // 'pendiente'), se avisa acá para que quien la revise ahora sepa que ya
+  // hubo una vuelta previa -- el historial completo queda más abajo.
+  let avisoYaFueRechazada = document.getElementById("afp-aviso-ya-rechazada");
+  const yaFueRechazada = (p.historial || []).some(h => h.evento === "rechazada");
+  if (!avisoYaFueRechazada) {
+    avisoYaFueRechazada = document.createElement("p");
+    avisoYaFueRechazada.id = "afp-aviso-ya-rechazada";
+    avisoYaFueRechazada.className = "ayuda-inline";
+    document.getElementById("afp-detalle-ficha").after(avisoYaFueRechazada);
+  }
+  avisoYaFueRechazada.textContent = "Esta factura ya fue rechazada antes y fue corregida y reingresada -- revisa el historial más abajo.";
+  avisoYaFueRechazada.style.display = yaFueRechazada ? "block" : "none";
+
   const tbody = document.getElementById("afp-tbody-lineas");
-  tbody.innerHTML = p.lineas.map(l => {
+  tbody.innerHTML = p.lineas.map((l, idx) => {
     const sinResolver = l.producto_id == null;
-    const nombreCelda = sinResolver
-      ? `⚠️ Producto nuevo, falta crear${l.texto_original ? ` — "${afpEscapeHtml(l.texto_original)}"` : ""}`
-      : (afpEscapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`);
+    let nombreCelda;
+    if (sinResolver) {
+      // Bodega resuelve el producto sin salir de este mismo modal de
+      // aprobación -- antes esto solo avisaba y mandaba a Finanzas a editar
+      // la factura, un rodeo innecesario ya que quien tiene permiso real
+      // para crear productos es Bodega, no Finanzas.
+      nombreCelda = `
+        <div class="afp-linea-sin-resolver">
+          <div>⚠️ Producto nuevo, falta crear${l.texto_original ? ` — "${afpEscapeHtml(l.texto_original)}"` : ""}</div>
+          ${afpPuedeBodega ? `
+            <button type="button" class="btn btn-secundario btn-chico afp-btn-crear-producto" data-indice="${idx}" style="margin-top:6px">
+              Crear este producto en Logística
+            </button>
+            <div class="afp-form-crear-producto" data-indice="${idx}" style="display:none;margin-top:6px">
+              <input type="text" class="afp-crear-categoria" placeholder="Categoría (ej. EMBRAGUE)" style="margin-bottom:4px">
+              <input type="text" class="afp-crear-modelo" placeholder="Modelo (ej. ABC 2020)" style="margin-bottom:4px" value="${l.texto_original ? afpEscapeHtml(l.texto_original) : ""}">
+              <button type="button" class="btn btn-primario btn-chico afp-btn-crear-confirmar" data-indice="${idx}">Crear y vincular</button>
+            </div>
+          ` : ""}
+        </div>`;
+    } else {
+      nombreCelda = afpEscapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`;
+    }
     return `
     <tr>
       <td>${nombreCelda}</td>
@@ -167,6 +273,42 @@ function afpAbrirDetalle(id) {
       <td class="num mono">${afpFmtMoney(l.cantidad * l.precio_unitario)}</td>
     </tr>`;
   }).join("");
+
+  tbody.querySelectorAll(".afp-btn-crear-producto").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = btn.dataset.indice;
+      const form = tbody.querySelector(`.afp-form-crear-producto[data-indice="${idx}"]`);
+      if (form) form.style.display = form.style.display === "none" ? "block" : "none";
+    });
+  });
+  tbody.querySelectorAll(".afp-btn-crear-confirmar").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const idx = parseInt(btn.dataset.indice, 10);
+      const form = btn.closest(".afp-form-crear-producto");
+      const categoria = form.querySelector(".afp-crear-categoria").value.trim();
+      const modelo = form.querySelector(".afp-crear-modelo").value.trim();
+      if (!categoria && !modelo) {
+        afpToast("Ingresa al menos categoría o modelo para crear el producto", true);
+        return;
+      }
+      try {
+        const data = await afpApi(`/api/facturas/pendientes-recepcion/${id}/lineas/${idx}/crear-producto`, {
+          method: "POST",
+          body: JSON.stringify({ categoria, modelo }),
+        });
+        afpToast(`Producto "${data.producto.nombre}" creado y vinculado a esta línea`);
+        // El backend devuelve el pendiente ya actualizado con la línea
+        // resuelta -- se reemplaza en caché y se vuelve a pintar el
+        // detalle, así "Aprobar" se habilita de inmediato si esa era la
+        // última línea que faltaba, sin cerrar y reabrir el modal.
+        const i = afpPendientesCache.findIndex(x => x.id === id);
+        if (i !== -1) afpPendientesCache[i] = data.pendiente;
+        afpAbrirDetalle(id);
+      } catch (err) {
+        afpToast(err.message, true);
+      }
+    });
+  });
 
   // El backend siempre rechaza aprobar/rechazar si el rol no es
   // bodega/admin (ver @requiere_rol en app.py) — acá solo se evita
@@ -184,10 +326,27 @@ function afpAbrirDetalle(id) {
     avisoProductoNuevo.className = "ayuda-inline ayuda-inline--bloqueado";
     document.getElementById("afp-tbody-lineas").closest("table").after(avisoProductoNuevo);
   }
-  avisoProductoNuevo.textContent = "Esta factura tiene productos que todavía no existen en el catálogo — "
-    + "créalos primero desde Finanzas → Cuentas por Pagar → Editar esta factura (\"Crear este producto en Logística\" "
-    + "en cada línea) antes de poder aprobarla.";
-  avisoProductoNuevo.style.display = (afpPuedeBodega && hayLineasSinResolver) ? "block" : "none";
+  avisoProductoNuevo.textContent = afpPuedeBodega
+    ? "Esta factura tiene productos que todavía no existen en el catálogo — créalos arriba, en cada línea marcada, antes de poder aprobarla."
+    : "Esta factura tiene productos que todavía no existen en el catálogo — Bodega debe crearlos antes de poder aprobarla.";
+  avisoProductoNuevo.style.display = hayLineasSinResolver ? "block" : "none";
+
+  let historialLista = document.getElementById("afp-historial");
+  if (!historialLista) {
+    historialLista = document.createElement("ul");
+    historialLista.id = "afp-historial";
+    historialLista.className = "afp-historial";
+    avisoProductoNuevo.after(historialLista);
+  }
+  if (yaFueRechazada && (p.historial || []).length) {
+    historialLista.innerHTML = p.historial.map(h =>
+      `<li>${afpFmtFecha(h.fecha)} — ${AFP_EVENTO_HISTORIAL_LABEL[h.evento] || h.evento} (${afpEscapeHtml(h.usuario) || "—"})${h.nota ? `: "${afpEscapeHtml(h.nota)}"` : ""}</li>`
+    ).join("");
+    historialLista.style.display = "block";
+  } else {
+    historialLista.style.display = "none";
+  }
+
   const campoNotaRechazo = document.getElementById("afp-nota-rechazo").closest(".campo");
   campoNotaRechazo.style.display = afpPuedeBodega ? "" : "none";
   let avisoSoloLectura = document.getElementById("afp-aviso-solo-lectura");
@@ -254,4 +413,9 @@ document.getElementById("afp-btn-rechazar")?.addEventListener("click", async () 
 if (document.getElementById("afp-flotante")) {
   afpCargarRol().then(afpSondear);
   setInterval(afpSondear, AFP_INTERVALO_SONDEO_MS);
+}
+
+if (document.getElementById("afr-flotante")) {
+  afrSondear();
+  setInterval(afrSondear, AFP_INTERVALO_SONDEO_MS);
 }

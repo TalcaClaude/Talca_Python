@@ -1439,6 +1439,19 @@ def init_db():
         db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN foto_archivo TEXT DEFAULT ''")
         db.commit()
 
+    # ---- Migración 32: historial permanente por factura pendiente de
+    # recepción (creada / rechazada+nota / corregida y reingresada /
+    # aprobada). Antes, rechazar una factura la dejaba trabada: no había
+    # forma de corregirla y volver a mandarla sin recrearla desde cero
+    # (perdiendo el número, proveedor, líneas ya cargadas), y una vez que
+    # volvía a aprobarse no quedaba ningún rastro de que alguna vez fue
+    # rechazada (revisado_por/revisado_en/nota_rechazo se sobrescriben en
+    # cada paso). historial_json es un registro que solo crece, nunca se
+    # sobrescribe ni se borra -- ver _registrar_historial_pendiente.
+    if "historial_json" not in columnas_ffp:
+        db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN historial_json TEXT NOT NULL DEFAULT '[]'")
+        db.commit()
+
     # ---- Migración 16: perfil restringido de "mecánico" para el agente de
     # WhatsApp. Un mecánico registrado en agente_mecanicos puede ser de tipo
     # 'completo' (comportamiento de siempre: puede mandar fotos Y cambiar
@@ -4928,6 +4941,7 @@ def _factura_pendiente_recepcion_dict(db, row):
     d["lineas"] = json.loads(d.pop("lineas_json") or "[]")
     recibidas = d.pop("lineas_recibidas_json", None)
     d["lineas_recibidas"] = json.loads(recibidas) if recibidas else None
+    d["historial"] = json.loads(d.pop("historial_json", None) or "[]")
     d["monto_total"] = round(sum(l["cantidad"] * l["precio_unitario"] for l in d["lineas"]), 2)
     if d["proveedor_id"]:
         prov = db.execute("SELECT nombre FROM proveedores WHERE id = ?", (d["proveedor_id"],)).fetchone()
@@ -4935,6 +4949,28 @@ def _factura_pendiente_recepcion_dict(db, row):
     else:
         d["proveedor_nombre"] = ""
     return d
+
+
+def _registrar_historial_pendiente(db, pendiente_id, evento, nota=None):
+    """Agrega un evento al historial de una factura pendiente de recepción
+    (historial_json) -- a diferencia de 'estado' (que solo refleja la
+    situación ACTUAL) esto es un registro que nunca se sobrescribe ni se
+    borra: permite ver, en una misma factura, que fue rechazada una vez,
+    corregida, y aprobada después, sin perder ese rastro (a pedido del
+    taller). No hace commit -- queda a cargo de quien llama, que ya tiene
+    su propio commit al final de la misma operación."""
+    fila = db.execute(
+        "SELECT historial_json FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)
+    ).fetchone()
+    historial = json.loads((fila["historial_json"] if fila else None) or "[]")
+    entrada = {"evento": evento, "usuario": usuario_actual(), "fecha": now_iso()}
+    if nota:
+        entrada["nota"] = nota
+    historial.append(entrada)
+    db.execute(
+        "UPDATE facturas_finanzas_pendientes SET historial_json = ? WHERE id = ?",
+        (json.dumps(historial), pendiente_id),
+    )
 
 
 @app.route("/api/facturas/pendientes-recepcion", methods=["GET"])
@@ -4967,6 +5003,25 @@ def contador_facturas_pendientes_recepcion():
         "SELECT COUNT(*) FROM facturas_finanzas_pendientes WHERE estado = 'pendiente'"
     ).fetchone()[0]
     return jsonify({"pendientes": n})
+
+
+@app.route("/api/facturas/pendientes-recepcion/rechazadas/contador", methods=["GET"])
+@requiere_rol("finanzas")
+def contador_facturas_rechazadas():
+    """Aviso global flotante simétrico al de arriba, pero para Finanzas: a
+    diferencia de 'cuántas tengo pendientes de aprobar' (que es simplemente
+    su propio trabajo de todos los días, visible en su pantalla sin
+    necesidad de avisos), que Bodega haya rechazado una factura SÍ es una
+    excepción que amerita un aviso activo -- si nadie se entera, la factura
+    queda trabada esperando una corrección que nunca llega. Deja de contar
+    en cuanto se corrige y reingresa (vuelve a 'pendiente', ver
+    editar_factura_pendiente_recepcion) — no hace falta un flag de 'vista'
+    aparte para esto."""
+    db = get_db()
+    n = db.execute(
+        "SELECT COUNT(*) FROM facturas_finanzas_pendientes WHERE estado = 'rechazada'"
+    ).fetchone()[0]
+    return jsonify({"rechazadas": n})
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>", methods=["GET"])
@@ -5025,15 +5080,21 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
             return None, f"Ya hay una factura pendiente de recepción con el número '{numero}'"
 
     ts = now_iso()
+    # El primer evento del historial usa 'creado_por' (el parámetro, no
+    # usuario_actual()) porque este mismo punto de entrada también lo llama
+    # el pipeline del agente de WhatsApp fuera de una sesión con login (ver
+    # docstring más arriba) -- ahí 'creado_por' ya trae algo como "Agente
+    # WhatsApp", que es más preciso que "Sistema".
+    historial_inicial = json.dumps([{"evento": "creada", "usuario": creado_por, "fecha": ts}])
     cur = db.execute(
         """
         INSERT INTO facturas_finanzas_pendientes
             (numero, proveedor_id, fecha, lineas_json, condicion_pago, porcentaje_contado,
-             plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?)
+             plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo, historial_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?)
         """,
         (numero, proveedor_id, fecha, json.dumps(lineas_validadas), condicion_pago, porcentaje_contado,
-         plazo_dias_credito, creado_por, ts, origen, foto_archivo),
+         plazo_dias_credito, creado_por, ts, origen, foto_archivo, historial_inicial),
     )
     db.commit()
     nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -5150,19 +5211,24 @@ def crear_factura_pendiente_recepcion():
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>", methods=["PUT"])
 @requiere_rol("finanzas", "bodega")
 def editar_factura_pendiente_recepcion(pendiente_id):
-    """Corrige una factura pendiente de recepción ANTES de aprobarla o
-    rechazarla — pensado sobre todo para las que llegan por WhatsApp con
-    datos incompletos (folio no leído, producto que la IA no pudo
-    matchear contra el catálogo): finanzas o bodega puede completar el
-    número, el proveedor, o resolver una línea a un producto real antes de
-    que se pueda aprobar (aprobar_factura_pendiente_recepcion exige que
-    todas las líneas recibidas tengan un producto_id válido)."""
+    """Corrige una factura pendiente de recepción ANTES de aprobarla, o
+    DESPUÉS de que Bodega la rechazó — pensado tanto para las que llegan
+    por WhatsApp con datos incompletos (folio no leído, producto que la IA
+    no pudo matchear contra el catálogo) como para el camino normal de
+    rechazo: Bodega rechaza con una nota (ver
+    rechazar_factura_pendiente_recepcion) y quien la subió corrige acá lo
+    que estaba mal SIN tener que volver a escribir toda la factura de
+    cero, y al guardar vuelve sola a la cola de revisión ('pendiente') —
+    la nota de rechazo y quién/cuándo rechazó quedan para siempre en
+    historial_json (ver _registrar_historial_pendiente), no se pierden solo
+    porque se corrigió y se volvió a aprobar después."""
     db = get_db()
     fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
     if fila is None:
         return jsonify({"error": "No se encontró ese pendiente"}), 404
-    if fila["estado"] != "pendiente":
+    if fila["estado"] not in ("pendiente", "rechazada"):
         return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede editar."}), 400
+    estaba_rechazada = fila["estado"] == "rechazada"
 
     data = request.get_json(force=True, silent=True) or {}
     numero = (data.get("numero") if "numero" in data else fila["numero"]) or ""
@@ -5202,14 +5268,25 @@ def editar_factura_pendiente_recepcion(pendiente_id):
         if ya_pendiente:
             return jsonify({"error": f"Ya hay una factura pendiente de recepción con el número '{numero}'"}), 400
 
-    db.execute(
-        """
-        UPDATE facturas_finanzas_pendientes
-        SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?
-        WHERE id = ?
-        """,
-        (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
-    )
+    if estaba_rechazada:
+        db.execute(
+            """
+            UPDATE facturas_finanzas_pendientes
+            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, estado = 'pendiente'
+            WHERE id = ?
+            """,
+            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
+        )
+        _registrar_historial_pendiente(db, pendiente_id, "corregida_reingresada")
+    else:
+        db.execute(
+            """
+            UPDATE facturas_finanzas_pendientes
+            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?
+            WHERE id = ?
+            """,
+            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
+        )
     db.commit()
     actualizada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
     return jsonify(_factura_pendiente_recepcion_dict(db, actualizada))
@@ -5338,6 +5415,7 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
         """,
         (factura_id, json.dumps(lineas_recibidas_registro), usuario_actual(), ts, pendiente_id),
     )
+    _registrar_historial_pendiente(db, pendiente_id, "aprobada")
     db.commit()
 
     nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
@@ -5365,6 +5443,7 @@ def rechazar_factura_pendiente_recepcion(pendiente_id):
         """,
         (usuario_actual(), ts, nota, pendiente_id),
     )
+    _registrar_historial_pendiente(db, pendiente_id, "rechazada", nota=nota)
     db.commit()
     return jsonify({"ok": True})
 

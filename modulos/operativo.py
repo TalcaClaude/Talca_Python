@@ -2966,10 +2966,50 @@ def agregar_item_orden(orden_id):
         if producto is None:
             return jsonify({"error": "El producto indicado no existe"}), 400
 
-        # El costo del repuesto es el Costo Promedio Ponderado actual del
-        # producto (lo que efectivamente cuesta reponerlo), salvo que se
-        # informe uno distinto explícitamente.
+        # Si este repuesto tiene stock vivo de MÁS DE UN proveedor a la vez,
+        # hay que saber de cuál específico están saliendo estas unidades --
+        # antes se elegía "mejor esfuerzo" sin preguntar (ver
+        # _stockprov_descontar_automatico en core.py) y el costo que quedaba
+        # en la OT era siempre el Costo Promedio Ponderado general del
+        # producto, que no necesariamente correspondía al proveedor
+        # realmente descontado. Con 0 o 1 proveedores con stock no hace
+        # falta preguntar nada -- se sigue comportando EXACTAMENTE igual que
+        # antes (mismo camino automático, mismo costo). Mismo patrón ya
+        # usado en Logística -> Registrar movimiento (ver
+        # /api/productos/<id>/stock-proveedores y cargarProveedoresSalida en
+        # app.js), reutilizando el mismo endpoint para no duplicar criterio.
+        from app import _stockprov_buckets_producto
+        baldes_proveedor, _permite_sin_proveedor = _stockprov_buckets_producto(db, producto_id)
+
         costo_unitario = producto["costo_compra"]
+        proveedor_id_salida = None
+        proveedor_manual = False
+        if len(baldes_proveedor) > 1:
+            if "proveedor_id" not in data:
+                return jsonify({
+                    "error": "Este repuesto tiene stock de más de un proveedor -- indica de cuál estás "
+                             "descontando estas unidades.",
+                    "requiere_proveedor": True,
+                    "proveedores": baldes_proveedor,
+                }), 400
+            proveedor_id_crudo = data.get("proveedor_id")
+            try:
+                proveedor_id_salida = None if proveedor_id_crudo in (None, "", "__sin_proveedor__") else int(proveedor_id_crudo)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Proveedor inválido"}), 400
+            balde_elegido = next((b for b in baldes_proveedor if b["proveedor_id"] == proveedor_id_salida), None)
+            if balde_elegido is None:
+                return jsonify({
+                    "error": "Ese proveedor ya no tiene stock disponible de este producto -- vuelve a intentarlo.",
+                    "requiere_proveedor": True,
+                    "proveedores": baldes_proveedor,
+                }), 400
+            proveedor_manual = True
+            costo_unitario = balde_elegido["costo_promedio"]
+
+        # Un costo distinto informado a mano (poco común, pero ya existía)
+        # sigue teniendo prioridad por sobre cualquiera de los dos casos de
+        # arriba.
         if data.get("costo_unitario") not in (None, ""):
             try:
                 costo_unitario = float(data.get("costo_unitario"))
@@ -2982,6 +3022,7 @@ def agregar_item_orden(orden_id):
                 db, producto, cantidad_stock,
                 motivo=f"ORDEN DE TRABAJO #{orden_id}" + (f" - {descripcion}" if descripcion else ""),
                 usuario=usuario, categoria="Consumo interno",
+                proveedor_id=proveedor_id_salida, proveedor_manual=proveedor_manual,
             )
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
@@ -4087,7 +4128,41 @@ def agregar_item_garantia(garantia_id):
         producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
         if producto is None:
             return jsonify({"error": "El producto indicado no existe"}), 400
+
+        # Mismo criterio que agregar_item_orden() para ítems de OT: si hay
+        # stock de más de un proveedor a la vez, hay que preguntar de cuál
+        # específico salen estas unidades (importa todavía más acá -- una
+        # garantía es justamente el caso en que se necesita saber con
+        # certeza qué repuesto, de qué proveedor, se usó).
+        from app import _stockprov_buckets_producto
+        baldes_proveedor, _permite_sin_proveedor = _stockprov_buckets_producto(db, producto_id)
+
         costo_unitario = producto["costo_compra"]
+        proveedor_id_salida = None
+        proveedor_manual = False
+        if len(baldes_proveedor) > 1:
+            if "proveedor_id" not in data:
+                return jsonify({
+                    "error": "Este repuesto tiene stock de más de un proveedor -- indica de cuál estás "
+                             "descontando estas unidades.",
+                    "requiere_proveedor": True,
+                    "proveedores": baldes_proveedor,
+                }), 400
+            proveedor_id_crudo = data.get("proveedor_id")
+            try:
+                proveedor_id_salida = None if proveedor_id_crudo in (None, "", "__sin_proveedor__") else int(proveedor_id_crudo)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Proveedor inválido"}), 400
+            balde_elegido = next((b for b in baldes_proveedor if b["proveedor_id"] == proveedor_id_salida), None)
+            if balde_elegido is None:
+                return jsonify({
+                    "error": "Ese proveedor ya no tiene stock disponible de este producto -- vuelve a intentarlo.",
+                    "requiere_proveedor": True,
+                    "proveedores": baldes_proveedor,
+                }), 400
+            proveedor_manual = True
+            costo_unitario = balde_elegido["costo_promedio"]
+
         if data.get("costo_unitario") not in (None, ""):
             try:
                 costo_unitario = float(data.get("costo_unitario"))
@@ -4099,6 +4174,7 @@ def agregar_item_garantia(garantia_id):
                 db, producto, cantidad_stock,
                 motivo=f"GARANTÍA #{garantia_id}" + (f" - {descripcion}" if descripcion else ""),
                 usuario=usuario, categoria="Garantía",
+                proveedor_id=proveedor_id_salida, proveedor_manual=proveedor_manual,
             )
         except ValueError as e:
             return jsonify({"error": str(e)}), 400

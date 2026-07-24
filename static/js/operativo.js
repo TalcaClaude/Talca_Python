@@ -228,6 +228,13 @@ async function api(path, options = {}) {
   if (!res.ok) {
     const err = new Error(data.error || "Error inesperado");
     err.requiereForzar = !!data.requiere_forzar;
+    // Ver agregar_item_orden/agregar_item_garantia en operativo.py: cuando
+    // un repuesto tiene stock de más de un proveedor a la vez, el backend
+    // rechaza el POST con esto en vez de aplicar "mejor esfuerzo" en
+    // silencio -- el llamador debe mostrar el selector de proveedor en vez
+    // de solo mostrar el error.
+    err.requiereProveedor = !!data.requiere_proveedor;
+    err.proveedores = data.proveedores || null;
     throw err;
   }
   return data;
@@ -3041,10 +3048,35 @@ async function abrirRepuestosModal() {
     document.getElementById("opoi-producto-resultados").style.display = "none";
     document.getElementById("form-op-item").reset();
     document.getElementById("opoi-tipo").dispatchEvent(new Event("change"));
+    ocultarSelectorProveedorOpoi();
     await renderSelectConvertidoresDisponibles();
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+// Selector de proveedor obligatorio para "Carga de repuestos": solo
+// aparece cuando el producto elegido tiene stock vivo de MÁS DE UN
+// proveedor a la vez (ver /api/productos/<id>/stock-proveedores y
+// agregar_item_orden en operativo.py) -- con 0 o 1 no aparece nada y el
+// ítem se agrega al tiro exactamente como antes. Se elige el proveedor
+// ANTES de agregar el ítem (no después, en una fila ya cargada): mismo
+// criterio ya usado en Logística -> Registrar movimiento
+// (cargarProveedoresSalida en app.js), para no tener que revertir y
+// rehacer un movimiento de stock si la persona cambia de opinión.
+let opoiPendienteProveedor = null; // { producto, cantidad, textoBusqueda }
+
+function poblarOpcionesProveedorRepuesto(selectEl, proveedores) {
+  selectEl.innerHTML = '<option value="" disabled selected>Proveedor</option>' +
+    proveedores.map(p => {
+      const valor = p.proveedor_id === null ? "__sin_proveedor__" : p.proveedor_id;
+      return `<option value="${valor}">${escapeHtml(p.proveedor_nombre)} (${p.cantidad} disp., ${fmtMoney(p.costo_promedio)} c/u)</option>`;
+    }).join("");
+}
+
+function ocultarSelectorProveedorOpoi() {
+  document.getElementById("opoi-fila-proveedor").style.display = "none";
+  opoiPendienteProveedor = null;
 }
 
 // Búsqueda de producto para "Carga de repuestos": al hacer clic en un
@@ -3085,15 +3117,43 @@ function renderResultadosOpoi(texto) {
 }
 
 async function agregarRepuestoDesdeAutocomplete(producto) {
-  const ordenId = document.getElementById("opod-id").value;
   const cantidad = document.getElementById("opoi-cantidad").value || 1;
   const textoBusqueda = document.getElementById("opoi-producto-buscar").value;
+  // Antes de agregar, se revisa si este repuesto tiene stock de más de un
+  // proveedor a la vez -- si es así, NO se agrega todavía: se muestra el
+  // selector obligatorio y se agrega recién cuando la persona elige uno
+  // (ver poblarOpcionesProveedorRepuesto más arriba). Si la consulta falla
+  // por algún motivo, se sigue con el camino normal en vez de bloquear al
+  // operador -- el backend igual vuelve a pedir el proveedor si hiciera
+  // falta (ver el catch de agregarItemRepuestoOpoi).
   try {
-    await api(`/api/operativo/ordenes/${ordenId}/items`, {
-      method: "POST",
-      body: JSON.stringify({ tipo: "repuesto", producto_id: producto.id, cantidad }),
-    });
+    const stockProv = await api(`/api/productos/${producto.id}/stock-proveedores`);
+    if (stockProv.proveedores.length > 1) {
+      opoiPendienteProveedor = { producto, cantidad, textoBusqueda };
+      poblarOpcionesProveedorRepuesto(document.getElementById("opoi-proveedor-repuesto"), stockProv.proveedores);
+      document.getElementById("opoi-fila-proveedor").style.display = "flex";
+      document.getElementById("opoi-producto-resultados").style.display = "none";
+      toast(`"${producto.nombre}" tiene stock de más de un proveedor — elige de cuál.`);
+      return;
+    }
+  } catch (e) {
+    // Silencioso -- ver comentario de arriba.
+  }
+  await agregarItemRepuestoOpoi(producto, cantidad, textoBusqueda, undefined);
+}
+
+// Hace el POST real de agregar el ítem. 'proveedorId' viene undefined
+// cuando el producto no tenía más de un proveedor (comportamiento de
+// siempre, sin tocar ese campo); viene con un valor (número o null, "sin
+// proveedor conocido") cuando la persona ya lo eligió en el selector.
+async function agregarItemRepuestoOpoi(producto, cantidad, textoBusqueda, proveedorId) {
+  const ordenId = document.getElementById("opod-id").value;
+  const payload = { tipo: "repuesto", producto_id: producto.id, cantidad };
+  if (proveedorId !== undefined) payload.proveedor_id = proveedorId;
+  try {
+    await api(`/api/operativo/ordenes/${ordenId}/items`, { method: "POST", body: JSON.stringify(payload) });
     toast(`Agregado: ${producto.nombre}`);
+    ocultarSelectorProveedorOpoi();
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderItemsOrden(orden);
     renderCostosOrden(orden);
@@ -3104,13 +3164,34 @@ async function agregarRepuestoDesdeAutocomplete(producto) {
     state.opProductos = dataProductos.productos;
     renderResultadosOpoi(textoBusqueda);
   } catch (e) {
+    if (e.requiereProveedor && e.proveedores && e.proveedores.length) {
+      // Defensa adicional del backend (ej. el stock cambió justo entre que
+      // se consultó arriba y se intentó agregar) -- se muestra el mismo
+      // selector en vez de solo un error.
+      opoiPendienteProveedor = { producto, cantidad, textoBusqueda };
+      poblarOpcionesProveedorRepuesto(document.getElementById("opoi-proveedor-repuesto"), e.proveedores);
+      document.getElementById("opoi-fila-proveedor").style.display = "flex";
+    } else {
+      ocultarSelectorProveedorOpoi();
+    }
     toast(e.message, true);
   }
 }
 
+document.getElementById("opoi-proveedor-repuesto").addEventListener("change", (e) => {
+  const valor = e.target.value;
+  if (!valor || !opoiPendienteProveedor) return;
+  const { producto, cantidad, textoBusqueda } = opoiPendienteProveedor;
+  const proveedorId = valor === "__sin_proveedor__" ? null : parseInt(valor, 10);
+  agregarItemRepuestoOpoi(producto, cantidad, textoBusqueda, proveedorId);
+});
+
 document.getElementById("opoi-producto-buscar").addEventListener("input", (e) => {
   document.getElementById("opoi-producto-id").value = "";
   renderResultadosOpoi(e.target.value);
+  // Se abandona el selector de proveedor pendiente si la persona vuelve a
+  // escribir en la búsqueda -- ya no corresponde al producto que eligió.
+  ocultarSelectorProveedorOpoi();
 });
 document.getElementById("opoi-producto-buscar").addEventListener("focus", (e) => {
   if (e.target.value.trim()) renderResultadosOpoi(e.target.value);
@@ -3152,6 +3233,7 @@ document.getElementById("opoi-tipo").addEventListener("change", (e) => {
   document.getElementById("opoi-campo-costo").style.display = (!esRepuesto && !esConvertidor) ? "flex" : "none";
   document.getElementById("opoi-fila-mo-extra").style.display = (!esRepuesto && !esConvertidor) ? "flex" : "none";
   document.getElementById("opoi-campo-convertidor").style.display = esConvertidor ? "flex" : "none";
+  if (!esRepuesto) ocultarSelectorProveedorOpoi();
   if (esConvertidor) renderSelectConvertidoresDisponibles();
 });
 
@@ -3845,6 +3927,7 @@ async function abrirDetalleGarantia(id) {
     document.getElementById("gari-producto-resultados").style.display = "none";
     document.getElementById("form-gar-item").reset();
     document.getElementById("gari-tipo").dispatchEvent(new Event("change"));
+    ocultarSelectorProveedorGari();
 
     await cargarFotosGarantiaDetalle();
 
@@ -3887,29 +3970,75 @@ function renderResultadosGari(texto) {
   });
 }
 
+// Mismo mecanismo de selector de proveedor obligatorio que "Carga de
+// repuestos" de la OT (ver opoiPendienteProveedor / poblarOpcionesProveedorRepuesto
+// más arriba) -- se reutiliza esa misma función para poblar el <select>,
+// pero con su propio estado y elementos porque este formulario es
+// independiente (ítems de Garantía, no de la OT).
+let gariPendienteProveedor = null; // { producto, cantidad, textoBusqueda }
+
+function ocultarSelectorProveedorGari() {
+  document.getElementById("gari-fila-proveedor").style.display = "none";
+  gariPendienteProveedor = null;
+}
+
 async function agregarRepuestoGarantiaDesdeAutocomplete(producto) {
-  const garantiaId = document.getElementById("gard-id").value;
   const cantidad = document.getElementById("gari-cantidad").value || 1;
   const textoBusqueda = document.getElementById("gari-producto-buscar").value;
   try {
-    await api(`/api/operativo/garantias/${garantiaId}/items`, {
-      method: "POST",
-      body: JSON.stringify({ tipo: "repuesto", producto_id: producto.id, cantidad }),
-    });
+    const stockProv = await api(`/api/productos/${producto.id}/stock-proveedores`);
+    if (stockProv.proveedores.length > 1) {
+      gariPendienteProveedor = { producto, cantidad, textoBusqueda };
+      poblarOpcionesProveedorRepuesto(document.getElementById("gari-proveedor-repuesto"), stockProv.proveedores);
+      document.getElementById("gari-fila-proveedor").style.display = "flex";
+      document.getElementById("gari-producto-resultados").style.display = "none";
+      toast(`"${producto.nombre}" tiene stock de más de un proveedor — elige de cuál.`);
+      return;
+    }
+  } catch (e) {
+    // Silencioso -- se sigue con el camino normal, ver comentario
+    // equivalente en agregarRepuestoDesdeAutocomplete.
+  }
+  await agregarItemRepuestoGari(producto, cantidad, textoBusqueda, undefined);
+}
+
+async function agregarItemRepuestoGari(producto, cantidad, textoBusqueda, proveedorId) {
+  const garantiaId = document.getElementById("gard-id").value;
+  const payload = { tipo: "repuesto", producto_id: producto.id, cantidad };
+  if (proveedorId !== undefined) payload.proveedor_id = proveedorId;
+  try {
+    await api(`/api/operativo/garantias/${garantiaId}/items`, { method: "POST", body: JSON.stringify(payload) });
     toast(`Agregado: ${producto.nombre}`);
+    ocultarSelectorProveedorGari();
     const garantia = await api(`/api/operativo/garantias/${garantiaId}`);
     renderItemsGarantia(garantia);
     const dataProductos = await api("/api/productos");
     state.opProductos = dataProductos.productos;
     renderResultadosGari(textoBusqueda);
   } catch (e) {
+    if (e.requiereProveedor && e.proveedores && e.proveedores.length) {
+      gariPendienteProveedor = { producto, cantidad, textoBusqueda };
+      poblarOpcionesProveedorRepuesto(document.getElementById("gari-proveedor-repuesto"), e.proveedores);
+      document.getElementById("gari-fila-proveedor").style.display = "flex";
+    } else {
+      ocultarSelectorProveedorGari();
+    }
     toast(e.message, true);
   }
 }
 
+document.getElementById("gari-proveedor-repuesto").addEventListener("change", (e) => {
+  const valor = e.target.value;
+  if (!valor || !gariPendienteProveedor) return;
+  const { producto, cantidad, textoBusqueda } = gariPendienteProveedor;
+  const proveedorId = valor === "__sin_proveedor__" ? null : parseInt(valor, 10);
+  agregarItemRepuestoGari(producto, cantidad, textoBusqueda, proveedorId);
+});
+
 document.getElementById("gari-producto-buscar").addEventListener("input", (e) => {
   document.getElementById("gari-producto-id").value = "";
   renderResultadosGari(e.target.value);
+  ocultarSelectorProveedorGari();
 });
 document.getElementById("gari-producto-buscar").addEventListener("focus", (e) => {
   if (e.target.value.trim()) renderResultadosGari(e.target.value);
@@ -3961,6 +4090,7 @@ document.getElementById("gari-tipo").addEventListener("change", (e) => {
   document.getElementById("gari-campo-descripcion").style.display = esRepuesto ? "none" : "flex";
   document.getElementById("gari-campo-costo").style.display = esRepuesto ? "none" : "flex";
   document.getElementById("gari-fila-mo-extra").style.display = esRepuesto ? "none" : "flex";
+  if (!esRepuesto) ocultarSelectorProveedorGari();
 });
 
 document.getElementById("form-gar-item").addEventListener("submit", async (e) => {

@@ -300,5 +300,202 @@ class TestPerdidaSigueDescontandoElBalde(_BaseStockProveedores):
         self.assertEqual(data["proveedores"][0]["cantidad"], 3)
 
 
+class TestCargaDeRepuestosEnOtExigeProveedorConMasDeUno(_BaseStockProveedores):
+    """Auditoría de julio 2026: al agregar un repuesto desde la pestaña
+    "Carga de repuestos" de una OT (agregar_item_orden en operativo.py), si
+    el producto tenía stock de más de un proveedor a la vez, el sistema
+    elegía uno solo "mejor esfuerzo" sin preguntar (ver
+    _stockprov_descontar_automatico) y usaba el Costo Promedio Ponderado
+    general del producto, no el costo real del proveedor efectivamente
+    descontado. Ahora, con más de un proveedor, hay que indicar
+    explícitamente de cuál -- con 0 o 1 proveedor, el comportamiento sigue
+    siendo exactamente el de antes (no se pide nada)."""
+
+    def test_con_un_solo_proveedor_no_pide_elegir_y_se_comporta_como_antes(self):
+        producto = self._crear_producto_http("Rodamiento - un solo proveedor", stock_disponible=0)
+        proveedor = self._crear_proveedor("Único Proveedor SpA")
+        self._crear_factura_aplicada("FACT-CR-001", producto["id"], proveedor_id=proveedor["id"], cantidad=5, precio_unitario=3000)
+        cliente = self._crear_cliente("Cliente carga repuestos A")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["costo_unitario"], 3000)
+
+    def test_con_dos_proveedores_sin_elegir_uno_es_rechazado(self):
+        producto = self._crear_producto_http("Rodamiento - dos proveedores OT", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Rodamientos")
+        chino = self._crear_proveedor("Proveedor Chino Rodamientos")
+        self._crear_factura_aplicada("FACT-CR-002A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-CR-002B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente carga repuestos B")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1},
+        )
+        self.assertEqual(resp.status_code, 400)
+        data = resp.get_json()
+        self.assertTrue(data["requiere_proveedor"])
+        self.assertEqual(len(data["proveedores"]), 2)
+
+        # No se aplicó nada -- ni se agregó el ítem ni se tocó el stock.
+        orden_actualizada = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertEqual(len(orden_actualizada["items"]), 0)
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[casanova["id"]], 5)
+        self.assertEqual(por_proveedor[chino["id"]], 5)
+
+    def test_con_dos_proveedores_eligiendo_uno_usa_su_costo_y_descuenta_ese_balde(self):
+        producto = self._crear_producto_http("Rodamiento - elige proveedor OT", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Rodamientos 2")
+        chino = self._crear_proveedor("Proveedor Chino Rodamientos 2")
+        self._crear_factura_aplicada("FACT-CR-003A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-CR-003B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente carga repuestos C")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 2, "proveedor_id": chino["id"]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        item = resp.get_json()
+        # El costo que queda en la OT es el del proveedor Chino (1500), NO
+        # el Costo Promedio Ponderado general del producto (que mezcla
+        # ambos proveedores).
+        self.assertEqual(item["costo_unitario"], 1500)
+
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[chino["id"]], 3)  # 5 - 2
+        self.assertEqual(por_proveedor[casanova["id"]], 5)  # intacto
+
+    def test_con_proveedor_que_no_tiene_stock_de_este_producto_es_rechazado(self):
+        producto = self._crear_producto_http("Rodamiento - proveedor invalido OT", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Rodamientos 3")
+        chino = self._crear_proveedor("Proveedor Chino Rodamientos 3")
+        otro = self._crear_proveedor("Proveedor Sin Stock De Este Producto")
+        self._crear_factura_aplicada("FACT-CR-004A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-CR-004B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente carga repuestos D")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1, "proveedor_id": otro["id"]},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.get_json()["requiere_proveedor"])
+
+    def test_costo_explicito_sigue_teniendo_prioridad_sobre_el_del_proveedor_elegido(self):
+        producto = self._crear_producto_http("Rodamiento - costo explicito OT", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Rodamientos 4")
+        chino = self._crear_proveedor("Proveedor Chino Rodamientos 4")
+        self._crear_factura_aplicada("FACT-CR-005A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-CR-005B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente carga repuestos E")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={
+                "tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1,
+                "proveedor_id": chino["id"], "costo_unitario": 9999,
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["costo_unitario"], 9999)
+        # El balde igual se descontó del proveedor elegido -- el costo
+        # explícito solo cambia lo que queda registrado en la OT, no de
+        # dónde sale el stock.
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[chino["id"]], 4)
+
+    def test_con_stock_sin_proveedor_conocido_mas_un_proveedor_real_tambien_pide_elegir(self):
+        # "Sin proveedor conocido" (stock inicial/sin factura) cuenta como
+        # un balde más -- si además hay un proveedor real con stock, sigue
+        # siendo "más de un proveedor a la vez" y hay que preguntar.
+        producto = self._crear_producto_http("Rodamiento - sin proveedor + real", stock_disponible=3, costo_compra=1000)
+        real = self._crear_proveedor("Proveedor Real Con Stock")
+        self._crear_factura_aplicada("FACT-CR-006", producto["id"], proveedor_id=real["id"], cantidad=4, precio_unitario=2500)
+        cliente = self._crear_cliente("Cliente carga repuestos F")
+        orden = self._crear_orden(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.get_json()["requiere_proveedor"])
+
+        # Eligiendo "sin proveedor conocido" explícitamente (null) también
+        # funciona.
+        resp2 = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1, "proveedor_id": None},
+        )
+        self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
+        self.assertEqual(resp2.get_json()["costo_unitario"], 1000)
+
+
+class TestCargaDeRepuestosEnGarantiaExigeProveedorConMasDeUno(_BaseStockProveedores):
+    """Mismo criterio que TestCargaDeRepuestosEnOtExigeProveedorConMasDeUno,
+    pero para los ítems de una Garantía (agregar_item_garantia) -- ahí
+    importa todavía más saber con certeza de qué proveedor salió el
+    repuesto, porque es justo el caso de "el auto volvió por un problema"."""
+
+    def _crear_garantia(self, cliente_id):
+        resp = self.client.post(
+            "/api/operativo/garantias",
+            json={"cliente_id": cliente_id, "motivo": "Reclamo de repuesto en garantia"},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def test_con_dos_proveedores_sin_elegir_uno_es_rechazado(self):
+        producto = self._crear_producto_http("Sello - dos proveedores garantia", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Sellos")
+        chino = self._crear_proveedor("Proveedor Chino Sellos")
+        self._crear_factura_aplicada("FACT-GAR-001A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-GAR-001B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente garantia A")
+        garantia = self._crear_garantia(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1},
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.get_json()["requiere_proveedor"])
+
+    def test_con_dos_proveedores_eligiendo_uno_usa_su_costo_y_descuenta_ese_balde(self):
+        producto = self._crear_producto_http("Sello - elige proveedor garantia", stock_disponible=0)
+        casanova = self._crear_proveedor("Casanova Sellos 2")
+        chino = self._crear_proveedor("Proveedor Chino Sellos 2")
+        self._crear_factura_aplicada("FACT-GAR-002A", producto["id"], proveedor_id=casanova["id"], cantidad=5, precio_unitario=4000)
+        self._crear_factura_aplicada("FACT-GAR-002B", producto["id"], proveedor_id=chino["id"], cantidad=5, precio_unitario=1500)
+        cliente = self._crear_cliente("Cliente garantia B")
+        garantia = self._crear_garantia(cliente["id"])
+
+        resp = self.client.post(
+            f"/api/operativo/garantias/{garantia['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 1, "proveedor_id": casanova["id"]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["costo_unitario"], 4000)
+
+        stock_actual = self._stock_proveedores(producto["id"])
+        por_proveedor = {b["proveedor_id"]: b["cantidad"] for b in stock_actual["proveedores"]}
+        self.assertEqual(por_proveedor[casanova["id"]], 4)
+        self.assertEqual(por_proveedor[chino["id"]], 5)
+
+
 if __name__ == "__main__":
     unittest.main()

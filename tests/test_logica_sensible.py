@@ -772,6 +772,44 @@ class TestOperativo(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 409)
 
+    def test_orden_entregada_no_admite_eliminar_items(self):
+        """Hallazgo #16 del informe de revisión: a diferencia de agregar un
+        ítem (bloqueado si la orden está cerrada, ver test de arriba),
+        eliminar un ítem no tenía esa misma protección -- se podía borrar
+        un repuesto de una orden ya entregada y el stock volvía como si la
+        pieza jamás se hubiera usado, aunque siguiera instalada en el
+        vehículo ya entregado."""
+        producto = self._crear_producto_http("Repuesto para orden - no eliminar si cerrada", 10, 5000)
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        resp_item = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": producto["id"], "cantidad": 3},
+        )
+        self.assertEqual(resp_item.status_code, 201, resp_item.get_data(as_text=True))
+        item_id = resp_item.get_json()["id"]
+        stock_antes = self.client.get(f"/api/productos/{producto['id']}").get_json()["stock_disponible"]
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+
+        resp_del = self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item_id}")
+        self.assertEqual(resp_del.status_code, 409, resp_del.get_data(as_text=True))
+
+        # El ítem sigue existiendo y el stock NO volvió -- el repuesto sigue
+        # instalado en el vehículo ya entregado.
+        detalle = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertTrue(any(it["id"] == item_id for it in detalle["items"]))
+        stock_despues = self.client.get(f"/api/productos/{producto['id']}").get_json()["stock_disponible"]
+        self.assertAlmostEqual(stock_despues, stock_antes, delta=0.01)
+
+        # Reabriendo la orden, eliminar SÍ debe volver a funcionar (mismo
+        # criterio que agregar ítems).
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "reparacion"})
+        resp_del_ok = self.client.delete(f"/api/operativo/ordenes/{orden['id']}/items/{item_id}")
+        self.assertEqual(resp_del_ok.status_code, 200, resp_del_ok.get_data(as_text=True))
+        stock_final = self.client.get(f"/api/productos/{producto['id']}").get_json()["stock_disponible"]
+        self.assertAlmostEqual(stock_final - stock_antes, 3, delta=0.01)
+
     def test_mano_de_obra_con_iva_y_detalle_de_trabajo_externo(self):
         # Trabajo subcontratado (ej. "programación electrónica por Lucas
         # Medina") que se cobra con IVA: el costo real que sale del taller
@@ -920,6 +958,34 @@ class TestOperativoFase35(unittest.TestCase):
         resp2 = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"estado": "enviado"})
         self.assertEqual(resp2.status_code, 200, resp2.get_data(as_text=True))
         self.assertEqual(resp2.get_json()["estado"], "reparacion")
+
+    def test_presupuesto_marcado_aprobado_no_retrocede_una_orden_ya_avanzada(self):
+        """Hallazgo #19 del informe de revisión: el sistema ya evitaba que
+        marcar el presupuesto "enviado" retrocediera una orden que había
+        avanzado más allá de "esperando_aprobacion" (ver el test de
+        arriba), pero esa misma protección le faltaba a "aprobado" -- una
+        orden que ya estaba en 'listo' (control de calidad hecho) podía
+        saltar de vuelta a 'reparación' solo porque se aprobó un ítem
+        adicional del presupuesto, deshaciendo visualmente el trabajo ya
+        avanzado."""
+        cliente = self._crear_cliente()
+        orden = self._crear_orden(cliente["id"])
+        # Llega hasta 'listo' por el camino normal.
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"estado": "aprobado"})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "control_calidad"})
+        resp_listo = self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "listo"})
+        self.assertEqual(resp_listo.get_json()["estado"], "listo")
+
+        # Se agrega un ítem nuevo al presupuesto y se vuelve a marcar
+        # "aprobado" (ej. el cliente aceptó un adicional) -- la orden NO
+        # debería retroceder a 'reparación', sigue en 'listo'.
+        self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/presupuesto/items",
+            json={"tipo": "mano_obra", "descripcion": "Adicional", "cantidad": 1, "precio_unitario": 5000},
+        )
+        resp2 = self.client.put(f"/api/operativo/ordenes/{orden['id']}/presupuesto", json={"estado": "aprobado"})
+        self.assertEqual(resp2.status_code, 200, resp2.get_data(as_text=True))
+        self.assertEqual(resp2.get_json()["estado"], "listo")
 
     def test_presupuesto_con_descuento_e_iva_calcula_el_total_correcto(self):
         cliente = self._crear_cliente()
@@ -2906,8 +2972,19 @@ class TestCuentasPorCobrar(unittest.TestCase):
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         return resp.get_json()
 
-    def _crear_orden(self, cliente_id):
-        resp = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente_id})
+    def _crear_orden(self, cliente_id, equipo_id=None):
+        payload = {"cliente_id": cliente_id}
+        if equipo_id is not None:
+            payload["equipo_id"] = equipo_id
+        resp = self.client.post("/api/operativo/ordenes", json=payload)
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_equipo(self, cliente_id, identificador="XX0000"):
+        resp = self.client.post(
+            "/api/operativo/equipos",
+            json={"cliente_id": cliente_id, "identificador": identificador, "marca": "Marca", "modelo": "Modelo"},
+        )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         return resp.get_json()
 
@@ -2998,6 +3075,56 @@ class TestCuentasPorCobrar(unittest.TestCase):
         cxc = self._cxc_de_orden(orden["id"])
         self.assertIsNotNone(cxc, "con un pago ya registrado, la CxC debe conservarse al reabrir")
         self.assertEqual(cxc["monto_total"], 50000)
+
+    def test_reabrir_una_orden_entregada_limpia_la_fecha_de_entrega_anterior(self):
+        """Hallazgo #17 del informe de revisión: reabrir una orden ya
+        entregada no borraba la fecha de la entrega anterior -- si esa OT
+        se volvía a entregar más adelante, el sistema seguía usando la
+        fecha de la PRIMERA entrega (para la CxC y los reportes de
+        capacidad semanal), pudiendo nacer una cuenta "vencida" el mismo
+        día en que se reentrega el auto."""
+        cliente = self._crear_cliente("Cliente fecha entrega - reabrir")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        entregada = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertIsNotNone(entregada["fecha_entrega_real"])
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "reparacion"})
+        reabierta = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertIsNone(reabierta["fecha_entrega_real"], "la fecha de la primera entrega debería limpiarse al reabrir")
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        reentregada = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        self.assertIsNotNone(reentregada["fecha_entrega_real"])
+
+    def test_reabrir_orden_entregada_respeta_un_solo_trabajo_abierto_por_vehiculo(self):
+        """Hallazgo #18 del informe de revisión: la regla de "un vehículo
+        no puede tener dos OT abiertas a la vez" se aplicaba al CREAR una
+        orden nueva (ver crear_orden), pero no al REABRIR una que ya
+        estaba cerrada -- se podía terminar con dos OT abiertas para el
+        mismo auto (una nueva y otra reabierta), confundiendo en cuál
+        cargar repuestos."""
+        cliente = self._crear_cliente("Cliente un solo trabajo - reabrir")
+        equipo = self._crear_equipo(cliente["id"], identificador="REABRIR-01")
+
+        orden_vieja = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden_vieja['id']}", json={"estado": "entregado"})
+
+        # El auto vuelve al taller por otro motivo: se crea una OT nueva
+        # (permitido, la vieja ya está entregada).
+        orden_nueva = self._crear_orden(cliente["id"], equipo_id=equipo["id"])
+        self.assertNotEqual(orden_nueva["id"], orden_vieja["id"])
+
+        # Reabrir la OT vieja ahora debe bloquearse: el mismo vehículo ya
+        # tiene la OT nueva abierta.
+        resp = self.client.put(f"/api/operativo/ordenes/{orden_vieja['id']}", json={"estado": "reparacion"})
+        self.assertEqual(resp.status_code, 409, resp.get_data(as_text=True))
+        self.assertIn(str(orden_nueva["id"]), resp.get_json()["error"])
+
+        # Si se cancela la OT nueva, reabrir la vieja sí debe funcionar.
+        self.client.put(f"/api/operativo/ordenes/{orden_nueva['id']}", json={"estado": "cancelado"})
+        resp_ok = self.client.put(f"/api/operativo/ordenes/{orden_vieja['id']}", json={"estado": "reparacion"})
+        self.assertEqual(resp_ok.status_code, 200, resp_ok.get_data(as_text=True))
 
     def test_estado_de_la_cxc_pasa_a_parcial_y_luego_a_pagada_con_los_abonos(self):
         cliente = self._crear_cliente("Cliente CxC - abonos")

@@ -2692,13 +2692,45 @@ def editar_orden(orden_id):
         if estado not in ESTADOS_ORDEN:
             return jsonify({"error": f"Estado inválido. Usa uno de: {', '.join(ESTADOS_ORDEN)}"}), 400
 
+    # Reabrir una orden que estaba cerrada (entregado/cancelado) hacia
+    # cualquier estado abierto: misma validación de "un solo trabajo abierto
+    # por vehículo" que ya se aplica al crear una OT nueva (ver crear_orden
+    # más arriba) -- sin esto se podía terminar con dos OT abiertas a la vez
+    # para el mismo auto (una nueva y otra reabierta), hallazgo #18 del
+    # informe de revisión.
+    if row["estado"] in ESTADOS_CERRADOS and estado not in ESTADOS_CERRADOS and row["equipo_id"]:
+        placeholders_reapertura = ", ".join("?" for _ in ESTADOS_CERRADOS)
+        otra_abierta = db.execute(
+            f"SELECT id, estado FROM ordenes_trabajo WHERE equipo_id = ? AND id != ? AND estado NOT IN ({placeholders_reapertura}) "
+            "ORDER BY fecha_recepcion DESC LIMIT 1",
+            (row["equipo_id"], orden_id, *ESTADOS_CERRADOS),
+        ).fetchone()
+        if otra_abierta is not None:
+            return jsonify({
+                "error": f"No se puede reabrir esta orden: el vehículo ya tiene otra OT abierta (OT #{otra_abierta['id']}, "
+                         f"estado: {ESTADOS_LABEL.get(otra_abierta['estado'], otra_abierta['estado'])}). Cierra o cancela "
+                         "esa orden primero, o usa esa misma OT en vez de reabrir esta.",
+                "bloqueo_id": otra_abierta["id"],
+                "bloqueo_tipo": "orden",
+            }), 409
+
     fecha_entrega_real = row["fecha_entrega_real"]
-    if estado == "entregado" and not fecha_entrega_real:
-        # Se completa sola al pasar a "entregado" por primera vez, salvo que
-        # el cliente mande una fecha explícita (ej. una entrega retroactiva).
-        fecha_entrega_real = (data.get("fecha_entrega_real") or "").strip() or now_iso()
-    elif "fecha_entrega_real" in data:
+    if "fecha_entrega_real" in data:
+        # Corrección manual explícita (ej. entrega retroactiva): se respeta
+        # tal cual venga, tenga o no que ver con un cambio de estado.
         fecha_entrega_real = (data.get("fecha_entrega_real") or "").strip() or None
+    elif estado == "entregado":
+        if not fecha_entrega_real:
+            # Se completa sola al pasar a "entregado" por primera vez.
+            fecha_entrega_real = now_iso()
+    else:
+        # Reabrir una orden (o cualquier transición que la deje fuera de
+        # 'entregado') limpia la fecha de la entrega anterior -- mismo
+        # criterio que ya usa editar_garantia() con fecha_cierre. Sin esto,
+        # una orden reentregada más adelante seguía arrastrando la fecha de
+        # la primera entrega, pudiendo generar una cuenta por cobrar
+        # "vencida" el mismo día que se reentrega el auto (hallazgo #17).
+        fecha_entrega_real = None
 
     prioridad = row["prioridad"]
     if "prioridad" in data:
@@ -3137,9 +3169,22 @@ def agregar_item_orden(orden_id):
 def eliminar_item_orden(orden_id, item_id):
     db = get_db()
     _iniciar_transaccion_stock(db)  # puede devolver stock si el ítem era un repuesto
+    orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return jsonify({"error": "Orden no encontrada"}), 404
     item = db.execute("SELECT * FROM orden_items WHERE id = ? AND orden_id = ?", (item_id, orden_id)).fetchone()
     if item is None:
         return jsonify({"error": "Ítem no encontrado en esta orden"}), 404
+    # Misma protección que ya tiene agregar_item_orden() para órdenes
+    # cerradas -- sin esto, eliminar un repuesto de una orden ya entregada
+    # devolvía el stock como si la pieza jamás se hubiera usado, aunque
+    # siguiera instalada en el vehículo, y cambiaba retroactivamente el
+    # costo de una orden que ya estaba en reportes cerrados (hallazgo #16
+    # del informe de revisión).
+    if orden["estado"] in ESTADOS_CERRADOS:
+        return jsonify({"error": f"La orden está '{orden['estado']}' y no admite eliminar ítems (el repuesto "
+                                  "podría seguir instalado en el vehículo entregado). Reábrela primero cambiando "
+                                  "su estado si de verdad hay que corregirlo."}), 409
 
     if item["tipo"] == "repuesto" and item["producto_id"]:
         # Se devuelve el stock consumido, igual que una devolución normal
@@ -3361,7 +3406,11 @@ def actualizar_presupuesto(orden_id):
         responsable_diagnostico = usuario_actual().strip().upper()
 
     nuevo_estado_orden = row["estado"]
-    if estado_presupuesto == "aprobado" and row["presupuesto_estado"] != "aprobado":
+    if (
+        estado_presupuesto == "aprobado"
+        and row["presupuesto_estado"] != "aprobado"
+        and row["estado"] not in ESTADOS_POSTERIORES_A_APROBACION
+    ):
         nuevo_estado_orden = "reparacion"
     elif (
         estado_presupuesto == "enviado"
@@ -3374,6 +3423,13 @@ def actualizar_presupuesto(orden_id):
         # cliente responda. No se aplica si la orden ya iba más adelante
         # (ver ESTADOS_POSTERIORES_A_APROBACION) para no hacerla retroceder.
         nuevo_estado_orden = "esperando_aprobacion"
+    # Nota: la guardia "row['estado'] not in ESTADOS_POSTERIORES_A_APROBACION"
+    # de la rama "aprobado" (arriba) es la misma que ya tenía "enviado" --
+    # antes faltaba acá, así que aprobar un ítem adicional del presupuesto en
+    # una orden que ya iba más adelante (ej. en 'listo', con control de
+    # calidad hecho) la hacía retroceder a 'reparación' sin querer,
+    # deshaciendo visualmente el trabajo ya avanzado (hallazgo #19 del
+    # informe de revisión).
 
     ts = now_iso()
     db.execute(

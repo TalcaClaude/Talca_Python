@@ -4088,27 +4088,45 @@ def _llamar_claude_vision_factura(imagen_bytes, mime_type):
                     "items": {
                         "type": "object",
                         "properties": {
+                            "modelo": {
+                                "type": "string",
+                                "description": (
+                                    "El código de MODELO/FAMILIA de transmisión o caja de cambios al que "
+                                    "corresponde este repuesto -- ej. 'JF010', 'U140', '0AM', 'A6LF', '0BH'. "
+                                    "En este taller, CADA repuesto pertenece a un modelo de transmisión "
+                                    "específico, y ese código casi siempre viene como PRIMERA palabra de la "
+                                    "descripción del ítem en la factura (ej. en 'JF011 PULLEY SET', el modelo "
+                                    "es 'JF011'). Es un campo distinto de 'codigo' (que es el N° de parte/SKU "
+                                    "del fabricante, no el modelo de transmisión) -- una misma factura puede "
+                                    "traer ambos. CRÍTICO: transcribe el modelo EXACTAMENTE como está impreso, "
+                                    "letra por letra y dígito por dígito -- NUNCA lo 'corrijas' o redondees a "
+                                    "un modelo parecido que te suene más común o más conocido (ej. si dice "
+                                    "'JF011', jamás pongas 'JF010' aunque JF010 te parezca más habitual -- son "
+                                    "modelos distintos y confundirlos hace que el repuesto quede mal "
+                                    "identificado en el inventario). Vacío si esa línea no trae un modelo de "
+                                    "transmisión identificable."
+                                ),
+                            },
                             "codigo": {
                                 "type": "string",
                                 "description": (
-                                    "Código, N° de parte (part number) o SKU del producto, tal como aparece "
-                                    "impreso en la factura -- suele venir pegado o justo al lado del nombre "
-                                    "(ej. 'JF011', 'AB-2201', '4021-A'). Este campo es CRÍTICO: es lo que se "
-                                    "usa para identificar el producto exacto en el inventario, porque muchas "
-                                    "veces hay varios productos con nombres parecidos y solo el código los "
-                                    "distingue. Vacío únicamente si la factura de verdad no trae ningún código "
-                                    "para esa línea -- nunca lo dejes vacío solo porque ya lo pusiste dentro de "
-                                    "'descripcion'."
+                                    "Código o N° de parte (part number) del FABRICANTE del repuesto, tal como "
+                                    "aparece impreso en la factura -- suele ser un código largo, tipo SKU "
+                                    "(ej. '33710-NKC-7-FX', 'LUK0920006990', '073740'). Es DISTINTO del "
+                                    "'modelo' de transmisión (ver ese campo) -- este es el código propio del "
+                                    "fabricante de la pieza, no el modelo del vehículo/transmisión. Vacío si "
+                                    "esa línea no trae ningún código de fabricante."
                                 ),
                             },
                             "descripcion": {
                                 "type": "string",
                                 "description": (
                                     "Descripción del producto tal como aparece impresa en la factura, "
-                                    "COMPLETA -- si el código/N° de parte viene pegado al nombre (ej. 'JF011 "
-                                    "PULLEY SET'), inclúyelo también acá tal cual, aunque ya lo hayas puesto "
-                                    "por separado en el campo 'codigo'. Nunca resumas ni dejes solo una parte "
-                                    "del texto (ej. no reduzcas 'JF011 PULLEY SET' a solamente 'PULLEY SET')."
+                                    "COMPLETA -- si el modelo de transmisión o el código vienen pegados al "
+                                    "nombre (ej. 'JF011 PULLEY SET'), inclúyelos también acá tal cual, aunque "
+                                    "ya los hayas puesto por separado en los campos 'modelo'/'codigo'. Nunca "
+                                    "resumas ni dejes solo una parte del texto (ej. no reduzcas 'JF011 PULLEY "
+                                    "SET' a solamente 'PULLEY SET')."
                                 ),
                             },
                             "cantidad": {"type": "number"},
@@ -4134,13 +4152,17 @@ def _llamar_claude_vision_factura(imagen_bytes, mime_type):
                 {
                     "type": "text",
                     "text": (
-                        "Esta es una foto de una factura de compra de un taller mecánico. "
-                        "Extrae los datos usando la herramienta extraer_factura. Presta ESPECIAL atención al "
-                        "código o N° de parte de cada producto (campo 'codigo') -- es el dato más importante "
-                        "de cada línea porque es lo que permite identificar exactamente qué producto es, y es "
-                        "un error común quedarse solo con el nombre genérico y perder el código. Si algún dato "
-                        "no se alcanza a leer con confianza (letra borrosa, foto cortada, etc.), déjalo vacío "
-                        "en vez de inventarlo — alguien va a revisar y corregir a mano antes de guardar."
+                        "Esta es una foto de una factura de compra de un taller mecánico especializado en "
+                        "transmisiones/cajas de cambio. Extrae los datos usando la herramienta extraer_factura. "
+                        "Presta ESPECIAL atención al campo 'modelo' (el modelo de transmisión, ej. JF010, U140, "
+                        "0AM, A6LF, 0BH) de cada línea -- es el dato MÁS importante para identificar el "
+                        "producto correcto en el inventario del taller, y hay que transcribirlo EXACTAMENTE "
+                        "como está impreso, sin redondearlo a un modelo parecido que te resulte más familiar "
+                        "(dos modelos que se ven casi iguales, ej. JF010 y JF011, son productos completamente "
+                        "distintos para este taller). También presta atención al campo 'codigo' (N° de parte "
+                        "del fabricante), que es un dato distinto del modelo. Si algún dato no se alcanza a "
+                        "leer con confianza (letra borrosa, foto cortada, etc.), déjalo vacío en vez de "
+                        "inventarlo o adivinarlo — alguien va a revisar y corregir a mano antes de guardar."
                     ),
                 },
             ],
@@ -4285,27 +4307,76 @@ def _llamar_claude_vision_clasificar_foto_whatsapp(imagen_bytes, mime_type):
     raise RuntimeError("La IA no devolvió una respuesta en el formato esperado. Intenta con una foto más nítida.")
 
 
-def _buscar_producto_por_texto(db, texto, codigo=None):
+UMBRAL_MATCH_TEXTO = 0.45
+
+
+def _mejor_match_por_texto(texto_norm, candidatos, campo="nombre"):
+    """Núcleo del comparador difuso: entre 'candidatos' (filas de
+    productos), devuelve el que mejor calce contra 'texto_norm' según
+    difflib, o None si ninguno supera UMBRAL_MATCH_TEXTO. 'campo' es qué
+    columna del producto comparar (mezclada con codigo_interno para no
+    perder esa señal) -- separado de _buscar_producto_por_texto para
+    poder reusarlo tanto contra el catálogo completo como contra un
+    subconjunto ya acotado por modelo de transmisión (ver más abajo)."""
+    mejor = None
+    mejor_score = 0.0
+    for p in candidatos:
+        candidato = f"{p[campo] or ''} {p['codigo_interno'] or ''}".strip().upper()
+        if not candidato:
+            continue
+        score = difflib.SequenceMatcher(None, texto_norm, candidato).ratio()
+        if score > mejor_score:
+            mejor_score = score
+            mejor = p
+    if mejor is not None and mejor_score >= UMBRAL_MATCH_TEXTO:
+        return mejor
+    return None
+
+
+def _buscar_producto_por_texto(db, texto, codigo=None, modelo=None):
     """Intenta encontrar, entre los productos existentes, el que mejor
     calza con una descripción de texto libre (típicamente sacada de una
     foto de factura escaneada por IA — ahí no hay ID ni modelo/detalle
     exactos como en la carga masiva por Excel, solo el nombre que puso el
-    proveedor).
+    proveedor). Se intenta, en este orden, la señal más confiable primero:
 
-    Si se pasa 'codigo' (el código/N° de parte que la IA haya leído por
-    separado, ver _llamar_claude_vision_factura), se intenta PRIMERO un
-    match EXACTO contra productos.codigo_interno (que es único en la BD,
-    ver idx_codigo_interno_unico) -- es una señal muchísimo más confiable
-    que comparar texto libre, porque dos productos pueden tener nombres
-    casi idénticos ('Pulley Set' genérico) pero nunca el mismo código. Si
-    hay un código y calza exacto con un producto, se devuelve ese de
-    inmediato sin pasar por el puntaje de texto de más abajo.
+    1. 'codigo' (el N° de parte/SKU del fabricante que la IA haya leído
+       por separado): match EXACTO contra productos.codigo_interno (única
+       en la BD, ver idx_codigo_interno_unico). Si calza, se devuelve ese
+       producto de inmediato -- es la señal más fuerte posible.
 
-    Si no hay código o no matcheó ninguno, cae al comparador de texto
-    simple (difflib) de siempre, sin dependencias nuevas. Umbral
-    conservador a propósito: es mejor dejar la línea sin matchear (y que
-    la persona la busque a mano en el autocompletar) que asignarle el
-    producto equivocado sin que se note."""
+    2. 'modelo' (el modelo de transmisión, ej. 'JF010', que la IA también
+       lee por separado -- ver _llamar_claude_vision_factura): en este
+       taller cada producto pertenece a un modelo de transmisión exacto
+       (columna productos.categoria, ver nombre_automatico en core.py), y
+       dos modelos que se ESCRIBEN parecido (ej. JF010 vs JF011) pueden
+       ser productos totalmente distintos -- por eso acá NUNCA se hace
+       fuzzy: si 'modelo' viene y NO calza EXACTO con ningún
+       productos.categoria existente, la línea queda sin matchear de
+       inmediato, sin caer al comparador de texto general de más abajo
+       (antes SÍ cateaba: 'JF011 pulley set' terminaba emparejado con
+       'JF010 - PULLEY SET' del catálogo solo porque el texto se parecía
+       mucho, un error grave -- confundir el modelo de transmisión es
+       peor que no matchear nada). Si 'modelo' SÍ calza exacto, se acota
+       la búsqueda a solo los productos de ese modelo y se compara el
+       texto contra el detalle (columna 'modelo' en la BD, la que el
+       taller ve como "Detalle") de ESE subconjunto nada más -- comparar
+       ya sin el modelo de transmisión de por medio (que ambos lados
+       comparten y sólo infla el puntaje de parecido) es lo que permite
+       distinguir, por ejemplo, "0BH clutch" de "0BH - TCU": aunque
+       compartan el modelo 0BH, "clutch" y "TCU" no se parecen en nada
+       como texto, así que correctamente no matchea.
+
+    3. Si no hay 'modelo' (la IA no distinguió ninguno en esa línea), cae
+       al comparador de texto simple contra TODO el catálogo, como
+       siempre se hizo -- es la señal menos confiable, así que solo se
+       usa cuando no hay nada mejor.
+
+    Umbral conservador a propósito en cada paso de texto: es mejor dejar
+    la línea sin matchear (y que la persona la busque a mano en el
+    autocompletar, viendo siempre lo que se leyó -- ver 'texto_original'/
+    'codigo_leido'/'modelo_leido' en las pantallas de revisión) que
+    asignarle el producto equivocado sin que se note."""
     codigo_norm = (codigo or "").strip().upper()
     if codigo_norm:
         por_codigo = db.execute(
@@ -4315,24 +4386,28 @@ def _buscar_producto_por_texto(db, texto, codigo=None):
             return por_codigo
 
     texto_norm = (texto or "").strip().upper()
+
+    modelo_norm = (modelo or "").strip().upper()
+    if modelo_norm:
+        familia = db.execute(
+            "SELECT * FROM productos WHERE upper(trim(categoria)) = ?", (modelo_norm,)
+        ).fetchall()
+        if not familia:
+            # El modelo que leyó la IA no existe en el catálogo -- podría
+            # ser un modelo nuevo que el taller nunca ha cargado, o un
+            # dígito mal leído (JF011 vs JF010). En cualquiera de los dos
+            # casos, adivinar es peligroso: se deja sin matchear a
+            # propósito, NO se cae al comparador de texto general.
+            return None
+        if not texto_norm:
+            return None
+        return _mejor_match_por_texto(texto_norm, familia, campo="modelo")
+
     if not texto_norm:
         return None
 
     productos = db.execute("SELECT * FROM productos").fetchall()
-    mejor = None
-    mejor_score = 0.0
-    for p in productos:
-        candidato = f"{p['nombre'] or ''} {p['codigo_interno'] or ''}".strip().upper()
-        if not candidato:
-            continue
-        score = difflib.SequenceMatcher(None, texto_norm, candidato).ratio()
-        if score > mejor_score:
-            mejor_score = score
-            mejor = p
-
-    if mejor is not None and mejor_score >= 0.45:
-        return mejor
-    return None
+    return _mejor_match_por_texto(texto_norm, productos, campo="nombre")
 
 
 @app.route("/api/facturas/carga-masiva/plantilla", methods=["GET"])
@@ -4881,7 +4956,8 @@ def escanear_foto_factura():
     for i, linea in enumerate(extraido.get("lineas") or [], start=1):
         descripcion = (linea.get("descripcion") or "").strip()
         codigo_leido = (linea.get("codigo") or "").strip()
-        producto = _buscar_producto_por_texto(db, descripcion, codigo_leido)
+        modelo_leido = (linea.get("modelo") or "").strip()
+        producto = _buscar_producto_por_texto(db, descripcion, codigo_leido, modelo_leido)
         try:
             cantidad = int(linea.get("cantidad"))
         except (TypeError, ValueError):
@@ -4897,12 +4973,13 @@ def escanear_foto_factura():
             "cantidad": cantidad,
             "precio_unitario": precio,
             "errores": [],
-            # Texto (y código) tal como lo leyó la IA en la foto — se
-            # muestra SIEMPRE en la previsualización, matcheó o no, para
+            # Texto (código y modelo) tal como lo leyó la IA en la foto —
+            # se muestra SIEMPRE en la previsualización, matcheó o no, para
             # que la persona pueda comparar contra el producto asignado
             # antes de confirmar (un match automático puede estar mal).
             "texto_original": descripcion,
             "codigo_leido": codigo_leido,
+            "modelo_leido": modelo_leido,
         })
 
     _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes)
@@ -4980,7 +5057,8 @@ def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes,
     for linea in extraido.get("lineas") or []:
         descripcion = (linea.get("descripcion") or "").strip()
         codigo_leido = (linea.get("codigo") or "").strip()
-        producto = _buscar_producto_por_texto(db, descripcion, codigo_leido)
+        modelo_leido = (linea.get("modelo") or "").strip()
+        producto = _buscar_producto_por_texto(db, descripcion, codigo_leido, modelo_leido)
         try:
             cantidad = int(linea.get("cantidad"))
         except (TypeError, ValueError):
@@ -4994,13 +5072,14 @@ def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes,
             "producto_nombre": row_to_dict(producto)["nombre"] if producto else None,
             "cantidad": cantidad,
             "precio_unitario": precio,
-            # Texto (y código) tal como lo leyó la IA -- se guarda SIEMPRE,
-            # matcheó o no, para que quien revise el pendiente vea con qué
-            # se comparó antes de confiar en el producto asignado (ver
-            # pfd-lineas en finanzas.js / afp-tbody-lineas en
+            # Texto (código y modelo) tal como lo leyó la IA -- se guarda
+            # SIEMPRE, matcheó o no, para que quien revise el pendiente vea
+            # con qué se comparó antes de confiar en el producto asignado
+            # (ver pfd-lineas en finanzas.js / afp-tbody-lineas en
             # alerta_facturas_pendientes.js).
             "texto_original": descripcion,
             "codigo_leido": codigo_leido,
+            "modelo_leido": modelo_leido,
         })
 
     if not lineas_validadas:

@@ -1670,7 +1670,7 @@ async function abrirDetalleFacturaPendiente(id) {
     // desapercibido -- ahora siempre queda a la vista para comparar contra
     // el producto asignado antes de aprobar.
     const leido = l.texto_original
-      ? `<div class="pfd-linea-leido">Leído: "${escapeHtml(l.texto_original)}"${l.codigo_leido ? ` · código: "${escapeHtml(l.codigo_leido)}"` : ""}</div>`
+      ? `<div class="pfd-linea-leido">Leído: "${escapeHtml(l.texto_original)}"${l.modelo_leido ? ` · modelo: "${escapeHtml(l.modelo_leido)}"` : ""}${l.codigo_leido ? ` · código: "${escapeHtml(l.codigo_leido)}"` : ""}</div>`
       : "";
     const nombreCelda = sinResolver
       ? `⚠️ Producto nuevo, falta crear${leido}`
@@ -1813,10 +1813,11 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
             Crear este producto en Logística
           </button>
           <div class="pfr-linea-crear-form" style="display:none;margin-top:6px">
-            <input type="text" class="pfr-crear-codigo-interno" placeholder="Código interno / N° de parte (ej. JF011)"
+            <input type="text" class="pfr-crear-categoria" placeholder="Modelo (ej. JF010)"
+                   value="${linea && linea.modelo_leido ? escapeHtml(linea.modelo_leido) : ""}" style="margin-bottom:4px">
+            <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. Pulley Set)" style="margin-bottom:4px">
+            <input type="text" class="pfr-crear-codigo-interno" placeholder="Código interno / N° de parte del fabricante (ej. 33710-NKC-7-FX)"
                    value="${linea && linea.codigo_leido ? escapeHtml(linea.codigo_leido) : ""}" style="margin-bottom:4px">
-            <input type="text" class="pfr-crear-categoria" placeholder="Modelo" style="margin-bottom:4px">
-            <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px">
             <button type="button" class="btn btn-primario btn-chico pfr-crear-confirmar">Crear y vincular</button>
           </div>
         ` : ""}
@@ -1895,9 +1896,12 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
   if (btnCrear) {
     btnCrear.addEventListener("click", () => {
       formCrear.style.display = formCrear.style.display === "none" ? "block" : "none";
-      if (formCrear.style.display === "block" && !div.querySelector(".pfr-crear-categoria").value) {
-        // Ayuda: si Finanzas ya tipeó una descripción libre, se usa como
-        // punto de partida para el detalle -- Bodega igual puede corregirla.
+      // Ayuda: si Finanzas ya tipeó (o la IA leyó) una descripción libre y
+      // el campo Detalle todavía está vacío, se usa como punto de partida
+      // -- Bodega igual puede corregirla. Independiente de si "Modelo" ya
+      // viene prellenado con lo que leyó la IA (ver modelo_leido más
+      // arriba) o no.
+      if (formCrear.style.display === "block" && !div.querySelector(".pfr-crear-modelo").value) {
         div.querySelector(".pfr-crear-modelo").value = inputNombreNuevo.value || "";
       }
     });
@@ -2268,7 +2272,7 @@ function cmfRenderPreview(resumen) {
                       <option value="">Selecciona un producto…</option>
                       ${state.cmfProductos.map(p => `<option value="${p.id}" ${p.id === l.producto_id ? "selected" : ""}>#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("")}
                     </select>
-                    ${l.texto_original ? `<p class="ayuda-inline">Leído: "${escapeHtml(l.texto_original)}"</p>` : ""}
+                    ${l.texto_original ? `<p class="ayuda-inline">Leído: "${escapeHtml(l.texto_original)}"${l.modelo_leido ? ` · modelo: "${escapeHtml(l.modelo_leido)}"` : ""}${l.codigo_leido ? ` · código: "${escapeHtml(l.codigo_leido)}"` : ""}</p>` : ""}
                   </td>
                   <td class="num"><input type="number" class="cmf-linea-cantidad" min="1" value="${l.cantidad ?? ""}" style="width:70px"></td>
                   <td class="num"><input type="number" class="cmf-linea-precio" min="0" step="1" value="${l.precio_unitario ?? ""}" style="width:90px"></td>

@@ -261,7 +261,7 @@ function afpAbrirDetalle(id) {
     // el código se perdió al leer la foto y matcheó por texto contra el
     // producto incorrecto) pasaba desapercibido en esta revisión.
     const leido = l.texto_original
-      ? `<div class="pfd-linea-leido">Leído: "${afpEscapeHtml(l.texto_original)}"${l.codigo_leido ? ` · código: "${afpEscapeHtml(l.codigo_leido)}"` : ""}</div>`
+      ? `<div class="pfd-linea-leido">Leído: "${afpEscapeHtml(l.texto_original)}"${l.modelo_leido ? ` · modelo: "${afpEscapeHtml(l.modelo_leido)}"` : ""}${l.codigo_leido ? ` · código: "${afpEscapeHtml(l.codigo_leido)}"` : ""}</div>`
       : "";
     let nombreCelda;
     if (sinResolver) {
@@ -278,9 +278,9 @@ function afpAbrirDetalle(id) {
               Crear este producto en Logística
             </button>
             <div class="afp-form-crear-producto" data-indice="${idx}" style="display:none;margin-top:6px">
-              <input type="text" class="afp-crear-codigo-interno" placeholder="Código interno / N° de parte (ej. JF011)" value="${l.codigo_leido ? afpEscapeHtml(l.codigo_leido) : ""}" style="margin-bottom:4px">
-              <input type="text" class="afp-crear-categoria" placeholder="Modelo" style="margin-bottom:4px">
-              <input type="text" class="afp-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px" value="${l.texto_original ? afpEscapeHtml(l.texto_original) : ""}">
+              <input type="text" class="afp-crear-categoria" placeholder="Modelo (ej. JF010)" value="${l.modelo_leido ? afpEscapeHtml(l.modelo_leido) : ""}" style="margin-bottom:4px">
+              <input type="text" class="afp-crear-modelo" placeholder="Detalle (ej. Pulley Set)" style="margin-bottom:4px" value="${l.texto_original ? afpEscapeHtml(l.texto_original) : ""}">
+              <input type="text" class="afp-crear-codigo-interno" placeholder="Código interno / N° de parte del fabricante (ej. 33710-NKC-7-FX)" value="${l.codigo_leido ? afpEscapeHtml(l.codigo_leido) : ""}" style="margin-bottom:4px">
               <button type="button" class="btn btn-primario btn-chico afp-btn-crear-confirmar" data-indice="${idx}">Crear y vincular</button>
             </div>
           ` : ""}

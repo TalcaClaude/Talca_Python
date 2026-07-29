@@ -47,15 +47,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app as taller_app  # noqa: E402  (import después de fijar DB_PATH a propósito)
 
 
-def _crear_producto(db, nombre, stock_disponible=0, costo_compra=0.0, stock_minimo=0, codigo_interno=""):
+def _crear_producto(db, nombre, stock_disponible=0, costo_compra=0.0, stock_minimo=0, codigo_interno="",
+                     categoria="", modelo=""):
     ts = taller_app.now_iso()
     cur = db.execute(
         """
         INSERT INTO productos (
-            nombre, codigo_interno, stock_disponible, costo_compra, stock_minimo, creado_en, actualizado_en
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            nombre, codigo_interno, categoria, modelo, stock_disponible, costo_compra, stock_minimo,
+            creado_en, actualizado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (nombre, codigo_interno, stock_disponible, costo_compra, stock_minimo, ts, ts),
+        (nombre, codigo_interno, categoria, modelo, stock_disponible, costo_compra, stock_minimo, ts, ts),
     )
     db.commit()
     return cur.lastrowid
@@ -1943,6 +1945,98 @@ class TestBuscarProductoPorTexto(unittest.TestCase):
             self.assertEqual(taller_app._buscar_producto_por_texto(db, nombre, "")["id"], producto_id)
             self.assertEqual(taller_app._buscar_producto_por_texto(db, nombre, None)["id"], producto_id)
 
+    # -- Matching por "modelo" (modelo de transmisión, columna 'categoria' en
+    # la BD -- ver nombre_automatico en core.py) -- caso real reportado por
+    # el taller: la IA lee "JF011 pulley set" pero el catálogo solo tiene
+    # "JF010 - PULLEY SET" (un modelo DISTINTO, un dígito de diferencia). El
+    # comparador de texto plano de antes matcheaba igual (altísima
+    # similitud entre "JF011" y "JF010"), asignando el repuesto al modelo
+    # de transmisión equivocado -- un error grave para un taller de
+    # transmisiones. Estos tests fijan el comportamiento correcto: el
+    # modelo nunca se compara de forma difusa, solo exacto o nada. --
+
+    def test_modelo_exacto_acota_la_busqueda_y_matchea_el_detalle_correcto_de_esa_familia(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            correcto_id = _crear_producto(
+                db, "JF010 - PULLEY SET TESTMODELOFAMILIA", categoria="JF010TMF", modelo="PULLEY SET TESTMODELOFAMILIA",
+                stock_disponible=5,
+            )
+            # Mismo modelo de transmisión, pieza distinta -- no debe
+            # confundirse aunque comparta el prefijo "JF010TMF".
+            _crear_producto(
+                db, "JF010 - VALVE BODY TESTMODELOFAMILIA", categoria="JF010TMF", modelo="VALVE BODY TESTMODELOFAMILIA",
+                stock_disponible=5,
+            )
+            producto = taller_app._buscar_producto_por_texto(
+                db, "JF010TMF PULLEY SET TESTMODELOFAMILIA", modelo="JF010TMF"
+            )
+            self.assertIsNotNone(producto)
+            self.assertEqual(producto["id"], correcto_id)
+
+    def test_modelo_que_no_existe_en_el_catalogo_no_matchea_aunque_el_texto_se_parezca_mucho(self):
+        # El caso exacto reportado: "JF011" (typo/modelo distinto) no
+        # existe en el catálogo, solo "JF010" -- por muy parecido que sea
+        # el texto, NO se puede caer al comparador de texto general y
+        # adivinar "JF010": eso es justo el bug que se está corrigiendo.
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            _crear_producto(
+                db, "JF010 - PULLEY SET TESTMODELOINEXISTENTE", categoria="JF010TMI", modelo="PULLEY SET TESTMODELOINEXISTENTE",
+                stock_disponible=5,
+            )
+            producto = taller_app._buscar_producto_por_texto(
+                db, "JF011TMI PULLEY SET TESTMODELOINEXISTENTE", modelo="JF011TMI"
+            )
+            self.assertIsNone(producto)
+
+    def test_modelo_exacto_pero_detalle_sin_relacion_dentro_de_la_familia_no_matchea(self):
+        # Caso real reportado: "0BH clutch" terminó matcheado a "0BH -
+        # TCU" (un repuesto totalmente distinto: embrague vs. unidad de
+        # control electrónica) solo porque compartían el prefijo del
+        # modelo. Acotar por modelo exacto y comparar el detalle SIN ese
+        # prefijo (que ya no debería inflar el puntaje) tiene que rechazar
+        # este match, no forzarlo. (Ojo: a propósito NO se repite ningún
+        # sufijo de texto entre el producto y la búsqueda -- compartir un
+        # marcador largo "para no chocar entre tests" infla el parecido de
+        # texto y falsea el resultado; la unicidad acá la da el código de
+        # modelo, que ya es exclusivo de este test.)
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            _crear_producto(
+                db, "0BHZTDR - TCU", categoria="0BHZTDR", modelo="TCU",
+                stock_disponible=5,
+            )
+            producto = taller_app._buscar_producto_por_texto(
+                db, "0BHZTDR CLUTCH", modelo="0BHZTDR"
+            )
+            self.assertIsNone(producto)
+
+    def test_modelo_vacio_cae_al_comparador_de_texto_general_de_siempre(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            nombre = "FILTRO DE ACEITE TESTMODELOVACIO"
+            producto_id = _crear_producto(db, nombre, stock_disponible=4)
+            self.assertEqual(taller_app._buscar_producto_por_texto(db, nombre, modelo="")["id"], producto_id)
+            self.assertEqual(taller_app._buscar_producto_por_texto(db, nombre, modelo=None)["id"], producto_id)
+
+    def test_codigo_exacto_sigue_ganando_por_encima_del_modelo(self):
+        # El código de fabricante (match exacto contra codigo_interno) es
+        # la señal más fuerte de todas -- tiene que ganarle incluso a un
+        # modelo que apunta a una familia distinta (ej. porque la IA leyó
+        # mal el modelo pero el código sí lo tenía cargado el taller).
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            correcto_id = _crear_producto(
+                db, "PULLEY SET TESTPRIORIDADCODIGO", codigo_interno="SKU-PRIORIDAD-1",
+                categoria="MODELOA-PRIORIDAD", modelo="PULLEY SET TESTPRIORIDADCODIGO", stock_disponible=5,
+            )
+            producto = taller_app._buscar_producto_por_texto(
+                db, "PULLEY SET TESTPRIORIDADCODIGO", codigo="SKU-PRIORIDAD-1", modelo="MODELOB-PRIORIDAD-INEXISTENTE"
+            )
+            self.assertIsNotNone(producto)
+            self.assertEqual(producto["id"], correcto_id)
+
 
 class TestEscanearFotoFactura(unittest.TestCase):
     """El endpoint /api/facturas/escanear-foto no llama a la IA real en los
@@ -2060,6 +2154,44 @@ class TestEscanearFotoFactura(unittest.TestCase):
         linea = resp.get_json()["facturas"][0]["lineas"][0]
         self.assertEqual(linea["producto_id"], correcto_id)
         self.assertEqual(linea["codigo_leido"], "JF011FT")
+
+    def test_foto_con_modelo_inexistente_no_asigna_el_modelo_parecido_del_catalogo(self):
+        # Reproduce el caso real reportado por el taller de punta a punta:
+        # una factura de importación trae "JF011 pulley set" (código de
+        # fabricante largo, sin relación con el catálogo del taller) --
+        # el catálogo solo tiene "JF010", un modelo de transmisión
+        # DISTINTO aunque el texto se parezca mucho. La línea tiene que
+        # quedar sin matchear, nunca asignada a JF010 por error.
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            _crear_producto(
+                db, "JF010 - PULLEY SET TESTFOTOMODELOE2E", categoria="JF010FME2E", modelo="PULLEY SET TESTFOTOMODELOE2E",
+                stock_disponible=5,
+            )
+        respuesta_ia = {
+            "numero_factura": "FOTO-MODELO-001",
+            "fecha": "2026-07-08",
+            "proveedor_nombre": "Proveedor Foto Modelo Test",
+            "proveedor_rut": "",
+            "lineas": [{
+                "modelo": "JF011FME2E",
+                "codigo": "33710-NKC-7-FX",
+                "descripcion": "JF011FME2E PULLEY SET TESTFOTOMODELOE2E",
+                "cantidad": 1,
+                "precio_unitario": 12000,
+            }],
+        }
+        with patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self._subir_foto()
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        linea = resp.get_json()["facturas"][0]["lineas"][0]
+        self.assertIsNone(linea["producto_id"])
+        self.assertEqual(linea["modelo_leido"], "JF011FME2E")
+        # Aunque no matcheó, el texto/modelo/código leídos quedan
+        # guardados para mostrarlos en la previsualización -- así Bodega
+        # ve exactamente qué leyó la IA y puede decidir a mano.
+        self.assertEqual(linea["texto_original"], "JF011FME2E PULLEY SET TESTFOTOMODELOE2E")
+        self.assertEqual(linea["codigo_leido"], "33710-NKC-7-FX")
 
     def test_corregir_linea_y_proveedor_deja_la_factura_lista_para_confirmar(self):
         with taller_app.app.app_context():

@@ -1661,9 +1661,20 @@ async function abrirDetalleFacturaPendiente(id) {
 
   document.getElementById("pfd-lineas").innerHTML = lineasParaMostrar.map(l => {
     const sinResolver = l.producto_id == null;
+    // "Leído: ..." se muestra SIEMPRE que haya texto_original (viene de
+    // una foto leída por IA -- WhatsApp o "Escanear foto"; las líneas
+    // tipeadas a mano/Excel no traen este campo), matcheó producto o no.
+    // Antes solo se mostraba cuando no matcheaba nada, así que un match
+    // automático equivocado (ej. el código del producto se perdió al leer
+    // la foto y matcheó por texto contra el producto incorrecto) pasaba
+    // desapercibido -- ahora siempre queda a la vista para comparar contra
+    // el producto asignado antes de aprobar.
+    const leido = l.texto_original
+      ? `<div class="pfd-linea-leido">Leído: "${escapeHtml(l.texto_original)}"${l.codigo_leido ? ` · código: "${escapeHtml(l.codigo_leido)}"` : ""}</div>`
+      : "";
     const nombreCelda = sinResolver
-      ? `⚠️ Producto nuevo, falta crear${l.texto_original ? ` — "${escapeHtml(l.texto_original)}"` : ""}`
-      : (escapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`);
+      ? `⚠️ Producto nuevo, falta crear${leido}`
+      : `${escapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}${leido}`;
     return `
     <tr>
       <td>${nombreCelda}</td>
@@ -1802,7 +1813,9 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
             Crear este producto en Logística
           </button>
           <div class="pfr-linea-crear-form" style="display:none;margin-top:6px">
-            <input type="text" class="pfr-crear-categoria" placeholder="Modelo (ej. JF011)" style="margin-bottom:4px">
+            <input type="text" class="pfr-crear-codigo-interno" placeholder="Código interno / N° de parte (ej. JF011)"
+                   value="${linea && linea.codigo_leido ? escapeHtml(linea.codigo_leido) : ""}" style="margin-bottom:4px">
+            <input type="text" class="pfr-crear-categoria" placeholder="Modelo" style="margin-bottom:4px">
             <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px">
             <button type="button" class="btn btn-primario btn-chico pfr-crear-confirmar">Crear y vincular</button>
           </div>
@@ -1889,6 +1902,7 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
       }
     });
     div.querySelector(".pfr-crear-confirmar").addEventListener("click", async () => {
+      const codigoInterno = div.querySelector(".pfr-crear-codigo-interno").value.trim();
       const categoria = div.querySelector(".pfr-crear-categoria").value.trim();
       const modelo = div.querySelector(".pfr-crear-modelo").value.trim();
       if (!categoria && !modelo) {
@@ -1898,7 +1912,7 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
       try {
         const data = await api(
           `/api/facturas/pendientes-recepcion/${ctx.pendienteId}/lineas/${ctx.indice}/crear-producto`,
-          { method: "POST", body: JSON.stringify({ categoria, modelo }) },
+          { method: "POST", body: JSON.stringify({ codigo_interno: codigoInterno, categoria, modelo }) },
         );
         toast(`Producto "${data.producto.nombre}" creado y vinculado a esta línea`);
         pfrProductosCache = [...pfrProductosCache, data.producto];

@@ -255,6 +255,14 @@ function afpAbrirDetalle(id) {
       </tr>`;
     }
     const sinResolver = l.producto_id == null;
+    // "Leído: ..." se muestra SIEMPRE que haya texto_original (viene de una
+    // foto leída por IA), matcheó producto o no -- antes solo se mostraba
+    // cuando no matcheaba nada, así que un match automático equivocado (ej.
+    // el código se perdió al leer la foto y matcheó por texto contra el
+    // producto incorrecto) pasaba desapercibido en esta revisión.
+    const leido = l.texto_original
+      ? `<div class="pfd-linea-leido">Leído: "${afpEscapeHtml(l.texto_original)}"${l.codigo_leido ? ` · código: "${afpEscapeHtml(l.codigo_leido)}"` : ""}</div>`
+      : "";
     let nombreCelda;
     if (sinResolver) {
       // Bodega resuelve el producto sin salir de este mismo modal de
@@ -263,20 +271,22 @@ function afpAbrirDetalle(id) {
       // para crear productos es Bodega, no Finanzas.
       nombreCelda = `
         <div class="afp-linea-sin-resolver">
-          <div>⚠️ Producto nuevo, falta crear${l.texto_original ? ` — "${afpEscapeHtml(l.texto_original)}"` : ""}</div>
+          <div>⚠️ Producto nuevo, falta crear</div>
+          ${leido}
           ${afpPuedeBodega ? `
             <button type="button" class="btn btn-secundario btn-chico afp-btn-crear-producto" data-indice="${idx}" style="margin-top:6px">
               Crear este producto en Logística
             </button>
             <div class="afp-form-crear-producto" data-indice="${idx}" style="display:none;margin-top:6px">
-              <input type="text" class="afp-crear-categoria" placeholder="Modelo (ej. JF011)" style="margin-bottom:4px">
+              <input type="text" class="afp-crear-codigo-interno" placeholder="Código interno / N° de parte (ej. JF011)" value="${l.codigo_leido ? afpEscapeHtml(l.codigo_leido) : ""}" style="margin-bottom:4px">
+              <input type="text" class="afp-crear-categoria" placeholder="Modelo" style="margin-bottom:4px">
               <input type="text" class="afp-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px" value="${l.texto_original ? afpEscapeHtml(l.texto_original) : ""}">
               <button type="button" class="btn btn-primario btn-chico afp-btn-crear-confirmar" data-indice="${idx}">Crear y vincular</button>
             </div>
           ` : ""}
         </div>`;
     } else {
-      nombreCelda = afpEscapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`;
+      nombreCelda = `${afpEscapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}${leido}`;
     }
     return `
     <tr>
@@ -298,6 +308,7 @@ function afpAbrirDetalle(id) {
     btn.addEventListener("click", async () => {
       const idx = parseInt(btn.dataset.indice, 10);
       const form = btn.closest(".afp-form-crear-producto");
+      const codigoInterno = form.querySelector(".afp-crear-codigo-interno").value.trim();
       const categoria = form.querySelector(".afp-crear-categoria").value.trim();
       const modelo = form.querySelector(".afp-crear-modelo").value.trim();
       if (!categoria && !modelo) {
@@ -307,7 +318,7 @@ function afpAbrirDetalle(id) {
       try {
         const data = await afpApi(`/api/facturas/pendientes-recepcion/${id}/lineas/${idx}/crear-producto`, {
           method: "POST",
-          body: JSON.stringify({ categoria, modelo }),
+          body: JSON.stringify({ codigo_interno: codigoInterno, categoria, modelo }),
         });
         afpToast(`Producto "${data.producto.nombre}" creado y vinculado a esta línea`);
         // El backend devuelve el pendiente ya actualizado con la línea

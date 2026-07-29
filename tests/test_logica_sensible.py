@@ -47,15 +47,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app as taller_app  # noqa: E402  (import después de fijar DB_PATH a propósito)
 
 
-def _crear_producto(db, nombre, stock_disponible=0, costo_compra=0.0, stock_minimo=0):
+def _crear_producto(db, nombre, stock_disponible=0, costo_compra=0.0, stock_minimo=0, codigo_interno=""):
     ts = taller_app.now_iso()
     cur = db.execute(
         """
         INSERT INTO productos (
-            nombre, stock_disponible, costo_compra, stock_minimo, creado_en, actualizado_en
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            nombre, codigo_interno, stock_disponible, costo_compra, stock_minimo, creado_en, actualizado_en
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (nombre, stock_disponible, costo_compra, stock_minimo, ts, ts),
+        (nombre, codigo_interno, stock_disponible, costo_compra, stock_minimo, ts, ts),
     )
     db.commit()
     return cur.lastrowid
@@ -1908,6 +1908,41 @@ class TestBuscarProductoPorTexto(unittest.TestCase):
             self.assertIsNone(taller_app._buscar_producto_por_texto(db, ""))
             self.assertIsNone(taller_app._buscar_producto_por_texto(db, None))
 
+    def test_codigo_exacto_prioriza_por_encima_del_texto(self):
+        # Caso reportado por el taller: la IA lee "JF011 PULLEY SET" pero al
+        # describir la línea se queda solo con "PULLEY SET" (pierde el
+        # código) -- si el catálogo tiene DOS "pulley set" con nombres
+        # parecidos, el texto libre solo no alcanza para distinguirlos, pero
+        # el código sí. El código, cuando viene y matchea exacto contra
+        # codigo_interno (columna única en la BD), tiene que ganarle a
+        # cualquier parecido de texto, aunque el texto se parezca más a otro
+        # producto.
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            correcto_id = _crear_producto(db, "PULLEY SET TESTCODIGO", codigo_interno="JF011TC", stock_disponible=5)
+            _crear_producto(db, "PULLEY SET TESTCODIGO EXTRA PARECIDO", codigo_interno="XX999TC", stock_disponible=5)
+            producto = taller_app._buscar_producto_por_texto(db, "PULLEY SET TESTCODIGO EXTRA PARECIDO", "JF011TC")
+            self.assertIsNotNone(producto)
+            self.assertEqual(producto["id"], correcto_id)
+
+    def test_codigo_que_no_matchea_ningun_producto_cae_al_texto(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            producto_id = _crear_producto(db, "FILTRO DE AIRE BOSCH FA-222 TESTCODIGOFALLBACK", stock_disponible=10)
+            producto = taller_app._buscar_producto_por_texto(
+                db, "FILTRO DE AIRE BOSCH FA-222 TESTCODIGOFALLBACK", "CODIGO-QUE-NO-EXISTE"
+            )
+            self.assertIsNotNone(producto)
+            self.assertEqual(producto["id"], producto_id)
+
+    def test_codigo_vacio_no_afecta_el_comportamiento_de_siempre(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            nombre = "AMORTIGUADOR TRASERO TESTCODIGOVACIO"
+            producto_id = _crear_producto(db, nombre, stock_disponible=3)
+            self.assertEqual(taller_app._buscar_producto_por_texto(db, nombre, "")["id"], producto_id)
+            self.assertEqual(taller_app._buscar_producto_por_texto(db, nombre, None)["id"], producto_id)
+
 
 class TestEscanearFotoFactura(unittest.TestCase):
     """El endpoint /api/facturas/escanear-foto no llama a la IA real en los
@@ -1996,6 +2031,35 @@ class TestEscanearFotoFactura(unittest.TestCase):
         # exigiendo producto_id en todas las líneas para APROBAR).
         self.assertTrue(grupo["valida"])
         self.assertEqual(grupo["errores"], [])
+
+    def test_foto_con_codigo_leido_prioriza_ese_match_por_encima_del_texto(self):
+        # Mismo caso que en TestFotosPorWhatsAppFase3 pero para el camino de
+        # "Escanear foto" desde el navegador (ambos comparten
+        # _buscar_producto_por_texto): si la IA devuelve un código junto a
+        # la descripción, ese código tiene que ganarle a cualquier parecido
+        # de texto contra otro producto del catálogo.
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            correcto_id = _crear_producto(db, "PULLEY SET TESTFOTOCODIGO", codigo_interno="JF011FT", stock_disponible=5)
+            _crear_producto(db, "PULLEY SET TESTFOTOCODIGO OTRO", codigo_interno="XX999FT", stock_disponible=5)
+        respuesta_ia = {
+            "numero_factura": "FOTO-CODIGO-001",
+            "fecha": "2026-07-08",
+            "proveedor_nombre": "Proveedor Foto Codigo Test",
+            "proveedor_rut": "",
+            "lineas": [{
+                "codigo": "JF011FT",
+                "descripcion": "PULLEY SET TESTFOTOCODIGO OTRO",
+                "cantidad": 1,
+                "precio_unitario": 12000,
+            }],
+        }
+        with patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self._subir_foto()
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        linea = resp.get_json()["facturas"][0]["lineas"][0]
+        self.assertEqual(linea["producto_id"], correcto_id)
+        self.assertEqual(linea["codigo_leido"], "JF011FT")
 
     def test_corregir_linea_y_proveedor_deja_la_factura_lista_para_confirmar(self):
         with taller_app.app.app_context():
@@ -2901,6 +2965,53 @@ class TestAgenteWhatsApp(unittest.TestCase):
         self.assertEqual(pendiente["origen"], "whatsapp")
         self.assertEqual(pendiente["numero"], numero)
         self.assertEqual(pendiente["lineas"][0]["producto_id"], producto_id)
+
+    def test_foto_de_factura_usa_el_codigo_leido_para_no_matchear_el_producto_equivocado(self):
+        # Caso real reportado por el taller: la foto trae "JF011 PULLEY
+        # SET", pero la IA arma la descripción quedándose solo con "PULLEY
+        # SET" (pierde el código) -- si el catálogo tiene dos productos de
+        # nombre parecido, el texto solo no alcanza para distinguirlos. Acá
+        # se simula justo eso: la IA sí devuelve el código en su propio
+        # campo ('codigo'), aparte de una descripción que por sí sola sería
+        # ambigua entre dos productos -- el pendiente tiene que quedar
+        # ligado al producto CORRECTO (el del código), no al que más se
+        # parece por texto.
+        telefono = "+56931234567"
+        numero = "AG-JF011"
+        self._registrar_mecanico("Mecánico Código Test", telefono)
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            correcto_id = _crear_producto(db, "PULLEY SET TESTWHATSAPPCODIGO", codigo_interno="JF011WA", stock_disponible=2)
+            _crear_producto(db, "PULLEY SET TESTWHATSAPPCODIGO OTRO MODELO", codigo_interno="XX999WA", stock_disponible=2)
+
+        respuesta_ia = {
+            "numero_factura": numero,
+            "fecha": "2026-07-09",
+            "proveedor_nombre": "Repuestos Código Test",
+            "proveedor_rut": "",
+            "lineas": [{
+                "codigo": "JF011WA",
+                "descripcion": "PULLEY SET TESTWHATSAPPCODIGO OTRO MODELO",
+                "cantidad": 1,
+                "precio_unitario": 12000,
+            }],
+        }
+        with patch.object(taller_app, "_llamar_claude_vision_clasificar_foto_whatsapp", return_value={"tipo": "factura", "patente": ""}), \
+             patch.object(taller_app, "_llamar_claude_vision_factura", return_value=respuesta_ia):
+            resp = self._subir_foto_por_agente(telefono)
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        pendientes = self.client.get("/api/facturas/pendientes-recepcion?estado=pendiente").get_json()["pendientes"]
+        pendiente = next(p for p in pendientes if p["numero"] == numero and p["origen"] == "whatsapp")
+        detalle = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
+        linea = detalle["lineas"][0]
+        self.assertEqual(linea["producto_id"], correcto_id)
+        # El código leído queda guardado en la línea para que la pantalla de
+        # revisión lo muestre siempre junto al producto asignado (ver
+        # pfd-lineas en finanzas.js / afp-tbody-lineas en
+        # alerta_facturas_pendientes.js) -- así un match automático
+        # equivocado salta a la vista antes de aprobar.
+        self.assertEqual(linea["codigo_leido"], "JF011WA")
 
     def test_aprobar_pendiente_crea_la_factura_real_y_aplica_stock(self):
         pendiente_id, producto_id, numero = self._preparar_pendiente("100002")

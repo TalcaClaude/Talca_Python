@@ -4088,7 +4088,29 @@ def _llamar_claude_vision_factura(imagen_bytes, mime_type):
                     "items": {
                         "type": "object",
                         "properties": {
-                            "descripcion": {"type": "string", "description": "Descripción del producto tal como aparece impresa en la factura."},
+                            "codigo": {
+                                "type": "string",
+                                "description": (
+                                    "Código, N° de parte (part number) o SKU del producto, tal como aparece "
+                                    "impreso en la factura -- suele venir pegado o justo al lado del nombre "
+                                    "(ej. 'JF011', 'AB-2201', '4021-A'). Este campo es CRÍTICO: es lo que se "
+                                    "usa para identificar el producto exacto en el inventario, porque muchas "
+                                    "veces hay varios productos con nombres parecidos y solo el código los "
+                                    "distingue. Vacío únicamente si la factura de verdad no trae ningún código "
+                                    "para esa línea -- nunca lo dejes vacío solo porque ya lo pusiste dentro de "
+                                    "'descripcion'."
+                                ),
+                            },
+                            "descripcion": {
+                                "type": "string",
+                                "description": (
+                                    "Descripción del producto tal como aparece impresa en la factura, "
+                                    "COMPLETA -- si el código/N° de parte viene pegado al nombre (ej. 'JF011 "
+                                    "PULLEY SET'), inclúyelo también acá tal cual, aunque ya lo hayas puesto "
+                                    "por separado en el campo 'codigo'. Nunca resumas ni dejes solo una parte "
+                                    "del texto (ej. no reduzcas 'JF011 PULLEY SET' a solamente 'PULLEY SET')."
+                                ),
+                            },
                             "cantidad": {"type": "number"},
                             "precio_unitario": {"type": "number", "description": "Precio unitario neto (sin IVA) si se puede distinguir; si no, el precio de la línea tal cual aparece."},
                         },
@@ -4113,8 +4135,11 @@ def _llamar_claude_vision_factura(imagen_bytes, mime_type):
                     "type": "text",
                     "text": (
                         "Esta es una foto de una factura de compra de un taller mecánico. "
-                        "Extrae los datos usando la herramienta extraer_factura. Si algún dato no se "
-                        "alcanza a leer con confianza (letra borrosa, foto cortada, etc.), déjalo vacío "
+                        "Extrae los datos usando la herramienta extraer_factura. Presta ESPECIAL atención al "
+                        "código o N° de parte de cada producto (campo 'codigo') -- es el dato más importante "
+                        "de cada línea porque es lo que permite identificar exactamente qué producto es, y es "
+                        "un error común quedarse solo con el nombre genérico y perder el código. Si algún dato "
+                        "no se alcanza a leer con confianza (letra borrosa, foto cortada, etc.), déjalo vacío "
                         "en vez de inventarlo — alguien va a revisar y corregir a mano antes de guardar."
                     ),
                 },
@@ -4260,15 +4285,35 @@ def _llamar_claude_vision_clasificar_foto_whatsapp(imagen_bytes, mime_type):
     raise RuntimeError("La IA no devolvió una respuesta en el formato esperado. Intenta con una foto más nítida.")
 
 
-def _buscar_producto_por_texto(db, texto):
+def _buscar_producto_por_texto(db, texto, codigo=None):
     """Intenta encontrar, entre los productos existentes, el que mejor
     calza con una descripción de texto libre (típicamente sacada de una
     foto de factura escaneada por IA — ahí no hay ID ni modelo/detalle
     exactos como en la carga masiva por Excel, solo el nombre que puso el
-    proveedor). Usa comparación de texto simple (difflib), sin
-    dependencias nuevas. Umbral conservador a propósito: es mejor dejar la
-    línea sin matchear (y que la persona la busque a mano en el
-    autocompletar) que asignarle el producto equivocado sin que se note."""
+    proveedor).
+
+    Si se pasa 'codigo' (el código/N° de parte que la IA haya leído por
+    separado, ver _llamar_claude_vision_factura), se intenta PRIMERO un
+    match EXACTO contra productos.codigo_interno (que es único en la BD,
+    ver idx_codigo_interno_unico) -- es una señal muchísimo más confiable
+    que comparar texto libre, porque dos productos pueden tener nombres
+    casi idénticos ('Pulley Set' genérico) pero nunca el mismo código. Si
+    hay un código y calza exacto con un producto, se devuelve ese de
+    inmediato sin pasar por el puntaje de texto de más abajo.
+
+    Si no hay código o no matcheó ninguno, cae al comparador de texto
+    simple (difflib) de siempre, sin dependencias nuevas. Umbral
+    conservador a propósito: es mejor dejar la línea sin matchear (y que
+    la persona la busque a mano en el autocompletar) que asignarle el
+    producto equivocado sin que se note."""
+    codigo_norm = (codigo or "").strip().upper()
+    if codigo_norm:
+        por_codigo = db.execute(
+            "SELECT * FROM productos WHERE codigo_interno = ?", (codigo_norm,)
+        ).fetchone()
+        if por_codigo is not None:
+            return por_codigo
+
     texto_norm = (texto or "").strip().upper()
     if not texto_norm:
         return None
@@ -4835,7 +4880,8 @@ def escanear_foto_factura():
 
     for i, linea in enumerate(extraido.get("lineas") or [], start=1):
         descripcion = (linea.get("descripcion") or "").strip()
-        producto = _buscar_producto_por_texto(db, descripcion)
+        codigo_leido = (linea.get("codigo") or "").strip()
+        producto = _buscar_producto_por_texto(db, descripcion, codigo_leido)
         try:
             cantidad = int(linea.get("cantidad"))
         except (TypeError, ValueError):
@@ -4851,10 +4897,12 @@ def escanear_foto_factura():
             "cantidad": cantidad,
             "precio_unitario": precio,
             "errores": [],
-            # Texto tal como lo leyó la IA en la foto — se muestra como ayuda
-            # en la previsualización cuando no matcheó ningún producto, para
-            # que la persona sepa qué buscar en el autocompletar.
+            # Texto (y código) tal como lo leyó la IA en la foto — se
+            # muestra SIEMPRE en la previsualización, matcheó o no, para
+            # que la persona pueda comparar contra el producto asignado
+            # antes de confirmar (un match automático puede estar mal).
             "texto_original": descripcion,
+            "codigo_leido": codigo_leido,
         })
 
     _carga_masiva_revalidar_grupo(db, grupo, numeros_existentes)
@@ -4931,7 +4979,8 @@ def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes,
     lineas_validadas = []
     for linea in extraido.get("lineas") or []:
         descripcion = (linea.get("descripcion") or "").strip()
-        producto = _buscar_producto_por_texto(db, descripcion)
+        codigo_leido = (linea.get("codigo") or "").strip()
+        producto = _buscar_producto_por_texto(db, descripcion, codigo_leido)
         try:
             cantidad = int(linea.get("cantidad"))
         except (TypeError, ValueError):
@@ -4945,7 +4994,13 @@ def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes,
             "producto_nombre": row_to_dict(producto)["nombre"] if producto else None,
             "cantidad": cantidad,
             "precio_unitario": precio,
+            # Texto (y código) tal como lo leyó la IA -- se guarda SIEMPRE,
+            # matcheó o no, para que quien revise el pendiente vea con qué
+            # se comparó antes de confiar en el producto asignado (ver
+            # pfd-lineas en finanzas.js / afp-tbody-lineas en
+            # alerta_facturas_pendientes.js).
             "texto_original": descripcion,
+            "codigo_leido": codigo_leido,
         })
 
     if not lineas_validadas:

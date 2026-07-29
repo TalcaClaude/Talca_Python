@@ -2004,6 +2004,16 @@ svg .chart-punto-hover {
    empujado fuera de la vista). */
 .pfr-linea-modo-campo { display: flex; flex-wrap: wrap; gap: 8px 20px; }
 .pfr-linea-modo-campo input[type="radio"] { width: auto; flex: 0 0 auto; }
+/* Texto/código tal como lo leyó la IA en una foto de factura, mostrado
+   junto al producto que quedó asignado (ver pfd-lineas en finanzas.js y
+   afp-tbody-lineas en alerta_facturas_pendientes.js) -- para que un match
+   automático equivocado salte a la vista al comparar contra el producto
+   asignado, en vez de quedar escondido. */
+.pfd-linea-leido {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
 .fila-grupo-mes td {
   background: var(--panel-2);
   font-weight: 600;

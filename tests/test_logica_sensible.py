@@ -3743,6 +3743,165 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         despues_correccion = self.client.get("/api/facturas/pendientes-recepcion/rechazadas/contador").get_json()["rechazadas"]
         self.assertEqual(despues_correccion, antes)
 
+    # ---- Líneas de "gasto general" (ítems de una factura que NO son
+    # repuestos -- combustible, herramientas -- y a propósito no deben
+    # tocar el inventario ni el catálogo de productos, a pedido del
+    # taller). Ver factura_gastos_generales / es_gasto_general.
+
+    def _linea_gasto_general(self, descripcion="Bencina generador", monto=15000, rubro_gav="combustible"):
+        return {
+            "es_gasto_general": True, "descripcion": descripcion, "monto": monto, "rubro_gav": rubro_gav,
+        }
+
+    def test_linea_gasto_general_no_crea_producto_ni_afecta_stock(self):
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-GG-001",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [self._linea_gasto_general()],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente = resp.get_json()
+
+        antes = self.client.get("/api/productos").get_json()["productos"]
+        aprobar = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(aprobar.status_code, 201, aprobar.get_data(as_text=True))
+        despues = self.client.get("/api/productos").get_json()["productos"]
+        self.assertEqual(len(antes), len(despues), "no debe crearse ningún producto nuevo")
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT * FROM facturas WHERE numero = ?", ("FACT-PEND-GG-001",)).fetchone()
+            self.assertIsNotNone(factura)
+            self.assertEqual(
+                db.execute("SELECT COUNT(*) FROM factura_lineas WHERE factura_id = ?", (factura["id"],)).fetchone()[0],
+                0,
+            )
+            gasto = db.execute(
+                "SELECT * FROM factura_gastos_generales WHERE factura_id = ?", (factura["id"],)
+            ).fetchone()
+            self.assertEqual(gasto["descripcion"], "Bencina generador")
+            self.assertEqual(gasto["monto"], 15000)
+            self.assertEqual(gasto["rubro_gav"], "combustible")
+            cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
+            self.assertEqual(cxp["monto_total"], 15000, "la CxP debe incluir el gasto general aunque no sea repuesto")
+
+    def test_factura_hibrida_repuesto_y_gasto_general_juntos(self):
+        """Ej. del taller: un filtro (va a inventario/OT) y la herramienta
+        para sacarlo (no va a inventario) llegan en la MISMA factura."""
+        producto = self._crear_producto_http("Filtro de aceite - factura híbrida", stock_disponible=0)
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-HIBRIDA-001",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [
+                    {"producto_id": producto["id"], "cantidad": 3, "precio_unitario": 4000},
+                    self._linea_gasto_general(descripcion="Extractor de filtros", monto=8000, rubro_gav="mantencion"),
+                ],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente = resp.get_json()
+
+        aprobar = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(aprobar.status_code, 201, aprobar.get_data(as_text=True))
+
+        actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(actualizado["stock_disponible"], 3, "el repuesto sí debe ingresar a stock")
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT * FROM facturas WHERE numero = ?", ("FACT-PEND-HIBRIDA-001",)).fetchone()
+            n_lineas_producto = db.execute(
+                "SELECT COUNT(*) FROM factura_lineas WHERE factura_id = ?", (factura["id"],)
+            ).fetchone()[0]
+            n_gastos = db.execute(
+                "SELECT COUNT(*) FROM factura_gastos_generales WHERE factura_id = ?", (factura["id"],)
+            ).fetchone()[0]
+            cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
+        self.assertEqual(n_lineas_producto, 1)
+        self.assertEqual(n_gastos, 1)
+        self.assertEqual(cxp["monto_total"], 12000 + 8000)  # 3 x 4000 + 8000
+
+        detalle = self.client.get(f"/api/facturas/{factura['id']}").get_json()
+        self.assertEqual(len(detalle["lineas"]), 1)
+        self.assertEqual(len(detalle["gastos_generales"]), 1)
+        self.assertEqual(detalle["gastos_generales"][0]["descripcion"], "Extractor de filtros")
+
+    def test_linea_gasto_general_sin_descripcion_es_rechazada(self):
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-GG-SIN-DESC",
+                "lineas": [self._linea_gasto_general(descripcion="")],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_linea_gasto_general_con_rubro_invalido_es_rechazada(self):
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-GG-RUBRO-MALO",
+                "lineas": [self._linea_gasto_general(rubro_gav="no_existe")],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_linea_gasto_general_sin_rubro_es_rechazada(self):
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-GG-SIN-RUBRO",
+                "lineas": [self._linea_gasto_general(rubro_gav="")],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_linea_gasto_general_con_gastos_por_ot_es_rechazada(self):
+        # 'gastos_por_ot' es un rubro válido del desplegable, pero es
+        # exclusivo de Caja Chica (liga un gasto a una orden puntual) --
+        # no tiene sentido para un ítem de factura sin OT asociada.
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-GG-OT",
+                "lineas": [self._linea_gasto_general(rubro_gav="gastos_por_ot")],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_bodega_puede_convertir_una_linea_de_producto_en_gasto_general_al_editar(self):
+        """Flujo pedido por el taller: Finanzas marca (o no) el gasto
+        general al cargar la factura, y Bodega confirma o desconfirma esa
+        marca al revisar el pendiente antes de aprobarlo -- ambos roles
+        pueden editar el mismo pendiente (PUT), así que Bodega puede
+        corregir la clasificación sin tener que rechazar toda la factura."""
+        producto = self._crear_producto_http("Producto - bodega reclasifica", stock_disponible=0)
+        pendiente = self._crear_pendiente("FACT-PEND-GG-RECLASIFICA", producto["id"], cantidad=1, precio_unitario=9000)
+
+        cliente_bodega = self._crear_usuario_y_login(["bodega"])
+        resp = cliente_bodega.put(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}",
+            json={"lineas": [self._linea_gasto_general(descripcion="En realidad es una herramienta", monto=9000, rubro_gav="mantencion")]},
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        aprobar = cliente_bodega.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(aprobar.status_code, 201, aprobar.get_data(as_text=True))
+
+        actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(actualizado["stock_disponible"], 0, "ya no debe aplicarse como stock, se reclasificó")
+
 
 class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
     """Hallazgo planteado por el taller: una factura puede traer un
@@ -4476,6 +4635,72 @@ class TestEstadoResultados(unittest.TestCase):
         ]
         self.assertEqual(len(coincidencias), 1, data["items"])
         self.assertAlmostEqual(coincidencias[0]["monto"], 25000.0, delta=0.01)
+
+    def _crear_y_aprobar_factura_con_gasto_general(self, numero, monto=15000, rubro_gav="combustible", dia="10"):
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": f"{self.MES}-{dia}",
+                "lineas": [{
+                    "es_gasto_general": True, "descripcion": "Bencina generador",
+                    "monto": monto, "rubro_gav": rubro_gav,
+                }],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente = resp.get_json()
+        aprobar = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
+        self.assertEqual(aprobar.status_code, 201, aprobar.get_data(as_text=True))
+        return aprobar.get_json()
+
+    def test_gasto_general_de_factura_suma_al_mismo_rubro_que_caja_chica(self):
+        """El taller pidió una pestaña de Gastos Generales para ítems de
+        factura (combustible, herramientas) que no van a inventario -- la
+        clasificación reutiliza los mismos rubros de Caja Chica para que
+        el Estado de Resultados quede completo sin importar por cuál de
+        los dos caminos entró el gasto operacional."""
+        antes = self._reporte()
+        combustible_antes = antes["gav"]["por_rubro"].get("combustible", 0)
+        total_antes = antes["gav"]["total"]
+        facturas_total_antes = antes["gav"]["facturas_total"]
+
+        self._crear_gasto(20000, rubro_gav="combustible", dia="12")  # vía Caja Chica
+        self._crear_y_aprobar_factura_con_gasto_general(
+            "FACT-GG-ESTADO-001", monto=15000, rubro_gav="combustible", dia="14",
+        )  # vía factura de proveedor -- mismo rubro
+
+        despues = self._reporte()
+        self.assertAlmostEqual(despues["gav"]["por_rubro"]["combustible"], combustible_antes + 20000 + 15000, delta=0.01)
+        self.assertAlmostEqual(despues["gav"]["total"], total_antes + 20000 + 15000, delta=0.01)
+        self.assertAlmostEqual(despues["gav"]["facturas_total"], facturas_total_antes + 15000, delta=0.01)
+
+    def test_detalle_de_gav_por_rubro_incluye_items_de_factura_y_de_caja_chica(self):
+        self._crear_gasto(9000, rubro_gav="mantencion", dia="11")
+        self._crear_y_aprobar_factura_con_gasto_general(
+            "FACT-GG-DETALLE-001", monto=8000, rubro_gav="mantencion", dia="15",
+        )
+
+        resp = self.client.get(f"/api/finanzas/estado-resultados/detalle?mes={self.MES}&linea=gav_mantencion")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        montos = sorted(i["monto"] for i in data["items"])
+        self.assertIn(9000.0, montos)
+        self.assertIn(8000.0, montos)
+
+    def test_endpoint_gastos_generales_lista_items_del_mes_con_su_factura(self):
+        aprobada = self._crear_y_aprobar_factura_con_gasto_general(
+            "FACT-GG-TAB-001", monto=12000, rubro_gav="combustible", dia="09",
+        )
+        resp = self.client.get(f"/api/finanzas/gastos-generales?mes={self.MES}")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        item = next(i for i in data["items"] if i["numero_factura"] == "FACT-GG-TAB-001")
+        self.assertEqual(item["monto"], 12000)
+        self.assertEqual(item["rubro_gav"], "combustible")
+        self.assertEqual(item["descripcion"], "Bencina generador")
+        self.assertEqual(item["factura_id"], aprobada["id"])
 
 
 class TestAccesoPorRolNotificaciones(unittest.TestCase):

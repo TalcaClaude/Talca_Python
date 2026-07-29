@@ -1997,6 +1997,14 @@ svg .chart-punto-hover {
 }
 .fac-linea-row:last-child { border-bottom: none; }
 .fac-linea-row .campo { margin-bottom: 0; }
+.fila-grupo-mes td {
+  background: var(--panel-2);
+  font-weight: 600;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  color: var(--text-muted);
+  text-transform: capitalize;
+}
 .fac-linea-quitar {
   background: none;
   border: 1px solid var(--line);

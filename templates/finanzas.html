@@ -41,6 +41,7 @@
     <button class="tab" data-vista="cxc">Cuentas por Cobrar</button>
     <button class="tab" data-vista="cxp">Cuentas por Pagar</button>
     <button class="tab" data-vista="facturas">Facturas</button>
+    <button class="tab" data-vista="gastos-generales">Gastos Generales</button>
     <button class="tab" data-vista="dte">Facturación electrónica</button>
     <button class="tab" data-vista="estado-resultados">Estado de Resultados</button>
     <button class="tab" data-vista="reportes">Reportes</button>
@@ -392,6 +393,41 @@
       </thead>
       <tbody id="tbody-facturas-pendientes">
         <tr><td colspan="8" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  </section>
+
+  <section class="vista" id="vista-gastos-generales" style="display:none">
+
+  <p class="ayuda-inline">Ítems de facturas de proveedor que NO son repuestos (ej. combustible para el generador, una herramienta para el taller) y a propósito no se ingresan al inventario. Se marcan al registrar o revisar una factura en la pestaña "Facturas" (interruptor "Gasto general" en cada línea) — acá quedan listados, separados por mes, con su rubro y la factura de la que vinieron. Suman al mismo total de Gastos de Administración y Ventas (GAV) del Estado de Resultados que los gastos de Caja Chica, sin importar por cuál de los dos caminos entraron.</p>
+  <section class="toolbar">
+    <div class="campo" style="margin:0">
+      <label>Mes</label>
+      <select id="gg-filtro-mes"><option value="">Todos los meses</option></select>
+    </div>
+    <div class="campo" style="margin:0">
+      <label>Rubro</label>
+      <select id="gg-filtro-rubro"><option value="">Todos los rubros</option></select>
+    </div>
+    <span style="flex:1"></span>
+    <p class="fac-total-linea">Total: <strong id="gg-total">$0</strong></p>
+  </section>
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>Descripción</th>
+          <th>Rubro</th>
+          <th>Fecha</th>
+          <th>Factura</th>
+          <th>Proveedor</th>
+          <th class="num">Monto</th>
+        </tr>
+      </thead>
+      <tbody id="tbody-gastos-generales">
+        <tr><td colspan="6" class="vacio">Cargando…</td></tr>
       </tbody>
     </table>
   </section>

@@ -2049,8 +2049,8 @@ def finanzas_estado_resultados():
         "AND d.rubro_gav != '' AND d.rubro_gav != 'gastos_por_ot' GROUP BY d.rubro_gav",
         (mes,),
     ).fetchall()
-    gav_por_rubro = {fila["rubro_gav"]: round(fila["total"], 2) for fila in filas_gav}
-    gav_caja_chica_total = round(sum(gav_por_rubro.values()), 2)
+    gav_por_rubro_caja_chica = {fila["rubro_gav"]: round(fila["total"], 2) for fila in filas_gav}
+    gav_caja_chica_total = round(sum(gav_por_rubro_caja_chica.values()), 2)
 
     gav_sin_clasificar = db.execute(
         "SELECT COALESCE(SUM(d.monto), 0) AS total FROM caja_gasto_detalles d "
@@ -2059,11 +2059,33 @@ def finanzas_estado_resultados():
         (mes,),
     ).fetchone()["total"] or 0
 
+    # Gastos generales que entraron por una FACTURA de proveedor (ej.
+    # combustible, herramientas) en vez de por una boleta de Caja Chica --
+    # mismos rubros, mismo total de GAV, para que no importe por cuál de
+    # los dos caminos entró el gasto (ver factura_gastos_generales en
+    # app.py). Siempre vienen con rubro_gav asignado (_validar_lineas_pendiente
+    # lo exige), así que no hay "sin_clasificar" de este origen.
+    filas_gav_facturas = db.execute(
+        "SELECT g.rubro_gav AS rubro_gav, COALESCE(SUM(g.monto), 0) AS total "
+        "FROM factura_gastos_generales g JOIN facturas f ON f.id = g.factura_id "
+        "WHERE substr(f.fecha, 1, 7) = ? GROUP BY g.rubro_gav",
+        (mes,),
+    ).fetchall()
+    gav_por_rubro_facturas = {fila["rubro_gav"]: round(fila["total"], 2) for fila in filas_gav_facturas}
+    gav_facturas_total = round(sum(gav_por_rubro_facturas.values()), 2)
+
+    gav_por_rubro = {
+        rubro: round(gav_por_rubro_caja_chica.get(rubro, 0) + gav_por_rubro_facturas.get(rubro, 0), 2)
+        for rubro in set(gav_por_rubro_caja_chica) | set(gav_por_rubro_facturas)
+    }
+
     total_remuneraciones = round(
         manual["remuneraciones"] + manual["bono_remuneraciones"]
         + manual["otras_remuneraciones"] + manual["previred"], 2
     )
-    gav_total = round(gav_caja_chica_total + total_remuneraciones + manual["arriendo"] + manual["seguros"], 2)
+    gav_total = round(
+        gav_caja_chica_total + gav_facturas_total + total_remuneraciones + manual["arriendo"] + manual["seguros"], 2
+    )
 
     utilidad_operacional = round(utilidad_bruta - gav_total, 2)
 
@@ -2103,6 +2125,7 @@ def finanzas_estado_resultados():
             "rubros_label": RUBROS_GAV_QUE_SUMAN_GAV,
             "sin_clasificar": round(gav_sin_clasificar, 2),
             "caja_chica_total": gav_caja_chica_total,
+            "facturas_total": gav_facturas_total,
             "remuneraciones": manual["remuneraciones"],
             "bono_remuneraciones": manual["bono_remuneraciones"],
             "otras_remuneraciones": manual["otras_remuneraciones"],
@@ -2301,5 +2324,86 @@ def finanzas_estado_resultados_detalle():
                 etiqueta += f" — {f['proveedor']}"
             items.append({"etiqueta": etiqueta, "fecha": f["fecha"], "monto": round(f["monto"], 2)})
 
+        # Mismo rubro, pero del otro origen posible: gastos generales que
+        # llegaron por una factura de proveedor en vez de por Caja Chica
+        # (ver factura_gastos_generales en app.py). "gav_sin_clasificar" no
+        # aplica acá porque esas líneas siempre exigen un rubro al cargarse.
+        if linea != "gav_sin_clasificar":
+            filas_facturas = db.execute(
+                "SELECT f.fecha AS fecha, g.descripcion AS descripcion, f.numero AS numero_factura, "
+                "p.nombre AS proveedor, g.monto AS monto "
+                "FROM factura_gastos_generales g JOIN facturas f ON f.id = g.factura_id "
+                "LEFT JOIN proveedores p ON p.id = f.proveedor_id "
+                "WHERE substr(f.fecha, 1, 7) = ? AND g.rubro_gav = ? ORDER BY f.fecha",
+                [mes, linea[len("gav_"):]],
+            ).fetchall()
+            for f in filas_facturas:
+                etiqueta = f["descripcion"] or f"Factura {f['numero_factura']}"
+                etiqueta += f" — Factura {f['numero_factura']}" if f["descripcion"] else ""
+                if f["proveedor"]:
+                    etiqueta += f" ({f['proveedor']})"
+                items.append({"etiqueta": etiqueta, "fecha": f["fecha"], "monto": round(f["monto"], 2)})
+
     total = round(sum(i["monto"] for i in items), 2)
     return jsonify({"linea": linea, "tipo": "lista", "items": items, "total": total})
+
+
+@bp.route("/api/finanzas/gastos-generales", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
+def finanzas_gastos_generales():
+    """Lista los ítems de facturas marcados como 'gasto general' (ver
+    factura_gastos_generales en app.py) -- combustible, herramientas y
+    similares que llegaron por una factura de proveedor pero que a
+    propósito no se ingresan al inventario. Es la pestaña "Gastos
+    Generales" que pidió el taller, con el mismo estilo de lista que ya
+    usan las Órdenes de Trabajo. Sin filtro de mes devuelve todo (el
+    frontend agrupa por mes para la vista tipo "separados por mes");
+    con ?mes=YYYY-MM devuelve solo ese mes, igual que el Estado de
+    Resultados. ?rubro=<clave> filtra además por rubro GAV."""
+    db = get_db()
+    mes = (request.args.get("mes") or "").strip()
+    if mes:
+        try:
+            mes = _mes_valido(mes)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+    rubro = (request.args.get("rubro") or "").strip()
+    if rubro and rubro not in RUBROS_GAV_QUE_SUMAN_GAV:
+        return jsonify({"error": f"Rubro inválido. Debe ser uno de: {', '.join(RUBROS_GAV_QUE_SUMAN_GAV)}"}), 400
+
+    sql = (
+        "SELECT g.id AS id, g.descripcion AS descripcion, g.monto AS monto, g.rubro_gav AS rubro_gav, "
+        "g.creado_en AS creado_en, f.id AS factura_id, f.numero AS numero_factura, f.fecha AS fecha, "
+        "p.nombre AS proveedor, fp.foto_archivo AS foto_archivo "
+        "FROM factura_gastos_generales g "
+        "JOIN facturas f ON f.id = g.factura_id "
+        "LEFT JOIN proveedores p ON p.id = f.proveedor_id "
+        "LEFT JOIN facturas_finanzas_pendientes fp ON fp.factura_id = f.id "
+        "WHERE 1 = 1"
+    )
+    params = []
+    if mes:
+        sql += " AND substr(f.fecha, 1, 7) = ?"
+        params.append(mes)
+    if rubro:
+        sql += " AND g.rubro_gav = ?"
+        params.append(rubro)
+    sql += " ORDER BY f.fecha DESC, g.id DESC"
+
+    filas = db.execute(sql, params).fetchall()
+    items = [{
+        "id": fila["id"],
+        "descripcion": fila["descripcion"],
+        "monto": round(fila["monto"], 2),
+        "rubro_gav": fila["rubro_gav"],
+        "rubro_gav_label": RUBROS_GAV_QUE_SUMAN_GAV.get(fila["rubro_gav"], fila["rubro_gav"]),
+        "fecha": fila["fecha"],
+        "mes": (fila["fecha"] or "")[:7],
+        "factura_id": fila["factura_id"],
+        "numero_factura": fila["numero_factura"],
+        "proveedor": fila["proveedor"] or "",
+        "foto_archivo": fila["foto_archivo"] or "",
+    } for fila in filas]
+
+    total = round(sum(i["monto"] for i in items), 2)
+    return jsonify({"items": items, "total": total, "rubros_label": RUBROS_GAV_QUE_SUMAN_GAV})

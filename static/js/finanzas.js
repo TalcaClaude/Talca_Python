@@ -170,6 +170,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
     document.getElementById("vista-cxc").style.display = vista === "cxc" ? "block" : "none";
     document.getElementById("vista-cxp").style.display = vista === "cxp" ? "block" : "none";
     document.getElementById("vista-facturas").style.display = vista === "facturas" ? "block" : "none";
+    document.getElementById("vista-gastos-generales").style.display = vista === "gastos-generales" ? "block" : "none";
     document.getElementById("vista-dte").style.display = vista === "dte" ? "block" : "none";
     document.getElementById("vista-estado-resultados").style.display = vista === "estado-resultados" ? "block" : "none";
     document.getElementById("vista-reportes").style.display = vista === "reportes" ? "block" : "none";
@@ -179,6 +180,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
       cxc: "Finanzas — Cuentas por Cobrar",
       cxp: "Finanzas — Cuentas por Pagar",
       facturas: "Finanzas — Facturas",
+      "gastos-generales": "Finanzas — Gastos Generales",
       dte: "Finanzas — Facturación electrónica",
       "estado-resultados": "Finanzas — Estado de Resultados",
       reportes: "Finanzas — Reportes",
@@ -199,6 +201,7 @@ document.querySelectorAll(".tabs:not(.sub-tabs) > .tab").forEach(tabBtn => {
         if (verPendientePrefill) abrirDetalleFacturaPendiente(parseInt(verPendientePrefill, 10));
       });
     }
+    if (vista === "gastos-generales") cargarGastosGenerales();
     if (vista === "dte") {
       cargarDte();
       // Llegada desde el botón "Ir a Facturación electrónica" de la
@@ -643,6 +646,17 @@ function optionsRubroGav(valorActual) {
   return Object.entries(RUBRO_GAV_LABEL).map(([valor, label]) =>
     `<option value="${valor}" ${valor === (valorActual || "") ? "selected" : ""}>${label}</option>`
   ).join("");
+}
+
+// Mismos rubros que optionsRubroGav, pero sin "Gastos por OT" -- ese es
+// exclusivo de Caja Chica (liga un gasto a una orden puntual, ver
+// RUBROS_GAV_QUE_SUMAN_GAV en modulos/finanzas.py), no tiene sentido para
+// un ítem de "gasto general" de una factura de proveedor.
+function optionsRubroGavFactura(valorActual) {
+  return Object.entries(RUBRO_GAV_LABEL)
+    .filter(([valor]) => valor !== "gastos_por_ot")
+    .map(([valor, label]) => `<option value="${valor}" ${valor === (valorActual || "") ? "selected" : ""}>${label}</option>`)
+    .join("");
 }
 
 function renderBoletaItem(b) {
@@ -1499,6 +1513,90 @@ async function cargarFacturasPendientesRecepcion() {
 }
 
 // ---------------------------------------------------------------------------
+// Pestaña "Gastos Generales": ítems de facturas marcados como gasto general
+// (ver es_gasto_general / factura_gastos_generales) -- combustible,
+// herramientas y similares que no van a inventario. Se trae la lista
+// completa una sola vez y los filtros de mes/rubro se aplican en el
+// navegador, sin volver a pedirle nada al servidor.
+// ---------------------------------------------------------------------------
+
+let ggItemsCache = [];
+let ggRubrosLabel = {};
+
+function ggNombreMes(mes) {
+  return new Date(`${mes}-01T00:00:00`).toLocaleDateString("es-CL", { month: "long", year: "numeric" });
+}
+
+function ggRenderTabla() {
+  const mesFiltro = document.getElementById("gg-filtro-mes").value;
+  const rubroFiltro = document.getElementById("gg-filtro-rubro").value;
+  const items = ggItemsCache.filter(i =>
+    (!mesFiltro || i.mes === mesFiltro) && (!rubroFiltro || i.rubro_gav === rubroFiltro)
+  );
+
+  const tbody = document.getElementById("tbody-gastos-generales");
+  if (items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">No hay gastos generales registrados${mesFiltro || rubroFiltro ? " con este filtro" : ""}.</td></tr>`;
+    document.getElementById("gg-total").textContent = fmtMoney(0);
+    return;
+  }
+
+  // Ya vienen ordenados por fecha DESC desde el servidor -- se agrupan acá
+  // por mes (encabezado tipo "Julio 2026") sin perder ese orden, tal como
+  // pidió el taller ("separados por mes").
+  let filasHtml = "";
+  let mesAnterior = null;
+  for (const i of items) {
+    if (i.mes !== mesAnterior) {
+      filasHtml += `<tr class="fila-grupo-mes"><td colspan="6">${escapeHtml(ggNombreMes(i.mes))}</td></tr>`;
+      mesAnterior = i.mes;
+    }
+    filasHtml += `
+      <tr>
+        <td>${escapeHtml(i.descripcion)}</td>
+        <td><span class="badge-origen">${escapeHtml(i.rubro_gav_label || i.rubro_gav)}</span></td>
+        <td>${escapeHtml(fmtFecha(i.fecha))}</td>
+        <td>${escapeHtml(i.numero_factura) || "—"}</td>
+        <td>${escapeHtml(i.proveedor) || "—"}</td>
+        <td class="num mono">${fmtMoney(i.monto)}</td>
+      </tr>`;
+  }
+  tbody.innerHTML = filasHtml;
+
+  const total = items.reduce((acc, i) => acc + i.monto, 0);
+  document.getElementById("gg-total").textContent = fmtMoney(total);
+}
+
+async function cargarGastosGenerales() {
+  const tbody = document.getElementById("tbody-gastos-generales");
+  try {
+    const data = await api("/api/finanzas/gastos-generales");
+    ggItemsCache = data.items;
+    ggRubrosLabel = data.rubros_label || {};
+
+    const selectRubro = document.getElementById("gg-filtro-rubro");
+    const rubroActual = selectRubro.value;
+    selectRubro.innerHTML = '<option value="">Todos los rubros</option>' +
+      Object.entries(ggRubrosLabel).map(([valor, label]) => `<option value="${valor}">${label}</option>`).join("");
+    selectRubro.value = rubroActual;
+
+    const mesesDisponibles = [...new Set(ggItemsCache.map(i => i.mes))].sort().reverse();
+    const selectMes = document.getElementById("gg-filtro-mes");
+    const mesActual = selectMes.value;
+    selectMes.innerHTML = '<option value="">Todos los meses</option>' +
+      mesesDisponibles.map(m => `<option value="${m}">${ggNombreMes(m)}</option>`).join("");
+    selectMes.value = mesActual;
+
+    ggRenderTabla();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+  }
+}
+
+document.getElementById("gg-filtro-mes").addEventListener("change", ggRenderTabla);
+document.getElementById("gg-filtro-rubro").addEventListener("change", ggRenderTabla);
+
+// ---------------------------------------------------------------------------
 // Detalle de una factura (pendiente, aprobada o rechazada) al hacer click en
 // su fila — para las ya aprobadas, muestra las líneas tal como quedaron en
 // la factura real (con si se aplicaron o no a stock) y permite eliminarla
@@ -1530,11 +1628,14 @@ async function abrirDetalleFacturaPendiente(id) {
   };
 
   let lineasParaMostrar = p.lineas || [];
+  let gastosGeneralesParaMostrar = (p.lineas || []).filter(l => l.es_gasto_general);
+  lineasParaMostrar = lineasParaMostrar.filter(l => !l.es_gasto_general);
   let facturaReal = null;
   if (p.estado === "aprobada" && p.factura_id) {
     try {
       facturaReal = await api(`/api/facturas/${p.factura_id}`);
       lineasParaMostrar = facturaReal.lineas;
+      gastosGeneralesParaMostrar = facturaReal.gastos_generales || [];
       pfdFacturaIdReal = p.factura_id;
     } catch (e) {
       // Si no se pudo traer la factura real (ej. se eliminó desde otro
@@ -1570,7 +1671,13 @@ async function abrirDetalleFacturaPendiente(id) {
       <td class="num mono">${fmtMoney(l.precio_unitario)}</td>
       <td>${facturaReal ? (l.aplicada ? "Ingresada a stock" : "No aplicada") : "—"}</td>
     </tr>`;
-  }).join("");
+  }).join("") + gastosGeneralesParaMostrar.map(g => `
+    <tr>
+      <td>💸 ${escapeHtml(g.descripcion)} <span class="badge-origen">${escapeHtml(g.rubro_gav_label || g.rubro_gav || "")}</span></td>
+      <td class="num mono">—</td>
+      <td class="num mono">${fmtMoney(g.monto)}</td>
+      <td>Gasto general — no va a inventario</td>
+    </tr>`).join("");
 
   const hayLineasSinResolver = p.estado === "pendiente" && lineasParaMostrar.some(l => l.producto_id == null);
   if (hayLineasSinResolver) {
@@ -1638,6 +1745,11 @@ document.getElementById("pfd-btn-eliminar-confirmar").addEventListener("click", 
 function actualizarTotalFacturaPendiente() {
   const filas = Array.from(document.querySelectorAll("#pfr-lineas .fac-linea-row"));
   const total = filas.reduce((acc, fila) => {
+    const esGG = fila.querySelector(".pfr-linea-modo-gg").checked;
+    if (esGG) {
+      const monto = parseFloat(fila.querySelector(".pfr-linea-monto-gg").value) || 0;
+      return acc + monto;
+    }
     const cantidad = parseFloat(fila.querySelector(".pfr-linea-cantidad").value) || 0;
     const precio = parseFloat(fila.querySelector(".pfr-linea-precio").value) || 0;
     return acc + cantidad * precio;
@@ -1652,6 +1764,8 @@ function actualizarTotalFacturaPendiente() {
 // pendiente) esos dos vienen null y el botón no se muestra -- ahí Finanzas
 // solo puede DESCRIBIR el producto nuevo, no crearlo (ver hallazgo: crear
 // productos es exclusivo de Bodega).
+let pfrLineaContador = 0;
+
 function filaLineaFacturaPendiente(productos, linea, ctx) {
   ctx = ctx || {};
   const div = document.createElement("div");
@@ -1659,35 +1773,67 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
   const sinResolverAlAbrir = !!(linea && linea.producto_id == null && (linea.texto_original || linea.cantidad != null));
   const puedeCrearProducto = ctx.pendienteId != null && ctx.indice != null &&
     state.sesion && (state.sesion.rol === "admin" || (state.sesion.modulos || []).includes("bodega"));
+  const esGastoGeneralAlAbrir = !!(linea && linea.es_gasto_general);
+  const grupoModo = `pfr-modo-${++pfrLineaContador}`;
   div.innerHTML = `
-    <div class="campo">
-      <label>Producto</label>
-      <select class="pfr-linea-producto-id">
-        <option value="">Selecciona un producto…</option>
-        <option value="__nuevo__">✏️ No está en el catálogo — describir para Bodega</option>
-        ${productos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("")}
-      </select>
-      <input type="text" class="pfr-linea-nombre-nuevo" placeholder="¿Qué producto es? (ej. Kit de embrague ABC 2020)"
-             style="display:none;margin-top:6px"
-             value="${linea && linea.texto_original ? escapeHtml(linea.texto_original) : ""}">
-      ${puedeCrearProducto ? `
-        <button type="button" class="btn btn-secundario btn-chico pfr-linea-crear-producto" style="display:none;margin-top:6px">
-          Crear este producto en Logística
-        </button>
-        <div class="pfr-linea-crear-form" style="display:none;margin-top:6px">
-          <input type="text" class="pfr-crear-categoria" placeholder="Modelo (ej. JF011)" style="margin-bottom:4px">
-          <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px">
-          <button type="button" class="btn btn-primario btn-chico pfr-crear-confirmar">Crear y vincular</button>
-        </div>
-      ` : ""}
+    <div class="campo pfr-linea-modo-campo" style="grid-column:1/-1;margin-bottom:6px">
+      <label class="toggle-critico" style="display:inline-block;margin-right:16px;font-weight:normal">
+        <input type="radio" name="${grupoModo}" class="pfr-linea-modo-producto" value="producto" ${esGastoGeneralAlAbrir ? "" : "checked"}>
+        Repuesto (va a inventario)
+      </label>
+      <label class="toggle-critico" style="display:inline-block;font-weight:normal">
+        <input type="radio" name="${grupoModo}" class="pfr-linea-modo-gg" value="gasto_general" ${esGastoGeneralAlAbrir ? "checked" : ""}>
+        Gasto general — no va a inventario (ej. combustible, herramienta)
+      </label>
     </div>
-    <div class="campo">
-      <label>Cantidad</label>
-      <input type="number" class="pfr-linea-cantidad" min="1" value="${linea && linea.cantidad != null ? linea.cantidad : 1}">
+    <div class="pfr-modo-producto" style="display:${esGastoGeneralAlAbrir ? "none" : "contents"}">
+      <div class="campo">
+        <label>Producto</label>
+        <select class="pfr-linea-producto-id">
+          <option value="">Selecciona un producto…</option>
+          <option value="__nuevo__">✏️ No está en el catálogo — describir para Bodega</option>
+          ${productos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("")}
+        </select>
+        <input type="text" class="pfr-linea-nombre-nuevo" placeholder="¿Qué producto es? (ej. Kit de embrague ABC 2020)"
+               style="display:none;margin-top:6px"
+               value="${linea && linea.texto_original ? escapeHtml(linea.texto_original) : ""}">
+        ${puedeCrearProducto ? `
+          <button type="button" class="btn btn-secundario btn-chico pfr-linea-crear-producto" style="display:none;margin-top:6px">
+            Crear este producto en Logística
+          </button>
+          <div class="pfr-linea-crear-form" style="display:none;margin-top:6px">
+            <input type="text" class="pfr-crear-categoria" placeholder="Modelo (ej. JF011)" style="margin-bottom:4px">
+            <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. ABC 2020)" style="margin-bottom:4px">
+            <button type="button" class="btn btn-primario btn-chico pfr-crear-confirmar">Crear y vincular</button>
+          </div>
+        ` : ""}
+      </div>
+      <div class="campo">
+        <label>Cantidad</label>
+        <input type="number" class="pfr-linea-cantidad" min="1" value="${linea && linea.cantidad != null ? linea.cantidad : 1}">
+      </div>
+      <div class="campo">
+        <label>Precio unit. ($ CLP)</label>
+        <input type="number" class="pfr-linea-precio" min="0" step="1" value="${linea && linea.precio_unitario != null ? linea.precio_unitario : 0}">
+      </div>
     </div>
-    <div class="campo">
-      <label>Precio unit. ($ CLP)</label>
-      <input type="number" class="pfr-linea-precio" min="0" step="1" value="${linea && linea.precio_unitario != null ? linea.precio_unitario : 0}">
+    <div class="pfr-modo-gasto-general" style="display:${esGastoGeneralAlAbrir ? "contents" : "none"}">
+      <div class="campo">
+        <label>Descripción</label>
+        <input type="text" class="pfr-linea-descripcion-gg" placeholder="Ej: Bencina para el generador"
+               value="${linea && linea.descripcion ? escapeHtml(linea.descripcion) : ""}">
+      </div>
+      <div class="campo">
+        <label>Rubro</label>
+        <select class="pfr-linea-rubro-gg">
+          <option value="">Selecciona…</option>
+          ${optionsRubroGavFactura(linea ? linea.rubro_gav : "")}
+        </select>
+      </div>
+      <div class="campo">
+        <label>Monto ($ CLP)</label>
+        <input type="number" class="pfr-linea-monto-gg" min="0" step="1" value="${linea && linea.monto != null ? linea.monto : 0}">
+      </div>
     </div>
     <button type="button" class="fac-linea-quitar">Quitar</button>
   `;
@@ -1696,12 +1842,23 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
   const inputNombreNuevo = div.querySelector(".pfr-linea-nombre-nuevo");
   const btnCrear = div.querySelector(".pfr-linea-crear-producto");
   const formCrear = div.querySelector(".pfr-linea-crear-form");
+  const radioModoProducto = div.querySelector(".pfr-linea-modo-producto");
+  const radioModoGG = div.querySelector(".pfr-linea-modo-gg");
+  const bloqueProducto = div.querySelector(".pfr-modo-producto");
+  const bloqueGG = div.querySelector(".pfr-modo-gasto-general");
 
   function sincronizarVisibilidad() {
     const esNuevo = select.value === "__nuevo__";
     inputNombreNuevo.style.display = esNuevo ? "block" : "none";
     if (btnCrear) btnCrear.style.display = esNuevo ? "inline-block" : "none";
     if (formCrear && !esNuevo) formCrear.style.display = "none";
+  }
+
+  function sincronizarModo() {
+    const esGG = radioModoGG.checked;
+    bloqueProducto.style.display = esGG ? "none" : "contents";
+    bloqueGG.style.display = esGG ? "contents" : "none";
+    actualizarTotalFacturaPendiente();
   }
 
   if (linea && linea.producto_id) {
@@ -1712,12 +1869,15 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
   sincronizarVisibilidad();
 
   select.addEventListener("change", sincronizarVisibilidad);
+  radioModoProducto.addEventListener("change", sincronizarModo);
+  radioModoGG.addEventListener("change", sincronizarModo);
   div.querySelector(".fac-linea-quitar").addEventListener("click", () => {
     div.remove();
     actualizarTotalFacturaPendiente();
   });
   div.querySelector(".pfr-linea-cantidad").addEventListener("input", actualizarTotalFacturaPendiente);
   div.querySelector(".pfr-linea-precio").addEventListener("input", actualizarTotalFacturaPendiente);
+  div.querySelector(".pfr-linea-monto-gg").addEventListener("input", actualizarTotalFacturaPendiente);
 
   if (btnCrear) {
     btnCrear.addEventListener("click", () => {
@@ -1956,6 +2116,24 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
   const filas = Array.from(document.querySelectorAll("#pfr-lineas .fac-linea-row"));
   const lineas = [];
   for (const fila of filas) {
+    if (fila.querySelector(".pfr-linea-modo-gg").checked) {
+      // Gasto general (combustible, herramienta, etc.) -- no pasa por el
+      // matching de producto, va con descripción libre + rubro + un solo
+      // monto (ver es_gasto_general en _validar_lineas_pendiente).
+      const descripcion = fila.querySelector(".pfr-linea-descripcion-gg").value.trim();
+      const rubro_gav = fila.querySelector(".pfr-linea-rubro-gg").value;
+      const monto = fila.querySelector(".pfr-linea-monto-gg").value;
+      if (!descripcion) {
+        toast("Describe cada línea marcada como \"Gasto general\" (ej. \"Bencina para el generador\")", true);
+        return;
+      }
+      if (!rubro_gav) {
+        toast("Elige un rubro para cada línea marcada como \"Gasto general\"", true);
+        return;
+      }
+      lineas.push({ es_gasto_general: true, descripcion, rubro_gav, monto });
+      continue;
+    }
     const valorSelect = fila.querySelector(".pfr-linea-producto-id").value;
     const cantidad = fila.querySelector(".pfr-linea-cantidad").value;
     const precio_unitario = fila.querySelector(".pfr-linea-precio").value;

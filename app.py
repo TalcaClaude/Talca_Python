@@ -473,6 +473,28 @@ def init_db():
             creado_en TEXT NOT NULL
         );
 
+        -- Líneas de una factura que NO son repuestos y no deben tocar el
+        -- inventario (ej. combustible para el generador, una herramienta
+        -- para el taller) -- a pedido del taller, para mantener el
+        -- catálogo de productos estricto (solo repuestos reales). Una
+        -- misma factura puede tener líneas normales en factura_lineas
+        -- (van a inventario) Y líneas acá al mismo tiempo (ej. un filtro
+        -- que va a una OT + la herramienta para sacarlo, en la misma
+        -- factura) -- por eso es un catálogo de líneas aparte y no una
+        -- marca sobre producto ni sobre la factura completa. rubro_gav usa
+        -- la misma clasificación fija que ya usan las boletas de Caja
+        -- Chica (ver RUBROS_GAV en modulos/finanzas.py) para que el total
+        -- de GAV del Estado de Resultados sume ambos orígenes sin
+        -- duplicar ni inventar una segunda clasificación paralela.
+        CREATE TABLE IF NOT EXISTS factura_gastos_generales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            factura_id INTEGER NOT NULL REFERENCES facturas(id) ON DELETE CASCADE,
+            descripcion TEXT NOT NULL,
+            monto REAL NOT NULL,
+            rubro_gav TEXT NOT NULL,
+            creado_en TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS proveedores (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre TEXT UNIQUE NOT NULL,
@@ -3625,6 +3647,19 @@ def _factura_detalle(db, factura_row):
         ld = dict(l)
         ld["producto_id_sistema"] = f"{ld['producto_id_num']:04d}"
         d["lineas"].append(ld)
+
+    # Ítems de gasto general de esta misma factura (ver
+    # factura_gastos_generales) -- una factura puede traer ambos tipos de
+    # línea a la vez (ej. un filtro que va a inventario + la herramienta
+    # para sacarlo, que no), así que se muestran juntos al ver el detalle.
+    gastos = db.execute(
+        "SELECT id, descripcion, monto, rubro_gav, creado_en FROM factura_gastos_generales "
+        "WHERE factura_id = ? ORDER BY id",
+        (factura_row["id"],),
+    ).fetchall()
+    d["gastos_generales"] = [{
+        **dict(g), "rubro_gav_label": RUBROS_GAV_QUE_SUMAN_GAV.get(g["rubro_gav"], g["rubro_gav"]),
+    } for g in gastos]
     return d
 
 
@@ -3699,15 +3734,19 @@ CXP_DIAS_VENCIMIENTO_DEFECTO = 30
 
 
 def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validadas,
-                              condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None):
+                              condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None,
+                              lineas_gasto_general=None):
     """Genera la(s) Cuenta(s) por Pagar de una factura de compra recién
     registrada — el monto total es la suma de cantidad×precio_unitario de
-    todas sus líneas. Se llama SIEMPRE desde _registrar_factura (nunca a
-    mano), así que cualquier factura que entre por cualquiera de sus
-    caminos (registro manual, carga masiva por Excel, foto de WhatsApp
-    aprobada, o aprobación de recepción desde Finanzas) genera su CxP sola,
-    sin que se pueda olvidar. No se genera nada si el total es $0 (ej.
-    factura de solo devoluciones).
+    todas sus líneas de producto MÁS el monto de sus líneas de gasto
+    general (ver lineas_gasto_general), porque al proveedor se le debe la
+    factura completa sin importar cómo se clasificó cada línea puertas
+    adentro. Se llama SIEMPRE desde _registrar_factura (nunca a mano), así
+    que cualquier factura que entre por cualquiera de sus caminos
+    (registro manual, carga masiva por Excel, foto de WhatsApp aprobada, o
+    aprobación de recepción desde Finanzas) genera su CxP sola, sin que se
+    pueda olvidar. No se genera nada si el total es $0 (ej. factura de
+    solo devoluciones).
 
     condicion_pago/porcentaje_contado/plazo_dias_credito solo los manda
     aprobar_factura_pendiente_recepcion (ver más abajo) — las facturas de
@@ -3723,6 +3762,8 @@ def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validada
         OTRA por el tramo a crédito (pendiente, con su propio
         vencimiento) — ambas apuntando a la misma factura_id."""
     monto_total = round(sum(cantidad * precio_unitario for _p, cantidad, precio_unitario in lineas_validadas), 2)
+    monto_total += round(sum(l["monto"] for l in (lineas_gasto_general or [])), 2)
+    monto_total = round(monto_total, 2)
     if monto_total <= 0:
         return
 
@@ -3771,14 +3812,22 @@ def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validada
 
 
 def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True,
-                        condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None):
+                        condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None,
+                        lineas_gasto_general=None):
     """Inserta la factura y sus líneas, aplicando el ingreso de stock si
     corresponde, y generando su(s) Cuenta(s) por Pagar (ver
     _generar_cxp_de_factura). Único llamador hoy:
     aprobar_factura_pendiente_recepcion — manual, Excel, foto escaneada y
     WhatsApp entran TODOS por 'pendientes de recepción' primero (ver
     _crear_pendiente_recepcion) y esta función recién se ejecuta al
-    aprobar, sin importar el origen."""
+    aprobar, sin importar el origen.
+
+    lineas_gasto_general son ítems que llegaron en la misma factura pero
+    NO son repuestos (ej. combustible, una herramienta) -- van a la tabla
+    aparte factura_gastos_generales, nunca a factura_lineas ni a stock, a
+    pedido del taller de mantener el catálogo de productos estricto (ver
+    tabla en init_db). Sí se suman al total de la CxP igual que cualquier
+    otra línea (ver _generar_cxp_de_factura)."""
     ts = now_iso()
     cur = db.execute(
         "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en, condicion_pago, porcentaje_contado, plazo_dias_credito) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -3808,9 +3857,19 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
                 (now_iso(), cur_linea.lastrowid),
             )
 
+    for l in (lineas_gasto_general or []):
+        db.execute(
+            """
+            INSERT INTO factura_gastos_generales (factura_id, descripcion, monto, rubro_gav, creado_en)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (factura_id, l["descripcion"], l["monto"], l["rubro_gav"], ts),
+        )
+
     _generar_cxp_de_factura(
         db, factura_id, proveedor_id, fecha, lineas_validadas,
         condicion_pago=condicion_pago, porcentaje_contado=porcentaje_contado, plazo_dias_credito=plazo_dias_credito,
+        lineas_gasto_general=lineas_gasto_general,
     )
 
     return factura_id
@@ -4968,7 +5027,13 @@ def _factura_pendiente_recepcion_dict(db, row):
     recibidas = d.pop("lineas_recibidas_json", None)
     d["lineas_recibidas"] = json.loads(recibidas) if recibidas else None
     d["historial"] = json.loads(d.pop("historial_json", None) or "[]")
-    d["monto_total"] = round(sum(l["cantidad"] * l["precio_unitario"] for l in d["lineas"]), 2)
+    # Las líneas de gasto general (ver es_gasto_general en
+    # _validar_lineas_pendiente) no tienen cantidad/precio_unitario, van
+    # con un 'monto' único -- el total de la factura suma ambos tipos.
+    d["monto_total"] = round(sum(
+        l["monto"] if l.get("es_gasto_general") else l["cantidad"] * l["precio_unitario"]
+        for l in d["lineas"]
+    ), 2)
     if d["proveedor_id"]:
         prov = db.execute("SELECT nombre FROM proveedores WHERE id = ?", (d["proveedor_id"],)).fetchone()
         d["proveedor_nombre"] = prov["nombre"] if prov else ""
@@ -5146,10 +5211,44 @@ def _validar_lineas_pendiente(db, lineas_in):
     líneas sin resolver -- Bodega la completa después desde la pantalla de
     editar el pendiente (ver crear_y_vincular_producto_pendiente), y
     aprobar_factura_pendiente_recepcion sigue exigiendo que toda línea
-    tenga un producto_id real antes de poder aprobar la factura."""
+    tenga un producto_id real antes de poder aprobar la factura.
+
+    Una línea también puede venir marcada 'es_gasto_general': true -- ej.
+    una herramienta o combustible que llegó en la misma factura que
+    repuestos reales (una factura puede traer un filtro que sí va a
+    inventario Y la herramienta para sacarlo, que no), a pedido del taller
+    para no ensuciar el catálogo de productos con ítems que no son
+    repuestos. Esas líneas no pasan por el matching de producto_id en
+    absoluto: van con 'descripcion' (texto libre) y 'monto' (un solo
+    monto total, sin desglosar cantidad/precio unitario) y un 'rubro_gav'
+    de la misma clasificación fija que ya usan las boletas de Caja Chica.
+    Nunca requieren que Bodega les cree un producto ni bloquean la
+    aprobación de la factura."""
     lineas_validadas = []
     productos_vistos = set()
     for i, linea in enumerate(lineas_in, start=1):
+        if linea.get("es_gasto_general"):
+            descripcion = (linea.get("descripcion") or "").strip()
+            if not descripcion:
+                return None, f"Línea {i}: describe el gasto general (ej. 'Bencina para el generador')"
+            try:
+                monto = float(linea.get("monto"))
+            except (TypeError, ValueError):
+                return None, f"Línea {i}: el monto debe ser un número válido"
+            if monto <= 0:
+                return None, f"Línea {i}: el monto debe ser mayor a 0"
+            try:
+                rubro_gav = _rubro_gav_valido(linea.get("rubro_gav"))
+            except ValueError as e:
+                return None, f"Línea {i}: {e}"
+            if rubro_gav not in RUBROS_GAV_QUE_SUMAN_GAV:
+                return None, f"Línea {i}: elige un rubro para el gasto general"
+            lineas_validadas.append({
+                "es_gasto_general": True, "producto_id": None, "producto_nombre": None,
+                "descripcion": descripcion, "monto": round(monto, 2), "rubro_gav": rubro_gav,
+            })
+            continue
+
         try:
             cantidad = int(linea.get("cantidad"))
             precio_unitario = float(linea.get("precio_unitario"))
@@ -5409,8 +5508,17 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
     _iniciar_transaccion_stock(db)
 
     lineas_validadas = []
+    lineas_gasto_general = []
     lineas_recibidas_registro = []
     for l in lineas_facturadas:
+        if l.get("es_gasto_general"):
+            # Sin concepto de "cantidad recibida" -- es un gasto, no un
+            # repuesto que se cuenta al llegar. Siempre se incluye tal
+            # cual quedó cargada; si Finanzas/Bodega no lo quiere en la
+            # factura, se saca la línea editando el pendiente antes de
+            # aprobar (mismo camino que para sacar una línea de producto).
+            lineas_gasto_general.append(l)
+            continue
         cantidad_recibida = l["cantidad"]
         lineas_recibidas_registro.append({"producto_id": l["producto_id"], "cantidad_recibida": cantidad_recibida})
         if cantidad_recibida <= 0:
@@ -5423,13 +5531,14 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
             return jsonify({"error": f"El producto '{nombre}' ya no existe en el inventario"}), 400
         lineas_validadas.append((producto, cantidad_recibida, l["precio_unitario"]))
 
-    if not lineas_validadas:
+    if not lineas_validadas and not lineas_gasto_general:
         return jsonify({"error": "No se puede aprobar una recepción sin ningún producto recibido — si nada llegó, rechaza la factura."}), 400
 
     factura_id = _registrar_factura(
         db, fila["numero"], fila["proveedor_id"], fila["fecha"], lineas_validadas, usuario_actual(),
         aplicar_stock=True, condicion_pago=fila["condicion_pago"],
         porcentaje_contado=fila["porcentaje_contado"], plazo_dias_credito=fila["plazo_dias_credito"],
+        lineas_gasto_general=lineas_gasto_general,
     )
 
     ts = now_iso()
@@ -9784,6 +9893,8 @@ from modulos.finanzas import (  # noqa: E402
     bp as bp_finanzas,
     _cxc_pendiente_y_vencido,
     _cxp_pendiente_y_vencido,
+    RUBROS_GAV_QUE_SUMAN_GAV,
+    _rubro_gav_valido,
 )
 app.register_blueprint(bp_finanzas)
 

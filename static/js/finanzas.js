@@ -1776,12 +1776,12 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
   const esGastoGeneralAlAbrir = !!(linea && linea.es_gasto_general);
   const grupoModo = `pfr-modo-${++pfrLineaContador}`;
   div.innerHTML = `
-    <div class="campo pfr-linea-modo-campo" style="grid-column:1/-1;margin-bottom:6px">
-      <label class="toggle-critico" style="display:inline-block;margin-right:16px;font-weight:normal">
+    <div class="pfr-linea-modo-campo" style="grid-column:1/-1;margin-bottom:6px">
+      <label class="toggle-critico">
         <input type="radio" name="${grupoModo}" class="pfr-linea-modo-producto" value="producto" ${esGastoGeneralAlAbrir ? "" : "checked"}>
         Repuesto (va a inventario)
       </label>
-      <label class="toggle-critico" style="display:inline-block;font-weight:normal">
+      <label class="toggle-critico">
         <input type="radio" name="${grupoModo}" class="pfr-linea-modo-gg" value="gasto_general" ${esGastoGeneralAlAbrir ? "checked" : ""}>
         Gasto general — no va a inventario (ej. combustible, herramienta)
       </label>

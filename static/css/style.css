@@ -1997,6 +1997,13 @@ svg .chart-punto-hover {
 }
 .fac-linea-row:last-child { border-bottom: none; }
 .fac-linea-row .campo { margin-bottom: 0; }
+/* Interruptor "Repuesto / Gasto general" de cada línea de factura -- a
+   propósito NO tiene clase "campo" (para que no le pegue la regla
+   ".campo input { width:100% }" de más abajo, que estiraba cada radio a
+   todo el ancho de la fila dejándolo gigante, apilado y con el texto
+   empujado fuera de la vista). */
+.pfr-linea-modo-campo { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+.pfr-linea-modo-campo input[type="radio"] { width: auto; flex: 0 0 auto; }
 .fila-grupo-mes td {
   background: var(--panel-2);
   font-weight: 600;

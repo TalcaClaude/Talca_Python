@@ -5024,6 +5024,14 @@ CONDICIONES_PAGO_VALIDAS = {"contado", "credito", "mixto"}
 def _factura_pendiente_recepcion_dict(db, row):
     d = dict(row)
     d["lineas"] = json.loads(d.pop("lineas_json") or "[]")
+    # rubro_gav_label para que cualquier pantalla que muestre estas líneas
+    # (revisión de Bodega en Finanzas, o el aviso flotante global -- ver
+    # alerta_facturas_pendientes.js, que a propósito no comparte utilidades
+    # con finanzas.js) pueda mostrar la etiqueta linda ("Combustible") sin
+    # tener que duplicar el mapeo de rubros en cada script.
+    for l in d["lineas"]:
+        if l.get("es_gasto_general"):
+            l["rubro_gav_label"] = RUBROS_GAV_QUE_SUMAN_GAV.get(l.get("rubro_gav"), l.get("rubro_gav"))
     recibidas = d.pop("lineas_recibidas_json", None)
     d["lineas_recibidas"] = json.loads(recibidas) if recibidas else None
     d["historial"] = json.loads(d.pop("historial_json", None) or "[]")

@@ -241,6 +241,19 @@ function afpAbrirDetalle(id) {
 
   const tbody = document.getElementById("afp-tbody-lineas");
   tbody.innerHTML = p.lineas.map((l, idx) => {
+    // Gasto general (combustible, herramienta, etc. -- ver es_gasto_general
+    // en app.py): no es un producto sin resolver, es una línea que a
+    // propósito NUNCA se liga a inventario. Se muestra aparte, sin el aviso
+    // de "falta crear" ni el botón de Logística, y nunca bloquea "Aprobar".
+    if (l.es_gasto_general) {
+      return `
+      <tr>
+        <td>💸 ${afpEscapeHtml(l.descripcion)} <span class="badge-origen">${afpEscapeHtml(l.rubro_gav_label || l.rubro_gav || "")}</span></td>
+        <td class="num mono">—</td>
+        <td class="num mono">—</td>
+        <td class="num mono">${afpFmtMoney(l.monto)}</td>
+      </tr>`;
+    }
     const sinResolver = l.producto_id == null;
     let nombreCelda;
     if (sinResolver) {
@@ -316,7 +329,10 @@ function afpAbrirDetalle(id) {
   // revisión visible en modo solo-lectura para cualquier otro rol
   // (transparencia: finanzas puede ver que su factura sigue pendiente,
   // aunque no pueda resolverla ella misma).
-  const hayLineasSinResolver = p.lineas.some(l => l.producto_id == null);
+  // Un gasto general también tiene producto_id == null a propósito (nunca
+  // se liga a inventario, ver arriba) -- no cuenta como "sin resolver", o
+  // Bodega jamás podría aprobar una factura que traiga uno.
+  const hayLineasSinResolver = p.lineas.some(l => l.producto_id == null && !l.es_gasto_general);
   document.getElementById("afp-btn-aprobar").style.display = (afpPuedeBodega && !hayLineasSinResolver) ? "" : "none";
   document.getElementById("afp-btn-rechazar").style.display = afpPuedeBodega ? "" : "none";
   let avisoProductoNuevo = document.getElementById("afp-aviso-producto-nuevo");

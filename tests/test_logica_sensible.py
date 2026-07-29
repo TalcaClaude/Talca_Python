@@ -3789,6 +3789,32 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
             cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
             self.assertEqual(cxp["monto_total"], 15000, "la CxP debe incluir el gasto general aunque no sea repuesto")
 
+    def test_pendiente_con_gasto_general_trae_rubro_gav_label_para_el_aviso_flotante(self):
+        """El aviso flotante global (alerta_facturas_pendientes.js) decide
+        si bloquea 'Aprobar' mirando si alguna línea tiene producto_id nulo
+        -- una línea de gasto general también lo tiene a propósito, así
+        que ese script necesita poder distinguirla por 'es_gasto_general'
+        (no debe tratarla como "producto sin resolver"). También necesita
+        'rubro_gav_label' ya resuelto en la respuesta, porque ese script
+        deliberadamente no comparte el mapeo de rubros con finanzas.js."""
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-GG-AVISO-001",
+                "lineas": [self._linea_gasto_general(descripcion="Aceite para el compresor", rubro_gav="mantencion")],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente_id = resp.get_json()["id"]
+
+        listado = self.client.get("/api/facturas/pendientes-recepcion?estado=pendiente").get_json()
+        pendiente = next(p for p in listado["pendientes"] if p["id"] == pendiente_id)
+        linea = pendiente["lineas"][0]
+        self.assertTrue(linea["es_gasto_general"])
+        self.assertIsNone(linea["producto_id"])
+        self.assertEqual(linea["rubro_gav_label"], "Mantención y equipos")
+
     def test_factura_hibrida_repuesto_y_gasto_general_juntos(self):
         """Ej. del taller: un filtro (va a inventario/OT) y la herramienta
         para sacarlo (no va a inventario) llegan en la MISMA factura."""

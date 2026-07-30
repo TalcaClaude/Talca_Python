@@ -349,9 +349,19 @@ document.getElementById("btn-reset-operativo-diagnostico").addEventListener("cli
     const data = await api("/api/admin/reset-operativo/diagnostico");
     const partes = [];
     if (data.tablas_no_clasificadas.length) {
+      const esquemas = data.esquema_tablas_no_clasificadas || {};
       partes.push(
         `⚠ Hay ${data.tablas_no_clasificadas.length} tabla(s) en la base que no están ni en la lista de borrado `
-        + `ni en la de preservadas: ${data.tablas_no_clasificadas.join(", ")}.`
+        + `ni en la de preservadas:\n`
+        + data.tablas_no_clasificadas.map(t => {
+            const e = esquemas[t];
+            if (!e) return `  - ${t}`;
+            const cols = e.columnas.map(c => `${c.nombre} (${c.tipo}${c.not_null ? ", NOT NULL" : ""})`).join(", ");
+            const fks = e.llaves_foraneas.length
+              ? " · llaves foráneas: " + e.llaves_foraneas.map(f => `${f.columna} → ${f.tabla_referenciada}`).join(", ")
+              : " · sin llaves foráneas declaradas";
+            return `  - ${t} (${e.filas} fila(s)) — columnas: ${cols}${fks}`;
+          }).join("\n")
       );
     }
     if (data.riesgos.length) {

@@ -417,6 +417,14 @@ class TestResetOperativo(unittest.TestCase):
             self.assertEqual(riesgo["filas_con_referencia"], 1)
             self.assertFalse(riesgo["tabla_preservada_a_proposito"])
 
+            # El esquema de la tabla sin clasificar viene incluido, para
+            # poder decidir qué es sin necesitar acceso directo a la base.
+            esquema = data["esquema_tablas_no_clasificadas"]["cosa_no_catalogada"]
+            self.assertEqual(esquema["filas"], 1)
+            nombres_columnas = {c["nombre"] for c in esquema["columnas"]}
+            self.assertEqual(nombres_columnas, {"id", "producto_id"})
+            self.assertEqual(esquema["llaves_foraneas"], [{"columna": "producto_id", "tabla_referenciada": "productos"}])
+
             # Y "ejecutar" tiene que abortar sin tocar nada -- justo el
             # comportamiento que evitó el problema en producción.
             resp_ejecutar = self.client.post(

@@ -11574,14 +11574,21 @@ def reset_operativo_diagnostico():
     cuando 'ejecutar' avisa ese error -- así no hay que intentar el reseteo
     a ciegas otra vez para ver qué tabla es.
 
-    Dos cosas puede encontrar:
+    Tres cosas puede encontrar:
       1. 'tablas_no_clasificadas': tablas que existen HOY en la base pero
          no están ni en RESET_OPERATIVO_TABLAS (se borran) ni en
          RESET_OPERATIVO_TABLAS_PRESERVADAS (se conservan a propósito) --
          ej. una tabla nueva que se agregó después de escribir esta lista,
-         o una tabla '<algo>_legado...' que quedó de una reconstrucción
-         vieja (ver _reconstruir_tabla_legada_si_hace_falta en core.py).
-      2. 'riesgos': para cada tabla que el reseteo NO va a vaciar (esté
+         una tabla '<algo>_legado...' que quedó de una reconstrucción vieja
+         (ver _reconstruir_tabla_legada_si_hace_falta en core.py), o una
+         tabla huérfana de una función que ya se sacó del código (nadie la
+         lee ni la escribe hoy, pero nunca se hizo DROP TABLE).
+      2. 'esquema_tablas_no_clasificadas': para cada una de esas tablas sin
+         clasificar, sus columnas (PRAGMA table_info) y llaves foráneas
+         declaradas (PRAGMA foreign_key_list) -- para poder decidir de qué
+         se trata y si hay que sumarla al borrado o a las preservadas, sin
+         necesidad de acceso directo a la base.
+      3. 'riesgos': para cada tabla que el reseteo NO va a vaciar (esté
          clasificada como preservada, o ni siquiera clasificada), revisa
          sus llaves foráneas (PRAGMA foreign_key_list) buscando alguna que
          apunte a una tabla que SÍ se va a vaciar -- y cuenta cuántas filas
@@ -11596,6 +11603,21 @@ def reset_operativo_diagnostico():
     ]
     tablas_clasificadas = set(tablas_a_vaciar) | set(RESET_OPERATIVO_TABLAS_PRESERVADAS)
     tablas_no_clasificadas = sorted(t for t in todas_las_tablas if t not in tablas_clasificadas)
+
+    esquema_tablas_no_clasificadas = {}
+    for tabla in tablas_no_clasificadas:
+        columnas = [
+            {"nombre": c["name"], "tipo": c["type"], "not_null": bool(c["notnull"])}
+            for c in db.execute(f"PRAGMA table_info({tabla})").fetchall()
+        ]
+        llaves_foraneas = [
+            {"columna": fk["from"], "tabla_referenciada": fk["table"]}
+            for fk in db.execute(f"PRAGMA foreign_key_list({tabla})").fetchall()
+        ]
+        filas = db.execute(f"SELECT COUNT(*) FROM {tabla}").fetchone()[0]
+        esquema_tablas_no_clasificadas[tabla] = {
+            "columnas": columnas, "llaves_foraneas": llaves_foraneas, "filas": filas,
+        }
 
     riesgos = []
     for tabla in todas_las_tablas:
@@ -11621,6 +11643,7 @@ def reset_operativo_diagnostico():
     return jsonify({
         "total_tablas_en_la_base": len(todas_las_tablas),
         "tablas_no_clasificadas": tablas_no_clasificadas,
+        "esquema_tablas_no_clasificadas": esquema_tablas_no_clasificadas,
         "riesgos": riesgos,
         "listo_para_ejecutar": not tablas_no_clasificadas and not riesgos,
     })

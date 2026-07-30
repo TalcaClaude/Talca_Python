@@ -306,6 +306,135 @@ class TestResetOperativo(unittest.TestCase):
         data = resp.get_json()
         self.assertEqual(data["total_eliminadas"], 0)
 
+    def test_diagnostico_no_encuentra_nada_en_una_base_recien_creada(self):
+        # Sanity check estructural: en una base recién creada por init_db()
+        # (sin ningún incidente histórico de esquema) el diagnóstico no
+        # debería encontrar ni tablas sin clasificar ni riesgos -- si esto
+        # falla, es que RESET_OPERATIVO_TABLAS/RESET_OPERATIVO_TABLAS_PRESERVADAS
+        # quedaron desincronizadas del esquema real definido en init_db().
+        resp = self.client.get("/api/admin/reset-operativo/diagnostico")
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["tablas_no_clasificadas"], [])
+        self.assertEqual(data["riesgos"], [])
+        self.assertTrue(data["listo_para_ejecutar"])
+
+    def test_diagnostico_requiere_admin(self):
+        cliente_finanzas = self._crear_usuario_con_rol("fin_reset_diag", "finanzas")
+        resp = cliente_finanzas.get("/api/admin/reset-operativo/diagnostico")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_detecta_y_vacia_automaticamente_una_tabla_legado_huerfana(self):
+        # Reproduce el escenario real que abortó el reseteo en producción:
+        # una tabla '<algo>_legado...' que quedó de una reconstrucción
+        # histórica de esquema (ver _reconstruir_tabla_legada_si_hace_falta
+        # en core.py -- el incidente documentado ahí es justo con
+        # 'garantias', que en su momento tuvo una columna 'orden_id' NOT
+        # NULL apuntando a ordenes_trabajo, antes de existir
+        # 'orden_origen_id'). Esa tabla vieja no aparece en RESET_OPERATIVO_TABLAS
+        # (no existe ningún CREATE TABLE para ella en el código fuente -- se
+        # crea en caliente con ALTER TABLE ... RENAME TO), así que sin la
+        # detección dinámica por nombre, borrar 'ordenes_trabajo' la dejaría
+        # con una referencia rota y abortaría el reseteo, exactamente lo que
+        # le pasó al taller.
+        self._sembrar_datos_operativos()
+        db = taller_app._conectar_db()
+        try:
+            db.execute(
+                """
+                CREATE TABLE garantias_legado (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    orden_id INTEGER NOT NULL REFERENCES ordenes_trabajo(id),
+                    motivo TEXT DEFAULT ''
+                )
+                """
+            )
+            db.execute("INSERT INTO garantias_legado (orden_id, motivo) VALUES (1, 'Reclamo antiguo')")
+            db.commit()
+        finally:
+            db.close()
+
+        # El diagnóstico ya no debería marcar nada -- la tabla legado se
+        # detecta y se suma sola a lo que se va a vaciar.
+        resp_diag = self.client.get("/api/admin/reset-operativo/diagnostico")
+        self.assertEqual(resp_diag.status_code, 200, resp_diag.get_data(as_text=True))
+        data_diag = resp_diag.get_json()
+        self.assertEqual(data_diag["tablas_no_clasificadas"], [])
+        self.assertEqual(data_diag["riesgos"], [])
+        self.assertTrue(data_diag["listo_para_ejecutar"])
+
+        # Y "ejecutar" tiene que completarse sin abortar, vaciando también
+        # garantias_legado.
+        resp = self.client.post(
+            "/api/admin/reset-operativo/ejecutar", json={"confirmacion": "RESETEAR TALLER"}
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = resp.get_json()
+        self.assertEqual(data["eliminadas"].get("garantias_legado"), 1)
+
+        db2 = taller_app._conectar_db()
+        try:
+            self.assertEqual(db2.execute("SELECT COUNT(*) FROM garantias_legado").fetchone()[0], 0)
+            self.assertEqual(list(db2.execute("PRAGMA foreign_key_check").fetchall()), [])
+        finally:
+            db2.execute("DROP TABLE garantias_legado")
+            db2.commit()
+            db2.close()
+
+    def test_diagnostico_detecta_tabla_desconocida_con_referencia_de_riesgo(self):
+        # Caso más general que el de arriba: una tabla que NO sigue el
+        # patrón '_legado' (o sea, ni siquiera se puede adivinar por
+        # nombre) pero igual tiene una llave foránea propia hacia una
+        # tabla que el reseteo sí va a vaciar. El diagnóstico tiene que
+        # encontrarla iguel -- listar cada llave foránea real de la base es
+        # justamente lo que permite no depender de que alguien se acuerde
+        # de catalogar cada tabla nueva a mano.
+        self._sembrar_datos_operativos()
+        db = taller_app._conectar_db()
+        try:
+            db.execute(
+                """
+                CREATE TABLE cosa_no_catalogada (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    producto_id INTEGER REFERENCES productos(id)
+                )
+                """
+            )
+            db.execute("INSERT INTO cosa_no_catalogada (producto_id) VALUES (1)")
+            db.commit()
+        finally:
+            db.close()
+
+        try:
+            resp = self.client.get("/api/admin/reset-operativo/diagnostico")
+            self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+            data = resp.get_json()
+            self.assertIn("cosa_no_catalogada", data["tablas_no_clasificadas"])
+            self.assertFalse(data["listo_para_ejecutar"])
+            riesgo = next(r for r in data["riesgos"] if r["tabla"] == "cosa_no_catalogada")
+            self.assertEqual(riesgo["columna"], "producto_id")
+            self.assertEqual(riesgo["tabla_referenciada"], "productos")
+            self.assertEqual(riesgo["filas_con_referencia"], 1)
+            self.assertFalse(riesgo["tabla_preservada_a_proposito"])
+
+            # Y "ejecutar" tiene que abortar sin tocar nada -- justo el
+            # comportamiento que evitó el problema en producción.
+            resp_ejecutar = self.client.post(
+                "/api/admin/reset-operativo/ejecutar", json={"confirmacion": "RESETEAR TALLER"}
+            )
+            self.assertEqual(resp_ejecutar.status_code, 500)
+            data_ejecutar = resp_ejecutar.get_json()
+            self.assertIn("violaciones", data_ejecutar)
+            self.assertTrue(len(data_ejecutar["violaciones"]) > 0)
+
+            productos = self.client.get("/api/productos").get_json()["productos"]
+            self.assertEqual(len(productos), 1, "el abort no debería haber tocado ningún dato")
+        finally:
+            db2 = taller_app._conectar_db()
+            db2.execute("DROP TABLE cosa_no_catalogada")
+            db2.commit()
+            db2.close()
+
 
 if __name__ == "__main__":
     unittest.main()

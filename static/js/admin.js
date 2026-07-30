@@ -340,6 +340,44 @@ document.getElementById("btn-reset-operativo-preview").addEventListener("click",
   }
 });
 
+document.getElementById("btn-reset-operativo-diagnostico").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-reset-operativo-diagnostico");
+  const resultado = document.getElementById("reset-operativo-diagnostico-resultado");
+  btn.disabled = true;
+  resultado.textContent = "Revisando la base (no borra nada)…";
+  try {
+    const data = await api("/api/admin/reset-operativo/diagnostico");
+    const partes = [];
+    if (data.tablas_no_clasificadas.length) {
+      partes.push(
+        `⚠ Hay ${data.tablas_no_clasificadas.length} tabla(s) en la base que no están ni en la lista de borrado `
+        + `ni en la de preservadas: ${data.tablas_no_clasificadas.join(", ")}.`
+      );
+    }
+    if (data.riesgos.length) {
+      partes.push(
+        "⚠ Se encontraron referencias que quedarían rotas si se ejecuta el reseteo ahora:\n"
+        + data.riesgos.map(r =>
+            `  - "${r.tabla}"."${r.columna}" apunta a "${r.tabla_referenciada}" (que sí se borraría) `
+            + `y tiene ${r.filas_con_referencia} fila(s) con ese dato -- `
+            + (r.tabla_preservada_a_proposito
+                ? `"${r.tabla}" está en la lista de preservadas.`
+                : `"${r.tabla}" no está clasificada en ninguna lista.`)
+          ).join("\n")
+      );
+    }
+    resultado.textContent = partes.length
+      ? partes.join("\n\n") + `\n\nRevisó ${data.total_tablas_en_la_base} tabla(s) en total. NO se modificó ningún dato.`
+      : `Todo en orden: revisó ${data.total_tablas_en_la_base} tabla(s) y no encontró ninguna referencia que fuera a quedar rota. El reseteo debería poder ejecutarse sin problema.`;
+    toast(data.listo_para_ejecutar ? "Diagnóstico OK" : "Diagnóstico encontró problemas -- revisa el detalle", !data.listo_para_ejecutar);
+  } catch (e) {
+    resultado.textContent = "";
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.getElementById("btn-reset-operativo-ejecutar").addEventListener("click", async () => {
   const frase = document.getElementById("reset-operativo-frase").value.trim();
   if (frase !== "RESETEAR TALLER") {
@@ -353,10 +391,27 @@ document.getElementById("btn-reset-operativo-ejecutar").addEventListener("click"
   btn.disabled = true;
   resultado.textContent = "Creando respaldo y borrando…";
   try {
-    const data = await api("/api/admin/reset-operativo/ejecutar", {
+    // Fetch directo (no el helper api()) porque si esto falla con
+    // 'referencias rotas', el detalle útil (qué tabla/fila) viene en
+    // 'violaciones' -- un campo extra que api() descartaría al quedarse
+    // solo con data.error.
+    const res = await fetch("/api/admin/reset-operativo/ejecutar", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ confirmacion: frase }),
     });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      let mensaje = data.error || "Error inesperado";
+      if (data.violaciones && data.violaciones.length) {
+        mensaje += "\n\nDetalle técnico (tabla / fila / tabla referenciada / columna):\n"
+          + data.violaciones.map(v => `  - ${JSON.stringify(v)}`).join("\n")
+          + '\n\nUsa el botón "Diagnosticar" de arriba para identificar la tabla y columna exactas antes de reintentar.';
+      }
+      resultado.textContent = mensaje;
+      toast(data.error || "Error inesperado", true);
+      return;
+    }
     resultado.textContent = `Listo: se borraron ${data.total_eliminadas} fila(s) en total. Respaldo previo guardado como "${data.respaldo_local_creado}" (ver "Respaldos automáticos locales" arriba).`;
     document.getElementById("reset-operativo-preview").textContent = "";
     document.getElementById("reset-operativo-confirmar-campo").style.display = "none";

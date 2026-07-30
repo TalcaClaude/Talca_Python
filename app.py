@@ -11425,6 +11425,19 @@ def migracion_ordenes_historicas():
 # se verifica integridad al final con "PRAGMA foreign_key_check" antes de
 # confirmar, así que un orden distinto no rompería nada.
 #
+# OJO -- esta lista NO es necesariamente todo lo que se borra en la
+# práctica: ver _reset_operativo_tablas_a_vaciar() más abajo, que le suma
+# cualquier tabla '<algo>_legado...' huérfana que haya quedado de una
+# reconstrucción histórica de esquema (ver _reconstruir_tabla_legada_si_hace_falta
+# y _reparar_fk_hacia_tabla_renombrada en core.py -- garantias/garantia_items
+# y convertidores_torque/convertidor_items ya tuvieron incidentes así en
+# producción). Esas tablas '_legado' no aparecen en ningún CREATE TABLE del
+# código fuente (se crean en caliente con ALTER TABLE ... RENAME TO), así
+# que no pueden listarse a mano acá -- si una de ellas conserva una llave
+# foránea propia hacia alguna tabla de esta lista (ej. la columna vieja
+# 'orden_id' que tenía garantias antes de existir 'orden_origen_id'),
+# quedaría con una referencia rota después del borrado si no se detecta.
+#
 # Tablas que este reseteo NUNCA toca (quedan intactas):
 #   - clientes, equipos              (lo que el taller pidió preservar)
 #   - usuarios                        (cuentas del sistema, no son datos del taller)
@@ -11489,6 +11502,47 @@ RESET_OPERATIVO_TABLAS = [
 
 RESET_OPERATIVO_FRASE_CONFIRMACION = "RESETEAR TALLER"
 
+# Tablas que el reseteo deja intactas a propósito (ver comentario largo más
+# arriba de RESET_OPERATIVO_TABLAS). Se separa en su propia constante -- y no
+# se deja como un literal metido dentro de vista_previa() -- porque
+# reset_operativo_diagnostico() también la necesita para saber qué tablas de
+# la base están "clasificadas" (con una decisión tomada, borrar o preservar)
+# y cuáles quedaron fuera de ambas listas sin que nadie se diera cuenta.
+RESET_OPERATIVO_TABLAS_PRESERVADAS = [
+    "clientes", "equipos", "usuarios", "categorias", "marcas", "modelos",
+    "ubicaciones", "configuracion_facturacion", "estado_resultado_manual",
+    "respaldos_log",
+]
+
+
+def _reset_operativo_tablas_legado(db):
+    """Tablas '<tabla>_legado', '<tabla>_legado_fk', o esas mismas variantes
+    con un timestamp pegado al final (ver core.py: _reconstruir_tabla_legada_si_hace_falta
+    y _reparar_fk_hacia_tabla_renombrada, que arman el nombre así), para
+    CUALQUIER tabla de RESET_OPERATIVO_TABLAS -- se detectan por nombre
+    directamente contra la base real (no hay como saberlo desde el código
+    fuente, ver comentario arriba de RESET_OPERATIVO_TABLAS)."""
+    todas_las_tablas = {
+        r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    encontradas = []
+    for base in RESET_OPERATIVO_TABLAS:
+        patron = re.compile(rf"^{re.escape(base)}_legado(_fk)?(_\d+)?$")
+        encontradas.extend(sorted(t for t in todas_las_tablas if patron.match(t)))
+    return encontradas
+
+
+def _reset_operativo_tablas_a_vaciar(db):
+    """La lista real de tablas a vaciar: RESET_OPERATIVO_TABLAS más
+    cualquier tabla '_legado' huérfana que se le haya pegado (ver
+    _reset_operativo_tablas_legado). Se recalcula en cada request -- no es
+    cara (una sola consulta a sqlite_master) y así 'vista-previa',
+    'diagnostico' y 'ejecutar' siempre están mirando exactamente lo mismo,
+    aunque aparezca una tabla '_legado' nueva entre una llamada y otra."""
+    return RESET_OPERATIVO_TABLAS + _reset_operativo_tablas_legado(db)
+
 
 @app.route("/api/admin/reset-operativo/vista-previa", methods=["GET"])
 @requiere_rol()
@@ -11500,25 +11554,86 @@ def reset_operativo_vista_previa():
     endpoint de solo lectura en vez de meterlo en la respuesta de error del
     endpoint que ejecuta)."""
     db = get_db()
-    conteos = {tabla: db.execute(f"SELECT COUNT(*) FROM {tabla}").fetchone()[0] for tabla in RESET_OPERATIVO_TABLAS}
+    tablas_a_vaciar = _reset_operativo_tablas_a_vaciar(db)
+    conteos = {tabla: db.execute(f"SELECT COUNT(*) FROM {tabla}").fetchone()[0] for tabla in tablas_a_vaciar}
     return jsonify({
         "conteos": conteos,
         "total_filas": sum(conteos.values()),
-        "tablas_preservadas": [
-            "clientes", "equipos", "usuarios", "categorias", "marcas", "modelos",
-            "ubicaciones", "configuracion_facturacion", "estado_resultado_manual",
-            "respaldos_log",
-        ],
+        "tablas_preservadas": RESET_OPERATIVO_TABLAS_PRESERVADAS,
         "frase_confirmacion_requerida": RESET_OPERATIVO_FRASE_CONFIRMACION,
+    })
+
+
+@app.route("/api/admin/reset-operativo/diagnostico", methods=["GET"])
+@requiere_rol()
+def reset_operativo_diagnostico():
+    """Solo lectura, no borra ni modifica nada: revisa la base REAL (no la
+    lista de tablas escrita a mano en el código) para encontrar por qué
+    'ejecutar' se abortaría con 'quedaron referencias rotas después de
+    borrar'. Pensado para correrlo cuantas veces haga falta, sin riesgo,
+    cuando 'ejecutar' avisa ese error -- así no hay que intentar el reseteo
+    a ciegas otra vez para ver qué tabla es.
+
+    Dos cosas puede encontrar:
+      1. 'tablas_no_clasificadas': tablas que existen HOY en la base pero
+         no están ni en RESET_OPERATIVO_TABLAS (se borran) ni en
+         RESET_OPERATIVO_TABLAS_PRESERVADAS (se conservan a propósito) --
+         ej. una tabla nueva que se agregó después de escribir esta lista,
+         o una tabla '<algo>_legado...' que quedó de una reconstrucción
+         vieja (ver _reconstruir_tabla_legada_si_hace_falta en core.py).
+      2. 'riesgos': para cada tabla que el reseteo NO va a vaciar (esté
+         clasificada como preservada, o ni siquiera clasificada), revisa
+         sus llaves foráneas (PRAGMA foreign_key_list) buscando alguna que
+         apunte a una tabla que SÍ se va a vaciar -- y cuenta cuántas filas
+         tienen ese valor lleno hoy. Cualquier fila ahí es justamente la
+         que después de borrar quedaría con una referencia rota."""
+    db = get_db()
+    tablas_a_vaciar = _reset_operativo_tablas_a_vaciar(db)
+    todas_las_tablas = [
+        r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    ]
+    tablas_clasificadas = set(tablas_a_vaciar) | set(RESET_OPERATIVO_TABLAS_PRESERVADAS)
+    tablas_no_clasificadas = sorted(t for t in todas_las_tablas if t not in tablas_clasificadas)
+
+    riesgos = []
+    for tabla in todas_las_tablas:
+        if tabla in tablas_a_vaciar:
+            continue  # esta tabla también se vacía completa -- no puede quedar con nada colgando de sí misma
+        for fk in db.execute(f"PRAGMA foreign_key_list({tabla})").fetchall():
+            tabla_referenciada = fk["table"]
+            if tabla_referenciada not in tablas_a_vaciar:
+                continue
+            columna = fk["from"]
+            filas_con_referencia = db.execute(
+                f"SELECT COUNT(*) FROM {tabla} WHERE {columna} IS NOT NULL"
+            ).fetchone()[0]
+            if filas_con_referencia > 0:
+                riesgos.append({
+                    "tabla": tabla,
+                    "columna": columna,
+                    "tabla_referenciada": tabla_referenciada,
+                    "filas_con_referencia": filas_con_referencia,
+                    "tabla_preservada_a_proposito": tabla in RESET_OPERATIVO_TABLAS_PRESERVADAS,
+                })
+
+    return jsonify({
+        "total_tablas_en_la_base": len(todas_las_tablas),
+        "tablas_no_clasificadas": tablas_no_clasificadas,
+        "riesgos": riesgos,
+        "listo_para_ejecutar": not tablas_no_clasificadas and not riesgos,
     })
 
 
 @app.route("/api/admin/reset-operativo/ejecutar", methods=["POST"])
 @requiere_rol()
 def reset_operativo_ejecutar():
-    """Vacía TODAS las tablas de RESET_OPERATIVO_TABLAS, preservando
-    clientes/equipos/usuarios/catálogos (ver comentario arriba de la lista).
-    Pensado como paso previo a cargar la base migrada desde el sistema PHP.
+    """Vacía TODAS las tablas de _reset_operativo_tablas_a_vaciar() (la lista
+    fija RESET_OPERATIVO_TABLAS más cualquier tabla '_legado' huérfana que
+    se le haya detectado), preservando clientes/equipos/usuarios/catálogos
+    (ver comentario arriba de la lista). Pensado como paso previo a cargar
+    la base migrada desde el sistema PHP.
 
     Salvaguardas, en orden:
       1. Exige la frase exacta RESETEAR TALLER en el body -- es una
@@ -11550,12 +11665,13 @@ def reset_operativo_ejecutar():
         }), 500
 
     db = get_db()
+    tablas_a_vaciar = _reset_operativo_tablas_a_vaciar(db)
     db.commit()  # cierra cualquier transacción implícita pendiente antes de tocar el pragma
     db.execute("PRAGMA foreign_keys = OFF")
     db.execute("BEGIN IMMEDIATE")
     try:
         eliminadas = {}
-        for tabla in RESET_OPERATIVO_TABLAS:
+        for tabla in tablas_a_vaciar:
             cur = db.execute(f"DELETE FROM {tabla}")
             eliminadas[tabla] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 

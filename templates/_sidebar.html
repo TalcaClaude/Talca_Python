@@ -116,6 +116,20 @@
       <a class="sidebar-subitem" data-vista-link="estado-resultados" href="/finanzas#estado-resultados">Estado de resultados</a>
     </div>
   </div>
+  {% elif "bodega" in modulos_usuario %}
+  <!-- Bodega no tiene el módulo 'finanzas' asignado, pero sí puede entrar a
+       /finanzas a registrar facturas de compra (ver requiere_modulo en
+       app.py, ruta /finanzas) -- ahí la plantilla detecta que no tiene el
+       módulo completo y le muestra solo la pestaña "Facturas" (ver
+       'solo_facturas' en vista_finanzas()/finanzas.html). Acá, en vez del
+       submenú completo de arriba, se le da un único link directo (sin
+       flecha/desplegable) a esa vista restringida. -->
+  <div class="sidebar-modulo{{ ' activo' if modulo_activo == 'finanzas' else '' }}">
+    <a class="sidebar-modulo-header" href="/finanzas" style="text-decoration:none; display:flex;">
+      <span class="sidebar-modulo-tag">04</span>
+      <span class="sidebar-modulo-nombre">Facturas</span>
+    </a>
+  </div>
   {% endif %}
 
   {% if rol_usuario == "admin" or "operativo" in modulos_usuario %}

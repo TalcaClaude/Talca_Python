@@ -21,7 +21,7 @@
       <span class="brand-tag">04</span>
       <div class="brand-text">
         <h1>Inventario<span>Taller</span></h1>
-        <p class="brand-sub" id="brand-sub">Finanzas — Resumen</p>
+        <p class="brand-sub" id="brand-sub">Finanzas — {{ 'Facturas' if solo_facturas else 'Resumen' }}</p>
       </div>
     </div>
     <div class="topbar-acciones">
@@ -36,18 +36,22 @@
   </header>
 
   <nav class="tabs">
+    {% if not solo_facturas %}
     <button class="tab activo" data-vista="resumen">Resumen</button>
     <button class="tab" data-vista="caja">Caja Chica</button>
     <button class="tab" data-vista="cxc">Cuentas por Cobrar</button>
     <button class="tab" data-vista="cxp">Cuentas por Pagar</button>
-    <button class="tab" data-vista="facturas">Facturas</button>
+    {% endif %}
+    <button class="tab{{ ' activo' if solo_facturas else '' }}" data-vista="facturas">Facturas</button>
+    {% if not solo_facturas %}
     <button class="tab" data-vista="gastos-generales">Gastos Generales</button>
     <button class="tab" data-vista="dte">Facturación electrónica</button>
     <button class="tab" data-vista="estado-resultados">Estado de Resultados</button>
     <button class="tab" data-vista="reportes">Reportes</button>
+    {% endif %}
   </nav>
 
-  <section class="vista" id="vista-resumen">
+  <section class="vista" id="vista-resumen" style="{{ 'display:none' if solo_facturas else '' }}">
 
   <section class="toolbar">
     <label class="toggle-critico">Desde <input type="date" id="fin-resumen-desde"></label>
@@ -367,9 +371,9 @@
 
   </section>
 
-  <section class="vista" id="vista-facturas" style="display:none">
+  <section class="vista" id="vista-facturas" style="{{ 'display:block' if solo_facturas else 'display:none' }}">
 
-  <p class="ayuda-inline">Regístralas apenas se pacte la compra con el proveedor (contado, crédito a N días, o mixto). Quedan "pendientes de recepción": no se aplica stock ni se genera la Cuenta por Pagar hasta que alguien contraste esta factura contra lo que llegó físicamente y la apruebe — ver el aviso 📦 que aparece en cualquier pantalla mientras haya facturas por revisar.</p>
+  <p class="ayuda-inline">Regístralas apenas se pacte la compra con el proveedor (contado, crédito a N días, o mixto). Si todos los productos ya existen en el catálogo, la factura se aplica de inmediato (stock actualizado y Cuenta por Pagar generada) apenas la confirmas. Si trae un producto nuevo que todavía no está en el catálogo, queda "pendiente de recepción" hasta que se cree ese producto y se apruebe — ver el aviso 📦 que aparece en cualquier pantalla mientras haya facturas por revisar.</p>
   <section class="toolbar">
     <span style="flex:1"></span>
     <button class="btn btn-secundario" id="btn-cxp-carga-masiva">Carga masiva (Excel)</button>
@@ -900,9 +904,36 @@
       </div>
     </div>
 
-    <div class="modal-actions">
+    <div id="pfd-condicion-pago" style="display:none">
+      <h3 class="subtitulo">Cambiar condición de pago</h3>
+      <p class="ayuda-inline">Solo corrige la condición pactada con el proveedor — no toca las líneas ni el stock ya aplicado. Reemplaza la Cuenta por Pagar de esta factura por una nueva con la condición corregida (bloqueado si ya tiene abonos registrados).</p>
+      <div class="grid-3">
+        <label class="toggle-critico"><input type="radio" name="pfd-condicion" value="contado"> Al contado</label>
+        <label class="toggle-critico"><input type="radio" name="pfd-condicion" value="credito" checked> A crédito</label>
+        <label class="toggle-critico"><input type="radio" name="pfd-condicion" value="mixto"> Mixto</label>
+      </div>
+      <div class="grid-2" id="pfd-campos-mixto" style="display:none">
+        <div class="campo">
+          <label>% al contado</label>
+          <input type="number" id="pfd-porcentaje-contado" min="1" max="99" value="50">
+        </div>
+      </div>
+      <div class="grid-2" id="pfd-campos-credito">
+        <div class="campo">
+          <label>Plazo de crédito (días)</label>
+          <input type="number" id="pfd-plazo-dias" min="1" value="30">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" id="pfd-cond-cancelar">Cancelar</button>
+        <button type="button" class="btn btn-primary" id="pfd-cond-guardar">Guardar condición de pago</button>
+      </div>
+    </div>
+
+    <div class="modal-actions" id="pfd-acciones-principales">
       <button type="button" class="btn btn-secundario" data-close="modal-factura-pendiente-detalle">Cerrar</button>
       <button type="button" class="btn btn-secundario" id="pfd-btn-editar" style="display:none">Editar</button>
+      <button type="button" class="btn btn-secundario" id="pfd-btn-condicion-pago" style="display:none">Cambiar condición de pago</button>
       <button type="button" class="btn btn-danger" id="pfd-btn-eliminar" style="display:none">Eliminar factura</button>
       <button type="button" class="btn btn-danger" id="pfd-btn-eliminar-confirmar" style="display:none">Sí, eliminar y revertir stock</button>
     </div>

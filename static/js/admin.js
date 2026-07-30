@@ -309,6 +309,67 @@ document.getElementById("btn-vaciar-caja-chica").addEventListener("click", async
   }
 });
 
+// ---------------------------------------------------------------------------
+// Reseteo de datos operativos (para migración desde PHP) -- ver
+// /api/admin/reset-operativo/vista-previa y /ejecutar en app.py. Primero
+// muestra cuántas filas hay en cada tabla que se borraría (sin tocar nada),
+// recién después habilita el campo de confirmación con la frase exacta.
+// ---------------------------------------------------------------------------
+
+document.getElementById("btn-reset-operativo-preview").addEventListener("click", async () => {
+  const btn = document.getElementById("btn-reset-operativo-preview");
+  const preview = document.getElementById("reset-operativo-preview");
+  const confirmarCampo = document.getElementById("reset-operativo-confirmar-campo");
+  btn.disabled = true;
+  preview.textContent = "Contando…";
+  try {
+    const data = await api("/api/admin/reset-operativo/vista-previa");
+    const filas = Object.entries(data.conteos)
+      .filter(([, n]) => n > 0)
+      .map(([tabla, n]) => `${tabla}: ${n}`)
+      .join(" · ");
+    preview.textContent = data.total_filas > 0
+      ? `Se borrarían ${data.total_filas} fila(s) en total — ${filas}`
+      : "No hay datos operativos que borrar (todas las tablas ya están vacías).";
+    confirmarCampo.style.display = data.total_filas > 0 ? "" : "none";
+  } catch (e) {
+    preview.textContent = "";
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("btn-reset-operativo-ejecutar").addEventListener("click", async () => {
+  const frase = document.getElementById("reset-operativo-frase").value.trim();
+  if (frase !== "RESETEAR TALLER") {
+    toast("Escribe exactamente RESETEAR TALLER para confirmar", true);
+    return;
+  }
+  if (!confirm("Esto borra TODAS las órdenes de trabajo, productos, facturas de compra, garantías, convertidores, caja chica y todo lo relacionado -- de forma permanente (salvo restaurar el respaldo automático que se crea antes). Clientes y vehículos NO se tocan. ¿Continuar?")) return;
+  if (!confirm("Última confirmación: esta acción no se puede deshacer desde la interfaz. ¿Ejecutar el reseteo ahora?")) return;
+  const btn = document.getElementById("btn-reset-operativo-ejecutar");
+  const resultado = document.getElementById("resultado-reset-operativo");
+  btn.disabled = true;
+  resultado.textContent = "Creando respaldo y borrando…";
+  try {
+    const data = await api("/api/admin/reset-operativo/ejecutar", {
+      method: "POST",
+      body: JSON.stringify({ confirmacion: frase }),
+    });
+    resultado.textContent = `Listo: se borraron ${data.total_eliminadas} fila(s) en total. Respaldo previo guardado como "${data.respaldo_local_creado}" (ver "Respaldos automáticos locales" arriba).`;
+    document.getElementById("reset-operativo-preview").textContent = "";
+    document.getElementById("reset-operativo-confirmar-campo").style.display = "none";
+    document.getElementById("reset-operativo-frase").value = "";
+    toast("Reseteo completado");
+  } catch (e) {
+    resultado.textContent = "";
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.getElementById("btn-migracion-garantias-items").addEventListener("click", async () => {
   const btn = document.getElementById("btn-migracion-garantias-items");
   const resultado = document.getElementById("resultado-migracion-garantias-items");

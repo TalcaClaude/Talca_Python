@@ -124,6 +124,23 @@
   </section>
 
   <section class="chart-card" style="margin-top:22px;">
+    <h3>Reseteo de datos operativos (para migración desde PHP)</h3>
+    <p class="chart-sub">Deja en blanco todo lo operativo — órdenes de trabajo, productos de bodega, convertidores de torque, garantías, facturas de compra, cuentas por pagar/cobrar, caja chica, documentos tributarios y todo lo que se genera a partir de eso — para poder cargar encima la base migrada desde el sistema PHP antiguo. <strong>Clientes, sus vehículos (equipos), usuarios del sistema y los catálogos (categorías/marcas/modelos/ubicaciones) NO se tocan.</strong> Crea un respaldo automático antes de borrar cualquier cosa; aun así, te recomendamos descargar también un respaldo manual (sección de arriba) antes de continuar.</p>
+    <div class="modal-actions modal-actions--start">
+      <button type="button" class="btn btn-secundario" id="btn-reset-operativo-preview">Ver qué se borraría</button>
+    </div>
+    <div id="reset-operativo-preview" class="ayuda" style="margin-top:10px;"></div>
+    <div class="campo" id="reset-operativo-confirmar-campo" style="display:none; margin-top:14px;">
+      <label>Para ejecutar, escribe exactamente: <code>RESETEAR TALLER</code></label>
+      <input type="text" id="reset-operativo-frase" placeholder="RESETEAR TALLER">
+      <div class="modal-actions modal-actions--start" style="margin-top:10px;">
+        <button type="button" class="btn btn-danger" id="btn-reset-operativo-ejecutar">Ejecutar reseteo</button>
+      </div>
+    </div>
+    <p class="ayuda-inline" id="resultado-reset-operativo" style="margin-top:10px;"></p>
+  </section>
+
+  <section class="chart-card" style="margin-top:22px;">
     <h3>Migración de datos (clientes / autos / OT abiertas)</h3>
     <!-- Antes esta herramienta solo se podía llegar tipeando la URL a mano
          (/admin/migracion-datos) -- no tenía ningún link visible desde acá,

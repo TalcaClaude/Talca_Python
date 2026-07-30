@@ -134,10 +134,20 @@ async function cargarSesion() {
     // como módulo SECUNDARIO (ej. rol="bodega" con modulos=["bodega",
     // "finanzas"]) y aun así tener que ver este botón.
     const puedeFinanzas = s.rol === "admin" || (s.modulos || []).includes("finanzas");
+    // "Registrar factura de compra" (ruta directa de ingreso, ver
+    // crear_factura_pendiente_recepcion en app.py) también está abierta a
+    // Bodega desde la nueva ruta de ingreso directo -- ella es quien
+    // ahora ingresa las facturas al recibir la mercadería.
+    const puedeFacturas = puedeFinanzas || (s.modulos || []).includes("bodega");
     const btnNuevaFacturaPendiente = document.getElementById("btn-nueva-factura-pendiente");
-    if (btnNuevaFacturaPendiente) btnNuevaFacturaPendiente.style.display = puedeFinanzas ? "" : "none";
+    if (btnNuevaFacturaPendiente) btnNuevaFacturaPendiente.style.display = puedeFacturas ? "" : "none";
     const btnNuevaCxpManual = document.getElementById("btn-nueva-cxp-manual");
     if (btnNuevaCxpManual) btnNuevaCxpManual.style.display = puedeFinanzas ? "" : "none";
+    // Solo Finanzas/admin puede corregir la condición de pago de una
+    // factura ya aplicada (ver PUT /api/facturas/<id>/condicion-pago) --
+    // se guarda en el estado global para que abrirDetalleFacturaPendiente
+    // decida si muestra ese botón sin tener que repetir este cálculo.
+    state.puedeEditarCondicionPago = puedeFinanzas;
   } catch (e) {
     console.error(e);
   }
@@ -1459,6 +1469,8 @@ const EVENTO_HISTORIAL_PFR_LABEL = {
   rechazada: "Rechazada por Bodega",
   corregida_reingresada: "Corregida y reingresada",
   aprobada: "Aprobada",
+  aplicada_directamente: "Aplicada directamente al ingresarla (sin paso de aprobación aparte)",
+  condicion_pago_editada: "Condición de pago corregida por Finanzas",
 };
 const ORIGEN_PFR_LABEL = { manual: "Manual", excel: "Excel", foto: "Foto", whatsapp: "WhatsApp" };
 
@@ -1620,6 +1632,9 @@ async function abrirDetalleFacturaPendiente(id) {
   document.getElementById("pfd-btn-eliminar-confirmar").style.display = "none";
   document.getElementById("pfd-btn-eliminar").style.display = "none";
   document.getElementById("pfd-btn-editar").style.display = "none";
+  document.getElementById("pfd-condicion-pago").style.display = "none";
+  document.getElementById("pfd-btn-condicion-pago").style.display = "none";
+  document.getElementById("pfd-acciones-principales").style.display = "";
 
   const etiquetaCondicion = {
     contado: "Al contado",
@@ -1708,6 +1723,24 @@ async function abrirDetalleFacturaPendiente(id) {
   if (pfdFacturaIdReal) {
     document.getElementById("pfd-btn-eliminar").style.display = "";
   }
+  // Cambiar condición de pago: solo tiene sentido sobre una factura YA
+  // aplicada de verdad (con factura_id real, ver arriba) y solo para
+  // Finanzas/admin (ver puedeEditarCondicionPago en cargarSesion) -- Bodega
+  // puede ver esta pantalla (ruta directa de ingreso) pero no puede tocar
+  // la condición pactada con el proveedor, solo Finanzas la termina de
+  // confirmar.
+  if (pfdFacturaIdReal && state.puedeEditarCondicionPago) {
+    document.getElementById("pfd-btn-condicion-pago").style.display = "";
+    // Prellenado con la condición actual (guardada en el pendiente, que
+    // PUT /api/facturas/<id>/condicion-pago mantiene al día -- ver
+    // cambiar_condicion_pago_factura en app.py).
+    const radioCondicionActual = document.querySelector(`input[name="pfd-condicion"][value="${p.condicion_pago}"]`);
+    if (radioCondicionActual) radioCondicionActual.checked = true;
+    document.getElementById("pfd-porcentaje-contado").value = p.porcentaje_contado || 50;
+    document.getElementById("pfd-plazo-dias").value = p.plazo_dias_credito || 30;
+    document.getElementById("pfd-campos-mixto").style.display = p.condicion_pago === "mixto" ? "grid" : "none";
+    document.getElementById("pfd-campos-credito").style.display = p.condicion_pago === "contado" ? "none" : "grid";
+  }
 
   abrirModal("modal-factura-pendiente-detalle");
 }
@@ -1746,6 +1779,51 @@ document.getElementById("pfd-btn-eliminar-confirmar").addEventListener("click", 
   try {
     await api(`/api/facturas/${pfdFacturaIdReal}?forzar=1`, { method: "DELETE" });
     toast("Factura eliminada y stock revertido");
+    cerrarModal("modal-factura-pendiente-detalle");
+    await cargarFacturasPendientesRecepcion();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Cambiar condición de pago de una factura ya aplicada (Finanzas/admin,
+// ver PUT /api/facturas/<id>/condicion-pago) -- no toca líneas ni stock,
+// solo reemplaza la(s) Cuenta(s) por Pagar por una(s) nueva(s) con la
+// condición corregida.
+// ---------------------------------------------------------------------------
+
+document.getElementById("pfd-btn-condicion-pago").addEventListener("click", () => {
+  document.getElementById("pfd-acciones-principales").style.display = "none";
+  document.getElementById("pfd-condicion-pago").style.display = "block";
+});
+
+document.getElementById("pfd-cond-cancelar").addEventListener("click", () => {
+  document.getElementById("pfd-condicion-pago").style.display = "none";
+  document.getElementById("pfd-acciones-principales").style.display = "";
+});
+
+document.querySelectorAll('input[name="pfd-condicion"]').forEach(radio => {
+  radio.addEventListener("change", () => {
+    const condicion = document.querySelector('input[name="pfd-condicion"]:checked').value;
+    document.getElementById("pfd-campos-mixto").style.display = condicion === "mixto" ? "grid" : "none";
+    document.getElementById("pfd-campos-credito").style.display = condicion === "contado" ? "none" : "grid";
+  });
+});
+
+document.getElementById("pfd-cond-guardar").addEventListener("click", async () => {
+  if (!pfdFacturaIdReal) return;
+  const condicion = document.querySelector('input[name="pfd-condicion"]:checked').value;
+  try {
+    await api(`/api/facturas/${pfdFacturaIdReal}/condicion-pago`, {
+      method: "PUT",
+      body: JSON.stringify({
+        condicion_pago: condicion,
+        porcentaje_contado: condicion === "mixto" ? Number(document.getElementById("pfd-porcentaje-contado").value) : (condicion === "contado" ? 100 : 0),
+        plazo_dias_credito: Number(document.getElementById("pfd-plazo-dias").value || 30),
+      }),
+    });
+    toast("Condición de pago corregida");
     cerrarModal("modal-factura-pendiente-detalle");
     await cargarFacturasPendientesRecepcion();
   } catch (e) {
@@ -2197,7 +2275,7 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
       if (eraCorreccionDeRechazo && typeof afrSondear === "function") afrSondear();
     } else {
       const condicion = document.querySelector('input[name="pfr-condicion"]:checked').value;
-      await api("/api/facturas/pendientes-recepcion", {
+      const creada = await api("/api/facturas/pendientes-recepcion", {
         method: "POST",
         body: JSON.stringify({
           numero: document.getElementById("pfr-numero").value,
@@ -2209,7 +2287,14 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
           plazo_dias_credito: Number(document.getElementById("pfr-plazo-dias").value || 30),
         }),
       });
-      toast("Factura registrada — queda pendiente de aprobar la recepción");
+      // Con todos los productos ya en el catálogo, la factura queda
+      // aplicada de una (ver _crear_pendiente_y_aplicar_si_posible en
+      // app.py) -- solo sigue "pendiente" si le falta crear algún
+      // producto nuevo, que es cuando de verdad hace falta el paso extra
+      // de aprobar a mano.
+      toast(creada.estado === "aprobada"
+        ? "Factura aplicada: stock actualizado y Cuenta por Pagar generada"
+        : "Factura registrada — queda pendiente de recepción (falta vincular un producto nuevo, ver el aviso 📦)");
     }
     cerrarModal("modal-factura-pendiente");
     await cargarFacturasPendientesRecepcion();
@@ -2289,6 +2374,21 @@ function cmfRenderPreview(resumen) {
     `;
   }).join("");
 
+  // La corrección de una línea se manda al servidor SOLA (sin esperar a
+  // que la persona aprete "Guardar corrección" a propósito): antes esto
+  // dependía por completo de ese botón chico, y era fácil elegir otro
+  // producto en el desplegable, dar por hecho que ya quedó guardado, y
+  // apretar directo "Confirmar carga" -- la corrección se perdía en
+  // silencio y lo que le llegaba a Bodega era la factura tal como se
+  // había leído originalmente. "change" alcanza (se dispara al elegir del
+  // desplegable, o al salir de un campo de texto/número después de
+  // editarlo), no hace falta guardar en cada tecla.
+  document.querySelectorAll("#cmf-lista-facturas .cmf-linea-producto-id, #cmf-lista-facturas .cmf-linea-cantidad, #cmf-lista-facturas .cmf-linea-precio").forEach(el => {
+    el.addEventListener("change", () => cmfGuardarCorreccionLinea(el.closest("tr[data-cmf-linea]")));
+  });
+  // El botón "Guardar corrección" se deja igual (por si alguien prefiere
+  // guardar explícitamente, o para repetir el guardado tras un error) --
+  // ya no es la ÚNICA forma de que la corrección se guarde.
   document.querySelectorAll("#cmf-lista-facturas .cmf-linea-guardar").forEach(btn => {
     btn.addEventListener("click", () => cmfGuardarCorreccionLinea(btn.closest("tr[data-cmf-linea]")));
   });
@@ -2297,25 +2397,37 @@ function cmfRenderPreview(resumen) {
   });
 }
 
-async function cmfGuardarCorreccionLinea(tr) {
+// Manda al servidor la corrección de UNA línea con los valores que hay
+// AHORA MISMO en su fila (sin toast ni repintar la tabla completa) --
+// separado de cmfGuardarCorreccionLinea para poder reusarlo también desde
+// "Confirmar carga" (ver más abajo), que hace un último barrido de todas
+// las filas visibles antes de confirmar, como red de seguridad extra por
+// si algún cambio no alcanzó a dispararse por su cuenta (ej. autocompletado
+// del navegador).
+async function cmfEnviarCorreccionLinea(tr) {
   const [numeroFactura, filaStr] = tr.dataset.cmfLinea.split("|");
   const productoId = tr.querySelector(".cmf-linea-producto-id").value;
   const cantidad = tr.querySelector(".cmf-linea-cantidad").value;
   const precio = tr.querySelector(".cmf-linea-precio").value;
+  const data = await api("/api/facturas/carga-masiva/corregir-linea", {
+    method: "POST",
+    body: JSON.stringify({
+      token: state.cmfToken,
+      numero_factura: numeroFactura,
+      fila: parseInt(filaStr, 10),
+      producto_id: productoId || null,
+      cantidad: cantidad || null,
+      precio_unitario: precio || null,
+    }),
+  });
+  const idx = state.cmfFacturas.findIndex(f => f.numero === numeroFactura);
+  if (idx >= 0) state.cmfFacturas[idx] = data.factura;
+  return data;
+}
+
+async function cmfGuardarCorreccionLinea(tr) {
   try {
-    const data = await api("/api/facturas/carga-masiva/corregir-linea", {
-      method: "POST",
-      body: JSON.stringify({
-        token: state.cmfToken,
-        numero_factura: numeroFactura,
-        fila: parseInt(filaStr, 10),
-        producto_id: productoId || null,
-        cantidad: cantidad || null,
-        precio_unitario: precio || null,
-      }),
-    });
-    const idx = state.cmfFacturas.findIndex(f => f.numero === numeroFactura);
-    if (idx >= 0) state.cmfFacturas[idx] = data.factura;
+    const data = await cmfEnviarCorreccionLinea(tr);
     cmfRenderPreview(data.resumen);
     toast("Corrección guardada");
   } catch (e) {
@@ -2420,6 +2532,14 @@ document.getElementById("btn-cmf-confirmar").addEventListener("click", async () 
   if (!state.cmfToken) return;
   const condicion = document.querySelector('input[name="cmf-condicion"]:checked').value;
   try {
+    // Red de seguridad: manda una última corrección de CADA línea visible
+    // con el valor que hay ahora mismo en pantalla, antes de confirmar --
+    // así "Confirmar carga" nunca puede dejar afuera un cambio que la
+    // persona ya hizo, incluso si por algún motivo no se disparó solo
+    // (ver cmfEnviarCorreccionLinea más arriba).
+    for (const tr of document.querySelectorAll("#cmf-lista-facturas tr[data-cmf-linea]")) {
+      await cmfEnviarCorreccionLinea(tr);
+    }
     const data = await api("/api/facturas/carga-masiva/confirmar", {
       method: "POST",
       body: JSON.stringify({
@@ -2429,8 +2549,13 @@ document.getElementById("btn-cmf-confirmar").addEventListener("click", async () 
         plazo_dias_credito: Number(document.getElementById("cmf-plazo-dias").value || 30),
       }),
     });
-    toast(`${data.total_creadas} factura(s) quedaron pendientes de recepción` +
-      (data.omitidas.length ? ` — se omitieron ${data.omitidas.length} con errores (${data.omitidas.join(", ")})` : ""));
+    const pendientesSinAplicar = data.total_creadas - data.total_aplicadas;
+    toast(
+      (data.total_aplicadas ? `${data.total_aplicadas} factura(s) aplicadas (stock + Cuenta por Pagar)` : "") +
+      (data.total_aplicadas && pendientesSinAplicar ? " — " : "") +
+      (pendientesSinAplicar ? `${pendientesSinAplicar} quedaron pendientes de recepción (falta vincular un producto nuevo)` : "") +
+      (data.omitidas.length ? ` — se omitieron ${data.omitidas.length} con errores (${data.omitidas.join(", ")})` : "")
+    );
     cerrarModal("modal-cxp-carga-masiva");
     await cargarFacturasPendientesRecepcion();
   } catch (e) {
@@ -3116,4 +3241,14 @@ document.getElementById("dted-btn-nota-credito-confirmar").addEventListener("cli
 // ---------------------------------------------------------------------------
 
 cargarSesion();
-cargarResumenFinanzas();
+// Bodega con acceso restringido llega acá sin el botón "Resumen" en el DOM
+// (ver templates/finanzas.html, 'solo_facturas') -- cargar el resumen
+// general fallaría con 403 (/api/finanzas/resumen es solo para Finanzas) y
+// ensuciaría la pantalla con un toast de error apenas carga. En ese caso se
+// carga directo la única pestaña a la que tiene acceso.
+if (document.querySelector('.tabs:not(.sub-tabs) > .tab[data-vista="resumen"]')) {
+  cargarResumenFinanzas();
+} else {
+  document.getElementById("vista-facturas").style.display = "block";
+  cargarFacturasPendientesRecepcion();
+}

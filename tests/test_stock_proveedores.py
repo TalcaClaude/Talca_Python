@@ -60,6 +60,14 @@ class _BaseStockProveedores(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         pendiente = resp.get_json()
+        if pendiente["estado"] == "aprobada":
+            # Ruta de ingreso directo (ver _crear_pendiente_y_aplicar_si_posible
+            # en app.py): con el producto ya en el catálogo, la factura queda
+            # aplicada de una al crearla -- no hay (ni hace falta) un
+            # segundo paso de aprobación que llamar.
+            resp2 = self.client.get(f"/api/facturas/{pendiente['factura_id']}")
+            self.assertEqual(resp2.status_code, 200, resp2.get_data(as_text=True))
+            return resp2.get_json()
         resp2 = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
         self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
         return resp2.get_json()

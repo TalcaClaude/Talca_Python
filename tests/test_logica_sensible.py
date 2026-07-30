@@ -156,9 +156,11 @@ class TestEliminarFacturaRevierteSinContaminarConsumo(unittest.TestCase):
 
     def _crear_factura_aplicada(self, numero, producto_id, cantidad=5, precio_unitario=1000):
         # Desde la migración a "pendientes de recepción" ya no existe el
-        # registro rápido (POST /api/facturas) — se crea el pendiente y se
-        # aprueba de inmediato, que es el único camino que queda para que
-        # una factura termine aplicando stock.
+        # registro rápido (POST /api/facturas) — se crea el pendiente, que
+        # con el producto ya en el catálogo queda aplicado de inmediato con
+        # la ruta de ingreso directo (ver
+        # _crear_pendiente_y_aplicar_si_posible en app.py); si por algún
+        # motivo no se aplicara solo, se aprueba a mano como respaldo.
         resp = self.client.post(
             "/api/facturas/pendientes-recepcion",
             json={
@@ -170,6 +172,10 @@ class TestEliminarFacturaRevierteSinContaminarConsumo(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         pendiente = resp.get_json()
+        if pendiente["estado"] == "aprobada":
+            resp2 = self.client.get(f"/api/facturas/{pendiente['factura_id']}")
+            self.assertEqual(resp2.status_code, 200, resp2.get_data(as_text=True))
+            return resp2.get_json()
         resp2 = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
         self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
         return resp2.get_json()
@@ -2037,6 +2043,63 @@ class TestBuscarProductoPorTexto(unittest.TestCase):
             self.assertIsNotNone(producto)
             self.assertEqual(producto["id"], correcto_id)
 
+    # -- Caso real reportado por el taller (factura de Guangzhou Transpeed):
+    # dentro de una familia de modelo ya acotada exacto (ej. "JF011"),
+    # comparar por CARACTERES (como se hacía hasta la corrección anterior)
+    # le daba demasiado parecido a textos cortos sin relación real --
+    # "pulley set" vs "oil filter e" puntuaba 0.455 sobre un umbral de
+    # 0.45, y "valve body" vs "brake band" puntuaba 0.5 -- ambos productos
+    # completamente distintos, matcheados igual. Estos tests fijan que el
+    # comparador por PALABRAS los rechace. --
+
+    def test_dentro_de_la_familia_palabras_sin_relacion_no_matchean_aunque_el_texto_se_parezca(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            _crear_producto(
+                db, "JF011PSR - OIL FILTER E", categoria="JF011PSR", modelo="OIL FILTER E", stock_disponible=5,
+            )
+            producto = taller_app._buscar_producto_por_texto(db, "PULLEY SET", modelo="JF011PSR")
+            self.assertIsNone(producto)
+
+    def test_dentro_de_la_familia_palabras_sin_relacion_no_matchean_caso_valve_body(self):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            _crear_producto(
+                db, "RE4R01APSR - BRAKE BAND", categoria="RE4R01APSR", modelo="BRAKE BAND", stock_disponible=5,
+            )
+            producto = taller_app._buscar_producto_por_texto(db, "VALVE BODY", modelo="RE4R01APSR")
+            self.assertIsNone(producto)
+
+    def test_dentro_de_la_familia_con_palabras_en_comun_si_matchea(self):
+        # Contraparte de los dos tests anteriores: "clutch" SÍ debe
+        # encontrar "clutch late" dentro de la misma familia, porque
+        # comparten la palabra completa (a diferencia de "pulley set"
+        # dentro de "oil filter e", que no comparten ninguna).
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            correcto_id = _crear_producto(
+                db, "0AMPSR - CLUTCH LATE", categoria="0AMPSR", modelo="CLUTCH LATE", stock_disponible=5,
+            )
+            producto = taller_app._buscar_producto_por_texto(db, "CLUTCH", modelo="0AMPSR")
+            self.assertIsNotNone(producto)
+            self.assertEqual(producto["id"], correcto_id)
+
+    def test_dos_productos_empatados_en_palabras_no_matchean_ninguno(self):
+        # Si dentro de la misma familia hay dos productos con exactamente
+        # el mismo puntaje (ej. dos ubicaciones/lotes cargados por error
+        # con el mismo detalle), no hay forma de saber cuál es el
+        # correcto -- mejor dejarlo sin matchear que elegir uno al azar.
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            _crear_producto(
+                db, "U140PSR - CLUTCH SET A", categoria="U140PSR", modelo="CLUTCH SET", stock_disponible=5,
+            )
+            _crear_producto(
+                db, "U140PSR - CLUTCH SET B", categoria="U140PSR", modelo="CLUTCH SET", stock_disponible=5,
+            )
+            producto = taller_app._buscar_producto_por_texto(db, "CLUTCH SET", modelo="U140PSR")
+            self.assertIsNone(producto)
+
 
 class TestEscanearFotoFactura(unittest.TestCase):
     """El endpoint /api/facturas/escanear-foto no llama a la IA real en los
@@ -2255,23 +2318,39 @@ class TestEscanearFotoFactura(unittest.TestCase):
         self.assertFalse(factura_corregida["proveedor_nuevo"])
         self.assertTrue(factura_corregida["valida"])
 
-        # Desde la migración a "pendientes de recepción", confirmar la
-        # carga masiva ya NO crea la factura real de inmediato — la deja
-        # pendiente de que Bodega la apruebe (mismo camino unificado que
-        # manual/Excel/WhatsApp, ver carga_masiva_confirmar).
+        # Ruta de ingreso directo (ver _crear_pendiente_y_aplicar_si_posible
+        # en app.py): con las dos líneas ya resueltas contra el catálogo,
+        # confirmar la carga masiva aplica la factura de inmediato (stock +
+        # CxP) en vez de dejarla esperando que alguien la apruebe aparte.
         resp_confirmar = self.client.post(
             "/api/facturas/carga-masiva/confirmar", json={"token": token, "condicion_pago": "credito"}
         )
         self.assertEqual(resp_confirmar.status_code, 200, resp_confirmar.get_data(as_text=True))
         confirmadas = resp_confirmar.get_json()
         self.assertIn("FOTO-002", confirmadas.get("creadas", []))
+        self.assertIn("FOTO-002", confirmadas.get("aplicadas", []))
 
-        pendientes = self.client.get("/api/facturas/pendientes-recepcion?estado=pendiente").get_json()["pendientes"]
+        pendientes = self.client.get("/api/facturas/pendientes-recepcion").get_json()["pendientes"]
         pendiente_creado = next(p for p in pendientes if p["numero"] == "FOTO-002")
+        self.assertEqual(pendiente_creado["estado"], "aprobada")
         self.assertEqual(pendiente_creado["origen"], "foto")
         # No debe haberse creado un proveedor nuevo — tiene que quedar
         # asociada al proveedor existente que se eligió en la corrección.
         self.assertEqual(pendiente_creado["proveedor_id"], proveedor_existente_id)
+        # La corrección de la línea 2 (que originalmente no matcheó ningún
+        # producto) tiene que haber sobrevivido hasta el pendiente final,
+        # no quedarse solo en la previsualización -- este es el bug
+        # reportado por el taller: una corrección hecha en la vista previa
+        # de carga masiva se perdía y lo que le llegaba a Bodega era la
+        # factura tal como se había leído originalmente.
+        linea_1, linea_2 = pendiente_creado["lineas"]
+        self.assertEqual(linea_1["producto_id"], producto_1_id)
+        self.assertEqual(linea_2["producto_id"], producto_2_id)
+        # Y el texto que leyó la IA se conserva igual para AMBAS líneas
+        # (matcheadas o no), para que Bodega pueda comparar "Leído: ..."
+        # contra el producto asignado al revisar y aprobar.
+        self.assertEqual(linea_1["texto_original"], "PASTILLAS DE FRENO DELANTERAS TRW TESTFOTO2")
+        self.assertEqual(linea_2["texto_original"], "QQQ-XYZ-7777 OTRO TEXTO SIN RELACION ALGUNA")
 
 
 class TestAgenteWhatsApp(unittest.TestCase):
@@ -3438,7 +3517,10 @@ class TestCuentasPorPagar(unittest.TestCase):
     def _crear_factura(self, numero, producto_id, cantidad=5, precio_unitario=1000):
         # Mismo camino que _crear_factura_aplicada en
         # TestEliminarFacturaRevierteSinContaminarConsumo: ya no existe el
-        # registro rápido, se pasa por pendiente-de-recepción + aprobar.
+        # registro rápido, se pasa por pendiente-de-recepción + aprobar --
+        # salvo que, con el producto ya en el catálogo, la ruta de ingreso
+        # directo (ver _crear_pendiente_y_aplicar_si_posible en app.py) la
+        # deja aplicada de una sola vez, sin necesitar el segundo paso.
         resp = self.client.post(
             "/api/facturas/pendientes-recepcion",
             json={
@@ -3450,6 +3532,10 @@ class TestCuentasPorPagar(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         pendiente = resp.get_json()
+        if pendiente["estado"] == "aprobada":
+            resp2 = self.client.get(f"/api/facturas/{pendiente['factura_id']}")
+            self.assertEqual(resp2.status_code, 200, resp2.get_data(as_text=True))
+            return resp2.get_json()
         resp2 = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
         self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
         return resp2.get_json()
@@ -3541,6 +3627,173 @@ class TestCuentasPorPagar(unittest.TestCase):
         self.assertEqual(fila["estado"], "parcial")
 
 
+class TestCambiarCondicionPagoFactura(unittest.TestCase):
+    """PUT /api/facturas/<id>/condicion-pago: la corrección que Finanzas
+    puede hacerle a una factura YA aplicada (típicamente por la nueva ruta
+    de ingreso directo de Bodega, ver _crear_pendiente_y_aplicar_si_posible
+    en app.py) cuando la condición de pago pactada con el proveedor
+    termina siendo distinta a la que Bodega puso al ingresarla. Reemplaza
+    la(s) CxP existente(s) por una(s) nueva(s) -- nunca toca stock ni las
+    líneas de la factura."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin_client = taller_app.app.test_client()
+        cls.admin_client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_usuario(self, username, rol):
+        resp = self.admin_client.post(
+            "/api/admin/usuarios",
+            json={"username": username, "password": "clave123456", "nombre": username,
+                  "es_admin": False, "modulos": [rol]},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+    def _client_como(self, username):
+        client = taller_app.app.test_client()
+        resp = client.post("/login", data={"username": username, "password": "clave123456"})
+        self.assertEqual(resp.status_code, 302, resp.get_data(as_text=True))
+        return client
+
+    def _crear_factura_credito(self, numero, cantidad=1, precio_unitario=10000, plazo_dias_credito=30):
+        producto = self.admin_client.post(
+            "/api/productos", json={"nombre": f"Producto - {numero}", "stock_disponible": 0, "costo_compra": 0},
+        ).get_json()
+        resp = self.admin_client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": cantidad, "precio_unitario": precio_unitario}],
+                "condicion_pago": "credito", "plazo_dias_credito": plazo_dias_credito,
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente = resp.get_json()
+        # Con el producto recién creado (sin nombre repetido), la ruta de
+        # ingreso directo la aplica de una -- debe quedar 'aprobada'.
+        self.assertEqual(pendiente["estado"], "aprobada")
+        return pendiente
+
+    def _cxps_activas(self, factura_id):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            return [dict(r) for r in db.execute(
+                "SELECT * FROM cuentas_por_pagar WHERE factura_id = ? AND estado != 'anulada' ORDER BY id",
+                (factura_id,),
+            ).fetchall()]
+
+    def test_cambiar_a_contado_anula_la_cxp_de_credito_y_genera_una_pagada(self):
+        pendiente = self._crear_factura_credito("FACT-CONDPAGO-001", precio_unitario=10000)
+        factura_id = pendiente["factura_id"]
+        cxp_original = self._cxps_activas(factura_id)
+        self.assertEqual(len(cxp_original), 1)
+        self.assertEqual(cxp_original[0]["estado"], "pendiente")
+
+        resp = self.admin_client.put(
+            f"/api/facturas/{factura_id}/condicion-pago",
+            json={"condicion_pago": "contado"},
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            anulada = db.execute(
+                "SELECT * FROM cuentas_por_pagar WHERE id = ?", (cxp_original[0]["id"],)
+            ).fetchone()
+        self.assertEqual(anulada["estado"], "anulada")
+
+        cxp_nueva = self._cxps_activas(factura_id)
+        self.assertEqual(len(cxp_nueva), 1)
+        self.assertEqual(cxp_nueva[0]["estado"], "pagada")
+        self.assertEqual(cxp_nueva[0]["monto_total"], 10000)
+
+    def test_cambiar_a_mixto_genera_dos_cxp(self):
+        pendiente = self._crear_factura_credito("FACT-CONDPAGO-002", precio_unitario=10000)
+        factura_id = pendiente["factura_id"]
+
+        resp = self.admin_client.put(
+            f"/api/facturas/{factura_id}/condicion-pago",
+            json={"condicion_pago": "mixto", "porcentaje_contado": 40, "plazo_dias_credito": 45},
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        cxps = self._cxps_activas(factura_id)
+        self.assertEqual(len(cxps), 2)
+        montos_por_estado = {c["estado"]: c["monto_total"] for c in cxps}
+        self.assertEqual(montos_por_estado["pagada"], 4000)
+        self.assertEqual(montos_por_estado["pendiente"], 6000)
+
+    def test_cambiar_condicion_actualiza_el_pendiente_asociado(self):
+        pendiente = self._crear_factura_credito("FACT-CONDPAGO-003", plazo_dias_credito=30)
+        factura_id = pendiente["factura_id"]
+
+        resp = self.admin_client.put(
+            f"/api/facturas/{factura_id}/condicion-pago",
+            json={"condicion_pago": "credito", "plazo_dias_credito": 90},
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
+        actualizado = self.admin_client.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
+        self.assertEqual(actualizado["plazo_dias_credito"], 90)
+        eventos = [h["evento"] for h in actualizado["historial"]]
+        self.assertIn("condicion_pago_editada", eventos)
+
+    def test_cambiar_condicion_bloqueada_si_ya_tiene_abonos(self):
+        pendiente = self._crear_factura_credito("FACT-CONDPAGO-004", precio_unitario=8000)
+        factura_id = pendiente["factura_id"]
+        cxp = self._cxps_activas(factura_id)[0]
+
+        resp_pago = self.admin_client.post(
+            f"/api/finanzas/cxp/{cxp['id']}/pagos", json={"monto": 2000, "metodo_pago": "efectivo"},
+        )
+        self.assertEqual(resp_pago.status_code, 201, resp_pago.get_data(as_text=True))
+
+        resp = self.admin_client.put(
+            f"/api/facturas/{factura_id}/condicion-pago",
+            json={"condicion_pago": "contado"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+        # No debe haber tocado nada: la CxP original sigue activa, tal cual.
+        cxps = self._cxps_activas(factura_id)
+        self.assertEqual(len(cxps), 1)
+        self.assertEqual(cxps[0]["id"], cxp["id"])
+
+    def test_cambiar_condicion_pago_es_solo_para_finanzas_o_admin(self):
+        pendiente = self._crear_factura_credito("FACT-CONDPAGO-005")
+        factura_id = pendiente["factura_id"]
+
+        self._crear_usuario("condpago_bodega1", "bodega")
+        bodega_client = self._client_como("condpago_bodega1")
+        resp_bodega = bodega_client.put(
+            f"/api/facturas/{factura_id}/condicion-pago", json={"condicion_pago": "contado"},
+        )
+        self.assertEqual(resp_bodega.status_code, 403)
+
+        self._crear_usuario("condpago_finanzas1", "finanzas")
+        finanzas_client = self._client_como("condpago_finanzas1")
+        resp_finanzas = finanzas_client.put(
+            f"/api/facturas/{factura_id}/condicion-pago", json={"condicion_pago": "contado"},
+        )
+        self.assertEqual(resp_finanzas.status_code, 200, resp_finanzas.get_data(as_text=True))
+
+    def test_cambiar_condicion_pago_con_valor_invalido_es_rechazada(self):
+        pendiente = self._crear_factura_credito("FACT-CONDPAGO-006")
+        factura_id = pendiente["factura_id"]
+        resp = self.admin_client.put(
+            f"/api/facturas/{factura_id}/condicion-pago", json={"condicion_pago": "no_existe"},
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    def test_cambiar_condicion_pago_de_factura_inexistente_da_404(self):
+        resp = self.admin_client.put(
+            "/api/facturas/9999999/condicion-pago", json={"condicion_pago": "contado"},
+        )
+        self.assertEqual(resp.status_code, 404)
+
+
 class TestCuentasPorPagarManual(unittest.TestCase):
     """Cierre de la Fase 2 de Finanzas: además de las CxP que se generan
     solas desde una factura de compra, Finanzas puede registrar a mano una
@@ -3625,9 +3878,16 @@ class TestCuentasPorPagarManual(unittest.TestCase):
                 "condicion_pago": "credito",
             },
         ).get_json()
-        factura = self.admin_client.post(
-            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={}
-        ).get_json()
+        # Con el producto ya en el catálogo, la ruta de ingreso directo
+        # (ver _crear_pendiente_y_aplicar_si_posible en app.py) ya la deja
+        # aplicada al crearla -- no hace falta (ni se puede) aprobarla de
+        # nuevo a mano.
+        if pendiente["estado"] == "aprobada":
+            factura = self.admin_client.get(f"/api/facturas/{pendiente['factura_id']}").get_json()
+        else:
+            factura = self.admin_client.post(
+                f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={}
+            ).get_json()
         with taller_app.app.app_context():
             db = taller_app.get_db()
             cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
@@ -3689,12 +3949,47 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         return resp.get_json()
 
-    def test_crear_pendiente_no_toca_stock_ni_genera_cxp(self):
-        producto = self._crear_producto_http("Producto - pendiente no toca stock", stock_disponible=0)
-        self._crear_pendiente("FACT-PEND-001", producto["id"], cantidad=10, precio_unitario=1000)
+    def _crear_pendiente_forzado_lineas(self, numero, lineas_validadas, condicion_pago="credito",
+                                          porcentaje_contado=0, plazo_dias_credito=30):
+        """Como _crear_pendiente, pero llama directo a la función de más
+        bajo nivel (_crear_pendiente_recepcion) en vez de pasar por el
+        endpoint HTTP -- así se salta la ruta de ingreso directo nueva
+        (ver _crear_pendiente_y_aplicar_si_posible en app.py), que con
+        todas las líneas ya resueltas contra el catálogo aplicaría la
+        factura de inmediato. Para los tests de esta clase que quieren
+        probar el mecanismo de aprobar/rechazar EN SÍ (no la nueva capa de
+        auto-aplicación), hace falta poder dejar la factura genuinamente
+        en estado 'pendiente'. Recibe las líneas ya armadas (mismo formato
+        que espera _crear_pendiente_recepcion) para poder cubrir tanto
+        líneas de producto como de gasto general."""
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            nueva, error = taller_app._crear_pendiente_recepcion(
+                db, numero, None, datetime.now().strftime("%Y-%m-%d"),
+                lineas_validadas, condicion_pago, porcentaje_contado, plazo_dias_credito, "test", origen="manual",
+            )
+            self.assertIsNone(error, error)
+            return taller_app._factura_pendiente_recepcion_dict(db, nueva)
 
-        sin_cambios = self.client.get(f"/api/productos/{producto['id']}").get_json()
-        self.assertEqual(sin_cambios["stock_disponible"], 0)
+    def _crear_pendiente_forzado(self, numero, producto_id, cantidad=5, precio_unitario=1000, **extra):
+        return self._crear_pendiente_forzado_lineas(
+            numero,
+            [{"producto_id": producto_id, "producto_nombre": None, "cantidad": cantidad, "precio_unitario": precio_unitario}],
+            **extra,
+        )
+
+    def test_crear_pendiente_con_producto_existente_se_aplica_de_inmediato(self):
+        # Ruta de ingreso directo (ver _crear_pendiente_y_aplicar_si_posible
+        # en app.py): con el producto ya en el catálogo, no hace falta un
+        # segundo paso de aprobación aparte -- la factura queda aplicada
+        # (stock + CxP) en la misma llamada que la crea.
+        producto = self._crear_producto_http("Producto - pendiente se aplica directo", stock_disponible=0)
+        creada = self._crear_pendiente("FACT-PEND-001", producto["id"], cantidad=10, precio_unitario=1000)
+        self.assertEqual(creada["estado"], "aprobada")
+        self.assertIsNotNone(creada["factura_id"])
+
+        aplicado = self.client.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(aplicado["stock_disponible"], 10)
 
         with taller_app.app.app_context():
             db = taller_app.get_db()
@@ -3702,6 +3997,35 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
             cxp = db.execute(
                 "SELECT COUNT(*) FROM cuentas_por_pagar cxp JOIN facturas f ON f.id = cxp.factura_id WHERE f.numero = ?",
                 ("FACT-PEND-001",),
+            ).fetchone()[0]
+        self.assertIsNotNone(factura)
+        self.assertEqual(cxp, 1)
+
+    def test_crear_pendiente_con_producto_nuevo_no_toca_stock_ni_genera_cxp_hasta_resolverlo(self):
+        # Si trae una línea sin resolver (repuesto que todavía no existe en
+        # el catálogo), NO se puede aplicar todavía -- queda 'pendiente'
+        # exactamente como el sistema se comportaba antes de la ruta de
+        # ingreso directo, a la espera de que Bodega cree el producto y
+        # apruebe a mano (ver TestProductoNuevoDesdeFacturaPendiente).
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-PEND-001B",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_nuevo_nombre": "Repuesto sin crear todavía", "cantidad": 10, "precio_unitario": 1000}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        creada = resp.get_json()
+        self.assertEqual(creada["estado"], "pendiente")
+
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            factura = db.execute("SELECT id FROM facturas WHERE numero = ?", ("FACT-PEND-001B",)).fetchone()
+            cxp = db.execute(
+                "SELECT COUNT(*) FROM cuentas_por_pagar cxp JOIN facturas f ON f.id = cxp.factura_id WHERE f.numero = ?",
+                ("FACT-PEND-001B",),
             ).fetchone()[0]
         self.assertIsNone(factura)
         self.assertEqual(cxp, 0)
@@ -3721,7 +4045,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
 
     def test_aprobar_tal_cual_facturado_aplica_stock_y_genera_cxp_a_credito(self):
         producto = self._crear_producto_http("Producto - aprobar credito", stock_disponible=0)
-        pendiente = self._crear_pendiente(
+        pendiente = self._crear_pendiente_forzado(
             "FACT-PEND-CRED-001", producto["id"], cantidad=4, precio_unitario=2500,
             condicion_pago="credito", plazo_dias_credito=60,
         )
@@ -3746,7 +4070,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
 
     def test_aprobar_al_contado_genera_cxp_ya_pagada(self):
         producto = self._crear_producto_http("Producto - aprobar contado", stock_disponible=0)
-        pendiente = self._crear_pendiente(
+        pendiente = self._crear_pendiente_forzado(
             "FACT-PEND-CONT-001", producto["id"], cantidad=2, precio_unitario=5000, condicion_pago="contado",
         )
         resp = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
@@ -3764,7 +4088,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
 
     def test_aprobar_mixto_genera_dos_cxp_una_pagada_y_una_pendiente(self):
         producto = self._crear_producto_http("Producto - aprobar mixto", stock_disponible=0)
-        pendiente = self._crear_pendiente(
+        pendiente = self._crear_pendiente_forzado(
             "FACT-PEND-MIX-001", producto["id"], cantidad=10, precio_unitario=1000,
             condicion_pago="mixto", porcentaje_contado=50, plazo_dias_credito=30,
         )
@@ -3803,7 +4127,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         # aplica la factura tal cual quedó cargada. Si algo no calza, el
         # camino es rechazar la factura, no "ajustarla" al aprobar.
         producto = self._crear_producto_http("Producto - aprobar ignora ajuste", stock_disponible=0)
-        pendiente = self._crear_pendiente(
+        pendiente = self._crear_pendiente_forzado(
             "FACT-PEND-IGNORA-001", producto["id"], cantidad=10, precio_unitario=1000, condicion_pago="credito",
         )
         resp = self.client.post(
@@ -3823,7 +4147,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
 
     def test_aprobar_sin_cuerpo_aplica_todas_las_lineas_facturadas(self):
         producto = self._crear_producto_http("Producto - aprobar sin cuerpo", stock_disponible=0)
-        pendiente = self._crear_pendiente("FACT-PEND-SINCUERPO-001", producto["id"], cantidad=5, precio_unitario=1000)
+        pendiente = self._crear_pendiente_forzado("FACT-PEND-SINCUERPO-001", producto["id"], cantidad=5, precio_unitario=1000)
         resp = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
@@ -3831,7 +4155,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
 
     def test_rechazar_no_aplica_stock_ni_crea_factura(self):
         producto = self._crear_producto_http("Producto - pendiente rechazada", stock_disponible=0)
-        pendiente = self._crear_pendiente("FACT-PEND-RECH-001", producto["id"], cantidad=5, precio_unitario=1000)
+        pendiente = self._crear_pendiente_forzado("FACT-PEND-RECH-001", producto["id"], cantidad=5, precio_unitario=1000)
 
         resp = self.client.post(
             f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar",
@@ -3864,8 +4188,8 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         producto = self._crear_producto_http("Producto - contador pendientes", stock_disponible=0)
         antes = self.client.get("/api/facturas/pendientes-recepcion/contador").get_json()["pendientes"]
 
-        p1 = self._crear_pendiente("FACT-PEND-CONTADOR-001", producto["id"])
-        self._crear_pendiente("FACT-PEND-CONTADOR-002", producto["id"])
+        p1 = self._crear_pendiente_forzado("FACT-PEND-CONTADOR-001", producto["id"])
+        self._crear_pendiente_forzado("FACT-PEND-CONTADOR-002", producto["id"])
         self.client.post(f"/api/facturas/pendientes-recepcion/{p1['id']}/aprobar", json={})
 
         despues = self.client.get("/api/facturas/pendientes-recepcion/contador").get_json()["pendientes"]
@@ -3895,7 +4219,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
 
     def test_no_se_podia_editar_una_rechazada_ahora_si_y_vuelve_a_pendiente(self):
         producto = self._crear_producto_http("Producto - corregir rechazada", stock_disponible=0)
-        pendiente = self._crear_pendiente("FACT-PEND-CORRIGE-001", producto["id"], cantidad=2, precio_unitario=5000)
+        pendiente = self._crear_pendiente_forzado("FACT-PEND-CORRIGE-001", producto["id"], cantidad=2, precio_unitario=5000)
         self.client.post(
             f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar",
             json={"nota": "El precio no calza con lo pactado"},
@@ -3937,7 +4261,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
 
     def test_historial_registra_todo_el_ciclo_sin_perder_el_rechazo_previo(self):
         producto = self._crear_producto_http("Producto - historial completo", stock_disponible=0)
-        pendiente = self._crear_pendiente("FACT-PEND-HIST-001", producto["id"], cantidad=1, precio_unitario=1000)
+        pendiente = self._crear_pendiente_forzado("FACT-PEND-HIST-001", producto["id"], cantidad=1, precio_unitario=1000)
 
         creada = self.client.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
         self.assertEqual([h["evento"] for h in creada["historial"]], ["creada"])
@@ -3972,7 +4296,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
 
     def test_contador_de_rechazadas_baja_al_corregir_y_reingresar(self):
         producto = self._crear_producto_http("Producto - contador rechazadas", stock_disponible=0)
-        pendiente = self._crear_pendiente("FACT-PEND-CONTADOR-RECH-001", producto["id"])
+        pendiente = self._crear_pendiente_forzado("FACT-PEND-CONTADOR-RECH-001", producto["id"])
         antes = self.client.get("/api/facturas/pendientes-recepcion/rechazadas/contador").get_json()["rechazadas"]
 
         self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/rechazar", json={"nota": "x"})
@@ -4010,8 +4334,11 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         pendiente = resp.get_json()
 
         antes = self.client.get("/api/productos").get_json()["productos"]
-        aprobar = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
-        self.assertEqual(aprobar.status_code, 201, aprobar.get_data(as_text=True))
+        # Una factura de puro gasto general (sin ninguna línea de producto)
+        # no tiene nada que le impida aplicarse de inmediato con la nueva
+        # ruta de ingreso directo (ver _crear_pendiente_y_aplicar_si_posible
+        # en app.py) -- ya queda 'aprobada' desde la creación.
+        self.assertEqual(pendiente["estado"], "aprobada")
         despues = self.client.get("/api/productos").get_json()["productos"]
         self.assertEqual(len(antes), len(despues), "no debe crearse ningún producto nuevo")
 
@@ -4040,16 +4367,18 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         (no debe tratarla como "producto sin resolver"). También necesita
         'rubro_gav_label' ya resuelto en la respuesta, porque ese script
         deliberadamente no comparte el mapeo de rubros con finanzas.js."""
-        resp = self.client.post(
-            "/api/facturas/pendientes-recepcion",
-            json={
-                "numero": "FACT-PEND-GG-AVISO-001",
-                "lineas": [self._linea_gasto_general(descripcion="Aceite para el compresor", rubro_gav="mantencion")],
-                "condicion_pago": "credito",
-            },
-        )
-        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
-        pendiente_id = resp.get_json()["id"]
+        # Se fuerza a quedar 'pendiente' (ver _crear_pendiente_forzado_lineas)
+        # porque, con solo un gasto general, la ruta de ingreso directo la
+        # aplicaría de inmediato (ver _crear_pendiente_y_aplicar_si_posible
+        # en app.py) y ya no aparecería en el listado "?estado=pendiente"
+        # que este test necesita revisar.
+        pendiente_id = self._crear_pendiente_forzado_lineas(
+            "FACT-PEND-GG-AVISO-001",
+            [{
+                "es_gasto_general": True, "producto_id": None, "producto_nombre": None,
+                "descripcion": "Aceite para el compresor", "monto": 15000, "rubro_gav": "mantencion",
+            }],
+        )["id"]
 
         listado = self.client.get("/api/facturas/pendientes-recepcion?estado=pendiente").get_json()
         pendiente = next(p for p in listado["pendientes"] if p["id"] == pendiente_id)
@@ -4077,8 +4406,11 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         pendiente = resp.get_json()
 
-        aprobar = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
-        self.assertEqual(aprobar.status_code, 201, aprobar.get_data(as_text=True))
+        # El producto de la única línea de repuesto ya existe en el
+        # catálogo, así que la ruta de ingreso directo la aplica de
+        # inmediato (ver _crear_pendiente_y_aplicar_si_posible en app.py) --
+        # no hace falta (ni se puede) aprobarla aparte.
+        self.assertEqual(pendiente["estado"], "aprobada")
 
         actualizado = self.client.get(f"/api/productos/{producto['id']}").get_json()
         self.assertEqual(actualizado["stock_disponible"], 3, "el repuesto sí debe ingresar a stock")
@@ -4156,7 +4488,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         pueden editar el mismo pendiente (PUT), así que Bodega puede
         corregir la clasificación sin tener que rechazar toda la factura."""
         producto = self._crear_producto_http("Producto - bodega reclasifica", stock_disponible=0)
-        pendiente = self._crear_pendiente("FACT-PEND-GG-RECLASIFICA", producto["id"], cantidad=1, precio_unitario=9000)
+        pendiente = self._crear_pendiente_forzado("FACT-PEND-GG-RECLASIFICA", producto["id"], cantidad=1, precio_unitario=9000)
 
         cliente_bodega = self._crear_usuario_y_login(["bodega"])
         resp = cliente_bodega.put(
@@ -4323,11 +4655,20 @@ class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
             json={
                 "numero": "FACT-PROD-NUEVO-007",
                 "fecha": datetime.now().strftime("%Y-%m-%d"),
-                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 500}],
+                "lineas": [
+                    {"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 500},
+                    # Segunda línea sin resolver, a propósito, para que la
+                    # factura NO se aplique de inmediato (ver
+                    # _crear_pendiente_y_aplicar_si_posible en app.py) y se
+                    # pueda probar el rechazo de "línea ya vinculada" sobre
+                    # una factura todavía en estado 'pendiente'.
+                    {"producto_nuevo_nombre": "Otro repuesto sin resolver", "cantidad": 1, "precio_unitario": 100},
+                ],
                 "condicion_pago": "credito",
             },
         )
         pendiente = resp_pend.get_json()
+        self.assertEqual(pendiente["estado"], "pendiente")
         resp = self.admin.post(
             f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
             json={"categoria": "X", "modelo": "Y"},
@@ -4446,12 +4787,16 @@ class TestRolesYPermisos(unittest.TestCase):
         sesion = client.get("/api/sesion").get_json()
         self.assertEqual(sesion["rol"], "finanzas")
 
-    def test_bodega_no_puede_crear_factura_pendiente_de_recepcion(self):
+    def test_bodega_puede_crear_factura_pendiente_de_recepcion(self):
+        # Desde la nueva ruta de ingreso directo (ver
+        # _crear_pendiente_y_aplicar_si_posible en app.py): Bodega es
+        # ahora quien ingresa las facturas al recibir la mercadería, así
+        # que este endpoint ya no es exclusivo de Finanzas.
         self._crear_usuario("rol_test_bodega1", "clave123456", "bodega")
         client = self._client_como("rol_test_bodega1", "clave123456")
         producto = self._crear_producto_http(self.admin_client, "Producto - rol bodega crea factura")
         resp = self._crear_pendiente_recepcion(client, producto["id"], "FACT-ROL-001")
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
 
     def test_finanzas_puede_crear_factura_pendiente_de_recepcion(self):
         self._crear_usuario("rol_test_finanzas2", "clave123456", "finanzas")
@@ -4474,7 +4819,29 @@ class TestRolesYPermisos(unittest.TestCase):
         self._crear_usuario("rol_test_finanzas4", "clave123456", "finanzas")
         finanzas_client = self._client_como("rol_test_finanzas4", "clave123456")
         producto = self._crear_producto_http(self.admin_client, "Producto - rol bodega aprueba")
-        pendiente = self._crear_pendiente_recepcion(finanzas_client, producto["id"], "FACT-ROL-004").get_json()
+        # Se agrega una segunda línea SIN resolver a propósito, para que la
+        # factura no se aplique de inmediato al crearla (ver
+        # _crear_pendiente_y_aplicar_si_posible en app.py) y se pueda
+        # seguir probando que Bodega (y no Finanzas) es quien aprueba la
+        # recepción a mano, con la factura todavía en estado 'pendiente'.
+        resp_crear = finanzas_client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-ROL-004",
+                "lineas": [
+                    {"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000},
+                    {"producto_nuevo_nombre": "Repuesto sin resolver", "cantidad": 1, "precio_unitario": 100},
+                ],
+                "condicion_pago": "credito",
+            },
+        )
+        pendiente = resp_crear.get_json()
+        self.assertEqual(pendiente["estado"], "pendiente")
+        resp_vincular = bodega_client.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/1/crear-producto",
+            json={"categoria": "REPUESTO SIN RESOLVER ROL", "modelo": "X"},
+        )
+        self.assertEqual(resp_vincular.status_code, 201, resp_vincular.get_data(as_text=True))
         resp = bodega_client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
 
@@ -4526,10 +4893,18 @@ class TestRolesYPermisos(unittest.TestCase):
         # home_del_rol() en core.py).
         self._crear_usuario("rol_test_bodega_paginas", "clave123456", "bodega")
         client = self._client_como("rol_test_bodega_paginas", "clave123456")
-        for ruta in ("/operativo", "/finanzas", "/convertidores", "/agente-ia"):
+        for ruta in ("/operativo", "/convertidores", "/agente-ia"):
             resp = client.get(ruta)
             self.assertEqual(resp.status_code, 302, f"{ruta} debería redirigir, dio {resp.status_code}")
             self.assertIn("/logistica", resp.headers["Location"], f"{ruta} no redirigió a /logistica")
+        # /finanzas es la excepción, a propósito, desde la nueva ruta de
+        # ingreso directo de facturas (ver vista_finanzas() en app.py):
+        # Bodega SÍ entra, pero la plantilla le esconde todo salvo la
+        # pestaña "Facturas" (ver 'solo_facturas' en finanzas.html, y
+        # test_usuario_bodega_entra_a_finanzas_pero_solo_ve_la_pestana_facturas
+        # en test_multi_modulos_usuario.py para el detalle completo).
+        resp_finanzas = client.get("/finanzas")
+        self.assertEqual(resp_finanzas.status_code, 200)
         # /administracion ya redirigía siempre a "/" (comportamiento previo,
         # sin cambios) -- y "/" a su vez redirige a /logistica para este rol.
         resp_admin = client.get("/administracion")
@@ -4920,6 +5295,12 @@ class TestEstadoResultados(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         pendiente = resp.get_json()
+        # Una factura de puro gasto general (sin ninguna línea de producto
+        # sin resolver) también queda aplicada de inmediato con la nueva
+        # ruta de ingreso directo (ver _crear_pendiente_y_aplicar_si_posible
+        # en app.py) -- ya no hace falta (ni se puede) aprobarla aparte.
+        if pendiente["estado"] == "aprobada":
+            return self.client.get(f"/api/facturas/{pendiente['factura_id']}").get_json()
         aprobar = self.client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})
         self.assertEqual(aprobar.status_code, 201, aprobar.get_data(as_text=True))
         return aprobar.get_json()

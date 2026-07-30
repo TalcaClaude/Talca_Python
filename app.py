@@ -2079,9 +2079,16 @@ def vista_operativo():
 
 
 @app.route("/finanzas")
-@requiere_modulo("finanzas")
+@requiere_modulo("finanzas", "bodega")
 def vista_finanzas():
-    return render_template("finanzas.html", modulo_activo="finanzas")
+    # Bodega entra acá desde la nueva ruta de ingreso directo de facturas
+    # (ver _crear_pendiente_y_aplicar_si_posible) -- pero solo debe ver la
+    # pestaña "Facturas", no el resto de Finanzas (Caja Chica, CxC, CxP,
+    # Gastos Generales, DTE, Estado de Resultados, Reportes). 'solo_facturas'
+    # controla eso en la plantilla (nav de pestañas + qué vista se muestra
+    # por defecto al cargar) -- ver templates/finanzas.html.
+    solo_facturas = usuario_rol() != "admin" and "finanzas" not in usuario_modulos()
+    return render_template("finanzas.html", modulo_activo="finanzas", solo_facturas=solo_facturas)
 
 
 @app.route("/agente-ia")
@@ -4307,30 +4314,68 @@ def _llamar_claude_vision_clasificar_foto_whatsapp(imagen_bytes, mime_type):
     raise RuntimeError("La IA no devolvió una respuesta en el formato esperado. Intenta con una foto más nítida.")
 
 
-UMBRAL_MATCH_TEXTO = 0.45
+UMBRAL_RECALL_PALABRAS = 0.6
+
+
+def _palabras(texto):
+    """Separa un texto en el conjunto de sus palabras/números (letras y
+    dígitos, sin puntuación) en mayúscula -- unidad básica del comparador
+    por palabras de más abajo."""
+    return set(re.findall(r"[A-Z0-9]+", (texto or "").upper()))
 
 
 def _mejor_match_por_texto(texto_norm, candidatos, campo="nombre"):
     """Núcleo del comparador difuso: entre 'candidatos' (filas de
-    productos), devuelve el que mejor calce contra 'texto_norm' según
-    difflib, o None si ninguno supera UMBRAL_MATCH_TEXTO. 'campo' es qué
-    columna del producto comparar (mezclada con codigo_interno para no
-    perder esa señal) -- separado de _buscar_producto_por_texto para
-    poder reusarlo tanto contra el catálogo completo como contra un
-    subconjunto ya acotado por modelo de transmisión (ver más abajo)."""
-    mejor = None
-    mejor_score = 0.0
+    productos), devuelve el que mejor calce contra 'texto_norm', o None si
+    ninguno es lo bastante bueno. 'campo' es qué columna del producto
+    comparar (mezclada con codigo_interno para no perder esa señal) --
+    separado de _buscar_producto_por_texto para poder reusarlo tanto
+    contra el catálogo completo como contra un subconjunto ya acotado por
+    modelo de transmisión (ver más abajo).
+
+    Compara por PALABRAS COMPLETAS, no por caracteres -- un comparador de
+    caracteres (difflib.SequenceMatcher puro, como se usaba antes) le da
+    demasiado parecido a textos cortos que no tienen nada que ver: en un
+    caso real de este taller, "PULLEY SET" vs "OIL FILTER E" (productos
+    completamente distintos) puntuaba 0.455 de 1.0 con ese método, por
+    encima del umbral que había -- y "VALVE BODY" vs "BRAKE BAND" (0.5)
+    también. Exigir que un porcentaje real de las PALABRAS leídas
+    aparezcan tal cual en el candidato (UMBRAL_RECALL_PALABRAS) filtra
+    esos falsos positivos de raíz, porque ninguna palabra de "pulley set"
+    aparece en "oil filter e". El parecido de caracteres (difflib) se usa
+    solo como desempate ENTRE candidatos que ya pasaron el filtro de
+    palabras, nunca como criterio único. Si dos productos distintos
+    quedan empatados en el primer lugar, se considera ambiguo y no se
+    matchea ninguno (mejor preguntarle a la persona que adivinar)."""
+    texto_tokens = _palabras(texto_norm)
+    if not texto_tokens:
+        return None
+
+    candidatos_calificados = []
     for p in candidatos:
         candidato = f"{p[campo] or ''} {p['codigo_interno'] or ''}".strip().upper()
-        if not candidato:
+        candidato_tokens = _palabras(candidato)
+        if not candidato_tokens:
             continue
-        score = difflib.SequenceMatcher(None, texto_norm, candidato).ratio()
-        if score > mejor_score:
-            mejor_score = score
-            mejor = p
-    if mejor is not None and mejor_score >= UMBRAL_MATCH_TEXTO:
-        return mejor
-    return None
+        recall = len(texto_tokens & candidato_tokens) / len(texto_tokens)
+        if recall < UMBRAL_RECALL_PALABRAS:
+            continue
+        parecido_caracteres = difflib.SequenceMatcher(None, texto_norm, candidato).ratio()
+        candidatos_calificados.append((recall, parecido_caracteres, p))
+
+    if not candidatos_calificados:
+        return None
+
+    candidatos_calificados.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    mejor = candidatos_calificados[0]
+    if len(candidatos_calificados) > 1:
+        segundo = candidatos_calificados[1]
+        if (mejor[0], mejor[1]) == (segundo[0], segundo[1]) and mejor[2]["id"] != segundo[2]["id"]:
+            # Dos productos distintos empatados en el primer lugar -- no
+            # hay forma de saber cuál es el correcto, así que no se
+            # adivina ninguno.
+            return None
+    return mejor[2]
 
 
 def _buscar_producto_por_texto(db, texto, codigo=None, modelo=None):
@@ -5334,6 +5379,71 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
     return nueva, None
 
 
+def _crear_pendiente_y_aplicar_si_posible(db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
+                                            porcentaje_contado, plazo_dias_credito, creado_por, origen,
+                                            foto_archivo="", exigir_numero=True, auto_aplicar=True):
+    """Como _crear_pendiente_recepcion, pero además -- si auto_aplicar es
+    True y la factura recién creada queda con TODAS sus líneas ya
+    resueltas contra el catálogo -- la aplica de inmediato (stock + CxP)
+    en la misma operación, sin dejarla esperando un segundo paso de
+    aprobación aparte. Es el corazón de la nueva ruta de ingreso directo
+    (Bodega ingresa la factura -- manual, Excel o foto -- y queda lista de
+    una, sin tener que pasársela a nadie más para que la apruebe después;
+    ver _aprobar_pendiente_recepcion, que hace la aplicación real).
+
+    Si queda alguna línea sin producto asociado (un repuesto nuevo que
+    todavía no existe en el catálogo), NO se puede aplicar todavía -- no
+    hay con qué mover stock. En ese caso la factura queda 'pendiente'
+    exactamente como se comportaba el sistema antes de esta ruta directa:
+    visible en la cola de siempre (ahora también accesible para Bodega),
+    hasta que alguien cree/vincule el producto que falta y la apruebe a
+    mano con el botón "Aprobar" (que sigue existiendo justo para este
+    caso, y para las facturas de WhatsApp -- ver auto_aplicar=False más
+    abajo).
+
+    auto_aplicar=False es para WhatsApp (ver _procesar_foto_factura_whatsapp):
+    esa vía no tiene un paso de revisión en vivo como las otras tres (nadie
+    mira/corrige la lectura de la foto antes de que esto se guarde), así
+    que ahí se prefiere mantener SIEMPRE el paso de aprobación humana
+    aparte, sin excepción, como red de seguridad mínima.
+
+    Devuelve (fila_dict, error, se_aplico). 'se_aplico' es True solo si la
+    factura quedó aplicada de inmediato -- así quien llama arma el mensaje
+    correcto ("factura aplicada: stock y CxP listos" vs "factura pendiente
+    de recepción, falta crear un producto")."""
+    nueva, error = _crear_pendiente_recepcion(
+        db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
+        porcentaje_contado, plazo_dias_credito, creado_por, origen=origen,
+        foto_archivo=foto_archivo, exigir_numero=exigir_numero,
+    )
+    if error:
+        return None, error, False
+    if not auto_aplicar:
+        return nueva, None, False
+
+    factura_id, lineas_recibidas_registro, error_aplicar = _aprobar_pendiente_recepcion(db, nueva)
+    if error_aplicar:
+        # No se pudo aplicar de inmediato (típicamente: una línea con
+        # producto nuevo sin crear todavía) -- no es un error real, queda
+        # 'pendiente' tal cual se guardó arriba, a la espera de que se
+        # complete y se apruebe a mano.
+        return nueva, None, False
+
+    ts = now_iso()
+    db.execute(
+        """
+        UPDATE facturas_finanzas_pendientes
+        SET estado = 'aprobada', factura_id = ?, lineas_recibidas_json = ?, revisado_por = ?, revisado_en = ?
+        WHERE id = ?
+        """,
+        (factura_id, json.dumps(lineas_recibidas_registro), creado_por, ts, nueva["id"]),
+    )
+    _registrar_historial_pendiente(db, nueva["id"], "aplicada_directamente")
+    db.commit()
+    aplicada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (nueva["id"],)).fetchone()
+    return aplicada, None, True
+
+
 def _validar_lineas_pendiente(db, lineas_in):
     """Valida y normaliza las líneas que manda el cliente para crear un
     pendiente de recepción manual — separado de _crear_pendiente_recepcion
@@ -5433,7 +5543,7 @@ def _validar_lineas_pendiente(db, lineas_in):
 
 
 @app.route("/api/facturas/pendientes-recepcion", methods=["POST"])
-@requiere_rol("finanzas")
+@requiere_rol("finanzas", "bodega")
 def crear_factura_pendiente_recepcion():
     data = request.get_json(force=True, silent=True) or {}
     numero = (data.get("numero") or "").strip().upper()
@@ -5466,7 +5576,7 @@ def crear_factura_pendiente_recepcion():
     if error:
         return jsonify({"error": error}), 400
 
-    nueva, error = _crear_pendiente_recepcion(
+    nueva, error, _se_aplico = _crear_pendiente_y_aplicar_si_posible(
         db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
         porcentaje_contado, plazo_dias_credito, usuario_actual(), origen="manual",
     )
@@ -5619,31 +5729,30 @@ def crear_y_vincular_producto_pendiente(pendiente_id, indice):
     return jsonify({"producto": nuevo, "pendiente": _factura_pendiente_recepcion_dict(db, actualizada)}), 201
 
 
-@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/aprobar", methods=["POST"])
-@requiere_rol("bodega")
-def aprobar_factura_pendiente_recepcion(pendiente_id):
-    """Aprueba la recepción: aplica la factura EXACTAMENTE como quedó
-    cargada (mismas cantidades, mismos precios) — quien aprueba no puede
-    modificar ningún dato acá. Si lo que llegó físicamente no calza con lo
-    facturado, el camino correcto es rechazar la factura (con una nota
-    explicando el motivo) para que quien la subió la corrija y la
-    reingrese; nunca "ajustarla" de paso al aprobarla (a pedido del
-    taller, corregido: antes se aceptaba un cuerpo 'lineas_recibidas' que
-    permitía justo eso, dejando entrar una cantidad de ítems distinta a la
-    facturada por el mismo folio/monto — se sacó por completo)."""
-    db = get_db()
-    fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
-    if fila is None:
-        return jsonify({"error": "No se encontró ese pendiente"}), 404
-    if fila["estado"] != "pendiente":
-        return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede volver a procesar."}), 400
+def _aprobar_pendiente_recepcion(db, fila):
+    """Lógica compartida para aplicar un pendiente de recepción 'fila' (ya
+    debe estar en estado 'pendiente'): valida sus líneas, registra la
+    factura real (stock + CxP) EXACTAMENTE como quedó cargada (mismas
+    cantidades, mismos precios, sin poder "ajustarla" de paso -- a pedido
+    del taller, ver historial de este mismo comentario en versiones
+    anteriores de esta función). Reutilizada tanto por el botón "Aprobar"
+    de Bodega (aprobar_factura_pendiente_recepcion, el camino manual de
+    siempre) como por el ingreso directo nuevo (ver
+    _crear_pendiente_y_aplicar_si_posible), que intenta aplicar la factura
+    de inmediato apenas se registra, sin pasar por una revisión aparte.
 
+    Devuelve (factura_id, lineas_recibidas_registro, error). Si 'error'
+    viene con texto, no se aplicó nada (ni transacción de stock ni CxP) y
+    los otros dos valores son None -- así quien llama decide qué hacer con
+    la fila de pendientes en sí (dejarla 'pendiente' tal cual para
+    reintentar después, o responder ese error directo a quien la estaba
+    aprobando a mano)."""
     if not (fila["numero"] or "").strip():
-        return jsonify({"error": "Esta factura todavía no tiene número de folio — complétalo (editar) antes de aprobarla."}), 400
+        return None, None, "Esta factura todavía no tiene número de folio — complétalo (editar) antes de aprobarla."
 
     ya_existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (fila["numero"],)).fetchone()
     if ya_existe:
-        return jsonify({"error": f"Ya existe una factura registrada con el número '{fila['numero']}'"}), 400
+        return None, None, f"Ya existe una factura registrada con el número '{fila['numero']}'"
 
     lineas_facturadas = json.loads(fila["lineas_json"])
 
@@ -5669,12 +5778,12 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
         if not producto:
             nombre = l.get("producto_nombre") or l.get("texto_original") or "(sin identificar)"
             if l["producto_id"] is None:
-                return jsonify({"error": f"La línea '{nombre}' todavía no está asociada a un producto del inventario — corrígela (editar) antes de aprobar."}), 400
-            return jsonify({"error": f"El producto '{nombre}' ya no existe en el inventario"}), 400
+                return None, None, f"La línea '{nombre}' todavía no está asociada a un producto del inventario — corrígela (editar) antes de aprobar."
+            return None, None, f"El producto '{nombre}' ya no existe en el inventario"
         lineas_validadas.append((producto, cantidad_recibida, l["precio_unitario"]))
 
     if not lineas_validadas and not lineas_gasto_general:
-        return jsonify({"error": "No se puede aprobar una recepción sin ningún producto recibido — si nada llegó, rechaza la factura."}), 400
+        return None, None, "No se puede aprobar una recepción sin ningún producto recibido — si nada llegó, rechaza la factura."
 
     factura_id = _registrar_factura(
         db, fila["numero"], fila["proveedor_id"], fila["fecha"], lineas_validadas, usuario_actual(),
@@ -5682,6 +5791,32 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
         porcentaje_contado=fila["porcentaje_contado"], plazo_dias_credito=fila["plazo_dias_credito"],
         lineas_gasto_general=lineas_gasto_general,
     )
+    return factura_id, lineas_recibidas_registro, None
+
+
+@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/aprobar", methods=["POST"])
+@requiere_rol("bodega")
+def aprobar_factura_pendiente_recepcion(pendiente_id):
+    """Aprueba la recepción a mano -- camino que ahora queda como respaldo
+    para lo que la nueva ruta de ingreso directo no pudo dejar aplicado
+    sola (ej. una línea con un producto nuevo que todavía falta crear en
+    el catálogo, ver _crear_pendiente_y_aplicar_si_posible) y para las
+    facturas que llegan por WhatsApp (que a propósito siguen pasando
+    siempre por acá, ver _procesar_foto_factura_whatsapp). Quien aprueba
+    no puede modificar ningún dato en este paso -- si lo que llegó
+    físicamente no calza con lo facturado, el camino correcto es rechazar
+    la factura (con una nota explicando el motivo) para que quien la
+    subió la corrija y la reingrese."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if fila["estado"] != "pendiente":
+        return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede volver a procesar."}), 400
+
+    factura_id, lineas_recibidas_registro, error = _aprobar_pendiente_recepcion(db, fila)
+    if error:
+        return jsonify({"error": error}), 400
 
     ts = now_iso()
     db.execute(
@@ -5747,17 +5882,18 @@ def obtener_foto_factura_pendiente_recepcion(pendiente_id):
 
 
 @app.route("/api/facturas/carga-masiva/confirmar", methods=["POST"])
-@requiere_rol("finanzas")
+@requiere_rol("finanzas", "bodega")
 def carga_masiva_confirmar():
     """Confirma la previsualización (Excel o foto escaneada, mismo caché —
-    ver 'origen' guardado al crearlo) y deja cada factura válida como
-    PENDIENTE DE RECEPCIÓN (nunca aplica stock ni genera CxP acá
-    directamente) — mismo flujo unificado que la carga manual, con la
-    condición de pago que se haya elegido en esta confirmación aplicada a
-    todas las facturas del lote (si el Excel/foto trae varias facturas de
-    proveedores distintos en una sola carga, todas quedan con la misma
-    condición; para condiciones distintas por factura, se registran en
-    cargas separadas)."""
+    ver 'origen' guardado al crearlo). Cada factura válida se intenta
+    aplicar de inmediato (stock + CxP, ver
+    _crear_pendiente_y_aplicar_si_posible) -- solo queda como PENDIENTE DE
+    RECEPCIÓN, a la espera de aprobación manual, si le falta crear algún
+    producto nuevo del catálogo. La condición de pago que se haya elegido
+    en esta confirmación se aplica a todas las facturas del lote (si el
+    Excel/foto trae varias facturas de proveedores distintos en una sola
+    carga, todas quedan con la misma condición; para condiciones distintas
+    por factura, se registran en cargas separadas)."""
     _carga_masiva_limpiar_cache()
     data = request.get_json(force=True, silent=True) or {}
     token = data.get("token")
@@ -5783,7 +5919,7 @@ def carga_masiva_confirmar():
 
     db = get_db()
     origen = entrada.get("origen") or "excel"
-    creadas, omitidas = [], []
+    creadas, omitidas, aplicadas = [], [], []
 
     for grupo in entrada["facturas"]:
         if not grupo["valida"]:
@@ -5830,6 +5966,8 @@ def carga_masiva_confirmar():
                     "producto_id": None, "producto_nombre": None,
                     "cantidad": linea["cantidad"], "precio_unitario": linea["precio_unitario"],
                     "texto_original": linea.get("texto_original"),
+                    "codigo_leido": linea.get("codigo_leido"),
+                    "modelo_leido": linea.get("modelo_leido"),
                 })
                 continue
             producto = db.execute("SELECT id, nombre FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
@@ -5839,13 +5977,24 @@ def carga_masiva_confirmar():
             lineas_validadas.append({
                 "producto_id": producto["id"], "producto_nombre": producto["nombre"],
                 "cantidad": linea["cantidad"], "precio_unitario": linea["precio_unitario"],
+                # Aunque esta línea SÍ matcheó un producto, se guarda igual
+                # lo que leyó la IA (si vino de una foto) -- para que la
+                # pantalla de revisión de Bodega pueda mostrar "Leído: ..."
+                # junto al producto asignado en CUALQUIER línea, no solo en
+                # las que quedaron sin resolver (ver pfd-lineas en
+                # finanzas.js / afp-tbody-lineas en
+                # alerta_facturas_pendientes.js) -- así un match automático
+                # equivocado sigue siendo detectable después de confirmar.
+                "texto_original": linea.get("texto_original"),
+                "codigo_leido": linea.get("codigo_leido"),
+                "modelo_leido": linea.get("modelo_leido"),
             })
 
         if not lineas_ok or not lineas_validadas:
             omitidas.append(grupo["numero"])
             continue
 
-        _nueva, error = _crear_pendiente_recepcion(
+        _nueva, error, se_aplico = _crear_pendiente_y_aplicar_si_posible(
             db, grupo["numero"], proveedor_id, grupo.get("fecha") or "", lineas_validadas,
             condicion_pago, porcentaje_contado, plazo_dias_credito, usuario_actual(), origen=origen,
         )
@@ -5853,10 +6002,125 @@ def carga_masiva_confirmar():
             omitidas.append(grupo["numero"])
             continue
         creadas.append(grupo["numero"])
+        if se_aplico:
+            aplicadas.append(grupo["numero"])
 
     CARGA_MASIVA_CACHE.pop(token, None)
 
-    return jsonify({"creadas": creadas, "omitidas": omitidas, "total_creadas": len(creadas)})
+    return jsonify({
+        "creadas": creadas, "omitidas": omitidas, "total_creadas": len(creadas),
+        "aplicadas": aplicadas, "total_aplicadas": len(aplicadas),
+    })
+
+
+@app.route("/api/facturas/<int:factura_id>/condicion-pago", methods=["PUT"])
+@requiere_rol("finanzas")
+def cambiar_condicion_pago_factura(factura_id):
+    """Corrige la condición de pago (al contado / a crédito a N días /
+    mixta) de una factura de compra YA REGISTRADA -- pensado para la nueva
+    ruta de ingreso directo (ver _crear_pendiente_y_aplicar_si_posible):
+    Bodega ingresa la factura y aplica el stock de inmediato, pero no
+    siempre tiene la última palabra sobre las condiciones pactadas con el
+    proveedor (eso lo termina de confirmar Finanzas) -- acá se corrige
+    DESPUÉS sin tocar nada más de la factura (ni sus líneas ni el stock ya
+    aplicado, que quedan intactos).
+
+    Reemplaza TODAS las Cuentas por Pagar activas de esta factura por
+    una(s) nueva(s) con la condición corregida (mismo cálculo que
+    _generar_cxp_de_factura usó la primera vez) -- las viejas se anulan
+    (nunca se borran, para no perder el rastro) y se generan de cero.
+    Bloqueado si alguna ya tiene abonos registrados (incluido el abono
+    automático que se crea junto con un tramo 'al contado') -- mismo
+    criterio de seguridad que finanzas_anular_cxp_manual: no hay todavía
+    forma de revertir un pago que ya "salió", así que no se puede
+    reescribir la condición por debajo de un pago ya hecho."""
+    db = get_db()
+    factura = db.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
+    if factura is None:
+        return jsonify({"error": "Factura no encontrada"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    condicion_pago = (data.get("condicion_pago") or "").strip().lower()
+    if condicion_pago not in CONDICIONES_PAGO_VALIDAS:
+        return jsonify({"error": f"Condición de pago inválida. Usa una de: {', '.join(CONDICIONES_PAGO_VALIDAS)}"}), 400
+    try:
+        porcentaje_contado = float(data.get("porcentaje_contado") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El porcentaje al contado debe ser un número"}), 400
+    try:
+        plazo_dias_credito = int(data.get("plazo_dias_credito") or CXP_DIAS_VENCIMIENTO_DEFECTO)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El plazo de crédito debe ser un número de días"}), 400
+    if condicion_pago == "mixto" and not (0 < porcentaje_contado < 100):
+        return jsonify({"error": "Para una condición mixta, el porcentaje al contado debe estar entre 0 y 100 (sin incluirlos)"}), 400
+    if plazo_dias_credito <= 0 and condicion_pago in ("credito", "mixto"):
+        return jsonify({"error": "El plazo de crédito debe ser mayor a 0 días"}), 400
+
+    cxp_existentes = db.execute(
+        "SELECT * FROM cuentas_por_pagar WHERE factura_id = ? AND estado != 'anulada'", (factura_id,)
+    ).fetchall()
+    for cxp in cxp_existentes:
+        total_pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (cxp["id"],)
+        ).fetchone()[0]
+        if total_pagado > 0:
+            return jsonify({
+                "error": "Esta factura ya tiene abonos registrados en su Cuenta por Pagar y no se puede "
+                         "cambiar la condición de pago sin revertirlos primero.",
+            }), 400
+
+    # Mismo cálculo de monto que usó _generar_cxp_de_factura la primera
+    # vez -- junta las líneas de producto (cantidad×precio_unitario) y las
+    # de gasto general de esta factura, para que la CxP nueva quede por el
+    # mismo total. El producto en sí no importa acá (_generar_cxp_de_factura
+    # solo usa cantidad×precio_unitario de cada tupla), así que se manda
+    # None en su lugar.
+    lineas_producto = db.execute(
+        "SELECT cantidad, precio_unitario FROM factura_lineas WHERE factura_id = ?", (factura_id,)
+    ).fetchall()
+    lineas_validadas = [(None, l["cantidad"], l["precio_unitario"]) for l in lineas_producto]
+    gastos_generales = db.execute(
+        "SELECT monto FROM factura_gastos_generales WHERE factura_id = ?", (factura_id,)
+    ).fetchall()
+    lineas_gasto_general = [{"monto": g["monto"]} for g in gastos_generales]
+
+    ts = now_iso()
+    for cxp in cxp_existentes:
+        db.execute(
+            "UPDATE cuentas_por_pagar SET estado = 'anulada', actualizado_en = ? WHERE id = ?",
+            (ts, cxp["id"]),
+        )
+
+    _generar_cxp_de_factura(
+        db, factura_id, factura["proveedor_id"], factura["fecha"], lineas_validadas,
+        condicion_pago=condicion_pago, porcentaje_contado=porcentaje_contado,
+        plazo_dias_credito=plazo_dias_credito, lineas_gasto_general=lineas_gasto_general,
+    )
+
+    # El pendiente de recepción del que nació esta factura (siempre existe
+    # uno, sin importar si fue por el camino viejo de aprobación o el
+    # nuevo de ingreso directo) guarda su propia copia de
+    # condicion_pago/porcentaje_contado/plazo_dias_credito -- se actualiza
+    # también acá para que la pantalla de detalle (pfd-info en
+    # finanzas.js) no quede mostrando la condición vieja.
+    pendiente = db.execute(
+        "SELECT id FROM facturas_finanzas_pendientes WHERE factura_id = ?", (factura_id,)
+    ).fetchone()
+    if pendiente:
+        db.execute(
+            """
+            UPDATE facturas_finanzas_pendientes
+            SET condicion_pago = ?, porcentaje_contado = ?, plazo_dias_credito = ?
+            WHERE id = ?
+            """,
+            (condicion_pago, porcentaje_contado, plazo_dias_credito, pendiente["id"]),
+        )
+        _registrar_historial_pendiente(db, pendiente["id"], "condicion_pago_editada")
+
+    db.commit()
+
+    nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
+    return jsonify(_factura_detalle(db, nueva))
 
 
 # ---------------------------------------------------------------------------
@@ -11140,6 +11404,184 @@ def migracion_ordenes_historicas():
     db.commit()
     resumen["siguiente_offset"] = offset + limite if offset + limite < len(datos) else None
     return jsonify(resumen)
+
+
+# ---------------------------------------------------------------------------
+# API: Reseteo de datos operativos (para la migración desde el sistema PHP)
+# ---------------------------------------------------------------------------
+#
+# Antes de cargar la base de datos migrada desde el sistema PHP antiguo, el
+# taller pidió poder dejar en blanco todo lo operativo (órdenes de trabajo,
+# productos de bodega y todo lo que se genera a partir de ellos: movimientos,
+# facturas de compra, cuentas por pagar/cobrar, garantías, convertidores de
+# torque, caja chica, documentos tributarios, etc.) SIN perder clientes ni
+# sus vehículos (equipos) asociados -- justamente el dato que más cuesta
+# reconstruir a mano y que no depende en nada del sistema PHP.
+#
+# RESET_OPERATIVO_TABLAS lista, en orden hijo -> padre, todas las tablas que
+# se vacían. El orden es solo por prolijidad al leer/auditar la lista --
+# durante el borrado real se desactiva "PRAGMA foreign_keys" (mismo
+# mecanismo que ya usa _reconstruir_tabla_legada_si_hace_falta en core.py) y
+# se verifica integridad al final con "PRAGMA foreign_key_check" antes de
+# confirmar, así que un orden distinto no rompería nada.
+#
+# Tablas que este reseteo NUNCA toca (quedan intactas):
+#   - clientes, equipos              (lo que el taller pidió preservar)
+#   - usuarios                        (cuentas del sistema, no son datos del taller)
+#   - categorias, marcas, modelos, ubicaciones   (catálogos/listas de apoyo)
+#   - configuracion_facturacion       (configuración de la empresa emisora de DTE)
+#   - estado_resultado_manual         (datos manuales de contabilidad por mes,
+#                                       no se generan a partir de OT/productos)
+#   - respaldos_log                   (bitácora de respaldos -- incluye el que
+#                                       este mismo reseteo crea automáticamente
+#                                       antes de borrar nada; borrarla sería
+#                                       contraproducente justo cuando más se
+#                                       necesita ese historial)
+RESET_OPERATIVO_TABLAS = [
+    # -- Finanzas ligadas a facturas de compra / OT --
+    "cxp_pagos",
+    "cuentas_por_pagar",
+    "cuentas_por_cobrar",
+    "factura_gastos_generales",
+    "factura_lineas",
+    "facturas_whatsapp_pendientes",
+    "facturas_finanzas_pendientes",
+    "facturas",
+    # -- Caja Chica --
+    "caja_gasto_detalles",
+    "caja_movimientos",
+    "caja_rendiciones",
+    # -- Avisos/bitácoras ligados a una OT --
+    "pre_entrega",
+    "pruebas_ruta",
+    "sugerencias_diagnostico",
+    "fotos_vehiculo",
+    "pagos_orden",
+    "qc_checklist_items",
+    "presupuesto_items",
+    # -- Garantías --
+    "garantia_items",
+    "garantias",
+    # -- Convertidores de torque --
+    "convertidor_items",
+    "convertidores_torque",
+    # -- Órdenes de trabajo --
+    "orden_items",
+    "ordenes_trabajo",
+    # -- Facturación electrónica (DTE) emitida a clientes --
+    "documentos_tributarios",
+    # -- Inventario / bodega --
+    "reservas",
+    "merma_proveedores",
+    "stock_minimo_calculo",
+    "stock_proveedores",
+    "movimientos",
+    "productos",
+    # -- Proveedores (a pedido del taller: se borra el catálogo completo,
+    #    no solo sus facturas/CxP) --
+    "proveedores",
+    # -- Agente de WhatsApp --
+    "agente_mensajes",
+    "agente_mecanicos",
+    # -- Log de alertas de stock (quedaría referenciando productos ya borrados) --
+    "alertas_stock_log",
+]
+
+RESET_OPERATIVO_FRASE_CONFIRMACION = "RESETEAR TALLER"
+
+
+@app.route("/api/admin/reset-operativo/vista-previa", methods=["GET"])
+@requiere_rol()
+def reset_operativo_vista_previa():
+    """Solo lectura: cuenta cuántas filas hay HOY en cada tabla que el
+    reseteo borraría, para mostrarlo ANTES de ejecutar nada (mismo espíritu
+    que el 'requiere_forzar' de eliminar_factura, pero acá se necesita el
+    detalle completo -- son ~30 tablas -- así que se separó en su propio
+    endpoint de solo lectura en vez de meterlo en la respuesta de error del
+    endpoint que ejecuta)."""
+    db = get_db()
+    conteos = {tabla: db.execute(f"SELECT COUNT(*) FROM {tabla}").fetchone()[0] for tabla in RESET_OPERATIVO_TABLAS}
+    return jsonify({
+        "conteos": conteos,
+        "total_filas": sum(conteos.values()),
+        "tablas_preservadas": [
+            "clientes", "equipos", "usuarios", "categorias", "marcas", "modelos",
+            "ubicaciones", "configuracion_facturacion", "estado_resultado_manual",
+            "respaldos_log",
+        ],
+        "frase_confirmacion_requerida": RESET_OPERATIVO_FRASE_CONFIRMACION,
+    })
+
+
+@app.route("/api/admin/reset-operativo/ejecutar", methods=["POST"])
+@requiere_rol()
+def reset_operativo_ejecutar():
+    """Vacía TODAS las tablas de RESET_OPERATIVO_TABLAS, preservando
+    clientes/equipos/usuarios/catálogos (ver comentario arriba de la lista).
+    Pensado como paso previo a cargar la base migrada desde el sistema PHP.
+
+    Salvaguardas, en orden:
+      1. Exige la frase exacta RESETEAR TALLER en el body -- es una
+         operación mucho más amplia que 'eliminar factura', así que un
+         simple forzar=1 se sentía insuficiente.
+      2. Crea un respaldo automático de TODA la base ANTES de borrar nada
+         (_crear_respaldo_local, mismo mecanismo que el respaldo local por
+         hora). Si el respaldo falla por cualquier motivo (ej. disco casi
+         lleno), se aborta sin tocar un solo dato.
+      3. Borra todo dentro de una única transacción con las llaves foráneas
+         desactivadas (mismo mecanismo que _reconstruir_tabla_legada_si_hace_falta
+         en core.py), y antes de confirmar corre 'PRAGMA foreign_key_check'
+         -- si detecta cualquier referencia que haya quedado rota (no
+         debería pasar, dado que se listan TODAS las tablas dependientes),
+         revierte todo y no cambia nada en vez de dejar la base a medias."""
+    body = request.get_json(silent=True) or {}
+    confirmacion = (body.get("confirmacion") or "").strip()
+    if confirmacion != RESET_OPERATIVO_FRASE_CONFIRMACION:
+        return jsonify({
+            "error": f"Para ejecutar el reseteo hay que mandar el campo 'confirmacion' con el texto exacto "
+                     f"'{RESET_OPERATIVO_FRASE_CONFIRMACION}'.",
+        }), 400
+
+    respaldo_ok, respaldo_detalle = _crear_respaldo_local()
+    if not respaldo_ok:
+        return jsonify({
+            "error": "Se abortó el reseteo antes de borrar nada: no se pudo crear el respaldo automático previo "
+                     f"({respaldo_detalle}). Libera espacio o revisa el error e inténtalo de nuevo.",
+        }), 500
+
+    db = get_db()
+    db.commit()  # cierra cualquier transacción implícita pendiente antes de tocar el pragma
+    db.execute("PRAGMA foreign_keys = OFF")
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        eliminadas = {}
+        for tabla in RESET_OPERATIVO_TABLAS:
+            cur = db.execute(f"DELETE FROM {tabla}")
+            eliminadas[tabla] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+        violaciones = db.execute("PRAGMA foreign_key_check").fetchall()
+        if violaciones:
+            db.execute("ROLLBACK")
+            return jsonify({
+                "error": "Se abortó el reseteo: quedaron referencias rotas después de borrar (no debería pasar). "
+                         "No se modificó ningún dato -- revisa el detalle y avisa antes de reintentar.",
+                "violaciones": [dict(v) for v in violaciones][:10],
+            }), 500
+
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    finally:
+        db.execute("PRAGMA foreign_keys = ON")
+        db.commit()
+
+    return jsonify({
+        "ok": True,
+        "respaldo_local_creado": respaldo_detalle,
+        "eliminadas": eliminadas,
+        "total_eliminadas": sum(eliminadas.values()),
+    })
 
 
 init_db()

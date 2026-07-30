@@ -428,6 +428,11 @@ class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
         "listar_facturas", "obtener_factura", "obtener_factura_por_numero",
         "carga_masiva_plantilla", "carga_masiva_previsualizar", "carga_masiva_corregir_linea",
         "carga_masiva_corregir_proveedor", "escanear_foto_factura",
+        # Ruta de ingreso directo (Bodega ingresa la factura y, si el
+        # catálogo ya tiene todo, queda aplicada de una -- ver
+        # _crear_pendiente_y_aplicar_si_posible en app.py): antes estos dos
+        # eran solo de Finanzas, ahora Bodega también puede usarlos.
+        "crear_factura_pendiente_recepcion", "carga_masiva_confirmar",
     }
     _ENDPOINTS_SOLO_ADMIN = {
         "estado_sistema", "backup_estado_automatico", "backup_probar_automatico", "panel_dueno",
@@ -596,13 +601,24 @@ class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
 
     # ---- Reproducción literal de los escenarios descritos en el informe ----
 
-    def test_usuario_bodega_no_ve_el_resumen_financiero(self):
+    def test_usuario_bodega_entra_a_finanzas_pero_solo_ve_la_pestana_facturas(self):
+        # Desde la nueva ruta de ingreso directo de facturas (ver
+        # _crear_pendiente_y_aplicar_si_posible en app.py y el comentario
+        # de vista_finanzas()), Bodega SÍ puede entrar a /finanzas -- pero
+        # la plantilla le esconde todo salvo la pestaña "Facturas" (ver
+        # 'solo_facturas' en finanzas.html), y el resto de las APIs de
+        # Finanzas (resumen general, CxC, Gastos Generales, etc.) le
+        # siguen estando vedadas -- solo se le abrió lo puntual que
+        # necesita para ingresar facturas.
         username = self._crear_usuario(modulos=["bodega"])
         client = self._login_como(username)
         resp = client.get("/finanzas")
-        self.assertEqual(resp.status_code, 302)  # la pantalla ya lo bloqueaba
+        self.assertEqual(resp.status_code, 200)
+        html = resp.get_data(as_text=True)
+        self.assertNotIn('data-vista="resumen"', html)
+        self.assertIn('data-vista="facturas"', html)
         resp_api = client.get("/api/finanzas/resumen")
-        self.assertEqual(resp_api.status_code, 403)  # pero la API, antes, no
+        self.assertEqual(resp_api.status_code, 403)  # el resumen general sigue siendo solo de Finanzas
 
     def test_usuario_bodega_no_puede_listar_clientes_de_operativo(self):
         username = self._crear_usuario(modulos=["bodega"])

@@ -49,7 +49,13 @@ class TestResetOperativo(unittest.TestCase):
         db = taller_app._conectar_db()
         try:
             db.execute("PRAGMA foreign_keys = OFF")
-            for tabla in taller_app.RESET_OPERATIVO_TABLAS:
+            # No todas las tablas de RESET_OPERATIVO_TABLAS existen
+            # necesariamente en esta base de pruebas (ej. 'orden_tiempos',
+            # que quedó en la lista por una función ya retirada del código
+            # y que por lo tanto init_db() no crea en una base nueva) -- se
+            # usa el mismo helper que usa el propio endpoint para no
+            # intentar un DELETE contra una tabla que no existe acá.
+            for tabla in taller_app._reset_operativo_tablas_a_vaciar(db):
                 db.execute(f"DELETE FROM {tabla}")
             db.execute("DELETE FROM equipos")
             db.execute("DELETE FROM clientes")
@@ -256,7 +262,11 @@ class TestResetOperativo(unittest.TestCase):
 
         db = taller_app._conectar_db()
         try:
-            for tabla in taller_app.RESET_OPERATIVO_TABLAS:
+            # Solo las que de verdad existen en esta base -- ver
+            # test_tabla_de_la_lista_que_no_existe_en_este_ambiente_no_rompe_nada
+            # para el caso de una entrada de la lista (ej. 'orden_tiempos')
+            # que este ambiente de pruebas nunca tuvo.
+            for tabla in taller_app._reset_operativo_tablas_a_vaciar(db):
                 n = db.execute(f"SELECT COUNT(*) FROM {tabla}").fetchone()[0]
                 self.assertEqual(n, 0, f"la tabla '{tabla}' debería haber quedado vacía")
 
@@ -305,6 +315,33 @@ class TestResetOperativo(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
         data = resp.get_json()
         self.assertEqual(data["total_eliminadas"], 0)
+
+    def test_tabla_de_la_lista_que_no_existe_en_este_ambiente_no_rompe_nada(self):
+        # 'orden_tiempos' está en RESET_OPERATIVO_TABLAS (ver app.py) pero
+        # no la crea init_db() -- quedó en la lista por una función ya
+        # retirada del código, y esta base de pruebas nunca la tuvo. Esto
+        # reproduce en general cualquier caso futuro parecido: una entrada
+        # de la lista que en ALGÚN ambiente no llegó a crearse no debería
+        # tirar 'no such table' -- _reset_operativo_tablas_a_vaciar() tiene
+        # que filtrarla sola contra lo que existe de verdad.
+        db = taller_app._conectar_db()
+        try:
+            tiene_orden_tiempos = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'orden_tiempos'"
+            ).fetchone()
+        finally:
+            db.close()
+        self.assertIsNone(tiene_orden_tiempos, "este test asume que 'orden_tiempos' no existe en la base de pruebas")
+
+        resp_preview = self.client.get("/api/admin/reset-operativo/vista-previa")
+        self.assertEqual(resp_preview.status_code, 200, resp_preview.get_data(as_text=True))
+        self.assertNotIn("orden_tiempos", resp_preview.get_json()["conteos"])
+
+        resp = self.client.post(
+            "/api/admin/reset-operativo/ejecutar", json={"confirmacion": "RESETEAR TALLER"}
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertNotIn("orden_tiempos", resp.get_json()["eliminadas"])
 
     def test_diagnostico_no_encuentra_nada_en_una_base_recien_creada(self):
         # Sanity check estructural: en una base recién creada por init_db()

@@ -11498,6 +11498,13 @@ RESET_OPERATIVO_TABLAS = [
     "agente_mecanicos",
     # -- Log de alertas de stock (quedaría referenciando productos ya borrados) --
     "alertas_stock_log",
+    # -- Bitácora de eventos por OT (columnas: orden_id NOT NULL REFERENCES
+    #    ordenes_trabajo, evento, marca_tiempo, usuario). Encontrada por
+    #    /api/admin/reset-operativo/diagnostico -- no aparece en ningún
+    #    CREATE TABLE del código fuente actual (ni se lee ni se escribe
+    #    desde ninguna pantalla hoy), así que es de una función que ya se
+    #    sacó del sistema. Estaba vacía (0 filas) al encontrarla. --
+    "orden_tiempos",
 ]
 
 RESET_OPERATIVO_FRASE_CONFIRMACION = "RESETEAR TALLER"
@@ -11515,18 +11522,31 @@ RESET_OPERATIVO_TABLAS_PRESERVADAS = [
 ]
 
 
-def _reset_operativo_tablas_legado(db):
+def _reset_operativo_tablas_reales(db):
+    """Nombres de TODAS las tablas que existen hoy en la base (sin las
+    internas 'sqlite_%'), consultado directo contra sqlite_master -- no
+    contra ninguna lista escrita a mano. Es la fuente de verdad que usan
+    tanto _reset_operativo_tablas_legado (para encontrar tablas '_legado'
+    huérfanas) como _reset_operativo_tablas_a_vaciar (para nunca intentar
+    un DELETE contra una tabla de RESET_OPERATIVO_TABLAS que en este
+    ambiente en particular no llegó a crearse -- ej. 'orden_tiempos', que
+    quedó en la lista por una función ya retirada del código y que por lo
+    tanto ni init_db() la crea en una base nueva)."""
+    return {
+        r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+
+
+def _reset_operativo_tablas_legado(db, todas_las_tablas=None):
     """Tablas '<tabla>_legado', '<tabla>_legado_fk', o esas mismas variantes
     con un timestamp pegado al final (ver core.py: _reconstruir_tabla_legada_si_hace_falta
     y _reparar_fk_hacia_tabla_renombrada, que arman el nombre así), para
     CUALQUIER tabla de RESET_OPERATIVO_TABLAS -- se detectan por nombre
     directamente contra la base real (no hay como saberlo desde el código
     fuente, ver comentario arriba de RESET_OPERATIVO_TABLAS)."""
-    todas_las_tablas = {
-        r[0] for r in db.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-    }
+    todas_las_tablas = _reset_operativo_tablas_reales(db) if todas_las_tablas is None else todas_las_tablas
     encontradas = []
     for base in RESET_OPERATIVO_TABLAS:
         patron = re.compile(rf"^{re.escape(base)}_legado(_fk)?(_\d+)?$")
@@ -11535,13 +11555,17 @@ def _reset_operativo_tablas_legado(db):
 
 
 def _reset_operativo_tablas_a_vaciar(db):
-    """La lista real de tablas a vaciar: RESET_OPERATIVO_TABLAS más
-    cualquier tabla '_legado' huérfana que se le haya pegado (ver
-    _reset_operativo_tablas_legado). Se recalcula en cada request -- no es
-    cara (una sola consulta a sqlite_master) y así 'vista-previa',
-    'diagnostico' y 'ejecutar' siempre están mirando exactamente lo mismo,
-    aunque aparezca una tabla '_legado' nueva entre una llamada y otra."""
-    return RESET_OPERATIVO_TABLAS + _reset_operativo_tablas_legado(db)
+    """La lista real de tablas a vaciar: las de RESET_OPERATIVO_TABLAS que
+    de verdad existen en esta base (ver _reset_operativo_tablas_reales --
+    protege contra una entrada de la lista, como 'orden_tiempos', que en
+    algún ambiente nunca se llegó a crear) más cualquier tabla '_legado'
+    huérfana que se le haya pegado (ver _reset_operativo_tablas_legado). Se
+    recalcula en cada request -- no es cara (una sola consulta a
+    sqlite_master) y así 'vista-previa', 'diagnostico' y 'ejecutar' siempre
+    están mirando exactamente lo mismo."""
+    todas_las_tablas = _reset_operativo_tablas_reales(db)
+    tablas_conocidas_que_existen = [t for t in RESET_OPERATIVO_TABLAS if t in todas_las_tablas]
+    return tablas_conocidas_que_existen + _reset_operativo_tablas_legado(db, todas_las_tablas)
 
 
 @app.route("/api/admin/reset-operativo/vista-previa", methods=["GET"])
@@ -11596,11 +11620,7 @@ def reset_operativo_diagnostico():
          que después de borrar quedaría con una referencia rota."""
     db = get_db()
     tablas_a_vaciar = _reset_operativo_tablas_a_vaciar(db)
-    todas_las_tablas = [
-        r[0] for r in db.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-        ).fetchall()
-    ]
+    todas_las_tablas = sorted(_reset_operativo_tablas_reales(db))
     tablas_clasificadas = set(tablas_a_vaciar) | set(RESET_OPERATIVO_TABLAS_PRESERVADAS)
     tablas_no_clasificadas = sorted(t for t in todas_las_tablas if t not in tablas_clasificadas)
 

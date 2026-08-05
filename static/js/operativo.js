@@ -1785,8 +1785,21 @@ document.getElementById("btn-opod-eliminar-orden").addEventListener("click", asy
 // acción que pueda cambiar el valor o los pagos (guardar cambios,
 // registrar/eliminar un pago, refrescos automáticos de estado).
 function renderValorYPagosOrden(orden) {
-  document.getElementById("opod-valor").value = formatearMontoEnVivo(String(orden.valor_neto != null ? orden.valor_neto : 0));
-  document.getElementById("opod-iva-check").checked = !!orden.precio_iva;
+  // Si el usuario está escribiendo en el campo de valor (o tiene el foco en
+  // el check de IVA) justo cuando llega un refresco automático de fondo (ver
+  // iniciarPollingOrdenes), no pisar lo que está escribiendo -- antes esto
+  // sobreescribía el input incondicionalmente y el monto se volvía a poner
+  // en el valor guardado en el servidor (ej. "0") antes de que alcanzara a
+  // guardar. Al guardar (btn-opod-guardar) o al reabrir la orden, el campo
+  // sí se sincroniza porque en esos momentos no tiene el foco.
+  const inputValor = document.getElementById("opod-valor");
+  if (document.activeElement !== inputValor) {
+    inputValor.value = formatearMontoEnVivo(String(orden.valor_neto != null ? orden.valor_neto : 0));
+  }
+  const checkIva = document.getElementById("opod-iva-check");
+  if (document.activeElement !== checkIva) {
+    checkIva.checked = !!orden.precio_iva;
+  }
   document.getElementById("opod-r-neto").textContent = fmtMoney(orden.valor_neto || 0);
   document.getElementById("opod-r-iva").textContent = fmtMoney(orden.valor_iva_monto || 0);
   document.getElementById("opod-r-total").textContent = fmtMoney(orden.valor_total || 0);
@@ -1967,7 +1980,12 @@ async function refrescarResumenHub(ordenId) {
   try {
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
     renderResumenClienteAuto(orden);
-    document.getElementById("opod-estado").value = orden.estado;
+    // Mismo cuidado que en renderValorYPagosOrden: no pisar el <select> de
+    // estado si el usuario lo tiene abierto/enfocado en este momento.
+    const selectEstado = document.getElementById("opod-estado");
+    if (document.activeElement !== selectEstado) {
+      selectEstado.value = orden.estado;
+    }
     renderValorYPagosOrden(orden);
     renderCostosOrden(orden);
     cargarOperativo();

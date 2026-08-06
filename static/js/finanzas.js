@@ -1659,11 +1659,22 @@ async function abrirDetalleFacturaPendiente(id) {
     }
   }
 
+  // Neto/IVA/Total: mientras está pendiente se usa el cálculo en vivo del
+  // pendiente (p.monto_neto/monto_iva/monto_total, ver
+  // _factura_pendiente_recepcion_dict); una vez aprobada, se usa lo que
+  // efectivamente quedó guardado en la factura real (facturaReal.*), que es
+  // lo que también generó su Cuenta por Pagar (ver _registrar_factura).
+  const montoNeto = facturaReal ? facturaReal.monto_neto : p.monto_neto;
+  const montoIva = facturaReal ? facturaReal.monto_iva : p.monto_iva;
+  const montoTotalConIva = facturaReal ? facturaReal.monto_total : p.monto_total;
+  const exentoIva = facturaReal ? facturaReal.exento_iva : p.exento_iva;
+
   document.getElementById("pfd-info").innerHTML = `
     <p><strong>Proveedor:</strong> ${escapeHtml(p.proveedor_nombre) || "—"}</p>
     <p><strong>Fecha:</strong> ${escapeHtml(p.fecha) || "—"}</p>
     <p><strong>Condición de pago:</strong> ${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}</p>
     <p><strong>Estado:</strong> ${ESTADO_PFR_LABEL[p.estado] || p.estado}</p>
+    <p><strong>Neto:</strong> ${fmtMoney(montoNeto)} — <strong>IVA${exentoIva ? " (exenta)" : " (19%)"}:</strong> ${fmtMoney(montoIva)} — <strong>Total:</strong> ${fmtMoney(montoTotalConIva)}</p>
     <p><strong>Origen:</strong> ${ORIGEN_PFR_LABEL[p.origen] || p.origen || "—"}</p>
     <p><strong>Registrada por:</strong> ${escapeHtml(p.creado_por) || "—"}</p>
     ${p.estado === "rechazada" && p.nota_rechazo ? `<p><strong>Motivo de rechazo:</strong> ${escapeHtml(p.nota_rechazo)}</p>` : ""}
@@ -1831,9 +1842,17 @@ document.getElementById("pfd-cond-guardar").addEventListener("click", async () =
   }
 });
 
+// Neto/IVA/Total en vivo, mientras se arma la factura -- mismo criterio que
+// ya usa la emisión de DTE de venta (ver actualizarTotalDte): el precio que
+// se escribe por línea es el NETO (sin IVA, tal como aparece en la factura
+// del proveedor), y de ahí se calculan IVA (19%) y el total. El checkbox
+// "Exenta de IVA" (pfr-exento-iva) deja el IVA en $0 para las facturas de
+// proveedores que no cargan IVA -- sin él, TODA factura de compra quedaría
+// forzada a pagar 19% de más en su Cuenta por Pagar, lo que sería un error
+// real para esos casos.
 function actualizarTotalFacturaPendiente() {
   const filas = Array.from(document.querySelectorAll("#pfr-lineas .fac-linea-row"));
-  const total = filas.reduce((acc, fila) => {
+  const neto = filas.reduce((acc, fila) => {
     const esGG = fila.querySelector(".pfr-linea-modo-gg").checked;
     if (esGG) {
       const monto = parseFloat(fila.querySelector(".pfr-linea-monto-gg").value) || 0;
@@ -1843,8 +1862,14 @@ function actualizarTotalFacturaPendiente() {
     const precio = parseFloat(fila.querySelector(".pfr-linea-precio").value) || 0;
     return acc + cantidad * precio;
   }, 0);
+  const exento = document.getElementById("pfr-exento-iva").checked;
+  const iva = exento ? 0 : Math.round(neto * 0.19 * 100) / 100;
+  const total = Math.round((neto + iva) * 100) / 100;
+  document.getElementById("pfr-total-neto").textContent = fmtMoney(neto);
+  document.getElementById("pfr-total-iva").textContent = fmtMoney(iva);
   document.getElementById("pfr-total-vivo").textContent = fmtMoney(total);
 }
+document.getElementById("pfr-exento-iva").addEventListener("change", actualizarTotalFacturaPendiente);
 
 // ctx = { pendienteId, indice } -- solo se pasan cuando la línea pertenece
 // a un pendiente YA GUARDADO (pantalla de "Editar"), porque el botón
@@ -2069,6 +2094,7 @@ async function abrirEdicionFacturaPendiente(id) {
     document.getElementById("pfr-numero").value = p.numero || "";
     document.getElementById("pfr-proveedor-id").value = p.proveedor_id || "";
     document.getElementById("pfr-fecha").value = (p.fecha || "").slice(0, 10);
+    document.getElementById("pfr-exento-iva").checked = !!p.exento_iva;
 
     const avisoRechazo = document.getElementById("pfr-aviso-rechazo");
     if (p.estado === "rechazada") {
@@ -2286,6 +2312,7 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
           proveedor_id: document.getElementById("pfr-proveedor-id").value || null,
           fecha: document.getElementById("pfr-fecha").value,
           lineas,
+          exento_iva: document.getElementById("pfr-exento-iva").checked,
         }),
       });
       toast(eraCorreccionDeRechazo ? "Factura corregida y reingresada a la cola de revisión de Bodega" : "Factura pendiente actualizada");
@@ -2306,6 +2333,7 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
           condicion_pago: condicion,
           porcentaje_contado: condicion === "mixto" ? Number(document.getElementById("pfr-porcentaje-contado").value) : (condicion === "contado" ? 100 : 0),
           plazo_dias_credito: Number(document.getElementById("pfr-plazo-dias").value || 30),
+          exento_iva: document.getElementById("pfr-exento-iva").checked,
         }),
       });
       // Con todos los productos ya en el catálogo, la factura queda

@@ -1482,6 +1482,44 @@ def init_db():
         db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN historial_json TEXT NOT NULL DEFAULT '[]'")
         db.commit()
 
+    # ---- Migración 33: Neto/IVA automático en facturas de compra -- a
+    # pedido del taller (roadmap ítem #2). Hasta acá, el precio que se
+    # escribía por línea se sumaba tal cual como "el total" de la factura,
+    # sin sumarle el 19% de IVA -- lo que dejaba la Cuenta por Pagar
+    # generada (ver _generar_cxp_de_factura) subestimada en un 19% respecto
+    # a lo que realmente se le debe al proveedor, cada vez que el precio
+    # ingresado era el neto (como efectivamente lo es: ver ayuda-inline del
+    # formulario "Registrar factura de compra"). Desde esta migración, el
+    # precio de cada línea se sigue tratando como NETO, pero el IVA (19%) y
+    # el total se calculan solos y son los que se usan para la CxP -- así
+    # queda reflejado lo que de verdad hay que pagarle al proveedor.
+    # 'exento_iva' (tanto en el pendiente como en la factura final) es el
+    # escape para las facturas de proveedores que no cargan IVA, para no
+    # forzarles un 19% de más.
+    #
+    # OJO: esto NO recalcula ni corrige ninguna Cuenta por Pagar ya
+    # generada antes de esta migración -- solo aplica a facturas
+    # registradas de acá en adelante. Tocar retroactivamente CxP con pagos
+    # ya hechos sería peligroso (los montos abonados quedarían descuadrados
+    # contra un total que cambió por debajo). facturas.monto_neto/monto_iva
+    # quedan en 0 para las filas históricas (no aplica, no "es cero").
+    if "exento_iva" not in columnas_ffp:
+        db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN exento_iva INTEGER NOT NULL DEFAULT 0")
+        db.commit()
+    columnas_facturas_v33 = [c[1] for c in db.execute("PRAGMA table_info(facturas)").fetchall()]
+    if "exento_iva" not in columnas_facturas_v33:
+        db.execute("ALTER TABLE facturas ADD COLUMN exento_iva INTEGER NOT NULL DEFAULT 0")
+        db.commit()
+    if "monto_neto" not in columnas_facturas_v33:
+        db.execute("ALTER TABLE facturas ADD COLUMN monto_neto REAL NOT NULL DEFAULT 0")
+        db.commit()
+    if "monto_iva" not in columnas_facturas_v33:
+        db.execute("ALTER TABLE facturas ADD COLUMN monto_iva REAL NOT NULL DEFAULT 0")
+        db.commit()
+    if "monto_total" not in columnas_facturas_v33:
+        db.execute("ALTER TABLE facturas ADD COLUMN monto_total REAL NOT NULL DEFAULT 0")
+        db.commit()
+
     # ---- Migración 16: perfil restringido de "mecánico" para el agente de
     # WhatsApp. Un mecánico registrado en agente_mecanicos puede ser de tipo
     # 'completo' (comportamiento de siempre: puede mandar fotos Y cambiar
@@ -3837,18 +3875,19 @@ CXP_DIAS_VENCIMIENTO_DEFECTO = 30
 
 def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validadas,
                               condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None,
-                              lineas_gasto_general=None):
+                              lineas_gasto_general=None, exento_iva=False):
     """Genera la(s) Cuenta(s) por Pagar de una factura de compra recién
     registrada — el monto total es la suma de cantidad×precio_unitario de
     todas sus líneas de producto MÁS el monto de sus líneas de gasto
-    general (ver lineas_gasto_general), porque al proveedor se le debe la
-    factura completa sin importar cómo se clasificó cada línea puertas
-    adentro. Se llama SIEMPRE desde _registrar_factura (nunca a mano), así
-    que cualquier factura que entre por cualquiera de sus caminos
-    (registro manual, carga masiva por Excel, foto de WhatsApp aprobada, o
-    aprobación de recepción desde Finanzas) genera su CxP sola, sin que se
-    pueda olvidar. No se genera nada si el total es $0 (ej. factura de
-    solo devoluciones).
+    general (ver lineas_gasto_general) MÁS el IVA (19%, salvo que
+    exento_iva) sobre ese neto (ver Migración 33) -- porque al proveedor se
+    le debe la factura completa, con IVA incluido, sin importar cómo se
+    clasificó cada línea puertas adentro. Se llama SIEMPRE desde
+    _registrar_factura (nunca a mano), así que cualquier factura que entre
+    por cualquiera de sus caminos (registro manual, carga masiva por Excel,
+    foto de WhatsApp aprobada, o aprobación de recepción desde Finanzas)
+    genera su CxP sola, sin que se pueda olvidar. No se genera nada si el
+    total es $0 (ej. factura de solo devoluciones).
 
     condicion_pago/porcentaje_contado/plazo_dias_credito solo los manda
     aprobar_factura_pendiente_recepcion (ver más abajo) — las facturas de
@@ -3863,9 +3902,11 @@ def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validada
       - 'mixto': se genera UNA CxP por el tramo al contado (ya pagada) y
         OTRA por el tramo a crédito (pendiente, con su propio
         vencimiento) — ambas apuntando a la misma factura_id."""
-    monto_total = round(sum(cantidad * precio_unitario for _p, cantidad, precio_unitario in lineas_validadas), 2)
-    monto_total += round(sum(l["monto"] for l in (lineas_gasto_general or [])), 2)
-    monto_total = round(monto_total, 2)
+    monto_neto = round(sum(cantidad * precio_unitario for _p, cantidad, precio_unitario in lineas_validadas), 2)
+    monto_neto += round(sum(l["monto"] for l in (lineas_gasto_general or [])), 2)
+    monto_neto = round(monto_neto, 2)
+    monto_iva = 0 if exento_iva else round(monto_neto * 0.19, 2)
+    monto_total = round(monto_neto + monto_iva, 2)
     if monto_total <= 0:
         return
 
@@ -3915,7 +3956,7 @@ def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validada
 
 def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True,
                         condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None,
-                        lineas_gasto_general=None):
+                        lineas_gasto_general=None, exento_iva=False):
     """Inserta la factura y sus líneas, aplicando el ingreso de stock si
     corresponde, y generando su(s) Cuenta(s) por Pagar (ver
     _generar_cxp_de_factura). Único llamador hoy:
@@ -3929,11 +3970,28 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
     aparte factura_gastos_generales, nunca a factura_lineas ni a stock, a
     pedido del taller de mantener el catálogo de productos estricto (ver
     tabla en init_db). Sí se suman al total de la CxP igual que cualquier
-    otra línea (ver _generar_cxp_de_factura)."""
+    otra línea (ver _generar_cxp_de_factura).
+
+    monto_neto/monto_iva/monto_total quedan guardados en la propia fila de
+    'facturas' (ver Migración 33) -- el precio de cada línea es el NETO, y
+    de acá sale exactamente el mismo cálculo que usa _generar_cxp_de_factura
+    para la Cuenta por Pagar, así el detalle de la factura y lo que se le
+    debe al proveedor siempre calzan."""
     ts = now_iso()
+    monto_neto = round(sum(cantidad * precio_unitario for _p, cantidad, precio_unitario in lineas_validadas), 2)
+    monto_neto += round(sum(l["monto"] for l in (lineas_gasto_general or [])), 2)
+    monto_neto = round(monto_neto, 2)
+    monto_iva = 0 if exento_iva else round(monto_neto * 0.19, 2)
+    monto_total = round(monto_neto + monto_iva, 2)
     cur = db.execute(
-        "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en, condicion_pago, porcentaje_contado, plazo_dias_credito) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (numero, proveedor_id, fecha, ts, condicion_pago, porcentaje_contado, plazo_dias_credito),
+        """
+        INSERT INTO facturas
+            (numero, proveedor_id, fecha, creado_en, condicion_pago, porcentaje_contado, plazo_dias_credito,
+             exento_iva, monto_neto, monto_iva, monto_total)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (numero, proveedor_id, fecha, ts, condicion_pago, porcentaje_contado, plazo_dias_credito,
+         1 if exento_iva else 0, monto_neto, monto_iva, monto_total),
     )
     factura_id = cur.lastrowid
     factura_row = {"id": factura_id, "numero": numero, "proveedor_id": proveedor_id}
@@ -3971,7 +4029,7 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
     _generar_cxp_de_factura(
         db, factura_id, proveedor_id, fecha, lineas_validadas,
         condicion_pago=condicion_pago, porcentaje_contado=porcentaje_contado, plazo_dias_credito=plazo_dias_credito,
-        lineas_gasto_general=lineas_gasto_general,
+        lineas_gasto_general=lineas_gasto_general, exento_iva=exento_iva,
     )
 
     return factura_id
@@ -5311,11 +5369,17 @@ def _factura_pendiente_recepcion_dict(db, row):
     d["historial"] = json.loads(d.pop("historial_json", None) or "[]")
     # Las líneas de gasto general (ver es_gasto_general en
     # _validar_lineas_pendiente) no tienen cantidad/precio_unitario, van
-    # con un 'monto' único -- el total de la factura suma ambos tipos.
-    d["monto_total"] = round(sum(
+    # con un 'monto' único -- el neto de la factura suma ambos tipos (ver
+    # Migración 33: el precio de cada línea es NETO, y de ahí se calculan
+    # IVA y total -- mismo criterio con el que luego se genera la CxP en
+    # _generar_cxp_de_factura, para que lo que se muestra acá antes de
+    # aprobar calce con lo que se termina debiendo al proveedor).
+    d["monto_neto"] = round(sum(
         l["monto"] if l.get("es_gasto_general") else l["cantidad"] * l["precio_unitario"]
         for l in d["lineas"]
     ), 2)
+    d["monto_iva"] = 0 if d.get("exento_iva") else round(d["monto_neto"] * 0.19, 2)
+    d["monto_total"] = round(d["monto_neto"] + d["monto_iva"], 2)
     if d["proveedor_id"]:
         prov = db.execute("SELECT nombre FROM proveedores WHERE id = ?", (d["proveedor_id"],)).fetchone()
         d["proveedor_nombre"] = prov["nombre"] if prov else ""
@@ -5409,7 +5473,7 @@ def detalle_factura_pendiente_recepcion(pendiente_id):
 
 def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
                                  porcentaje_contado, plazo_dias_credito, creado_por, origen="manual",
-                                 foto_archivo="", exigir_numero=True):
+                                 foto_archivo="", exigir_numero=True, exento_iva=False):
     """Inserta una fila en facturas_finanzas_pendientes — punto de entrada
     ÚNICO para las cuatro formas de registrar una factura de compra (manual,
     carga masiva por Excel, foto escaneada, foto de WhatsApp), sin importar
@@ -5463,11 +5527,12 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
         """
         INSERT INTO facturas_finanzas_pendientes
             (numero, proveedor_id, fecha, lineas_json, condicion_pago, porcentaje_contado,
-             plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo, historial_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?)
+             plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo, historial_json,
+             exento_iva)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?, ?)
         """,
         (numero, proveedor_id, fecha, json.dumps(lineas_validadas), condicion_pago, porcentaje_contado,
-         plazo_dias_credito, creado_por, ts, origen, foto_archivo, historial_inicial),
+         plazo_dias_credito, creado_por, ts, origen, foto_archivo, historial_inicial, 1 if exento_iva else 0),
     )
     db.commit()
     nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -5476,7 +5541,8 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
 
 def _crear_pendiente_y_aplicar_si_posible(db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
                                             porcentaje_contado, plazo_dias_credito, creado_por, origen,
-                                            foto_archivo="", exigir_numero=True, auto_aplicar=True):
+                                            foto_archivo="", exigir_numero=True, auto_aplicar=True,
+                                            exento_iva=False):
     """Como _crear_pendiente_recepcion, pero además -- si auto_aplicar es
     True y la factura recién creada queda con TODAS sus líneas ya
     resueltas contra el catálogo -- la aplica de inmediato (stock + CxP)
@@ -5509,7 +5575,7 @@ def _crear_pendiente_y_aplicar_si_posible(db, numero, proveedor_id, fecha, linea
     nueva, error = _crear_pendiente_recepcion(
         db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
         porcentaje_contado, plazo_dias_credito, creado_por, origen=origen,
-        foto_archivo=foto_archivo, exigir_numero=exigir_numero,
+        foto_archivo=foto_archivo, exigir_numero=exigir_numero, exento_iva=exento_iva,
     )
     if error:
         return None, error, False
@@ -5646,6 +5712,7 @@ def crear_factura_pendiente_recepcion():
     fecha = (data.get("fecha") or "").strip()
     lineas_in = data.get("lineas") or []
     condicion_pago = (data.get("condicion_pago") or "credito").strip().lower()
+    exento_iva = bool(data.get("exento_iva"))
     try:
         porcentaje_contado = float(data.get("porcentaje_contado") or 0)
     except (TypeError, ValueError):
@@ -5674,6 +5741,7 @@ def crear_factura_pendiente_recepcion():
     nueva, error, _se_aplico = _crear_pendiente_y_aplicar_si_posible(
         db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
         porcentaje_contado, plazo_dias_credito, usuario_actual(), origen="manual",
+        exento_iva=exento_iva,
     )
     if error:
         return jsonify({"error": error}), 400
@@ -5729,6 +5797,8 @@ def editar_factura_pendiente_recepcion(pendiente_id):
     else:
         lineas_validadas = json.loads(fila["lineas_json"])
 
+    exento_iva = bool(data.get("exento_iva")) if "exento_iva" in data else bool(fila["exento_iva"])
+
     if numero != fila["numero"]:
         existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
         if existe:
@@ -5744,20 +5814,20 @@ def editar_factura_pendiente_recepcion(pendiente_id):
         db.execute(
             """
             UPDATE facturas_finanzas_pendientes
-            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, estado = 'pendiente'
+            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, estado = 'pendiente', exento_iva = ?
             WHERE id = ?
             """,
-            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
+            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), 1 if exento_iva else 0, pendiente_id),
         )
         _registrar_historial_pendiente(db, pendiente_id, "corregida_reingresada")
     else:
         db.execute(
             """
             UPDATE facturas_finanzas_pendientes
-            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?
+            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, exento_iva = ?
             WHERE id = ?
             """,
-            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), pendiente_id),
+            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), 1 if exento_iva else 0, pendiente_id),
         )
     db.commit()
     actualizada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
@@ -5884,7 +5954,7 @@ def _aprobar_pendiente_recepcion(db, fila):
         db, fila["numero"], fila["proveedor_id"], fila["fecha"], lineas_validadas, usuario_actual(),
         aplicar_stock=True, condicion_pago=fila["condicion_pago"],
         porcentaje_contado=fila["porcentaje_contado"], plazo_dias_credito=fila["plazo_dias_credito"],
-        lineas_gasto_general=lineas_gasto_general,
+        lineas_gasto_general=lineas_gasto_general, exento_iva=bool(fila["exento_iva"]),
     )
     return factura_id, lineas_recibidas_registro, None
 
@@ -6190,6 +6260,7 @@ def cambiar_condicion_pago_factura(factura_id):
         db, factura_id, factura["proveedor_id"], factura["fecha"], lineas_validadas,
         condicion_pago=condicion_pago, porcentaje_contado=porcentaje_contado,
         plazo_dias_credito=plazo_dias_credito, lineas_gasto_general=lineas_gasto_general,
+        exento_iva=bool(factura["exento_iva"]),
     )
 
     # El pendiente de recepción del que nació esta factura (siempre existe

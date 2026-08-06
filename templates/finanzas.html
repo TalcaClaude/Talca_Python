@@ -840,7 +840,16 @@
       </div>
       <div id="pfr-lineas"></div>
       <button type="button" class="btn-link" id="pfr-agregar-linea">+ Agregar línea vacía</button>
-      <p class="fac-total-linea">Total factura: <strong id="pfr-total-vivo">$0</strong></p>
+
+      <label class="toggle-critico" style="margin-top:8px">
+        <input type="checkbox" id="pfr-exento-iva"> Esta factura es exenta de IVA (no le corresponde el 19%)
+      </label>
+      <p class="fac-total-linea">
+        Neto: <strong id="pfr-total-neto">$0</strong>
+        — IVA (19%): <strong id="pfr-total-iva">$0</strong>
+        — Total: <strong id="pfr-total-vivo">$0</strong>
+      </p>
+      <p class="ayuda-inline">El precio que escribes en cada línea es el valor NETO (sin IVA), tal como aparece en la factura del proveedor — el IVA y el total se calculan solos. La Cuenta por Pagar se genera por el total con IVA incluido, que es lo que realmente se le debe al proveedor.</p>
 
       <div id="pfr-seccion-condicion">
         <h3 class="subtitulo">Condición de pago</h3>

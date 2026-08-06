@@ -1894,6 +1894,8 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
             <input type="text" class="pfr-crear-categoria" placeholder="Modelo (ej. JF010)"
                    value="${linea && linea.modelo_leido ? escapeHtml(linea.modelo_leido) : ""}" style="margin-bottom:4px">
             <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. Pulley Set)" style="margin-bottom:4px">
+            <input type="text" class="pfr-crear-marca" placeholder="Marca (ej. BOSCH — opcional)"
+                   value="${document.getElementById("pfr-marca-todas") ? escapeHtml(document.getElementById("pfr-marca-todas").value.trim()) : ""}" style="margin-bottom:4px">
             <input type="text" class="pfr-crear-codigo-interno" placeholder="Código interno / N° de parte del fabricante (ej. 33710-NKC-7-FX)"
                    value="${linea && linea.codigo_leido ? escapeHtml(linea.codigo_leido) : ""}" style="margin-bottom:4px">
             <button type="button" class="btn btn-primario btn-chico pfr-crear-confirmar">Crear y vincular</button>
@@ -1987,6 +1989,7 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
       const codigoInterno = div.querySelector(".pfr-crear-codigo-interno").value.trim();
       const categoria = div.querySelector(".pfr-crear-categoria").value.trim();
       const modelo = div.querySelector(".pfr-crear-modelo").value.trim();
+      const marca = div.querySelector(".pfr-crear-marca").value.trim();
       if (!categoria && !modelo) {
         toast("Ingresa al menos modelo o detalle para crear el producto", true);
         return;
@@ -1994,7 +1997,7 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
       try {
         const data = await api(
           `/api/facturas/pendientes-recepcion/${ctx.pendienteId}/lineas/${ctx.indice}/crear-producto`,
-          { method: "POST", body: JSON.stringify({ codigo_interno: codigoInterno, categoria, modelo }) },
+          { method: "POST", body: JSON.stringify({ codigo_interno: codigoInterno, categoria, modelo, marca }) },
         );
         toast(`Producto "${data.producto.nombre}" creado y vinculado a esta línea`);
         pfrProductosCache = [...pfrProductosCache, data.producto];
@@ -2116,6 +2119,24 @@ async function abrirEdicionFacturaPendiente(id) {
 document.getElementById("pfr-agregar-linea").addEventListener("click", () => {
   document.getElementById("pfr-lineas").appendChild(filaLineaFacturaPendiente(pfrProductosCache));
   actualizarTotalFacturaPendiente();
+});
+
+// "Aplicar a todos los productos nuevos": copia la marca escrita arriba a
+// cada campo de marca de los formularios "Crear este producto" que ya estén
+// en pantalla en este momento -- pensado para el caso típico de una factura
+// que trae varios repuestos nuevos, todos de la misma marca (ej. china o
+// americana), para no tener que repetir la marca línea por línea. Los
+// formularios de líneas que se agreguen DESPUÉS de aplicar ya nacen con el
+// valor actual del campo de marca (ver filaLineaFacturaPendiente más
+// arriba), así que en general basta con escribir la marca una vez al
+// empezar a cargar la factura.
+document.getElementById("pfr-btn-aplicar-marca-todas").addEventListener("click", () => {
+  const marca = document.getElementById("pfr-marca-todas").value.trim();
+  const campos = document.querySelectorAll("#pfr-lineas .pfr-crear-marca");
+  campos.forEach(input => { input.value = marca; });
+  toast(marca
+    ? `Marca "${marca}" aplicada a ${campos.length} producto(s) nuevo(s) en pantalla`
+    : "Se limpió la marca de los productos nuevos en pantalla");
 });
 
 // ---------------------------------------------------------------------------

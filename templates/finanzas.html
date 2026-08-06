@@ -830,6 +830,14 @@
         <div class="autocomplete-resultados" id="pfr-producto-resultados" style="display:none"></div>
       </div>
       <p class="ayuda-inline">Haz clic en un resultado para agregarlo a la factura — la lista se mantiene abierta para que puedas seguir agregando productos sin volver a escribir.</p>
+      <div class="campo" id="pfr-marca-todas-wrap">
+        <label>Marca de los productos nuevos de esta factura</label>
+        <div class="campo-select-mas">
+          <input type="text" id="pfr-marca-todas" placeholder="Ej: BOSCH (déjalo vacío si esta factura trae varias marcas)">
+          <button type="button" class="btn-link" id="pfr-btn-aplicar-marca-todas">Aplicar a todos los productos nuevos</button>
+        </div>
+        <p class="ayuda-inline">Útil cuando toda la factura es de una sola marca: escribe la marca acá y aplícala a todas las líneas "Crear este producto" de una vez, en vez de repetirla línea por línea.</p>
+      </div>
       <div id="pfr-lineas"></div>
       <button type="button" class="btn-link" id="pfr-agregar-linea">+ Agregar línea vacía</button>
       <p class="fac-total-linea">Total factura: <strong id="pfr-total-vivo">$0</strong></p>

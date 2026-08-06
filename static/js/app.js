@@ -14,6 +14,7 @@ const state = {
   origenModalUbicacion: "producto", // "producto" | "bodega"
   categoriasDisponibles: [],
   modelosDisponibles: [],
+  marcasDisponibles: [],
   facturaEncontrada: null, // resultado del último lookup por número en el form de movimiento
   proveedores: [],
   proveedorActivoId: null,
@@ -465,16 +466,19 @@ document.getElementById("form-ubicacion").addEventListener("submit", async (e) =
 
 async function cargarCategoriasYMarcas() {
   try {
-    const [cats, modelos] = await Promise.all([
+    const [cats, modelos, marcas] = await Promise.all([
       api("/api/categorias"),
       api("/api/modelos"),
+      api("/api/marcas"),
     ]);
     // La API devuelve objetos {id, nombre, n_productos} (no strings sueltos)
     // para poder editarlos/eliminarlos desde el panel de gestión.
     state.categoriasDisponibles = cats.categorias;
     state.modelosDisponibles = modelos.modelos;
+    state.marcasDisponibles = marcas.marcas;
     renderSelectCategoria();
     renderSelectModelo();
+    renderSelectMarca();
     const modalGestion = document.getElementById("modal-gestion-categorias");
     if (modalGestion && modalGestion.classList.contains("abierto")) {
       renderGestionCategorias();
@@ -501,12 +505,21 @@ function renderSelectModelo(seleccionActual) {
   select.value = actual || "";
 }
 
-// Nombres de función y de la tabla interna ("categoria"/"modelo") se
+function renderSelectMarca(seleccionActual) {
+  const select = document.getElementById("f-marca");
+  const actual = seleccionActual !== undefined ? seleccionActual : select.value;
+  select.innerHTML = '<option value="">Sin marca</option>' +
+    state.marcasDisponibles.map(m => `<option value="${escapeHtml(m.nombre)}">${escapeHtml(m.nombre)}</option>`).join("");
+  select.value = actual || "";
+}
+
+// Nombres de función y de la tabla interna ("categoria"/"modelo"/"marca") se
 // mantienen sin cambio -- ver relabeling en app.py/core.py -- solo el
-// texto que ve el taller pasa a ser "Modelo"/"Detalle".
+// texto que ve el taller pasa a ser "Modelo"/"Detalle"/"Marca".
 const ETIQUETAS_ALTA_RAPIDA = {
   categoria: { texto: "modelo", render: renderSelectCategoria },
   modelo: { texto: "detalle", render: renderSelectModelo },
+  marca: { texto: "marca", render: renderSelectMarca },
 };
 
 // Alta rápida de modelo/detalle: antes usaba prompt(), que no deja ver el
@@ -1010,6 +1023,7 @@ document.getElementById("btn-nuevo").addEventListener("click", async () => {
   renderSelectUbicaciones(null);
   renderSelectCategoria("");
   renderSelectModelo("");
+  renderSelectMarca("");
   abrirModal("modal-producto");
 });
 
@@ -1031,6 +1045,7 @@ async function abrirEdicion(p) {
   renderSelectUbicaciones(p.ubicacion_id);
   renderSelectCategoria(p.categoria || "");
   renderSelectModelo(p.modelo || "");
+  renderSelectMarca(p.marca || "");
 
   const legacy = document.getElementById("f-ubicacion-legacy");
   if (!p.ubicacion_id && p.ubicacion) {
@@ -1057,6 +1072,7 @@ formProducto.addEventListener("submit", async (e) => {
     descripcion: document.getElementById("f-descripcion").value,
     categoria: document.getElementById("f-categoria").value,
     modelo: document.getElementById("f-modelo").value,
+    marca: document.getElementById("f-marca").value,
     ubicacion_id: document.getElementById("f-ubicacion-id").value,
   };
 
@@ -1136,6 +1152,7 @@ function renderDetalle(p) {
     <dt>Código interno</dt><dd class="mono">${escapeHtml(p.codigo_interno) || "—"}</dd>
     <dt>Modelo</dt><dd>${escapeHtml(p.categoria) || "—"}</dd>
     <dt>Detalle</dt><dd>${escapeHtml(p.modelo) || "—"}</dd>
+    <dt>Marca</dt><dd>${escapeHtml(p.marca) || "—"}</dd>
     <dt>Ubicación</dt><dd>${ubicacionTexto}</dd>
     <dt>Descripción</dt><dd>${escapeHtml(p.descripcion) || "—"}</dd>
     <dt>Disponible</dt><dd class="mono">${p.stock_disponible}</dd>

@@ -323,19 +323,24 @@ def coincide_busqueda(consulta, *campos):
     return all(t in texto for t in terminos)
 
 
-def nombre_automatico(categoria, modelo, codigo_interno, id_num):
+def nombre_automatico(categoria, modelo, codigo_interno, id_num, marca=""):
     """El producto ya no tiene un campo 'nombre' editable: se arma solo a
-    partir de los dos campos que lo identifican (categoria + modelo en la
+    partir de los campos que lo identifican (categoria + modelo en la
     base de datos -- de cara al taller son "Modelo" + "Detalle", ver
     relabeling en las rutas /api/categorias, /api/modelos y en el frontend;
     los nombres de columna internos no cambiaron), con respaldos
-    razonables si esos vienen vacíos."""
+    razonables si esos vienen vacíos.
+
+    'marca' es opcional (un mismo modelo/detalle puede existir en más de
+    una marca -- ej. una versión china y una americana de la misma pieza,
+    con distinta calidad y precio -- así que se agrega entre paréntesis al
+    final para distinguirlas de un vistazo en cualquier lista o buscador
+    que ya muestre 'nombre', sin tener que tocar cada pantalla por
+    separado)."""
     partes = [p for p in [(categoria or "").strip(), (modelo or "").strip()] if p]
-    if partes:
-        return " - ".join(partes)
-    if (codigo_interno or "").strip():
-        return codigo_interno.strip()
-    return f"Producto #{id_num:04d}"
+    base = " - ".join(partes) if partes else ((codigo_interno or "").strip() or f"Producto #{id_num:04d}")
+    marca = (marca or "").strip()
+    return f"{base} ({marca})" if marca else base
 
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")

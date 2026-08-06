@@ -875,15 +875,17 @@ def init_db():
         )
         db.commit()
 
-    # ---- Migración 5: se elimina el campo "marca" del sistema (a pedido del
-    # taller: la categoría + el modelo son suficientes para identificar el
-    # producto). Se limpia en todos los productos ya cargados y se
-    # recalcula el nombre automático por si dependía de la marca.
-    db.execute("UPDATE productos SET marca = '' WHERE marca IS NOT NULL AND marca != ''")
-    for r in db.execute("SELECT id, codigo_interno, categoria, modelo FROM productos").fetchall():
-        nuevo_nombre = nombre_automatico(r[2], r[3], r[1], r[0])
-        db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nuevo_nombre, r[0]))
-    db.commit()
+    # ---- Migración 5 (histórica, revertida): en su momento se eliminó el
+    # campo "marca" del sistema (categoría + modelo alcanzaban para
+    # identificar el producto). Ahora se reintroduce a pedido del taller: un
+    # mismo modelo/detalle puede venir de distintas marcas (ej. una versión
+    # china y una americana de la misma pieza), con calidad y precio
+    # distintos, y el taller necesita elegir de cuál está descontando o
+    # cargando stock -- por eso "marca" vuelve a ser parte de lo que
+    # identifica al producto (ver constraint de duplicados en
+    # _crear_producto_desde_datos/editar_producto) en vez de solo un dato
+    # informativo. Esta migración ya NO limpia el campo -- se deja tal cual
+    # quedó registrado.
 
     # ---- Migración 6: agrega facturas.proveedor_id y crea registros de
     # proveedor a partir del texto libre que ya existía, sin perder nada.
@@ -2502,6 +2504,7 @@ def _crear_producto_desde_datos(db, data):
     codigo_interno = (data.get("codigo_interno") or "").strip().upper()
     categoria = (data.get("categoria") or "").strip().upper()
     modelo = (data.get("modelo") or "").strip().upper()
+    marca = (data.get("marca") or "").strip().upper()
 
     if codigo_interno:
         existe = db.execute(
@@ -2511,13 +2514,18 @@ def _crear_producto_desde_datos(db, data):
             return None, f"Ya existe un producto con código '{codigo_interno}'", 400
 
     if categoria or modelo:
+        # La marca entra al constraint de duplicados a propósito: un mismo
+        # modelo/detalle puede existir en más de una marca (ej. una versión
+        # china y una americana de la misma pieza), cada una con su propio
+        # stock y costo -- por eso dos productos con igual categoria+modelo
+        # pero distinta marca NO se consideran duplicados entre sí.
         duplicado = db.execute(
-            "SELECT id, id AS pid FROM productos WHERE lower(trim(categoria)) = lower(trim(?)) AND lower(trim(modelo)) = lower(trim(?))",
-            (categoria, modelo),
+            "SELECT id, id AS pid FROM productos WHERE lower(trim(categoria)) = lower(trim(?)) AND lower(trim(modelo)) = lower(trim(?)) AND lower(trim(marca)) = lower(trim(?))",
+            (categoria, modelo, marca),
         ).fetchone()
         if duplicado:
             return None, (
-                f"Ya existe un producto con ese modelo y detalle (#{duplicado[0]:04d}). "
+                f"Ya existe un producto con ese modelo, detalle y marca (#{duplicado[0]:04d}). "
                 f"Si necesitas más stock, ingrésalo con una factura en vez de crear un producto nuevo."
             ), 400
 
@@ -2550,16 +2558,18 @@ def _crear_producto_desde_datos(db, data):
             codigo_interno, nombre, descripcion, categoria, marca, modelo,
             ubicacion_id, stock_disponible, stock_reservado, stock_minimo,
             costo_compra, creado_en, actualizado_en
-        ) VALUES (?, '', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             codigo_interno,
-            # A diferencia de código/categoría/modelo (que son casi como
-            # "etiquetas" cortas y se ven mejor en mayúscula), la descripción
-            # es texto libre más largo — forzarla a mayúscula sostenida la
-            # hacía más difícil de leer, así que solo se recorta espacios.
+            # A diferencia de código/categoría/modelo/marca (que son casi
+            # como "etiquetas" cortas y se ven mejor en mayúscula), la
+            # descripción es texto libre más largo — forzarla a mayúscula
+            # sostenida la hacía más difícil de leer, así que solo se
+            # recorta espacios.
             (data.get("descripcion") or "").strip(),
             categoria,
+            marca,
             modelo,
             ubicacion_id,
             stock_disponible,
@@ -2571,7 +2581,7 @@ def _crear_producto_desde_datos(db, data):
         ),
     )
     nuevo_id = cur.lastrowid
-    nombre = nombre_automatico(categoria, modelo, codigo_interno, nuevo_id)
+    nombre = nombre_automatico(categoria, modelo, codigo_interno, nuevo_id, marca)
     db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nombre, nuevo_id))
 
     # Si se crea con stock inicial, se deja registrado como movimiento de
@@ -2600,6 +2610,7 @@ def _crear_producto_desde_datos(db, data):
 
     _asegurar_categoria(db, categoria)
     _asegurar_modelo(db, modelo)
+    _asegurar_marca(db, marca)
     db.commit()
 
     nuevo = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (nuevo_id,)).fetchone()
@@ -2658,18 +2669,23 @@ def editar_producto(producto_id):
 
     categoria = (data.get("categoria") if data.get("categoria") is not None else row["categoria"]).strip().upper()
     modelo = (data.get("modelo") if data.get("modelo") is not None else row["modelo"]).strip().upper()
+    marca = (data.get("marca") if data.get("marca") is not None else row["marca"]).strip().upper()
 
     if categoria or modelo:
+        # Misma lógica que en _crear_producto_desde_datos: la marca entra al
+        # constraint, así que dos productos con igual categoria+modelo pero
+        # distinta marca (ej. versión china vs. americana de la misma
+        # pieza) no chocan entre sí.
         duplicado_pm = db.execute(
-            "SELECT id FROM productos WHERE lower(trim(categoria)) = lower(trim(?)) AND lower(trim(modelo)) = lower(trim(?)) AND id != ?",
-            (categoria, modelo, producto_id),
+            "SELECT id FROM productos WHERE lower(trim(categoria)) = lower(trim(?)) AND lower(trim(modelo)) = lower(trim(?)) AND lower(trim(marca)) = lower(trim(?)) AND id != ?",
+            (categoria, modelo, marca, producto_id),
         ).fetchone()
         if duplicado_pm:
             return jsonify({
-                "error": f"Ya existe otro producto con ese modelo y detalle (#{duplicado_pm[0]:04d})."
+                "error": f"Ya existe otro producto con ese modelo, detalle y marca (#{duplicado_pm[0]:04d})."
             }), 400
 
-    nombre = nombre_automatico(categoria, modelo, codigo_interno, producto_id)
+    nombre = nombre_automatico(categoria, modelo, codigo_interno, producto_id, marca)
 
     # Nota: el stock disponible/reservado NO se edita aquí directamente.
     # Se ajusta siempre a través de /movimiento para dejar trazabilidad.
@@ -2677,7 +2693,7 @@ def editar_producto(producto_id):
         """
         UPDATE productos SET
             codigo_interno = ?, nombre = ?, descripcion = ?, categoria = ?,
-            marca = '', modelo = ?, ubicacion_id = ?,
+            marca = ?, modelo = ?, ubicacion_id = ?,
             stock_minimo = ?, costo_compra = ?, actualizado_en = ?
         WHERE id = ?
         """,
@@ -2686,6 +2702,7 @@ def editar_producto(producto_id):
             nombre,
             (data.get("descripcion") if data.get("descripcion") is not None else row["descripcion"]).strip(),
             categoria,
+            marca,
             modelo,
             ubicacion_id,
             stock_minimo,
@@ -2698,6 +2715,7 @@ def editar_producto(producto_id):
 
     _asegurar_categoria(db, categoria)
     _asegurar_modelo(db, modelo)
+    _asegurar_marca(db, marca)
     db.commit()
 
     actualizado = db.execute(PRODUCTO_SELECT + " WHERE p.id = ?", (producto_id,)).fetchone()
@@ -3220,11 +3238,17 @@ def _asegurar_modelo(db, nombre):
         db.execute("INSERT OR IGNORE INTO modelos (nombre) VALUES (?)", (nombre,))
 
 
+def _asegurar_marca(db, nombre):
+    nombre = (nombre or "").strip().upper()
+    if nombre:
+        db.execute("INSERT OR IGNORE INTO marcas (nombre) VALUES (?)", (nombre,))
+
+
 def _recalcular_nombres_afectados(db, ids_productos):
     for pid in ids_productos:
-        r = db.execute("SELECT id, codigo_interno, categoria, modelo FROM productos WHERE id = ?", (pid,)).fetchone()
+        r = db.execute("SELECT id, codigo_interno, categoria, modelo, marca FROM productos WHERE id = ?", (pid,)).fetchone()
         if r:
-            nuevo_nombre = nombre_automatico(r["categoria"], r["modelo"], r["codigo_interno"], r["id"])
+            nuevo_nombre = nombre_automatico(r["categoria"], r["modelo"], r["codigo_interno"], r["id"], r["marca"])
             db.execute("UPDATE productos SET nombre = ? WHERE id = ?", (nuevo_nombre, r["id"]))
 
 
@@ -3378,6 +3402,77 @@ def eliminar_modelo(modelo_id):
     db.execute("DELETE FROM modelos WHERE id = ?", (modelo_id,))
     db.commit()
     return jsonify({"ok": True, "productos_con_este_modelo": n_productos})
+
+
+@app.route("/api/marcas", methods=["GET"])
+@requiere_rol("bodega")
+def listar_marcas():
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT m.id, m.nombre, COUNT(p.id) AS n_productos
+        FROM marcas m
+        LEFT JOIN productos p ON UPPER(TRIM(p.marca)) = m.nombre
+        GROUP BY m.id
+        ORDER BY m.nombre COLLATE NOCASE
+        """
+    ).fetchall()
+    return jsonify({"marcas": [dict(r) for r in rows]})
+
+
+@app.route("/api/marcas", methods=["POST"])
+@requiere_rol("bodega")
+def crear_marca():
+    data = request.get_json(force=True, silent=True) or {}
+    nombre = (data.get("nombre") or "").strip().upper()
+    if not nombre:
+        return jsonify({"error": "El nombre de la marca no puede estar vacío"}), 400
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO marcas (nombre) VALUES (?)", (nombre,))
+    db.commit()
+    return jsonify({"nombre": nombre}), 201
+
+
+@app.route("/api/marcas/<int:marca_id>", methods=["PUT"])
+@requiere_rol("bodega")
+def editar_marca(marca_id):
+    db = get_db()
+    actual = db.execute("SELECT * FROM marcas WHERE id = ?", (marca_id,)).fetchone()
+    if actual is None:
+        return jsonify({"error": "Marca no encontrada"}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    nuevo_nombre = (data.get("nombre") or "").strip().upper()
+    if not nuevo_nombre:
+        return jsonify({"error": "El nombre de la marca no puede estar vacío"}), 400
+
+    if nuevo_nombre != actual["nombre"]:
+        choque = db.execute("SELECT id FROM marcas WHERE nombre = ? AND id != ?", (nuevo_nombre, marca_id)).fetchone()
+        if choque:
+            return jsonify({"error": f"Ya existe una marca llamada '{nuevo_nombre}'. Elimina una de las dos para evitar duplicados."}), 400
+
+    afectados = [r["id"] for r in db.execute("SELECT id FROM productos WHERE UPPER(TRIM(marca)) = ?", (actual["nombre"],)).fetchall()]
+
+    db.execute("UPDATE marcas SET nombre = ? WHERE id = ?", (nuevo_nombre, marca_id))
+    db.execute("UPDATE productos SET marca = ? WHERE UPPER(TRIM(marca)) = ?", (nuevo_nombre, actual["nombre"]))
+    _recalcular_nombres_afectados(db, afectados)
+    db.commit()
+    return jsonify({"id": marca_id, "nombre": nuevo_nombre, "productos_actualizados": len(afectados)})
+
+
+@app.route("/api/marcas/<int:marca_id>", methods=["DELETE"])
+@requiere_rol("bodega")
+def eliminar_marca(marca_id):
+    db = get_db()
+    actual = db.execute("SELECT * FROM marcas WHERE id = ?", (marca_id,)).fetchone()
+    if actual is None:
+        return jsonify({"error": "Marca no encontrada"}), 404
+    n_productos = db.execute(
+        "SELECT COUNT(*) FROM productos WHERE UPPER(TRIM(marca)) = ?", (actual["nombre"],)
+    ).fetchone()[0]
+    db.execute("DELETE FROM marcas WHERE id = ?", (marca_id,))
+    db.commit()
+    return jsonify({"ok": True, "productos_con_esta_marca": n_productos})
 
 
 # ---------------------------------------------------------------------------

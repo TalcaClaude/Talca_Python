@@ -98,17 +98,34 @@ def _iniciar_transaccion_stock(db):
     UPDATE, sino desde esta línea), así que si dos requests llegan casi
     juntas, la segunda simplemente espera a que la primera termine y
     confirme sus cambios antes de leer — ya no puede leer un valor que está
-    a punto de quedar obsoleto."""
+    a punto de quedar obsoleto.
+
+    Es un no-op si 'db' ya está en medio de una transacción (db.in_transaction):
+    SQLite no permite un BEGIN anidado (lanzaría OperationalError "cannot
+    start a transaction within a transaction"). Esto permite que funciones
+    que ya toman este lock por su cuenta (ej. _aprobar_pendiente_recepcion
+    en app.py) puedan llamarse tanto solas como desde un caller que YA
+    tomó el lock más arriba (ej. aprobar_factura_pendiente_recepcion,
+    que necesita el lock desde ANTES de leer el estado del pendiente para
+    cerrar la carrera de un doble clic en "Aprobar" -- ver hallazgo #8/#9
+    del informe de revisión) sin duplicar el BEGIN. El primer llamador que
+    entra de verdad toma el lock; los anidados dentro de la misma
+    transacción sin commit de por medio simplemente lo heredan."""
+    if db.in_transaction:
+        return
     db.execute("BEGIN IMMEDIATE")
 
 
 def _iniciar_transaccion_correlativo(db):
     """Mismo mecanismo que _iniciar_transaccion_stock (BEGIN IMMEDIATE toma
-    el lock de escritura al toque) pero usado para el correlativo compartido
-    entre OT y garantías -- ver _asignar_id_correlativo en
-    modulos/operativo.py. Es una función aparte (aunque hace lo mismo) para
-    que quede claro en el código de OT/garantías por qué se está tomando el
-    lock ahí -- no es por stock."""
+    el lock de escritura al toque, y es no-op si ya hay una transacción
+    abierta) pero usado para el correlativo compartido entre OT y
+    garantías -- ver _asignar_id_correlativo en modulos/operativo.py. Es
+    una función aparte (aunque hace lo mismo) para que quede claro en el
+    código de OT/garantías por qué se está tomando el lock ahí -- no es
+    por stock."""
+    if db.in_transaction:
+        return
     db.execute("BEGIN IMMEDIATE")
 
 

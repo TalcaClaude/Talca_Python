@@ -110,7 +110,7 @@ async function cargarUsuarios() {
       btn.addEventListener("click", () => abrirEdicionUsuario(parseInt(btn.dataset.editar, 10)));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar usuarios: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar usuarios: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 

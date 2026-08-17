@@ -112,7 +112,7 @@ async function cargarMecanicosAgente() {
     renderTablaMecanicosAgente();
     renderSelectMecanicosAgente();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar mecánicos: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar mecánicos: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -262,7 +262,7 @@ async function cargarMensajesAgente() {
     state.agenteMensajes = await api("/api/agente/mensajes");
     renderTablaMensajesAgente();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error al cargar el historial: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 

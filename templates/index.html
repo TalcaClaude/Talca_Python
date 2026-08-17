@@ -621,13 +621,14 @@
         </div>
       </div>
       <div class="campo">
-        <label>Marca</label>
+        <label>Marca *</label>
         <div class="campo-select-mas">
-          <select id="f-marca"><option value="">Sin marca</option></select>
+          <select id="f-marca"><option value="">Selecciona una marca…</option></select>
           <button type="button" class="btn-link" data-nuevo="marca">+ Nuevo</button>
         </div>
+        <p class="ayuda-inline" id="f-marca-variantes-hint" style="display:none"></p>
       </div>
-      <p class="ayuda-inline">El modelo, el detalle y la marca identifican al producto en el sistema: no puede haber dos productos con la misma combinación. Un mismo modelo/detalle puede existir en más de una marca (ej. una versión china y una americana de la misma pieza, con distinta calidad y precio) — cada una queda como un producto separado, con su propio stock y costo. Si necesitas más stock de un producto que ya existe (misma marca incluida), ingrésalo con una factura en vez de crear uno nuevo.</p>
+      <p class="ayuda-inline">El modelo, el detalle y la marca identifican al producto en el sistema: no puede haber dos productos con la misma combinación. La marca es obligatoria (si el repuesto no tiene una marca real, escribe algo como "GENÉRICA") — un mismo modelo/detalle puede existir en más de una marca (ej. una versión china y una americana de la misma pieza, con distinta calidad y precio) y cada una queda como un producto separado, con su propio stock y costo. Si necesitas más stock de un producto que ya existe (misma marca incluida), ingrésalo con una factura en vez de crear uno nuevo.</p>
       <div class="campo">
         <label>Ubicación física</label>
         <div class="campo-ubicacion">

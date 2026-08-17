@@ -47,6 +47,7 @@ from flask import Blueprint, jsonify, request
 
 from core import (
     IVA_PORCENTAJE,
+    _iniciar_transaccion_stock,
     _pdf_response,
     coincide_busqueda,
     fmt_money_pdf,
@@ -179,11 +180,32 @@ def get_emisor_dte():
     demás (endpoints de este módulo) solo conoce la interfaz EmisorDTE.
     Cambiar de proveedor es cambiar PROVEEDOR_DTE en Railway y agregar la
     clase nueva acá arriba; no hay que tocar endpoints, base de datos ni
-    frontend."""
+    frontend.
+
+    Antes, cualquier valor de PROVEEDOR_DTE que no fuera exactamente
+    'simpleapi' (una variable vacía, o un typo como 'simpleap1' o
+    'simple_api') caía en silencio a EmisorSimulado() -- el sistema emitía
+    documentos DE PRUEBA sin avisar que la variable estaba mal, y nada
+    impedía que alguien se los mandara igual a un cliente real pensando que
+    eran reales (el PDF sí marca "documento de prueba" con una franja roja,
+    pero es solo una señal visual, no un bloqueo). Ahora 'simulado' es la
+    ÚNICA forma de pedir el modo de prueba a propósito -- cualquier otro
+    valor que no sea 'simpleapi' falla fuerte, para que una variable mal
+    escrita en Railway se note al toque como un error, no como facturas
+    "de mentira" coladas silenciosamente (hallazgo #13 del informe de
+    revisión)."""
     proveedor = (os.environ.get("PROVEEDOR_DTE") or "simulado").strip().lower()
+    if proveedor == "simulado":
+        return EmisorSimulado()
     if proveedor == "simpleapi":
         return EmisorSimpleAPI()
-    return EmisorSimulado()
+    raise EmisorDTEError(
+        f"La variable de entorno PROVEEDOR_DTE está configurada como '{proveedor}', que no es un "
+        "proveedor reconocido -- por seguridad, el sistema NO cae solo a modo simulado cuando esto "
+        "pasa (podría terminar mandándole un documento de prueba a un cliente real sin que nadie se "
+        "diera cuenta). Usa 'simulado' (modo de prueba, no manda nada al SII) o 'simpleapi' (proveedor "
+        "real) -- revisa y corrige esta variable en Railway."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +463,16 @@ def facturacion_emitir_nota_credito(documento_id):
     un documento tributario ya tributado ante el SII, nunca se puede
     simplemente borrar."""
     db = get_db()
+    # Mismo lock (BEGIN IMMEDIATE, no-op si ya hay una transacción abierta --
+    # ver _iniciar_transaccion_stock en core.py) que ya se usa en otros
+    # puntos con esta misma carrera de doble clic (ver
+    # aprobar_factura_pendiente_recepcion en app.py). Sin esto, dos clics
+    # casi simultáneos en "Anular con nota de crédito" podían pasar los dos
+    # el chequeo de "ya tiene nota de crédito" (más abajo) antes de que
+    # cualquiera alcanzara a insertar la suya, y terminar emitiendo DOS
+    # notas de crédito reales ante el SII por la misma factura (hallazgo
+    # #16 del informe de revisión).
+    _iniciar_transaccion_stock(db)
     documento = db.execute("SELECT * FROM documentos_tributarios WHERE id = ?", (documento_id,)).fetchone()
     if documento is None:
         return jsonify({"error": "Documento no encontrado"}), 404

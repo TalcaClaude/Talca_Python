@@ -84,6 +84,7 @@ from core import (  # noqa: E402
     _aplicar_entrada_stock,
     _aplicar_salida_stock,
     _stockprov_bucket_entrada,
+    _stockprov_bucket_get,
     _stockprov_descontar_preferido,
     _crear_libro_excel,
     _estilo_encabezado,
@@ -110,7 +111,27 @@ FACTURAS_WHATSAPP_DIR = os.path.join(os.path.dirname(DB_PATH), "facturas_whatsap
 os.makedirs(FACTURAS_WHATSAPP_DIR, exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "cambia-esta-clave-en-produccion-usando-la-variable-SECRET_KEY")
+_SECRET_KEY = os.environ.get("SECRET_KEY")
+if not _SECRET_KEY:
+    # Antes, si faltaba esta variable, el sistema arrancaba igual usando un
+    # valor de respaldo escrito directamente acá en el código -- visible
+    # para cualquiera que viera el repositorio. Con esa clave conocida se
+    # pueden falsificar cookies de sesión (incluida una de administrador)
+    # sin necesitar contraseña. Se confirmó que SECRET_KEY SÍ está
+    # configurada en Railway hoy (este riesgo no se llegó a explotar en
+    # producción), pero el código seguía dejando la puerta abierta para el
+    # día en que alguien despliegue un ambiente nuevo (u otro hosting) y se
+    # le olvide copiar esta variable. Ahora el sistema se niega a arrancar
+    # en vez de seguir con un valor de respaldo inseguro (hallazgo #14 del
+    # informe de revisión).
+    raise RuntimeError(
+        "Falta configurar la variable de entorno SECRET_KEY -- es obligatoria, ya no existe un valor de "
+        "respaldo (por seguridad: un valor fijo en el código permitiría falsificar sesiones, incluida una "
+        "de administrador). Genera una clave aleatoria larga (ej. con `python3 -c \"import secrets; "
+        "print(secrets.token_hex(32))\"`) y agrégala como variable de entorno SECRET_KEY antes de arrancar "
+        "(en Railway: Variables del servicio)."
+    )
+app.secret_key = _SECRET_KEY
 
 # "Cache busting" de CSS/JS: el navegador guarda los archivos estáticos en
 # caché por horas (Flask los sirve con Cache-Control de varias horas por
@@ -197,32 +218,45 @@ app.teardown_appcontext(close_db)
 
 # ---------------------------------------------------------------------------
 # Protección básica contra fuerza bruta en el login
+#
+# Hallazgo #18 de la auditoría: hasta acá este contador vivía solo en un
+# dict en memoria del proceso (LOGIN_INTENTOS_FALLIDOS) -- funcionaba bien
+# con el despliegue actual (un solo proceso worker), pero se reiniciaba
+# solo con reiniciar el servidor, y dejaría de ser efectivo el día que el
+# servicio se escale a más de un proceso worker (cada worker tendría su
+# propio dict, sin compartir el conteo de intentos fallidos entre sí).
+# Se mueve a la tabla login_intentos_fallidos (ver Migración 34 en
+# init_db) para que el conteo sea compartido y persistente, igual que
+# cualquier otro estado del sistema -- sin cambiar el comportamiento ni la
+# ventana de bloqueo que ya existían.
 # ---------------------------------------------------------------------------
 
-LOGIN_INTENTOS_FALLIDOS = {}  # ip -> [timestamps de intentos fallidos recientes]
 LOGIN_MAX_INTENTOS = 5
 LOGIN_VENTANA_SEGUNDOS = 300  # 5 minutos
 
 
-def _intentos_recientes(ip):
+def _intentos_recientes(db, ip):
     ahora = time.time()
-    intentos = [t for t in LOGIN_INTENTOS_FALLIDOS.get(ip, []) if ahora - t < LOGIN_VENTANA_SEGUNDOS]
-    LOGIN_INTENTOS_FALLIDOS[ip] = intentos
-    return intentos
+    limite = ahora - LOGIN_VENTANA_SEGUNDOS
+    db.execute("DELETE FROM login_intentos_fallidos WHERE ip = ? AND creado_en < ?", (ip, limite))
+    db.commit()
+    return db.execute(
+        "SELECT COUNT(*) FROM login_intentos_fallidos WHERE ip = ?", (ip,)
+    ).fetchone()[0]
 
 
-def _login_bloqueado(ip):
-    return len(_intentos_recientes(ip)) >= LOGIN_MAX_INTENTOS
+def _login_bloqueado(db, ip):
+    return _intentos_recientes(db, ip) >= LOGIN_MAX_INTENTOS
 
 
-def _registrar_intento_fallido(ip):
-    intentos = _intentos_recientes(ip)
-    intentos.append(time.time())
-    LOGIN_INTENTOS_FALLIDOS[ip] = intentos
+def _registrar_intento_fallido(db, ip):
+    db.execute("INSERT INTO login_intentos_fallidos (ip, creado_en) VALUES (?, ?)", (ip, time.time()))
+    db.commit()
 
 
-def _limpiar_intentos(ip):
-    LOGIN_INTENTOS_FALLIDOS.pop(ip, None)
+def _limpiar_intentos(db, ip):
+    db.execute("DELETE FROM login_intentos_fallidos WHERE ip = ?", (ip,))
+    db.commit()
 
 USUARIO_INICIAL = "admin"
 CLAVE_INICIAL = "taller2026"
@@ -1609,6 +1643,26 @@ def init_db():
                 )
         db.commit()
 
+    # ---- Migración 34: contador de intentos fallidos de login persistido
+    # en la base (hallazgo #18 de la auditoría) en vez de vivir solo en un
+    # dict en memoria del proceso -- ver el comentario junto a
+    # LOGIN_MAX_INTENTOS más arriba en este archivo para el porqué. Cada
+    # fila es UN intento fallido de UNA ip; se van borrando solos los que
+    # ya salieron de la ventana de bloqueo (ver _intentos_recientes) y los
+    # de una ip completa al loguearse bien (ver _limpiar_intentos), así que
+    # la tabla se mantiene chica en la práctica.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS login_intentos_fallidos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            creado_en REAL NOT NULL
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_login_intentos_ip ON login_intentos_fallidos (ip)")
+    db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -1823,12 +1877,59 @@ def _validar_csrf():
 # ---------------------------------------------------------------------------
 # Cabeceras de seguridad
 # ---------------------------------------------------------------------------
-# Se agregan en cada respuesta. El CSP permite 'unsafe-inline' en script/style
-# porque las plantillas usan bastante <script> y style="" inline (cambiar eso
-# implicaría un refactor grande y riesgoso que no vale la pena para esta
-# etapa) — igual bloquea lo más peligroso: que este sitio se cargue dentro de
-# un <iframe> ajeno (clickjacking) y que se carguen scripts/recursos desde
-# dominios externos no autorizados.
+# Se agregan en cada respuesta.
+#
+# Hallazgo #17 de la auditoría: el CSP permitía 'unsafe-inline' tanto en
+# script-src como en style-src, lo que anula esa cabecera como segunda
+# barrera si algún día apareciera una falla de XSS (un <script> inyectado se
+# ejecutaría igual, porque 'unsafe-inline' lo permite todo). No había
+# ninguna falla activa -- es refuerzo a futuro.
+#
+# style-src sigue con 'unsafe-inline': las plantillas usan cientos de
+# style="" inline (más de 200 en templates/*.html hoy), así que sacarlo
+# implicaría un refactor grande y riesgoso solo para bloquear inyección de
+# CSS, que es un riesgo bastante menor que ejecución de JS arbitrario.
+#
+# script-src, en cambio, SÍ se pudo endurecer con poco riesgo: todo el
+# sistema tiene solo 3 <script> inline (sin src=""), ninguno con variables
+# de Jinja adentro (_csrf.html, _sidebar.html, migracion_datos.html), así
+# que se identifican por su hash SHA-256 exacto (ver
+# _calcular_hashes_scripts_inline más abajo) en vez de con 'unsafe-inline'
+# -- cualquier OTRO script inline que aparezca en la página (ej. inyectado
+# por una futura falla de XSS) no calza con ninguno de esos 3 hashes exactos
+# y el navegador lo bloquea solo, que es justo el refuerzo que pedía este
+# hallazgo.
+#
+# Aparte de esto, el CSP ya bloqueaba lo más peligroso: que este sitio se
+# cargue dentro de un <iframe> ajeno (clickjacking) y que se carguen
+# scripts/recursos desde dominios externos no autorizados.
+
+
+def _calcular_hashes_scripts_inline():
+    """Calcula los hashes 'sha256-<base64>' de los <script> inline estáticos
+    (_csrf.html, _sidebar.html, migracion_datos.html -- los únicos 3 <script>
+    sin src="" de todo el sistema, y ninguno tiene variables de Jinja
+    adentro, así que su contenido final es siempre el mismo que en el
+    archivo fuente). Se calculan acá a partir de la plantilla real, no se
+    escriben a mano como texto fijo -- si algún día se edita el contenido de
+    cualquiera de los 3, el hash se recalcula solo en el próximo arranque,
+    sin que a nadie se le olvide actualizarlo (olvidarlo dejaría ESE script
+    bloqueado por el propio CSP -- rompería esa función puntual, no un
+    problema de seguridad, pero igual conviene evitarlo)."""
+    hashes = []
+    directorio_templates = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
+    for nombre_archivo in ("_csrf.html", "_sidebar.html", "migracion_datos.html"):
+        with open(os.path.join(directorio_templates, nombre_archivo), encoding="utf-8") as f:
+            contenido = f.read()
+        for bloque in re.findall(r"<script>(.*?)</script>", contenido, re.DOTALL):
+            digest = hashlib.sha256(bloque.encode("utf-8")).digest()
+            hashes.append("'sha256-" + base64.b64encode(digest).decode() + "'")
+    return " ".join(hashes)
+
+
+_CSP_SCRIPT_SRC = "'self' " + _calcular_hashes_scripts_inline()
+
+
 @app.after_request
 def _agregar_cabeceras_seguridad(resp):
     # Caso especial: la vista previa de facturas/notas de crédito (finanzas.js
@@ -1845,7 +1946,7 @@ def _agregar_cabeceras_seguridad(resp):
     frame_ancestors = "frame-ancestors 'self'; " if es_pdf_dte else "frame-ancestors 'none'; "
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
+        f"script-src {_CSP_SCRIPT_SRC}; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: blob:; "
@@ -1869,7 +1970,8 @@ def login():
         return render_template("login.html")
 
     ip = request.remote_addr or "desconocida"
-    if _login_bloqueado(ip):
+    db = get_db()
+    if _login_bloqueado(db, ip):
         return render_template(
             "login.html",
             error=f"Demasiados intentos fallidos. Espera {LOGIN_VENTANA_SEGUNDOS // 60} minutos antes de volver a intentar.",
@@ -1878,18 +1980,17 @@ def login():
     username = (request.form.get("username") or "").strip()
     password = request.form.get("password") or ""
 
-    db = get_db()
     usuario = db.execute("SELECT * FROM usuarios WHERE username = ?", (username,)).fetchone()
 
     if usuario is None or not check_password_hash(usuario["password_hash"], password):
-        _registrar_intento_fallido(ip)
+        _registrar_intento_fallido(db, ip)
         return render_template("login.html", error="Usuario o contraseña incorrectos."), 401
 
     if not usuario["activo"]:
-        _registrar_intento_fallido(ip)
+        _registrar_intento_fallido(db, ip)
         return render_template("login.html", error="Esta cuenta está desactivada. Habla con un administrador."), 403
 
-    _limpiar_intentos(ip)
+    _limpiar_intentos(db, ip)
     session.clear()
     session["user_id"] = usuario["id"]
     session["username"] = usuario["username"]
@@ -2552,6 +2653,20 @@ def _crear_producto_desde_datos(db, data):
             return None, f"Ya existe un producto con código '{codigo_interno}'", 400
 
     if categoria or modelo:
+        # La marca ahora es obligatoria en cuanto el producto tiene una
+        # identidad real (modelo y/o detalle) -- antes era opcional, y eso
+        # dejaba crear repuestos "sin marca" que después nunca se volvían a
+        # preguntar: cualquier factura futura de ese mismo repuesto, sin
+        # importar la marca real que trajera, terminaba mezclada bajo esa
+        # misma fila sin marca, con un solo precio y sin poder rastrear cuál
+        # unidad era de qué marca para la garantía. Si el repuesto de verdad
+        # no tiene marca reconocible (ej. un perno genérico), se pide
+        # escribir algo igual (ej. "GENÉRICA") en vez de dejarlo vacío.
+        if not marca:
+            return None, (
+                "La marca es obligatoria para crear un repuesto (ej. BOSCH, o \"GENÉRICA\" si no tiene una "
+                "marca real) -- así se puede llevar el precio y el seguimiento de garantía por marca."
+            ), 400
         # La marca entra al constraint de duplicados a propósito: un mismo
         # modelo/detalle puede existir en más de una marca (ej. una versión
         # china y una americana de la misma pieza), cada una con su propio
@@ -2575,6 +2690,16 @@ def _crear_producto_desde_datos(db, data):
         costo_compra = float(data.get("costo_compra") or 0)
     except (TypeError, ValueError):
         return None, "Stock y costo deben ser números", 400
+    # Sin este chequeo se podía crear un producto con stock o costo
+    # negativos (ej. stock_disponible=-5) sin ningún aviso -- quedaba
+    # aceptado tal cual (hallazgo #12 del informe de revisión), y de ahí en
+    # adelante cualquier cálculo que sume/reste sobre ese stock (reportes de
+    # valorización, proyección de stock mínimo, la propia ficha del
+    # producto) arrastraba un número que no tiene sentido físico.
+    if stock_disponible < 0 or stock_reservado < 0 or stock_minimo < 0:
+        return None, "El stock no puede ser negativo", 400
+    if costo_compra < 0:
+        return None, "El costo de compra no puede ser negativo", 400
 
     ubicacion_id = data.get("ubicacion_id") or None
     if ubicacion_id:
@@ -2710,10 +2835,19 @@ def editar_producto(producto_id):
     marca = (data.get("marca") if data.get("marca") is not None else row["marca"]).strip().upper()
 
     if categoria or modelo:
-        # Misma lógica que en _crear_producto_desde_datos: la marca entra al
-        # constraint, así que dos productos con igual categoria+modelo pero
-        # distinta marca (ej. versión china vs. americana de la misma
-        # pieza) no chocan entre sí.
+        # Misma lógica que en _crear_producto_desde_datos: la marca es
+        # obligatoria en cuanto el producto tiene modelo y/o detalle (evita
+        # que una edición le borre la marca a un producto que ya la tenía),
+        # y entra al constraint de duplicados, así que dos productos con
+        # igual categoria+modelo pero distinta marca (ej. versión china vs.
+        # americana de la misma pieza) no chocan entre sí.
+        if not marca:
+            return jsonify({
+                "error": (
+                    "La marca es obligatoria para este repuesto (ej. BOSCH, o \"GENÉRICA\" si no tiene una "
+                    "marca real) -- así se puede llevar el precio y el seguimiento de garantía por marca."
+                )
+            }), 400
         duplicado_pm = db.execute(
             "SELECT id FROM productos WHERE lower(trim(categoria)) = lower(trim(?)) AND lower(trim(modelo)) = lower(trim(?)) AND lower(trim(marca)) = lower(trim(?)) AND id != ?",
             (categoria, modelo, marca, producto_id),
@@ -2793,7 +2927,49 @@ def eliminar_producto(producto_id):
         # El producto deja de existir, así que su historial y su presencia
         # en facturas ya no tienen sentido: se eliminan junto con él.
         db.execute("DELETE FROM factura_lineas WHERE producto_id = ?", (producto_id,))
-        # Los movimientos se eliminan solos por ON DELETE CASCADE.
+        # movimientos/reservas/merma_proveedores/stock_minimo_calculo/
+        # stock_proveedores se eliminan solos por ON DELETE CASCADE.
+        #
+        # Estas otras cinco tablas SÍ referencian producto_id pero SIN
+        # cascada, y cada una guarda su propia descripción/cantidad/monto
+        # de forma independiente (no dependen de un join en vivo contra
+        # productos para tener sentido) -- así que en vez de borrar esos
+        # registros (perdiendo historial real de una OT, garantía,
+        # convertidor o gasto de caja chica) se desvincula el producto ya
+        # eliminado, dejando el registro intacto. Sin este paso, borrar un
+        # producto que ya se hubiera usado en cualquiera de estos lugares
+        # fallaba con "FOREIGN KEY constraint failed" (hallazgo #2 de la
+        # auditoría de agosto 2026, confirmado en vivo con un producto
+        # cargado en una OT).
+        db.execute("UPDATE orden_items SET producto_id = NULL WHERE producto_id = ?", (producto_id,))
+        db.execute("UPDATE garantia_items SET producto_id = NULL WHERE producto_id = ?", (producto_id,))
+        db.execute("UPDATE convertidor_items SET producto_id = NULL WHERE producto_id = ?", (producto_id,))
+        db.execute("UPDATE caja_movimientos SET producto_id = NULL WHERE producto_id = ?", (producto_id,))
+        db.execute("UPDATE caja_gasto_detalles SET producto_id = NULL WHERE producto_id = ?", (producto_id,))
+
+        # Los movimientos de este producto se van a borrar solos (CASCADE),
+        # pero otras cinco tablas guardan una referencia SIN cascada hacia
+        # ESE movimiento específico (de qué movimiento salió este ítem de
+        # OT/garantía/convertidor, o a qué movimiento quedó ligado este
+        # gasto de caja chica) -- si no se desvinculan primero, SQLite
+        # bloquea igual el CASCADE de movimientos con el mismo error
+        # "FOREIGN KEY constraint failed", solo que un paso más adelante.
+        movimientos_del_producto = [
+            r["id"] for r in db.execute("SELECT id FROM movimientos WHERE producto_id = ?", (producto_id,)).fetchall()
+        ]
+        if movimientos_del_producto:
+            placeholders = ", ".join("?" for _ in movimientos_del_producto)
+            for tabla, columna in [
+                ("orden_items", "movimiento_id"),
+                ("garantia_items", "movimiento_id"),
+                ("convertidor_items", "movimiento_id"),
+                ("caja_movimientos", "movimiento_inventario_id"),
+                ("caja_gasto_detalles", "movimiento_inventario_id"),
+            ]:
+                db.execute(
+                    f"UPDATE {tabla} SET {columna} = NULL WHERE {columna} IN ({placeholders})",
+                    movimientos_del_producto,
+                )
 
     fila_foto = db.execute("SELECT foto_archivo FROM productos WHERE id = ?", (producto_id,)).fetchone()
     if fila_foto and fila_foto["foto_archivo"]:
@@ -3627,19 +3803,70 @@ def eliminar_proveedor(proveedor_id):
         return jsonify({"error": "Proveedor no encontrado"}), 404
 
     forzar = request.args.get("forzar") == "1"
-    cant_facturas = db.execute(
-        "SELECT COUNT(*) FROM facturas WHERE proveedor_id = ?", (proveedor_id,)
-    ).fetchone()[0]
+    # Todas las tablas que referencian proveedor_id sin cascada -- antes
+    # solo se contaban/desvinculaban las facturas, pero movimientos,
+    # cuentas por pagar, facturas pendientes de recepción, stock/merma por
+    # proveedor, y los ítems de OT/garantía que registran de qué
+    # proveedor salió un repuesto TAMBIÉN bloquean el DELETE si quedan
+    # apuntando a un proveedor que ya no existe (hallazgo #2 de la
+    # auditoría de agosto 2026). Cada una de estas tiene su propio dato
+    # (monto, concepto, descripción) independiente del proveedor, así que
+    # se desvincula (proveedor_id = NULL) en vez de borrar el registro.
+    tablas_proveedor = [
+        ("facturas", "factura(s)"),
+        ("facturas_finanzas_pendientes", "factura(s) pendiente(s) de recepción"),
+        ("cuentas_por_pagar", "cuenta(s) por pagar"),
+        ("movimientos", "movimiento(s) de stock"),
+        ("merma_proveedores", "registro(s) de merma"),
+        ("stock_proveedores", "balde(s) de stock"),
+        ("orden_items", "ítem(s) de OT"),
+        ("garantia_items", "ítem(s) de garantía"),
+    ]
+    conteos = {
+        tabla: db.execute(f"SELECT COUNT(*) FROM {tabla} WHERE proveedor_id = ?", (proveedor_id,)).fetchone()[0]
+        for tabla, _ in tablas_proveedor
+    }
+    total_referencias = sum(conteos.values())
 
-    if cant_facturas > 0 and not forzar:
+    if total_referencias > 0 and not forzar:
+        detalle = " y ".join(f"{conteos[tabla]} {etiqueta}" for tabla, etiqueta in tablas_proveedor if conteos[tabla] > 0)
         return jsonify({
-            "error": f"Este proveedor tiene {cant_facturas} factura(s) asociada(s). "
-                     f"Puedes eliminarlo de todas formas: las facturas se conservan, solo quedan sin proveedor asignado.",
+            "error": f"Este proveedor tiene {detalle} asociado(s). "
+                     f"Puedes eliminarlo de todas formas: esos registros se conservan, solo quedan sin proveedor asignado.",
             "requiere_forzar": True,
         }), 409
 
     if forzar:
-        db.execute("UPDATE facturas SET proveedor_id = NULL WHERE proveedor_id = ?", (proveedor_id,))
+        # stock_proveedores/merma_proveedores son "baldes" que se agregan por
+        # producto+proveedor (ver _stockprov_buckets_producto) -- si el
+        # producto ya tenía un balde "sin proveedor conocido" (proveedor_id
+        # NULL) y además el balde de ESTE proveedor, un simple SET NULL
+        # dejaría dos baldes NULL duplicados para el mismo producto en vez de
+        # fusionarse en uno. Se suma la cantidad al balde NULL existente (si
+        # hay) y se borra el balde del proveedor eliminado; si no había balde
+        # NULL todavía, el balde del proveedor simplemente pasa a serlo.
+        for tabla in ("stock_proveedores", "merma_proveedores"):
+            baldes_proveedor = db.execute(
+                f"SELECT id, producto_id, cantidad FROM {tabla} WHERE proveedor_id = ?", (proveedor_id,)
+            ).fetchall()
+            for balde in baldes_proveedor:
+                balde_null = db.execute(
+                    f"SELECT id, cantidad FROM {tabla} WHERE producto_id = ? AND proveedor_id IS NULL",
+                    (balde["producto_id"],),
+                ).fetchone()
+                if balde_null is None:
+                    db.execute(f"UPDATE {tabla} SET proveedor_id = NULL WHERE id = ?", (balde["id"],))
+                else:
+                    db.execute(
+                        f"UPDATE {tabla} SET cantidad = cantidad + ? WHERE id = ?",
+                        (balde["cantidad"], balde_null["id"]),
+                    )
+                    db.execute(f"DELETE FROM {tabla} WHERE id = ?", (balde["id"],))
+
+        for tabla, _ in tablas_proveedor:
+            if tabla in ("stock_proveedores", "merma_proveedores"):
+                continue  # ya resuelto arriba con la fusión de baldes
+            db.execute(f"UPDATE {tabla} SET proveedor_id = NULL WHERE proveedor_id = ?", (proveedor_id,))
 
     db.execute("DELETE FROM proveedores WHERE id = ?", (proveedor_id,))
     db.commit()
@@ -4111,6 +4338,21 @@ def eliminar_factura(factura_id):
         # Antes de tocar nada: confirmar que TODAS las líneas aplicadas se
         # pueden revertir (que quede suficiente stock disponible). Si alguna
         # no se puede, se aborta completa para no dejar la reversión a medias.
+        #
+        # OJO: se valida tanto el stock TOTAL del producto como el balde
+        # específico de stock_proveedores del proveedor de esta factura --
+        # antes solo se chequeaba (y descontaba) el total agregado con un
+        # UPDATE crudo a productos.stock_disponible, sin tocar
+        # stock_proveedores para nada. Eso dejaba el desglose por proveedor
+        # mintiendo tras revertir una factura (mostraba stock de un
+        # proveedor que en la práctica ya no está, o de menos si ese
+        # producto se compró después a otro proveedor y el total agregado
+        # alcanzaba a "cubrir" la reversión desde el balde equivocado)
+        # (hallazgo #7 del informe de revisión). _aplicar_salida_stock con
+        # proveedor_manual=True (mismo mecanismo que usa el resto del
+        # sistema para salidas con proveedor elegido a mano) descuenta del
+        # balde correcto y mantiene stock_proveedores sincronizado con
+        # productos.stock_disponible.
         pendientes_de_revertir = []
         for linea in lineas_aplicadas:
             producto = db.execute("SELECT * FROM productos WHERE id = ?", (linea["producto_id"],)).fetchone()
@@ -4122,28 +4364,35 @@ def eliminar_factura(factura_id):
                              f"suficiente stock disponible para revertir esta factura (probablemente parte "
                              f"de ese stock ya se consumió). Ajusta el stock manualmente antes de eliminarla."
                 }), 409
+            bucket = _stockprov_bucket_get(db, producto["id"], factura["proveedor_id"])
+            disponible_balde = bucket["cantidad"] if bucket else 0
+            if disponible_balde < linea["cantidad"]:
+                return jsonify({
+                    "error": f"No se puede eliminar: el producto '{producto['nombre']}' ya no tiene "
+                             f"suficiente stock del balde de este proveedor específico para revertir esta "
+                             f"factura (probablemente parte de ese stock ya se consumió, o se mezcló con "
+                             f"stock de otro proveedor). Ajusta el stock manualmente antes de eliminarla."
+                }), 409
             pendientes_de_revertir.append((producto, linea))
 
-        ts = now_iso()
         for producto, linea in pendientes_de_revertir:
-            nuevo_stock = producto["stock_disponible"] - linea["cantidad"]
-            db.execute(
-                "UPDATE productos SET stock_disponible = ?, actualizado_en = ? WHERE id = ?",
-                (nuevo_stock, ts, producto["id"]),
-            )
-            db.execute(
-                """
-                INSERT INTO movimientos (
-                    producto_id, fecha, tipo, categoria, cantidad, motivo, usuario,
-                    costo_unitario, factura_id, factura_numero, stock_resultante
-                ) VALUES (?, ?, 'salida', ?, ?, ?, ?, NULL, NULL, ?, ?)
-                """,
-                (
-                    producto["id"], ts, CATEGORIA_CORRECCION_INVENTARIO, linea["cantidad"],
+            # Se relee 'producto' al toque (en vez de reusar la fila de la
+            # validación de arriba) por si esta factura tiene más de una
+            # línea del MISMO producto: la fila de la validación quedaría
+            # con el stock de ANTES de revertir la línea anterior, y aplicar
+            # la salida sobre esa foto vieja pisaría el descuento ya hecho
+            # en vez de sumarse a él.
+            producto_actual = db.execute("SELECT * FROM productos WHERE id = ?", (producto["id"],)).fetchone()
+            _aplicar_salida_stock(
+                db, producto_actual, linea["cantidad"],
+                motivo=(
                     f"Reversión automática por eliminación de la factura '{factura['numero']}' (corrección de error, "
-                    f"no cuenta como consumo real)",
-                    usuario, factura["numero"], nuevo_stock,
+                    f"no cuenta como consumo real)"
                 ),
+                usuario=usuario,
+                categoria=CATEGORIA_CORRECCION_INVENTARIO,
+                proveedor_id=factura["proveedor_id"],
+                proveedor_manual=True,
             )
 
     # Si esta factura fue creada a partir de una foto mandada por WhatsApp
@@ -5506,6 +5755,17 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
     if plazo_dias_credito <= 0 and condicion_pago in ("credito", "mixto"):
         return None, "El plazo de crédito debe ser mayor a 0 días"
 
+    # Lock ANTES de chequear duplicados por número, no después -- sin esto,
+    # dos registros casi simultáneos con el mismo folio (ej. la misma
+    # factura escaneada dos veces por apuro, o Excel + manual mandando el
+    # mismo número casi a la vez) podían leer "no existe" los dos antes de
+    # que cualquiera alcanzara a insertar, y terminar con dos facturas (o
+    # dos pendientes) con el mismo folio -- folio duplicado, hallazgo #8/#9
+    # del informe de revisión. Es un no-op si el caller ya venía con el
+    # lock tomado (ver _iniciar_transaccion_stock en core.py), así que es
+    # seguro para los cuatro caminos de entrada (manual/Excel/foto/WhatsApp)
+    # que comparten esta función.
+    _iniciar_transaccion_stock(db)
     if numero:
         existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
         if existe:
@@ -5973,6 +6233,16 @@ def aprobar_factura_pendiente_recepcion(pendiente_id):
     la factura (con una nota explicando el motivo) para que quien la
     subió la corrija y la reingrese."""
     db = get_db()
+    # El lock se toma ANTES de leer 'fila' (no solo dentro de
+    # _aprobar_pendiente_recepcion, que lo toma más adentro) -- si dos
+    # clics en "Aprobar" llegan casi juntos, sin este lock ambos podían leer
+    # estado='pendiente' antes de que cualquiera de los dos alcanzara a
+    # marcarla 'aprobada', y los dos terminaban aplicando stock y CxP por
+    # duplicado para la misma factura (hallazgo #8/#9 del informe de
+    # revisión). Con el lock desde acá, el segundo clic espera a que el
+    # primero confirme su cambio de estado antes de leer, y ve la factura
+    # ya aprobada.
+    _iniciar_transaccion_stock(db)
     fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
     if fila is None:
         return jsonify({"error": "No se encontró ese pendiente"}), 404
@@ -8027,14 +8297,28 @@ def webhook_whatsapp():
 
     Es una ruta pública (ver RUTAS_PUBLICAS) porque Twilio no manda ninguna
     sesión de este sistema — la única verificación posible es la firma de
-    Twilio (ver _validar_firma_twilio), y solo si se configuró
-    TWILIO_AUTH_TOKEN."""
+    Twilio (ver _validar_firma_twilio), y por eso TWILIO_AUTH_TOKEN es
+    obligatorio para que este endpoint acepte tráfico: sin token no hay
+    forma de comprobar que un mensaje realmente vino de Twilio, y antes
+    esta ruta igual procesaba cualquier request tal cual si el token no
+    estaba configurado -- cualquiera podía mandar un POST acá haciéndose
+    pasar por cualquier número de teléfono (incluido el de un mecánico
+    registrado) y el agente actuaba sobre eso (mover el estado de una OT,
+    etc.) sin ninguna verificación de origen. Se confirmó que
+    TWILIO_AUTH_TOKEN SÍ está configurado en producción hoy (este riesgo no
+    se llegó a explotar), pero se cierra la puerta para cuando el token
+    falte por cualquier motivo (hallazgo #15 del informe de revisión). Para
+    probar el flujo del agente SIN una cuenta de Twilio real, sigue
+    disponible /api/agente/simular-mensaje (protegido por sesión normal, no
+    por esto)."""
     def _twiml(texto, status=200):
         cuerpo = f"<?xml version='1.0' encoding='UTF-8'?><Response><Message>{html.escape(texto)}</Message></Response>"
         return cuerpo, status, {"Content-Type": "text/xml; charset=utf-8"}
 
     try:
-        if TWILIO_AUTH_TOKEN and not _validar_firma_twilio(request):
+        if not TWILIO_AUTH_TOKEN:
+            return _twiml("El agente de WhatsApp todavía no está configurado del todo (falta TWILIO_AUTH_TOKEN) -- este mensaje no se procesó.", 503)
+        if not _validar_firma_twilio(request):
             return _twiml("No se pudo verificar el origen del mensaje.", 403)
 
         telefono = request.form.get("From", "")
@@ -11616,6 +11900,9 @@ def migracion_ordenes_historicas():
 #                                       antes de borrar nada; borrarla sería
 #                                       contraproducente justo cuando más se
 #                                       necesita ese historial)
+#   - login_intentos_fallidos         (contador de intentos fallidos de login,
+#                                       seguridad de las cuentas del sistema,
+#                                       no datos del taller)
 RESET_OPERATIVO_TABLAS = [
     # -- Finanzas ligadas a facturas de compra / OT --
     "cxp_pagos",
@@ -11685,6 +11972,10 @@ RESET_OPERATIVO_TABLAS_PRESERVADAS = [
     "clientes", "equipos", "usuarios", "categorias", "marcas", "modelos",
     "ubicaciones", "configuracion_facturacion", "estado_resultado_manual",
     "respaldos_log",
+    # login_intentos_fallidos: contador de intentos fallidos de login (ver
+    # Migración 34) -- es seguridad de las cuentas del sistema, igual que
+    # 'usuarios' más arriba, no datos operativos del taller.
+    "login_intentos_fallidos",
 ]
 
 

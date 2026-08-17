@@ -508,9 +508,44 @@ function renderSelectModelo(seleccionActual) {
 function renderSelectMarca(seleccionActual) {
   const select = document.getElementById("f-marca");
   const actual = seleccionActual !== undefined ? seleccionActual : select.value;
-  select.innerHTML = '<option value="">Sin marca</option>' +
+  // Ya no hay "Sin marca": la marca es obligatoria para crear/editar un
+  // producto con modelo y/o detalle (ver crear_producto/editar_producto en
+  // app.py) -- esta opción vacía es solo el placeholder de "todavía no
+  // elegiste", no un valor válido para guardar.
+  select.innerHTML = '<option value="">Selecciona una marca…</option>' +
     state.marcasDisponibles.map(m => `<option value="${escapeHtml(m.nombre)}">${escapeHtml(m.nombre)}</option>`).join("");
   select.value = actual || "";
+}
+
+// Aviso en vivo si el Modelo+Detalle que se está escribiendo ya existe en
+// el catálogo con otra(s) marca(s) -- ayuda a decidir de un vistazo si
+// corresponde agregar una marca nueva de verdad, o si es la misma pieza y
+// solo falta elegir su marca ya cargada (evita duplicados por typo, ej.
+// "BOSCH " con espacio de más quedando como si fuera otra marca distinta).
+function actualizarHintVariantesMarca() {
+  const hint = document.getElementById("f-marca-variantes-hint");
+  if (!hint) return;
+  const categoria = document.getElementById("f-categoria").value.trim();
+  const modelo = document.getElementById("f-modelo").value.trim();
+  const idActual = document.getElementById("f-id").value;
+  if (!categoria && !modelo) {
+    hint.style.display = "none";
+    return;
+  }
+  const variantes = (state.productos || []).filter(p =>
+    (p.categoria || "").trim().toLowerCase() === categoria.toLowerCase() &&
+    (p.modelo || "").trim().toLowerCase() === modelo.toLowerCase() &&
+    String(p.id) !== String(idActual)
+  );
+  if (!variantes.length) {
+    hint.style.display = "none";
+    return;
+  }
+  const detalle = variantes
+    .map(p => `${p.marca ? escapeHtml(p.marca) : "sin marca (repuesto antiguo, corrígelo si lo ves)"} — ${fmtMoney(p.costo_compra)}`)
+    .join(" · ");
+  hint.innerHTML = `Este modelo/detalle ya existe en: ${detalle}. Si es la misma marca, usa ese producto (ingrésalo por factura) en vez de crear uno nuevo — si es una marca distinta, sigue no más.`;
+  hint.style.display = "block";
 }
 
 // Nombres de función y de la tabla interna ("categoria"/"modelo"/"marca") se
@@ -759,7 +794,7 @@ async function cargarProductos(resetearPagina) {
       badge.style.display = "none";
     }
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="10" class="vacio">Error al cargar productos: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="vacio">Error al cargar productos: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -1024,8 +1059,12 @@ document.getElementById("btn-nuevo").addEventListener("click", async () => {
   renderSelectCategoria("");
   renderSelectModelo("");
   renderSelectMarca("");
+  actualizarHintVariantesMarca();
   abrirModal("modal-producto");
 });
+
+document.getElementById("f-categoria").addEventListener("change", actualizarHintVariantesMarca);
+document.getElementById("f-modelo").addEventListener("change", actualizarHintVariantesMarca);
 
 async function abrirEdicion(p) {
   document.getElementById("f-id").value = p.id;
@@ -1046,6 +1085,7 @@ async function abrirEdicion(p) {
   renderSelectCategoria(p.categoria || "");
   renderSelectModelo(p.modelo || "");
   renderSelectMarca(p.marca || "");
+  actualizarHintVariantesMarca();
 
   const legacy = document.getElementById("f-ubicacion-legacy");
   if (!p.ubicacion_id && p.ubicacion) {
@@ -1075,6 +1115,15 @@ formProducto.addEventListener("submit", async (e) => {
     marca: document.getElementById("f-marca").value,
     ubicacion_id: document.getElementById("f-ubicacion-id").value,
   };
+
+  // Mismo criterio que valida el backend (ver _crear_producto_desde_datos /
+  // editar_producto en app.py): con Modelo y/o Detalle, la Marca ya no es
+  // opcional -- se avisa acá antes de mandar la petición para no hacerle
+  // esperar el viaje al servidor solo para enterarse.
+  if ((payload.categoria || payload.modelo) && !payload.marca.trim()) {
+    toast('Elige (o crea con "+ Nuevo") una marca para este repuesto. Si no tiene una marca real, usa algo como "GENÉRICA".', true);
+    return;
+  }
 
   if (!id) {
     // El costo (inicial) y el stock inicial solo se piden al CREAR el
@@ -1579,7 +1628,7 @@ async function cargarProveedores() {
     state.proveedores = data.proveedores;
     renderTablaProveedores();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar proveedores: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar proveedores: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -2201,7 +2250,7 @@ async function cargarUsuarios() {
     state.usuarios = data.usuarios;
     renderTablaUsuarios();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Error al cargar usuarios: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Error al cargar usuarios: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -2447,7 +2496,7 @@ async function cargarMermas() {
       btn.addEventListener("click", () => verOrigenMerma(btn.dataset.verOrigen, btn.dataset.nombre));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar mermas: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar mermas: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -2476,7 +2525,7 @@ async function verOrigenMerma(productoId, nombre) {
         <td>${escapeHtml(o.proveedor_nombre) || "Sin proveedor asignado"}</td>
       </tr>`).join("");
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -2563,7 +2612,7 @@ async function cargarMovimientos() {
       </tr>
     `).join("");
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar movimientos: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar movimientos: ${escapeHtml(e.message)}</td></tr>`;
     document.getElementById("mov-aviso-limite").style.display = "none";
   }
 }

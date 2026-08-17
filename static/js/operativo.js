@@ -1625,6 +1625,12 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     equipamiento[chk.dataset.equipamientoItem] = chk.checked;
   });
 
+  // Sin este bloqueo, un doble clic (o un clic accidental repetido mientras
+  // la primera solicitud todavía está en camino) dispara dos POST /ordenes
+  // casi simultáneos y crea DOS órdenes de trabajo separadas para el mismo
+  // ingreso -- confirmado en vivo durante la auditoría (hallazgo #4).
+  const btnCrearOrden = e.target.querySelector('button[type="submit"]');
+  btnCrearOrden.disabled = true;
   try {
     await api(`/api/operativo/equipos/${equipoId}`, {
       method: "PUT",
@@ -1675,6 +1681,8 @@ document.getElementById("form-op-orden-nueva").addEventListener("submit", async 
     // creó una OT para el mismo auto en ese momento) — se refresca el
     // aviso para que quede visible con su link, no solo el toast.
     chequearBloqueoEquipo(equipoId, "orden", "opon-equipo-bloqueo");
+  } finally {
+    btnCrearOrden.disabled = false;
   }
 });
 
@@ -2039,6 +2047,10 @@ document.getElementById("form-op-pago-nuevo").addEventListener("submit", async (
     monto: limpiarMonto(document.getElementById("opag-monto").value),
     fecha: document.getElementById("opag-fecha").value,
   };
+  // Ver comentario en form-op-orden-nueva: sin bloquear el botón, un doble
+  // clic registraba dos abonos idénticos (hallazgo #4).
+  const btnPago = e.target.querySelector('button[type="submit"]');
+  btnPago.disabled = true;
   try {
     await api(`/api/operativo/ordenes/${ordenId}/pagos`, { method: "POST", body: JSON.stringify(payload) });
     cerrarModal("modal-op-pago-nuevo");
@@ -2048,6 +2060,8 @@ document.getElementById("form-op-pago-nuevo").addEventListener("submit", async (
     renderCostosOrden(orden);
   } catch (e2) {
     toast(e2.message, true);
+  } finally {
+    btnPago.disabled = false;
   }
 });
 

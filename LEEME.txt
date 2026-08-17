@@ -1,0 +1,88 @@
+CÓMO APLICAR ESTA ENTREGA
+==========================
+
+Esta carpeta trae 5 archivos que cambiaron. Pasos:
+
+1. Copia estos archivos a tu carpeta del proyecto, reemplazando los que
+   ya existen (mismos nombres, mismas rutas):
+
+   app.py
+   static/js/app.js
+   static/js/finanzas.js
+   templates/index.html
+   tests/test_logica_sensible.py
+
+2. Abre GitHub Desktop. Deberías ver los cambios (5 archivos modificados)
+   listos para el commit.
+
+3. En el mensaje de commit puedes usar algo como:
+
+   "Marca obligatoria al crear repuestos + corrige 12 pruebas
+   desactualizadas de CxP/IVA"
+
+4. Commit y Push a main, como siempre.
+
+QUÉ TRAE ESTA ENTREGA
+======================
+
+1) MARCA OBLIGATORIA AL CREAR UN REPUESTO
+
+   Reportaste que al ingresar una factura, si dejabas la marca en blanco
+   (porque el repuesto tenía más de una marca), el sistema nunca te la
+   volvía a preguntar y el repuesto quedaba cargado igual -- así que
+   facturas futuras de ese mismo repuesto, sin importar la marca real que
+   trajeran, terminaban mezcladas bajo esa misma entrada sin marca, con
+   un solo precio, perdiendo el rastreo de garantía por marca.
+
+   Ahora:
+   - La marca es obligatoria en cuanto el repuesto tiene Modelo y/o
+     Detalle, tanto al crearlo desde una factura como desde el alta
+     directa en Logística ("+ Nuevo producto"), y también al editar un
+     producto que ya existía (ya no se puede guardar una edición que le
+     borre la marca).
+   - Si el repuesto de verdad no tiene una marca reconocible (ej. un
+     perno genérico), hay que escribir algo igual -- por ejemplo
+     "GENÉRICA" -- en vez de dejarlo vacío.
+   - Si escribes un Modelo+Detalle que ya existe en el catálogo con otra
+     marca, aparece un aviso al tiro mostrando esa(s) marca(s) y su
+     precio, para que decidas de un vistazo si es la misma pieza (la
+     seleccionas de la lista en vez de crear una nueva) o es una marca
+     distinta de verdad.
+
+   Se agregaron 5 pruebas automáticas nuevas para esto (antes no existía
+   ninguna prueba de la lógica de marcas) y se actualizaron 3 pruebas
+   viejas que dependían del hueco.
+
+2) 12 PRUEBAS DE CUENTAS POR PAGAR QUE ESTABAN DESACTUALIZADAS
+
+   Al correr TODA la batería de pruebas del sistema para asegurarme de no
+   romper nada con el cambio de arriba, encontré que 12 pruebas ya venían
+   fallando -- desde antes de que yo tocara nada. Confirmé esto probando
+   el código tal como estaba en tu repo, sin mis cambios.
+
+   La causa: son pruebas de Cuentas por Pagar que se escribieron ANTES de
+   que existiera el cálculo automático de "Neto/IVA" en las facturas de
+   compra. Cuando se agregó esa funcionalidad, el sistema empezó a sumar
+   19% de IVA automáticamente sobre el neto de cada factura (correcto,
+   así se pidió) -- pero esas 12 pruebas viejas nunca se actualizaron
+   para reflejar el nuevo total, así que seguían esperando el monto SIN
+   IVA y marcaban error donde en realidad no había ningún error real: el
+   sistema calcula bien el IVA, la prueba automática que debía
+   confirmarlo estaba desactualizada.
+
+   Corregí las 12 pruebas (algunas ahora prueban explícitamente con
+   "factura exenta de IVA" para mantenerse enfocadas en lo que
+   realmente evalúan -- el mecanismo de Cuentas por Pagar, no el cálculo
+   de IVA) y agregué 3 pruebas nuevas dedicadas exclusivamente a probar
+   el cálculo de Neto/IVA en sí, que no tenía ninguna cobertura propia
+   hasta ahora.
+
+VERIFICACIÓN
+=============
+
+Las 553 pruebas automáticas del sistema completo pasan limpio después de
+estos cambios (antes de esta entrega: 541 pasaban y 12 fallaban por el
+motivo explicado arriba).
+
+No se tocó nada de inventario.db, ni ninguna otra funcionalidad del
+sistema fuera de lo descrito arriba.

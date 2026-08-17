@@ -1227,7 +1227,14 @@ def agregar_item_convertidor(convertidor_id):
                     raise ValueError
             except (TypeError, ValueError):
                 return jsonify({"error": "El costo unitario debe ser un número válido y no puede ser negativo"}), 400
-        cantidad_stock = int(round(cantidad))
+        # Mismo criterio que agregar_item_orden() en modulos/operativo.py:
+        # el stock de un repuesto se lleva en unidades enteras, así que se
+        # rechaza una cantidad fraccionaria en vez de cobrarla exacta y
+        # redondear el descuento de stock en silencio (hallazgo #11 del
+        # informe de revisión).
+        if cantidad != int(cantidad):
+            return jsonify({"error": "La cantidad de un repuesto debe ser un número entero (el stock no se descuenta en fracciones de unidad)"}), 400
+        cantidad_stock = int(cantidad)
         try:
             _aplicar_salida_stock(
                 db, producto, cantidad_stock,

@@ -3521,6 +3521,11 @@ class TestCuentasPorPagar(unittest.TestCase):
         # salvo que, con el producto ya en el catálogo, la ruta de ingreso
         # directo (ver _crear_pendiente_y_aplicar_si_posible en app.py) la
         # deja aplicada de una sola vez, sin necesitar el segundo paso.
+        #
+        # exento_iva=True a propósito: esta clase prueba la mecánica de CxP
+        # (generación, pagos, saldo) con montos redondos y fáciles de leer,
+        # no el cálculo de Neto/IVA en sí -- ese tiene su propia cobertura
+        # en TestNetoIvaAutomaticoEnFacturas más abajo.
         resp = self.client.post(
             "/api/facturas/pendientes-recepcion",
             json={
@@ -3528,6 +3533,7 @@ class TestCuentasPorPagar(unittest.TestCase):
                 "fecha": datetime.now().strftime("%Y-%m-%d"),
                 "lineas": [{"producto_id": producto_id, "cantidad": cantidad, "precio_unitario": precio_unitario}],
                 "condicion_pago": "credito",
+                "exento_iva": True,
             },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
@@ -3657,6 +3663,10 @@ class TestCambiarCondicionPagoFactura(unittest.TestCase):
         return client
 
     def _crear_factura_credito(self, numero, cantidad=1, precio_unitario=10000, plazo_dias_credito=30):
+        # exento_iva=True: esta clase prueba qué pasa con las CxP al cambiar
+        # la condición de pago, no el cálculo de Neto/IVA (ver
+        # TestNetoIvaAutomaticoEnFacturas para esa cobertura) -- así los
+        # montos esperados coinciden directo con precio_unitario * cantidad.
         producto = self.admin_client.post(
             "/api/productos", json={"nombre": f"Producto - {numero}", "stock_disponible": 0, "costo_compra": 0},
         ).get_json()
@@ -3667,6 +3677,7 @@ class TestCambiarCondicionPagoFactura(unittest.TestCase):
                 "fecha": datetime.now().strftime("%Y-%m-%d"),
                 "lineas": [{"producto_id": producto["id"], "cantidad": cantidad, "precio_unitario": precio_unitario}],
                 "condicion_pago": "credito", "plazo_dias_credito": plazo_dias_credito,
+                "exento_iva": True,
             },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
@@ -3950,7 +3961,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         return resp.get_json()
 
     def _crear_pendiente_forzado_lineas(self, numero, lineas_validadas, condicion_pago="credito",
-                                          porcentaje_contado=0, plazo_dias_credito=30):
+                                          porcentaje_contado=0, plazo_dias_credito=30, exento_iva=True):
         """Como _crear_pendiente, pero llama directo a la función de más
         bajo nivel (_crear_pendiente_recepcion) en vez de pasar por el
         endpoint HTTP -- así se salta la ruta de ingreso directo nueva
@@ -3961,12 +3972,18 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         auto-aplicación), hace falta poder dejar la factura genuinamente
         en estado 'pendiente'. Recibe las líneas ya armadas (mismo formato
         que espera _crear_pendiente_recepcion) para poder cubrir tanto
-        líneas de producto como de gasto general."""
+        líneas de producto como de gasto general.
+
+        exento_iva=True por defecto: esta clase prueba el mecanismo de
+        aprobar/rechazar/CxP, no el cálculo de Neto/IVA en sí (ver
+        TestNetoIvaAutomaticoEnFacturas para esa cobertura) -- así los
+        montos esperados coinciden directo con precio_unitario * cantidad."""
         with taller_app.app.app_context():
             db = taller_app.get_db()
             nueva, error = taller_app._crear_pendiente_recepcion(
                 db, numero, None, datetime.now().strftime("%Y-%m-%d"),
                 lineas_validadas, condicion_pago, porcentaje_contado, plazo_dias_credito, "test", origen="manual",
+                exento_iva=exento_iva,
             )
             self.assertIsNone(error, error)
             return taller_app._factura_pendiente_recepcion_dict(db, nueva)
@@ -4328,6 +4345,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
                 "fecha": datetime.now().strftime("%Y-%m-%d"),
                 "lineas": [self._linea_gasto_general()],
                 "condicion_pago": "credito",
+                "exento_iva": True,
             },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
@@ -4401,6 +4419,7 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
                     self._linea_gasto_general(descripcion="Extractor de filtros", monto=8000, rubro_gav="mantencion"),
                 ],
                 "condicion_pago": "credito",
+                "exento_iva": True,
             },
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
@@ -4504,6 +4523,105 @@ class TestFacturasPendientesDeRecepcion(unittest.TestCase):
         self.assertEqual(actualizado["stock_disponible"], 0, "ya no debe aplicarse como stock, se reclasificó")
 
 
+class TestNetoIvaAutomaticoEnFacturas(unittest.TestCase):
+    """Cobertura dedicada de la funcionalidad "Neto/IVA automático" (el
+    precio de cada línea de una factura de compra es el NETO; el sistema
+    calcula el IVA (19%) y el total solo, salvo que la factura se marque
+    'exenta'). Esta funcionalidad se entregó sin pruebas propias -- lo que
+    dejó pasar, sin que nadie lo notara, que 12 pruebas más antiguas de CxP
+    quedaran calculando mal su monto esperado (no consideraban el IVA que
+    ahora se agrega solo). Esta clase existe para que el cálculo en sí
+    quede probado de una vez, en el mismo lugar donde vive la lógica."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_producto_http(self, nombre, stock_disponible=0, costo_compra=1000):
+        resp = self.client.post(
+            "/api/productos",
+            json={"nombre": nombre, "stock_disponible": stock_disponible, "costo_compra": costo_compra},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _factura_de(self, numero):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            return dict(db.execute("SELECT * FROM facturas WHERE numero = ?", (numero,)).fetchone())
+
+    def test_factura_normal_calcula_iva_19_por_ciento_sobre_el_neto(self):
+        producto = self._crear_producto_http("Producto - IVA normal", stock_disponible=0)
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-IVA-001",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 2, "precio_unitario": 10000}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        factura = self._factura_de("FACT-IVA-001")
+        self.assertEqual(factura["monto_neto"], 20000)
+        self.assertEqual(factura["monto_iva"], 3800)  # 20000 * 0.19
+        self.assertEqual(factura["monto_total"], 23800)
+        self.assertEqual(factura["exento_iva"], 0)
+
+        # La CxP que se genera junto con la factura debe coincidir exacto
+        # con ese mismo monto_total -- lo que de verdad se le debe al
+        # proveedor incluye el IVA, no solo el neto.
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            cxp = db.execute("SELECT * FROM cuentas_por_pagar WHERE factura_id = ?", (factura["id"],)).fetchone()
+        self.assertEqual(cxp["monto_total"], 23800)
+
+    def test_factura_exenta_no_agrega_iva(self):
+        producto = self._crear_producto_http("Producto - IVA exento", stock_disponible=0)
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-IVA-002",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 3, "precio_unitario": 5000}],
+                "condicion_pago": "credito",
+                "exento_iva": True,
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        factura = self._factura_de("FACT-IVA-002")
+        self.assertEqual(factura["monto_neto"], 15000)
+        self.assertEqual(factura["monto_iva"], 0)
+        self.assertEqual(factura["monto_total"], 15000)
+        self.assertEqual(factura["exento_iva"], 1)
+
+    def test_gasto_general_tambien_entra_al_calculo_de_iva(self):
+        # El monto de una línea de gasto general (ej. combustible) se suma
+        # al neto igual que cualquier repuesto, así que también le calcula
+        # su parte del IVA -- no queda "afuera" del cálculo solo por no ir
+        # a inventario.
+        producto = self._crear_producto_http("Producto - IVA hibrida", stock_disponible=0)
+        resp = self.client.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": "FACT-IVA-003",
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [
+                    {"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 6000},
+                    {"es_gasto_general": True, "descripcion": "Bencina", "monto": 4000, "rubro_gav": "combustible"},
+                ],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        factura = self._factura_de("FACT-IVA-003")
+        self.assertEqual(factura["monto_neto"], 10000)
+        self.assertEqual(factura["monto_iva"], 1900)
+        self.assertEqual(factura["monto_total"], 11900)
+
+
 class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
     """Hallazgo planteado por el taller: una factura puede traer un
     repuesto que todavía no existe en el catálogo. Antes, los cuatro
@@ -4601,7 +4719,7 @@ class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
         client_bodega = self._crear_usuario_y_login(["bodega"])
         resp2 = client_bodega.post(
             f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
-            json={"categoria": "EMBRAGUE", "modelo": "ABC 2020"},
+            json={"categoria": "EMBRAGUE", "modelo": "ABC 2020", "marca": "GENERICA"},
         )
         self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
 
@@ -4611,7 +4729,7 @@ class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
         )
         resp = self.admin.post(
             f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
-            json={"categoria": "BOMBA DE AGUA", "modelo": "XYZ"},
+            json={"categoria": "BOMBA DE AGUA", "modelo": "XYZ", "marca": "BOSCH"},
         )
         self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
         cuerpo = resp.get_json()
@@ -4637,6 +4755,90 @@ class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
         producto_final = self.admin.get(f"/api/productos/{producto_nuevo['id']}").get_json()
         self.assertEqual(producto_final["stock_disponible"], 2)
         self.assertEqual(producto_final["costo_compra"], 45000)
+
+    def test_crear_y_vincular_rechaza_sin_marca_si_hay_categoria_o_modelo(self):
+        # La marca solía ser opcional acá: si Bodega la dejaba en blanco al
+        # crear el producto desde una factura, ese repuesto quedaba para
+        # siempre como una entrada "genérica sin marca" -- cualquier factura
+        # futura de ese mismo repuesto, sin importar su marca real, se
+        # vinculaba a esa misma fila sin volver a preguntar, mezclando
+        # precios y perdiendo el seguimiento de garantía por marca (reporte
+        # del taller). Ahora se exige la marca en cuanto se define un modelo
+        # y/o detalle real.
+        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-004B")
+        resp = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
+            json={"categoria": "EMBRAGUE", "modelo": "ABC 2020"},
+        )
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("marca", resp.get_json()["error"].lower())
+
+        # La línea sigue sin vincular -- no se creó ningún producto a medias.
+        pendiente_actual = self.admin.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()
+        self.assertIsNone(pendiente_actual["lineas"][0]["producto_id"])
+
+    def test_dos_marcas_del_mismo_modelo_y_detalle_quedan_como_productos_separados(self):
+        # Núcleo de la funcionalidad "marca por repuesto": la misma pieza en
+        # dos marcas (ej. una versión genérica y una BOSCH) debe quedar como
+        # dos productos con su propio stock/costo, y una tercera factura con
+        # exactamente la misma combinación categoría+modelo+marca debe
+        # rechazarse como duplicado exacto.
+        pendiente_1 = self._crear_pendiente_con_producto_nuevo("FACT-PROD-MARCA-001")
+        resp_1 = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente_1['id']}/lineas/0/crear-producto",
+            json={"categoria": "FILTRO", "modelo": "ABC-100", "marca": "GENERICA"},
+        )
+        self.assertEqual(resp_1.status_code, 201, resp_1.get_data(as_text=True))
+        producto_generico = resp_1.get_json()["producto"]
+
+        pendiente_2 = self._crear_pendiente_con_producto_nuevo("FACT-PROD-MARCA-002")
+        resp_2 = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente_2['id']}/lineas/0/crear-producto",
+            json={"categoria": "FILTRO", "modelo": "ABC-100", "marca": "BOSCH"},
+        )
+        self.assertEqual(resp_2.status_code, 201, resp_2.get_data(as_text=True))
+        producto_bosch = resp_2.get_json()["producto"]
+
+        self.assertNotEqual(producto_generico["id"], producto_bosch["id"])
+        self.assertIn("GENERICA", producto_generico["nombre"])
+        self.assertIn("BOSCH", producto_bosch["nombre"])
+
+        # Repetir exactamente la misma marca para el mismo modelo/detalle sí
+        # se rechaza como duplicado.
+        pendiente_3 = self._crear_pendiente_con_producto_nuevo("FACT-PROD-MARCA-003")
+        resp_3 = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente_3['id']}/lineas/0/crear-producto",
+            json={"categoria": "FILTRO", "modelo": "ABC-100", "marca": "BOSCH"},
+        )
+        self.assertEqual(resp_3.status_code, 400, resp_3.get_data(as_text=True))
+        self.assertIn("ya existe", resp_3.get_json()["error"].lower())
+
+    def test_editar_producto_no_permite_dejar_la_marca_en_blanco(self):
+        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-MARCA-004")
+        resp = self.admin.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
+            json={"categoria": "TURBO", "modelo": "T200", "marca": "GARRETT"},
+        )
+        producto = resp.get_json()["producto"]
+        resp_editar = self.admin.put(f"/api/productos/{producto['id']}", json={"marca": ""})
+        self.assertEqual(resp_editar.status_code, 400, resp_editar.get_data(as_text=True))
+        self.assertIn("marca", resp_editar.get_json()["error"].lower())
+
+    def test_crear_producto_directo_en_logistica_tambien_exige_marca(self):
+        # Misma regla, camino directo (Logística "Nuevo producto", no desde
+        # una factura): _crear_producto_desde_datos es compartida por
+        # ambos, así que no debería poder crearse un producto con modelo
+        # y/o detalle pero sin marca por ninguna de las dos puertas.
+        resp = self.admin.post(
+            "/api/productos", json={"categoria": "AMORTIGUADOR", "modelo": "M900"},
+        )
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("marca", resp.get_json()["error"].lower())
+
+        resp_ok = self.admin.post(
+            "/api/productos", json={"categoria": "AMORTIGUADOR", "modelo": "M900", "marca": "MONROE"},
+        )
+        self.assertEqual(resp_ok.status_code, 201, resp_ok.get_data(as_text=True))
 
     def test_crear_y_vincular_rechaza_indice_invalido(self):
         pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-006")
@@ -4839,7 +5041,7 @@ class TestRolesYPermisos(unittest.TestCase):
         self.assertEqual(pendiente["estado"], "pendiente")
         resp_vincular = bodega_client.post(
             f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/1/crear-producto",
-            json={"categoria": "REPUESTO SIN RESOLVER ROL", "modelo": "X"},
+            json={"categoria": "REPUESTO SIN RESOLVER ROL", "modelo": "X", "marca": "GENERICA"},
         )
         self.assertEqual(resp_vincular.status_code, 201, resp_vincular.get_data(as_text=True))
         resp = bodega_client.post(f"/api/facturas/pendientes-recepcion/{pendiente['id']}/aprobar", json={})

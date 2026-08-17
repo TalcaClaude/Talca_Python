@@ -446,7 +446,7 @@ async function cargarCajaMovimientos() {
       });
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar Caja Chica: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar Caja Chica: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -1009,7 +1009,7 @@ async function cargarPendientesRendicion() {
     state.cajaPendientesLista = data.gastos;
     renderPendientesRendicion(cont);
   } catch (e) {
-    cont.innerHTML = `<p class="vacio">Error al cargar retiros pendientes: ${e.message}</p>`;
+    cont.innerHTML = `<p class="vacio">Error al cargar retiros pendientes: ${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -1077,7 +1077,7 @@ document.getElementById("btn-ver-rendiciones").addEventListener("click", async (
       tr.addEventListener("click", () => verDetalleRendicion(parseInt(tr.dataset.id, 10)));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar el historial: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar el historial: ${escapeHtml(e.message)}</td></tr>`;
   }
 });
 
@@ -1112,7 +1112,7 @@ async function verDetalleRendicion(id) {
         </tr>`).join("")
       : `<tr><td colspan="5" class="vacio">Sin boletas asociadas.</td></tr>`;
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="vacio">Error: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -1155,7 +1155,7 @@ async function cargarCxc() {
       tr.addEventListener("click", () => abrirDetalleOtCxc(parseInt(tr.dataset.ordenId, 10), "cerradas"));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar Cuentas por Cobrar: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar Cuentas por Cobrar: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -1210,7 +1210,7 @@ async function cargarCxcAbonos() {
       tr.addEventListener("click", () => abrirDetalleOtCxc(parseInt(tr.dataset.ordenId, 10), "abonos"));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar CxC por abonos: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar CxC por abonos: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -1269,6 +1269,11 @@ async function abrirDetalleOtCxc(ordenId, contexto) {
 document.getElementById("form-cxcd-pago").addEventListener("submit", async (e) => {
   e.preventDefault();
   const ordenId = document.getElementById("cxcd-orden-id").value;
+  // Ver comentario en form-op-orden-nueva (operativo.js): sin bloquear el
+  // botón, un doble clic registraba dos abonos idénticos a la misma OT
+  // (hallazgo #4).
+  const btnPago = e.target.querySelector('button[type="submit"]');
+  btnPago.disabled = true;
   try {
     await api(`/api/operativo/ordenes/${ordenId}/pagos`, {
       method: "POST",
@@ -1289,6 +1294,8 @@ document.getElementById("form-cxcd-pago").addEventListener("submit", async (e) =
     await cargarResumenFinanzas();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    btnPago.disabled = false;
   }
 });
 
@@ -1347,7 +1354,7 @@ async function cargarCxp() {
       btn.addEventListener("click", () => anularCxpManual(parseInt(btn.dataset.anularCxp, 10)));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar Cuentas por Pagar: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar Cuentas por Pagar: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -1436,6 +1443,12 @@ function abrirPagoCxp(id) {
 document.getElementById("form-cxp-pago").addEventListener("submit", async (e) => {
   e.preventDefault();
   const cxpId = document.getElementById("cxpp-cxp-id").value;
+  // Ver comentario en form-op-orden-nueva (operativo.js): sin bloquear el
+  // botón, un doble clic registraba dos abonos idénticos a la misma CxP —
+  // y si "desde_caja_chica" estaba marcado, duplicaba también el egreso en
+  // Caja Chica (hallazgo #4).
+  const btnPago = e.target.querySelector('button[type="submit"]');
+  btnPago.disabled = true;
   try {
     await api(`/api/finanzas/cxp/${cxpId}/pagos`, {
       method: "POST",
@@ -1451,6 +1464,8 @@ document.getElementById("form-cxp-pago").addEventListener("submit", async (e) =>
     await cargarCxp();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    btnPago.disabled = false;
   }
 });
 
@@ -1520,7 +1535,7 @@ async function cargarFacturasPendientesRecepcion() {
     });
     tbody.querySelectorAll("a[href]").forEach(a => a.addEventListener("click", (e) => e.stopPropagation()));
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error al cargar: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -1601,7 +1616,7 @@ async function cargarGastosGenerales() {
 
     ggRenderTabla();
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error al cargar: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -1919,8 +1934,9 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
             <input type="text" class="pfr-crear-categoria" placeholder="Modelo (ej. JF010)"
                    value="${linea && linea.modelo_leido ? escapeHtml(linea.modelo_leido) : ""}" style="margin-bottom:4px">
             <input type="text" class="pfr-crear-modelo" placeholder="Detalle (ej. Pulley Set)" style="margin-bottom:4px">
-            <input type="text" class="pfr-crear-marca" placeholder="Marca (ej. BOSCH — opcional)"
+            <input type="text" class="pfr-crear-marca" placeholder="Marca (ej. BOSCH — obligatoria; si no tiene, escribe GENÉRICA)"
                    value="${document.getElementById("pfr-marca-todas") ? escapeHtml(document.getElementById("pfr-marca-todas").value.trim()) : ""}" style="margin-bottom:4px">
+            <p class="ayuda-inline pfr-crear-marca-hint" style="display:none;margin:0 0 6px"></p>
             <input type="text" class="pfr-crear-codigo-interno" placeholder="Código interno / N° de parte del fabricante (ej. 33710-NKC-7-FX)"
                    value="${linea && linea.codigo_leido ? escapeHtml(linea.codigo_leido) : ""}" style="margin-bottom:4px">
             <button type="button" class="btn btn-primario btn-chico pfr-crear-confirmar">Crear y vincular</button>
@@ -1999,6 +2015,39 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
   div.querySelector(".pfr-linea-monto-gg").addEventListener("input", actualizarTotalFacturaPendiente);
 
   if (btnCrear) {
+    // Aviso en vivo: si el Modelo+Detalle que se está escribiendo ya
+    // existe en el catálogo con otra(s) marca(s), se muestra de inmediato
+    // -- ayuda a decidir si es una marca nueva de verdad o si conviene
+    // avisarle a quien carga la factura que revise antes de duplicar por
+    // un typo (ej. "BOSCH " con espacio de más).
+    const inputCategoria = div.querySelector(".pfr-crear-categoria");
+    const inputModelo = div.querySelector(".pfr-crear-modelo");
+    const hintMarca = div.querySelector(".pfr-crear-marca-hint");
+    function actualizarHintVariantes() {
+      if (!hintMarca) return;
+      const categoria = inputCategoria.value.trim().toLowerCase();
+      const modelo = inputModelo.value.trim().toLowerCase();
+      if (!categoria && !modelo) {
+        hintMarca.style.display = "none";
+        return;
+      }
+      const variantes = productos.filter(p =>
+        (p.categoria || "").trim().toLowerCase() === categoria &&
+        (p.modelo || "").trim().toLowerCase() === modelo
+      );
+      if (!variantes.length) {
+        hintMarca.style.display = "none";
+        return;
+      }
+      const detalle = variantes
+        .map(p => `${p.marca ? escapeHtml(p.marca) : "sin marca (repuesto antiguo)"} — ${fmtMoney(p.costo_compra)}`)
+        .join(" · ");
+      hintMarca.innerHTML = `Ya existe este modelo/detalle en: ${detalle}. Si es la misma marca, no crees uno nuevo -- selecciónalo arriba de la lista de productos.`;
+      hintMarca.style.display = "block";
+    }
+    inputCategoria.addEventListener("input", actualizarHintVariantes);
+    inputModelo.addEventListener("input", actualizarHintVariantes);
+
     btnCrear.addEventListener("click", () => {
       formCrear.style.display = formCrear.style.display === "none" ? "block" : "none";
       // Ayuda: si Finanzas ya tipeó (o la IA leyó) una descripción libre y
@@ -2009,6 +2058,7 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
       if (formCrear.style.display === "block" && !div.querySelector(".pfr-crear-modelo").value) {
         div.querySelector(".pfr-crear-modelo").value = inputNombreNuevo.value || "";
       }
+      if (formCrear.style.display === "block") actualizarHintVariantes();
     });
     div.querySelector(".pfr-crear-confirmar").addEventListener("click", async () => {
       const codigoInterno = div.querySelector(".pfr-crear-codigo-interno").value.trim();
@@ -2017,6 +2067,14 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
       const marca = div.querySelector(".pfr-crear-marca").value.trim();
       if (!categoria && !modelo) {
         toast("Ingresa al menos modelo o detalle para crear el producto", true);
+        return;
+      }
+      // Mismo criterio que valida el backend (ver
+      // crear_y_vincular_producto_pendiente -> _crear_producto_desde_datos
+      // en app.py): con modelo/detalle, la marca ya no es opcional -- este
+      // aviso evita el viaje al servidor solo para enterarse.
+      if (!marca) {
+        toast('Escribe una marca para este repuesto (ej. BOSCH, o "GENÉRICA" si no tiene una marca real).', true);
         return;
       }
       try {
@@ -2303,6 +2361,12 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
   const id = document.getElementById("pfr-id").value;
   const eraCorreccionDeRechazo = document.getElementById("pfr-aviso-rechazo").style.display !== "none";
 
+  // Ver comentario en form-op-orden-nueva (operativo.js): sin bloquear el
+  // botón, un doble clic al registrar una factura de compra nueva la
+  // duplicaba (dos facturas, y si venían con productos ya en catálogo, dos
+  // aplicaciones de stock/CxP por la misma compra real) (hallazgo #4).
+  const btnGuardarFactura = e.target.querySelector('button[type="submit"]');
+  btnGuardarFactura.disabled = true;
   try {
     if (id) {
       await api(`/api/facturas/pendientes-recepcion/${id}`, {
@@ -2349,6 +2413,8 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
     await cargarFacturasPendientesRecepcion();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    btnGuardarFactura.disabled = false;
   }
 });
 
@@ -3038,7 +3104,7 @@ async function cargarDocumentosDte() {
       tr.addEventListener("click", () => abrirDetalleDte(Number(tr.dataset.abrirDte)));
     });
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar: ${e.message}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="vacio">Error al cargar: ${escapeHtml(e.message)}</td></tr>`;
   }
 }
 
@@ -3175,7 +3241,7 @@ document.getElementById("dtef-orden-id").addEventListener("input", () => {
   }, 400);
 });
 
-document.getElementById("dtef-btn-emitir").addEventListener("click", async () => {
+document.getElementById("dtef-btn-emitir").addEventListener("click", async (e) => {
   const payload = {
     orden_id: document.getElementById("dtef-orden-id").value.trim() || null,
     receptor: {
@@ -3189,13 +3255,20 @@ document.getElementById("dtef-btn-emitir").addEventListener("click", async () =>
     items: state.dteItems || [],
     observaciones: document.getElementById("dtef-observaciones").value,
   };
+  // El más delicado de los formularios con este problema (hallazgo #4): un
+  // doble clic acá emite DOS documentos tributarios electrónicos reales
+  // ante el SII por la misma OT, no solo un registro duplicado en la BD.
+  const btnEmitir = e.currentTarget;
+  btnEmitir.disabled = true;
   try {
     await api("/api/facturacion/documentos", { method: "POST", body: JSON.stringify(payload) });
     toast("Factura emitida");
     cerrarModal("modal-dte-factura");
     await cargarDocumentosDte();
-  } catch (e) {
-    toast(e.message, true);
+  } catch (e2) {
+    toast(e2.message, true);
+  } finally {
+    btnEmitir.disabled = false;
   }
 });
 

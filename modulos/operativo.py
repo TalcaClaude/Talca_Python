@@ -1547,23 +1547,41 @@ def _orden_dict(db, row):
 
 def _generar_o_actualizar_cxc(db, orden_row):
     """Genera la Cuenta por Cobrar de una OT la PRIMERA vez que pasa por
-    alguno de ESTADOS_QUE_CIERRAN_CXC ('listo' o 'entregado') — el monto
-    queda 'congelado' con el valor_neto + IVA de ese momento (una vez
-    lista, la OT ya no debería seguir sumando ítems). Es idempotente: si
-    la orden pasa por 'listo' y después por 'entregado' (el camino
-    normal), o vuelve a pasar por cualquiera de los dos más de una vez
-    (ej. se revirtió el estado a mano), NO genera una segunda CxC ni pisa
-    el monto ya emitido — eso evitaría que un vaivén de estados infle por
-    accidente la deuda del cliente. Una OT sin precio cargado (valor_total
-    = 0) no genera CxC: no tiene sentido una cuenta por cobrar de $0."""
-    orden_id = orden_row["id"]
-    ya_existe = db.execute("SELECT id FROM cuentas_por_cobrar WHERE orden_id = ?", (orden_id,)).fetchone()
-    if ya_existe:
-        return
+    alguno de ESTADOS_QUE_CIERRAN_CXC ('listo' o 'entregado'). Es
+    idempotente en el sentido de que la orden puede pasar por 'listo' y
+    después por 'entregado' (el camino normal), o volver a pasar por
+    cualquiera de los dos más de una vez (ej. se revirtió el estado a
+    mano), sin que eso genere una segunda CxC -- eso evitaría que un
+    vaivén de estados infle por accidente la deuda del cliente.
 
+    El monto SÍ se sincroniza si ya existía una CxC para esta orden pero el
+    precio referencial (o el IVA) cambió después de generada -- ej. se
+    corrigió el precio estando la OT ya en listo/entregado porque faltaba
+    cargar un repuesto. Antes esta función era un no-op total si ya
+    existía una CxC, dejando el monto "congelado" con el valor viejo
+    aunque el precio real de la orden hubiera cambiado -- el cliente podía
+    terminar debiendo (o pagando de más) un monto que ya no correspondía
+    a lo cargado en la OT (hallazgo #3 del informe de revisión). No se
+    toca fecha_emision/fecha_vencimiento en la sincronización: esas
+    quedan fijas al momento en que se generó la CxC por primera vez.
+
+    Una OT sin precio cargado (valor_total = 0) no genera CxC: no tiene
+    sentido una cuenta por cobrar de $0."""
+    orden_id = orden_row["id"]
     valor_neto = orden_row["precio_referencial"] or 0
     valor_iva_monto = round(valor_neto * IVA_PORCENTAJE, 2) if orden_row["precio_iva"] else 0.0
     valor_total = round(valor_neto + valor_iva_monto, 2)
+
+    cxc_existente = db.execute("SELECT * FROM cuentas_por_cobrar WHERE orden_id = ?", (orden_id,)).fetchone()
+    if cxc_existente:
+        if valor_total > 0 and abs(valor_total - cxc_existente["monto_total"]) > 0.01:
+            db.execute(
+                "UPDATE cuentas_por_cobrar SET monto_total = ?, actualizado_en = ? WHERE id = ?",
+                (valor_total, now_iso(), cxc_existente["id"]),
+            )
+            _recalcular_estado_cxc(db, orden_id)
+        return
+
     if valor_total <= 0:
         return
 
@@ -2871,6 +2889,16 @@ def eliminar_orden(orden_id):
             )
 
     db.execute("UPDATE garantias SET orden_origen_id = NULL WHERE orden_origen_id = ?", (orden_id,))
+    # Estas tres tablas también referencian la OT sin cascada (a propósito:
+    # son registros propios -- un convertidor de torque, un gasto de caja
+    # chica, un documento tributario ya emitido -- que deben sobrevivir
+    # aunque la OT de origen se borre, solo perdiendo la trazabilidad hacia
+    # ella). Sin este paso, borrar una OT que tuviera cualquiera de estos
+    # tres asociados fallaba con "FOREIGN KEY constraint failed" (hallazgo
+    # #1 de la auditoría de agosto 2026).
+    db.execute("UPDATE convertidores_torque SET orden_origen_id = NULL WHERE orden_origen_id = ?", (orden_id,))
+    db.execute("UPDATE caja_gasto_detalles SET orden_id = NULL WHERE orden_id = ?", (orden_id,))
+    db.execute("UPDATE documentos_tributarios SET orden_id = NULL WHERE orden_id = ?", (orden_id,))
     db.execute("DELETE FROM ordenes_trabajo WHERE id = ?", (orden_id,))
     db.commit()
     return jsonify({"ok": True})
@@ -2884,6 +2912,11 @@ def eliminar_orden(orden_id):
 @requiere_rol("operativo")
 def agregar_pago_orden(orden_id):
     db = get_db()
+    # BEGIN IMMEDIATE (mismo helper que usa finanzas_pagar_cxp) para cerrar
+    # la misma condición de carrera: sin esto, dos abonos casi simultáneos
+    # podían leer el mismo total_pagado y ambos pasar la validación de
+    # sobrepago, dejando la OT pagada de más.
+    _iniciar_transaccion_stock(db)
     orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     if orden is None:
         return jsonify({"error": "Orden no encontrada"}), 404
@@ -2899,6 +2932,20 @@ def agregar_pago_orden(orden_id):
         return jsonify({"error": "El monto debe ser un número"}), 400
     if monto <= 0:
         return jsonify({"error": "El monto del pago debe ser mayor a 0"}), 400
+
+    # Mismo criterio que _orden_dict para "cuánto falta por pagar": Neto
+    # (precio_referencial) + IVA si corresponde, menos lo ya abonado en
+    # pagos_orden. Igual que finanzas_pagar_cxp con la CxP, se rechaza el
+    # abono si supera lo pendiente (con tolerancia de $0.01 por redondeo).
+    valor_neto = orden["precio_referencial"] or 0
+    valor_iva_monto = round(valor_neto * IVA_PORCENTAJE, 2) if orden["precio_iva"] else 0.0
+    valor_total = round(valor_neto + valor_iva_monto, 2)
+    total_pagado = db.execute(
+        "SELECT COALESCE(SUM(monto), 0) FROM pagos_orden WHERE orden_id = ?", (orden_id,)
+    ).fetchone()[0]
+    pendiente = round(max(0, valor_total - total_pagado), 2)
+    if monto > pendiente + 0.01:
+        return jsonify({"error": f"El monto supera lo pendiente por pagar (${round(pendiente):,})".replace(",", ".")}), 400
 
     fecha = (data.get("fecha") or "").strip() or now_iso()
 
@@ -3117,7 +3164,19 @@ def agregar_item_orden(orden_id):
             except (TypeError, ValueError):
                 return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
 
-        cantidad_stock = int(round(cantidad))
+        # El stock de un repuesto se lleva en unidades enteras -- mismo
+        # criterio que "Registrar movimiento" en Logística (ver
+        # registrar_movimiento en app.py, que exige "cantidad" entera desde
+        # la validación de entrada). Antes acá se aceptaba cualquier
+        # cantidad fraccionaria (ej. 2,5) y se cobraba el valor EXACTO al
+        # cliente, pero el stock se descontaba con int(round(cantidad)) --
+        # 2 unidades en vez de 2,5 -- desincronizando en silencio el
+        # inventario cada vez que se usaba una cantidad no entera
+        # (hallazgo #11 del informe de revisión). Se rechaza en vez de
+        # seguir redondeando en silencio.
+        if cantidad != int(cantidad):
+            return jsonify({"error": "La cantidad de un repuesto debe ser un número entero (el stock no se descuenta en fracciones de unidad)"}), 400
+        cantidad_stock = int(cantidad)
         try:
             _aplicar_salida_stock(
                 db, producto, cantidad_stock,
@@ -4241,6 +4300,11 @@ def eliminar_garantia(garantia_id):
                 proveedor_id=item["proveedor_id"], recalcular_costo_promedio=False,
             )
 
+    # Mismo caso que en eliminar_orden: un convertidor de torque puede
+    # referenciar esta garantía como su origen (garantia_origen_id), sin
+    # cascada -- se desvincula (no se borra el convertidor) antes de poder
+    # eliminar la garantía (hallazgo #1 de la auditoría de agosto 2026).
+    db.execute("UPDATE convertidores_torque SET garantia_origen_id = NULL WHERE garantia_origen_id = ?", (garantia_id,))
     db.execute("DELETE FROM garantias WHERE id = ?", (garantia_id,))
     db.commit()
     return jsonify({"ok": True})
@@ -4331,7 +4395,13 @@ def agregar_item_garantia(garantia_id):
                 costo_unitario = float(data.get("costo_unitario"))
             except (TypeError, ValueError):
                 return jsonify({"error": "El costo unitario debe ser un número válido"}), 400
-        cantidad_stock = int(round(cantidad))
+        # Mismo criterio que agregar_item_orden(): el stock de un repuesto
+        # se lleva en unidades enteras, así que se rechaza una cantidad
+        # fraccionaria en vez de cobrarla exacta y redondear el descuento
+        # de stock en silencio (hallazgo #11 del informe de revisión).
+        if cantidad != int(cantidad):
+            return jsonify({"error": "La cantidad de un repuesto debe ser un número entero (el stock no se descuenta en fracciones de unidad)"}), 400
+        cantidad_stock = int(cantidad)
         try:
             _aplicar_salida_stock(
                 db, producto, cantidad_stock,

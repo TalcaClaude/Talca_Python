@@ -1,0 +1,24 @@
+<script>
+  // Aplica el tema guardado (claro/oscuro) ANTES de que se pinte la
+  // página -- por eso este script va en el <head>, sin defer/async, y no
+  // en _sidebar.html (que carga después, junto al resto del body). Si se
+  // aplicara más tarde se vería un parpadeo del tema por defecto antes de
+  // cambiar al que la persona eligió la última vez.
+  //
+  // Claro es el tema por defecto (sin atributo); oscuro se activa
+  // agregando data-theme="dark" a <html> -- ver las reglas
+  // html[data-theme="dark"] en style.css, que sobrescriben las mismas
+  // variables de color que usa todo el resto de la hoja de estilos.
+  (function () {
+    try {
+      var guardado = localStorage.getItem("taller_tema");
+      if (guardado === "dark") {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    } catch (e) {
+      // Si localStorage no está disponible (ej. modo privado con
+      // restricciones), simplemente se queda en el tema claro por
+      // defecto -- no es motivo para romper la carga de la página.
+    }
+  })();
+</script>

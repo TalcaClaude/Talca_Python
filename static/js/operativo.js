@@ -188,12 +188,9 @@ document.querySelectorAll("[data-close]").forEach(btn => {
   btn.addEventListener("click", () => cerrarModal(btn.dataset.close));
 });
 
-document.addEventListener("keydown", (e) => {
-  if (e.key !== "Escape") return;
-  document.querySelectorAll(".modal-overlay.abierto").forEach(overlay => {
-    overlay.classList.remove("abierto");
-  });
-});
+// Los modales ya NO se cierran al hacer click afuera NI con ESC (para no
+// perder datos escritos por accidente). Solo se cierran con la X o
+// "Cancelar", que son clics explícitos.
 
 function escapeHtml(str) {
   if (str === null || str === undefined) return "";

@@ -33,6 +33,10 @@
   <div class="sidebar-brand">
     <h1>Inventario<span>Taller</span></h1>
     <p>Panel Principal</p>
+    <button type="button" class="tema-toggle-btn" id="tema-toggle-btn" aria-label="Cambiar a tema oscuro">
+      <span id="tema-toggle-icono">☾</span>
+      <span id="tema-toggle-texto">Oscuro</span>
+    </button>
   </div>
 
   {% if rol_usuario == "admin" %}
@@ -162,6 +166,38 @@
       modulo.classList.toggle('activo');
     });
   });
+
+  // Interruptor de tema claro/oscuro. El estado ya se aplicó antes de
+  // pintar la página (ver templates/_tema.html en el <head>), así que acá
+  // solo hace falta reflejar el estado inicial en el botón y manejar el
+  // clic para alternarlo y guardarlo en localStorage.
+  (function () {
+    var btn = document.getElementById('tema-toggle-btn');
+    if (!btn) return;
+    var icono = document.getElementById('tema-toggle-icono');
+    var texto = document.getElementById('tema-toggle-texto');
+
+    function actualizarBoton() {
+      var oscuro = document.documentElement.getAttribute('data-theme') === 'dark';
+      icono.textContent = oscuro ? '☀' : '☾';
+      texto.textContent = oscuro ? 'Claro' : 'Oscuro';
+      btn.setAttribute('aria-label', oscuro ? 'Cambiar a tema claro' : 'Cambiar a tema oscuro');
+    }
+
+    actualizarBoton();
+
+    btn.addEventListener('click', function () {
+      var esOscuro = document.documentElement.getAttribute('data-theme') === 'dark';
+      if (esOscuro) {
+        document.documentElement.removeAttribute('data-theme');
+        try { localStorage.setItem('taller_tema', 'light'); } catch (e) { /* localStorage no disponible */ }
+      } else {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        try { localStorage.setItem('taller_tema', 'dark'); } catch (e) { /* localStorage no disponible */ }
+      }
+      actualizarBoton();
+    });
+  })();
 
   // Apertura/cierre de la barra lateral en celular/tablet (ver comentario
   // arriba del <nav>). En desktop estos elementos ni se muestran, así que

@@ -4707,21 +4707,35 @@ class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
 
     # ---- Crear y vincular: quién puede, y qué pasa cuando ----
 
-    def test_solo_bodega_puede_crear_y_vincular_el_producto(self):
-        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-004")
+    def test_finanzas_y_bodega_pueden_crear_y_vincular_el_producto_pero_no_un_modulo_ajeno(self):
+        # El taller pasó a operar con una sola persona a cargo de Bodega y
+        # Facturas -- separar el permiso entre esos dos módulos ya no
+        # aporta nada, así que ambos pueden crear el producto acá (ver
+        # docstring de crear_y_vincular_producto_pendiente en app.py). Sigue
+        # bloqueado para alguien sin ninguno de los dos módulos.
+        pendiente = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-PERM-01")
         client_finanzas = self._crear_usuario_y_login(["finanzas"])
         resp = client_finanzas.post(
             f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
-            json={"categoria": "EMBRAGUE", "modelo": "ABC 2020"},
-        )
-        self.assertEqual(resp.status_code, 403)
-
-        client_bodega = self._crear_usuario_y_login(["bodega"])
-        resp2 = client_bodega.post(
-            f"/api/facturas/pendientes-recepcion/{pendiente['id']}/lineas/0/crear-producto",
             json={"categoria": "EMBRAGUE", "modelo": "ABC 2020", "marca": "GENERICA"},
         )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+
+        pendiente2 = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-PERM-02")
+        client_bodega = self._crear_usuario_y_login(["bodega"])
+        resp2 = client_bodega.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente2['id']}/lineas/0/crear-producto",
+            json={"categoria": "EMBRAGUE", "modelo": "ABC 2020 B", "marca": "GENERICA"},
+        )
         self.assertEqual(resp2.status_code, 201, resp2.get_data(as_text=True))
+
+        pendiente3 = self._crear_pendiente_con_producto_nuevo("FACT-PROD-NUEVO-PERM-03")
+        client_ajeno = self._crear_usuario_y_login(["operativo"])
+        resp3 = client_ajeno.post(
+            f"/api/facturas/pendientes-recepcion/{pendiente3['id']}/lineas/0/crear-producto",
+            json={"categoria": "EMBRAGUE", "modelo": "ABC 2020 C", "marca": "GENERICA"},
+        )
+        self.assertEqual(resp3.status_code, 403)
 
     def test_crear_y_vincular_producto_deja_la_linea_resuelta_y_permite_aprobar(self):
         pendiente = self._crear_pendiente_con_producto_nuevo(

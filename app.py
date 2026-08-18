@@ -2624,7 +2624,7 @@ def _stock_minimo_detalle(db, producto_id):
 
 
 @app.route("/api/productos", methods=["POST"])
-@requiere_rol("bodega")
+@requiere_rol("finanzas", "bodega")
 def crear_producto():
     data = request.get_json(force=True, silent=True) or {}
     db = get_db()
@@ -6095,7 +6095,7 @@ def editar_factura_pendiente_recepcion(pendiente_id):
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/lineas/<int:indice>/crear-producto", methods=["POST"])
-@requiere_rol("bodega")
+@requiere_rol("finanzas", "bodega")
 def crear_y_vincular_producto_pendiente(pendiente_id, indice):
     """Crea un producto nuevo y lo vincula de inmediato a UNA línea sin
     resolver de una factura pendiente de recepción -- el punto de
@@ -6103,19 +6103,20 @@ def crear_y_vincular_producto_pendiente(pendiente_id, indice):
     traer un repuesto que todavía no existe en el catálogo (Excel, foto
     escaneada, WhatsApp o el formulario manual ya la dejan pasar igual con
     esa línea en 'producto_id: None', ver _validar_lineas_pendiente /
-    _carga_masiva_revalidar_grupo), pero Finanzas no puede crear productos
-    (ver hallazgo #3 de la revisión técnica -- eso quedó reservado a
-    Bodega). Acá Bodega, revisando el pendiente antes de aprobarlo, crea
-    el producto que falta con sus propios datos (modelo, detalle,
-    ubicación) y esta línea queda vinculada en el mismo paso, sin tener
-    que ir a Logística aparte y después volver a editar la factura a
+    _carga_masiva_revalidar_grupo). Quien esté revisando el pendiente antes
+    de aprobarlo crea el producto que falta con sus propios datos (modelo,
+    detalle, marca) y esta línea queda vinculada en el mismo paso, sin
+    tener que ir a Logística aparte y después volver a editar la factura a
     mano.
 
-    Restringido a 'bodega' a propósito -- es la misma regla que ya rige
-    crear_producto(), solo que llamada desde otro lugar de la interfaz.
-    'indice' es la posición de la línea dentro de lineas_json (0-based,
-    en el mismo orden que ya devuelve el pendiente al listarlo/verlo) --
-    no el número de fila del Excel, que puede repetirse o no venir."""
+    Antes esto quedaba reservado solo a Bodega (ver hallazgo #3 de la
+    revisión técnica), pero el taller pasó a operar con una sola persona a
+    cargo tanto de Bodega como de Facturas -- separar el permiso ya no
+    aporta nada y solo agregaba un paso extra, así que ahora también
+    'finanzas' puede crear el producto directamente acá. 'indice' es la
+    posición de la línea dentro de lineas_json (0-based, en el mismo orden
+    que ya devuelve el pendiente al listarlo/verlo) -- no el número de fila
+    del Excel, que puede repetirse o no venir."""
     db = get_db()
     fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
     if fila is None:

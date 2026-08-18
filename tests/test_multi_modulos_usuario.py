@@ -532,7 +532,7 @@ class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
             resp = client.open(ruta, method=metodo, json={})
             self.assertNotEqual(resp.status_code, 403, f"{endpoint} {metodo} {ruta} -> {resp.status_code}")
 
-    def test_usuario_finanzas_tambien_puede_usar_facturas_pero_no_escribir_en_logistica(self):
+    def test_usuario_finanzas_tambien_puede_usar_facturas_y_crear_productos_pero_no_el_resto_de_logistica(self):
         username = self._crear_usuario(modulos=["finanzas"])
         client = self._login_como(username)
         for endpoint, metodo, ruta in self._rutas_de(self._ENDPOINTS_FACTURAS_FINANZAS_O_BODEGA):
@@ -541,11 +541,14 @@ class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
         # Puede LEER el catálogo de productos (lo necesita para su propio
         # flujo de compra de emergencia/carga de facturas)...
         self.assertEqual(client.get("/api/productos").status_code, 200)
-        # ...pero no puede CREAR uno, ni tocar el resto de Logística
-        # (ubicaciones, categorías, dashboard, etc.), que sigue siendo
-        # exclusivo de Bodega.
-        resp_crear = client.post("/api/productos", json={"nombre": "Intruso"})
-        self.assertEqual(resp_crear.status_code, 403)
+        # ...y también puede CREAR uno (el taller pasó a operar con una sola
+        # persona a cargo de Bodega y Facturas, así que separar ese permiso
+        # ya no aporta nada -- ver docstring de crear_producto en app.py),
+        # pero sigue sin poder tocar el resto de Logística (ubicaciones,
+        # categorías, dashboard, etc.), que sigue siendo exclusivo de
+        # Bodega.
+        resp_crear = client.post("/api/productos", json={"nombre": "Repuesto de emergencia"})
+        self.assertEqual(resp_crear.status_code, 201, resp_crear.get_data(as_text=True))
         self.assertEqual(client.get("/api/logistica/dashboard/graficos").status_code, 403)
 
     def test_usuario_operativo_no_puede_escribir_en_logistica_ni_tocar_facturas(self):
@@ -579,13 +582,25 @@ class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
 
     def test_pero_esa_lectura_abierta_no_sirve_para_escribir(self):
         # La lectura de /api/productos y /api/proveedores es abierta, pero
-        # crear/editar/eliminar sigue siendo solo de Bodega -- confirma que
-        # no se "filtró" de más al resolver el escenario anterior.
-        for modulo in ("operativo", "convertidores", "finanzas"):
+        # crear/editar/eliminar sigue siendo solo de Bodega (y, desde que el
+        # taller pasó a operar con una sola persona a cargo de Bodega y
+        # Facturas, también de Finanzas para /api/productos -- ver
+        # crear_producto en app.py) -- confirma que no se "filtró" de más
+        # al resolver el escenario anterior, ni a módulos que no tienen
+        # nada que ver (operativo, convertidores).
+        for modulo in ("operativo", "convertidores"):
             username = self._crear_usuario(modulos=[modulo])
             client = self._login_como(username)
             self.assertEqual(client.post("/api/productos", json={"nombre": "X"}).status_code, 403)
             self.assertEqual(client.post("/api/proveedores", json={"nombre": "X"}).status_code, 403)
+
+        username_finanzas = self._crear_usuario(modulos=["finanzas"])
+        client_finanzas = self._login_como(username_finanzas)
+        self.assertEqual(client_finanzas.post("/api/productos", json={"nombre": "X"}).status_code, 201)
+        # Crear PROVEEDORES sigue siendo exclusivo de Bodega -- este cambio
+        # fue solo para poder cargar el repuesto con su marca al vuelo
+        # desde una factura, no una relajación general de Logística.
+        self.assertEqual(client_finanzas.post("/api/proveedores", json={"nombre": "X"}).status_code, 403)
 
     def test_rutas_de_solo_admin_rechazan_incluso_a_bodega_y_finanzas(self):
         # panel-dueno, estado_sistema y el respaldo automático son

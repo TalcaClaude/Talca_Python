@@ -1883,13 +1883,15 @@ function actualizarTotalFacturaPendiente() {
 }
 document.getElementById("pfr-exento-iva").addEventListener("change", actualizarTotalFacturaPendiente);
 
-// ctx = { pendienteId, indice } -- solo se pasan cuando la línea pertenece
-// a un pendiente YA GUARDADO (pantalla de "Editar"), porque el botón
-// "Crear este producto" llama a un endpoint que necesita un pendiente_id +
-// índice de línea reales. En "Registrar factura" (todavía no existe el
-// pendiente) esos dos vienen null y el botón no se muestra -- ahí Finanzas
-// solo puede DESCRIBIR el producto nuevo, no crearlo (ver hallazgo: crear
-// productos es exclusivo de Bodega).
+// ctx = { pendienteId, indice } -- solo vienen con valores reales cuando la
+// línea pertenece a un pendiente YA GUARDADO (pantalla de "Editar"): ahí
+// "Crear este producto" llama al endpoint que vincula el producto nuevo
+// directo a esa línea/pendiente. En "Registrar factura" (todavía no existe
+// el pendiente) vienen null -- el botón de todos modos se muestra, pero en
+// ese caso crea el producto suelto en el catálogo (mismo endpoint que usa
+// Logística) y solo lo deja seleccionado en esta línea; queda vinculado a
+// la factura recién al guardarla, como cualquier otro producto ya
+// existente.
 let pfrLineaContador = 0;
 
 function filaLineaFacturaPendiente(productos, linea, ctx) {
@@ -1897,8 +1899,8 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
   const div = document.createElement("div");
   div.className = "fac-linea-row";
   const sinResolverAlAbrir = !!(linea && linea.producto_id == null && (linea.texto_original || linea.cantidad != null));
-  const puedeCrearProducto = ctx.pendienteId != null && ctx.indice != null &&
-    state.sesion && (state.sesion.rol === "admin" || (state.sesion.modulos || []).includes("bodega"));
+  const puedeCrearProducto = state.sesion && (state.sesion.rol === "admin" ||
+    (state.sesion.modulos || []).includes("bodega") || (state.sesion.modulos || []).includes("finanzas"));
   const esGastoGeneralAlAbrir = !!(linea && linea.es_gasto_general);
   const grupoModo = `pfr-modo-${++pfrLineaContador}`;
   div.innerHTML = `
@@ -2075,19 +2077,36 @@ function filaLineaFacturaPendiente(productos, linea, ctx) {
         return;
       }
       try {
-        const data = await api(
-          `/api/facturas/pendientes-recepcion/${ctx.pendienteId}/lineas/${ctx.indice}/crear-producto`,
-          { method: "POST", body: JSON.stringify({ codigo_interno: codigoInterno, categoria, modelo, marca }) },
-        );
-        toast(`Producto "${data.producto.nombre}" creado y vinculado a esta línea`);
-        pfrProductosCache = [...pfrProductosCache, data.producto];
+        let productoCreado;
+        if (ctx.pendienteId != null && ctx.indice != null) {
+          // La factura ya existe como pendiente guardado -- crea el
+          // producto y lo deja vinculado a esta línea en el mismo paso.
+          const data = await api(
+            `/api/facturas/pendientes-recepcion/${ctx.pendienteId}/lineas/${ctx.indice}/crear-producto`,
+            { method: "POST", body: JSON.stringify({ codigo_interno: codigoInterno, categoria, modelo, marca }) },
+          );
+          productoCreado = data.producto;
+          toast(`Producto "${productoCreado.nombre}" creado y vinculado a esta línea`);
+        } else {
+          // Todavía se está armando la factura (no existe el pendiente
+          // guardado) -- se crea el producto suelto en el catálogo, igual
+          // que desde Logística, y queda vinculado a esta línea al tiro;
+          // la vinculación real a la factura se guarda recién al terminar
+          // de registrarla, como cualquier otro producto ya existente.
+          productoCreado = await api("/api/productos", {
+            method: "POST",
+            body: JSON.stringify({ codigo_interno: codigoInterno, categoria, modelo, marca }),
+          });
+          toast(`Producto "${productoCreado.nombre}" creado`);
+        }
+        pfrProductosCache = [...pfrProductosCache, productoCreado];
         // Re-renderiza la línea ya resuelta, sin perder cantidad/precio que
         // el usuario haya alcanzado a corregir en esta misma edición.
         const cantidadActual = div.querySelector(".pfr-linea-cantidad").value;
         const precioActual = div.querySelector(".pfr-linea-precio").value;
         const nuevaFila = filaLineaFacturaPendiente(
           pfrProductosCache,
-          { producto_id: data.producto.id, cantidad: cantidadActual, precio_unitario: precioActual },
+          { producto_id: productoCreado.id, cantidad: cantidadActual, precio_unitario: precioActual },
           ctx,
         );
         div.replaceWith(nuevaFila);
@@ -2133,7 +2152,10 @@ document.getElementById("btn-nueva-factura-pendiente").addEventListener("click",
     toast(e.message, true);
     return;
   }
-  document.getElementById("pfr-lineas").appendChild(filaLineaFacturaPendiente(pfrProductosCache));
+  // Sin línea vacía por defecto: se agrega buscando un producto arriba, o
+  // con "+ Agregar línea vacía" si hace falta describir uno nuevo -- antes
+  // siempre quedaba una fila vacía dando vueltas hasta el final aunque
+  // todo se hubiera cargado por el buscador.
   actualizarTotalFacturaPendiente();
   abrirModal("modal-factura-pendiente");
 });
@@ -2336,11 +2358,11 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
     const cantidad = fila.querySelector(".pfr-linea-cantidad").value;
     const precio_unitario = fila.querySelector(".pfr-linea-precio").value;
     if (valorSelect === "__nuevo__") {
-      // Producto que todavía no existe en el catálogo: Finanzas solo lo
-      // DESCRIBE (no lo crea, eso es exclusivo de Bodega -- ver hallazgo
-      // #3). La línea queda sin producto_id y la factura igual se guarda
-      // como pendiente; Bodega la completa después desde "Editar" (botón
-      // "Crear este producto en Logística").
+      // Producto que todavía no existe en el catálogo y no se creó al
+      // tiro con el botón "Crear este producto en Logística" de esta misma
+      // línea (ver filaLineaFacturaPendiente): queda solo descrito, sin
+      // producto_id, y la factura igual se guarda como pendiente -- se
+      // puede completar más adelante desde "Editar".
       const nombreNuevo = fila.querySelector(".pfr-linea-nombre-nuevo").value.trim();
       if (!nombreNuevo) {
         toast("Describe el producto en cada línea marcada como \"No está en el catálogo\" (o quítala)", true);

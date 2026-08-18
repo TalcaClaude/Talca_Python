@@ -803,7 +803,6 @@
       <h2 id="pfr-titulo">Registrar factura de compra</h2>
       <button class="modal-close" data-close="modal-factura-pendiente">&times;</button>
     </div>
-    <p class="ayuda-inline">Esto NO aplica stock ni genera la Cuenta por Pagar todavía — queda pendiente hasta que se apruebe la recepción contra lo que llegó físicamente.</p>
     <p class="ayuda-inline" id="pfr-aviso-origen" style="display:none"></p>
     <p class="ayuda-inline ayuda-inline--bloqueado" id="pfr-aviso-rechazo" style="display:none"></p>
     <img id="pfr-foto-whatsapp" src="" alt="Foto original de WhatsApp" style="display:none; max-width:220px; border-radius:8px; border:1px solid var(--borde); margin-bottom:12px">
@@ -830,14 +829,12 @@
         <input type="text" id="pfr-buscar-producto" placeholder="Busca por nombre, código o N°… (ej: 6f35 bomba)" autocomplete="off">
         <div class="autocomplete-resultados" id="pfr-producto-resultados" style="display:none"></div>
       </div>
-      <p class="ayuda-inline">Haz clic en un resultado para agregarlo a la factura — la lista se mantiene abierta para que puedas seguir agregando productos sin volver a escribir.</p>
       <div class="campo" id="pfr-marca-todas-wrap">
-        <label>Marca de los productos nuevos de esta factura</label>
+        <label>Marca de todos los productos nuevos (opcional, si son la misma)</label>
         <div class="campo-select-mas">
-          <input type="text" id="pfr-marca-todas" placeholder="Ej: BOSCH (déjalo vacío si esta factura trae varias marcas)">
-          <button type="button" class="btn-link" id="pfr-btn-aplicar-marca-todas">Aplicar a todos los productos nuevos</button>
+          <input type="text" id="pfr-marca-todas" placeholder="Ej: BOSCH">
+          <button type="button" class="btn-link" id="pfr-btn-aplicar-marca-todas">Aplicar a todos</button>
         </div>
-        <p class="ayuda-inline">Útil cuando toda la factura es de una sola marca: escribe la marca acá y aplícala a todas las líneas "Crear este producto" de una vez, en vez de repetirla línea por línea.</p>
       </div>
       <div id="pfr-lineas"></div>
       <button type="button" class="btn-link" id="pfr-agregar-linea">+ Agregar línea vacía</button>
@@ -850,7 +847,6 @@
         — IVA (19%): <strong id="pfr-total-iva">$0</strong>
         — Total: <strong id="pfr-total-vivo">$0</strong>
       </p>
-      <p class="ayuda-inline">El precio que escribes en cada línea es el valor NETO (sin IVA), tal como aparece en la factura del proveedor — el IVA y el total se calculan solos. La Cuenta por Pagar se genera por el total con IVA incluido, que es lo que realmente se le debe al proveedor.</p>
 
       <div id="pfr-seccion-condicion">
         <h3 class="subtitulo">Condición de pago</h3>

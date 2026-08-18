@@ -2039,7 +2039,7 @@ svg .chart-punto-hover {
 
 .fac-linea-row {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr auto;
+  grid-template-columns: 1.5fr 1.2fr 0.7fr 0.9fr auto;
   gap: 10px;
   align-items: end;
   margin-bottom: 10px;
@@ -2082,6 +2082,11 @@ svg .chart-punto-hover {
   cursor: pointer;
   font-size: 13px;
   height: fit-content;
+  /* Siempre en la última columna del grid, sin importar cuántos campos
+     tenga la fila antes (Repuesto/Gasto general tienen distinta cantidad
+     de campos, ver fac-linea-row) -- así el botón de quitar queda
+     consistentemente pegado al borde derecho en cualquier modo. */
+  grid-column: -1;
 }
 .fac-linea-quitar:hover { background: var(--danger-soft); }
 

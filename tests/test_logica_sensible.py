@@ -5154,6 +5154,93 @@ class TestFacturaNuevaVentana(unittest.TestCase):
         )
 
 
+class TestVerificarNumeroFactura(unittest.TestCase):
+    """GET /api/facturas/verificar-numero/<numero>: chequeo de duplicados
+    de solo lectura, pensado para el paso 1 del asistente de facturas
+    nuevas (ver 'fn-p1-siguiente' en factura_nueva.js) -- el taller pidió
+    explícitamente que el aviso de número repetido salga al pasar al
+    siguiente paso, no recién al final al intentar crear/terminar la
+    factura con todo ya cargado."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin = taller_app.app.test_client()
+        cls.admin.post("/login", data={"username": "admin", "password": "taller2026"})
+        cls._contador = 0
+
+    def _siguiente(self, prefijo):
+        type(self)._contador += 1
+        return f"{prefijo}-{type(self)._contador}"
+
+    def test_numero_que_no_existe_en_ningun_lado(self):
+        resp = self.admin.get(f"/api/facturas/verificar-numero/{self._siguiente('FACT-VER-LIBRE')}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.get_json()["existe"])
+
+    def test_numero_de_una_factura_ya_aplicada_se_marca_como_existente(self):
+        numero = self._siguiente("FACT-VER-APLICADA")
+        resp_crear = self.admin.post(
+            "/api/productos", json={"nombre": self._siguiente("Repuesto Verificar Numero"), "costo_compra": 0},
+        )
+        producto = resp_crear.get_json()
+        # Con todas las líneas ya resueltas (producto_id real, no texto por
+        # crear), _crear_pendiente_y_aplicar_si_posible la aprueba y aplica
+        # de inmediato al crearla -- no hace falta un /aprobar aparte acá.
+        resp_crear_pendiente = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp_crear_pendiente.status_code, 201, resp_crear_pendiente.get_data(as_text=True))
+        self.assertEqual(resp_crear_pendiente.get_json()["estado"], "aprobada")
+
+        resp = self.admin.get(f"/api/facturas/verificar-numero/{numero}")
+        self.assertEqual(resp.status_code, 200)
+        datos = resp.get_json()
+        self.assertTrue(datos["existe"])
+        self.assertIn(numero, datos["mensaje"])
+
+    def test_numero_de_un_pendiente_sin_resolver_tambien_se_marca_como_existente(self):
+        numero = self._siguiente("FACT-VER-PENDIENTE")
+        self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_nuevo_nombre": "Repuesto sin resolver aún", "cantidad": 1, "precio_unitario": 500}],
+                "condicion_pago": "credito",
+            },
+        )
+        resp = self.admin.get(f"/api/facturas/verificar-numero/{numero}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.get_json()["existe"])
+
+    def test_excluir_pendiente_id_no_se_marca_a_si_mismo_como_duplicado(self):
+        numero = self._siguiente("FACT-VER-PROPIO-BORRADOR")
+        pendiente = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_nuevo_nombre": "Repuesto de un borrador propio", "cantidad": 1, "precio_unitario": 500}],
+                "condicion_pago": "credito",
+            },
+        ).get_json()
+
+        resp_sin_excluir = self.admin.get(f"/api/facturas/verificar-numero/{numero}")
+        self.assertTrue(resp_sin_excluir.get_json()["existe"])
+
+        resp_excluyendo = self.admin.get(
+            f"/api/facturas/verificar-numero/{numero}?excluir_pendiente_id={pendiente['id']}"
+        )
+        self.assertFalse(resp_excluyendo.get_json()["existe"])
+
+
 class TestRolesYPermisos(unittest.TestCase):
     """Los roles (admin/finanzas/bodega/operativo — ver ROLES_VALIDOS en
     core.py) no son solo cosméticos: los endpoints sensibles rechazan la

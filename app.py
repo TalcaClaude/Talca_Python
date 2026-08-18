@@ -4102,6 +4102,47 @@ def obtener_factura_por_numero(numero):
     return jsonify(_factura_detalle(db, row))
 
 
+@app.route("/api/facturas/verificar-numero/<path:numero>", methods=["GET"])
+@requiere_rol("finanzas", "bodega")
+def verificar_numero_factura(numero):
+    """Chequeo liviano (solo lectura, sin lock) de duplicados por número,
+    pensado para avisar apenas se ingresa el número en el paso 1 del
+    asistente de facturas nuevas (/facturas/nueva) -- antes esto solo se
+    detectaba al final, al intentar crear/aplicar la factura con los tres
+    pasos ya llenos, lo que obligaba a rehacer todo el trabajo si el
+    número resultaba repetido. Mismo criterio de duplicado que
+    _crear_pendiente_recepcion (factura ya aplicada, o pendiente sin
+    resolver con el mismo número) -- la validación real y con lock sigue
+    ocurriendo ahí, esto es solo para avisar temprano.
+
+    'excluir_pendiente_id' se usa al editar un borrador ya guardado, para
+    que no se marque a sí mismo como duplicado de sí mismo.
+    """
+    db = get_db()
+    numero_norm = (numero or "").strip().upper()
+    excluir_pendiente_id = request.args.get("excluir_pendiente_id", type=int)
+    if not numero_norm:
+        return jsonify({"existe": False})
+    existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero_norm,)).fetchone()
+    if existe:
+        return jsonify({
+            "existe": True,
+            "mensaje": f"Ya existe una factura registrada con el número '{numero_norm}'",
+        })
+    query = "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente'"
+    params = [numero_norm]
+    if excluir_pendiente_id:
+        query += " AND id != ?"
+        params.append(excluir_pendiente_id)
+    ya_pendiente = db.execute(query, params).fetchone()
+    if ya_pendiente:
+        return jsonify({
+            "existe": True,
+            "mensaje": f"Ya hay una factura pendiente de recepción con el número '{numero_norm}'",
+        })
+    return jsonify({"existe": False})
+
+
 # NOTA: el registro manual "rápido" de una factura (POST /api/facturas, con
 # aplicación de stock inmediata y sin pasar por aprobación de Bodega) se
 # eliminó — el taller pidió unificar todo bajo "pendientes de recepción"

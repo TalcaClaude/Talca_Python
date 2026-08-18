@@ -146,13 +146,27 @@ function mostrarPaso(n) {
   if (n === 3) actualizarTotalesPaso3();
 }
 
-document.getElementById("fn-p1-siguiente").addEventListener("click", () => {
+document.getElementById("fn-p1-siguiente").addEventListener("click", async () => {
   const numero = document.getElementById("fn-numero").value.trim();
   if (!numero) {
     toast("Ingresa el número de la factura antes de seguir", true);
     return;
   }
-  mostrarPaso(2);
+  const btn = document.getElementById("fn-p1-siguiente");
+  btn.disabled = true;
+  try {
+    const params = state.pendienteId != null ? `?excluir_pendiente_id=${state.pendienteId}` : "";
+    const check = await api(`/api/facturas/verificar-numero/${encodeURIComponent(numero)}${params}`);
+    if (check.existe) {
+      toast(check.mensaje, true);
+      return;
+    }
+    mostrarPaso(2);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
 });
 document.getElementById("fn-p2-atras").addEventListener("click", () => mostrarPaso(1));
 document.getElementById("fn-p2-siguiente").addEventListener("click", () => {
@@ -281,29 +295,28 @@ function filaLineaFacturaNueva(productos, linea) {
   if (esGastoGeneralAlAbrir) modoInicial = "gasto_general";
   else if (esOtAlAbrir) modoInicial = "producto_ot";
 
-  // Agrupados por repuesto (categoría + modelo) para que el select siempre
-  // muestre, juntas, todas las marcas ya cargadas de ese repuesto -- más
-  // una opción "+ Nueva marca" dentro del mismo grupo (ver
-  // agruparProductosPorRepuesto arriba). 'gruposNuevaMarca' guarda, por
-  // índice, a qué categoría/modelo corresponde cada opción "+ Nueva
-  // marca" -- se arma acá mismo para que el handler de "change" de más
-  // abajo (mismo closure) sepa qué precargar sin tener que codificarlo en
-  // el value de la opción.
+  // Agrupados por repuesto (categoría + modelo, ver agruparProductosPorRepuesto
+  // arriba) -- el select de "Producto" elige el REPUESTO (una sola opción
+  // por categoría+modelo, sin importar cuántas marcas tenga cargadas), y un
+  // segundo select de "Marca" (que aparece al lado, ver poblarSelectMarca
+  // más abajo) es el que elige entre las marcas ya cargadas de ESE
+  // repuesto en particular. 'grupos' queda en el closure para que ambos
+  // selects (y sus handlers de "change") lo puedan indexar por posición.
   const { grupos, sueltos } = agruparProductosPorRepuesto(productos);
-  const gruposNuevaMarca = [];
   const optionsSueltos = sueltos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("");
-  const optionsGrupos = grupos.map(g => {
-    const idx = gruposNuevaMarca.push(g) - 1;
-    const variantes = g.variantes
+  const optionsGrupos = grupos.map((g, idx) =>
+    `<option value="__grupo__:${idx}">${escapeHtml(g.categoria)} — ${escapeHtml(g.modelo)}</option>`
+  ).join("");
+
+  function opcionesMarca(idxGrupo) {
+    const g = grupos[idxGrupo];
+    if (!g) return "";
+    return g.variantes
       .slice()
       .sort((a, b) => (a.marca || "").localeCompare(b.marca || ""))
       .map(p => `<option value="${p.id}">${escapeHtml(p.marca) || "(sin marca)"} — ${fmtMoney(p.costo_compra)} (stock: ${p.stock_disponible})</option>`)
       .join("");
-    return `<optgroup label="${escapeHtml(g.categoria)} — ${escapeHtml(g.modelo)}">
-      ${variantes}
-      <option value="__nueva_marca__:${idx}">+ Nueva marca de este repuesto…</option>
-    </optgroup>`;
-  }).join("");
+  }
 
   div.innerHTML = `
     <div class="pfr-linea-modo-campo" style="grid-column:1/-1;margin-bottom:6px">
@@ -324,27 +337,25 @@ function filaLineaFacturaNueva(productos, linea) {
       <div class="campo">
         <label>Producto</label>
         <select class="fn-linea-producto-id">
-          <option value="">Selecciona un producto…</option>
-          <option value="__nuevo__">✏️ Repuesto nuevo (no está en el catálogo) — crear ahora</option>
+          <option value="">Selecciona un repuesto…</option>
           ${optionsSueltos}
           ${optionsGrupos}
         </select>
-        <p class="ayuda-inline fn-linea-marca-hint" style="display:none;margin:6px 0 0"></p>
+        <button type="button" class="btn-link fn-linea-btn-nuevo-repuesto">+ Repuesto nuevo (no está en el catálogo)</button>
+        <input type="hidden" class="fn-linea-producto-final-id" value="">
         <input type="text" class="fn-linea-nombre-nuevo" placeholder="¿Qué producto es? (ej. Kit de embrague ABC 2020)"
                style="display:none;margin-top:6px"
                value="${linea && linea.texto_original ? escapeHtml(linea.texto_original) : ""}">
         <button type="button" class="btn btn-secundario btn-chico fn-linea-crear-producto" style="display:none;margin-top:6px">
           Crear este producto
         </button>
-        <div class="fn-linea-crear-form" style="display:none;margin-top:6px">
-          <input type="text" class="fn-crear-categoria" placeholder="Modelo (ej. JF010)" style="margin-bottom:4px">
-          <input type="text" class="fn-crear-modelo" placeholder="Detalle (ej. Pulley Set)" style="margin-bottom:4px">
-          <input type="text" class="fn-crear-marca" placeholder="Marca (ej. BOSCH — obligatoria; si no tiene, escribe GENÉRICA)"
-                 value="${document.getElementById("fn-marca-todas") ? escapeHtml(document.getElementById("fn-marca-todas").value.trim()) : ""}" style="margin-bottom:4px">
-          <p class="ayuda-inline fn-crear-marca-hint" style="display:none;margin:0 0 6px"></p>
-          <input type="text" class="fn-crear-codigo-interno" placeholder="Código interno / N° de parte del fabricante" style="margin-bottom:4px">
-          <button type="button" class="btn btn-primary btn-chico fn-crear-confirmar">Crear y usar</button>
-        </div>
+      </div>
+      <div class="campo fn-linea-marca-campo">
+        <label>Marca</label>
+        <select class="fn-linea-marca-id" disabled>
+          <option value="">— elige un repuesto primero —</option>
+        </select>
+        <button type="button" class="btn-link fn-linea-btn-nueva-marca" style="display:none">+ Nueva marca de este repuesto…</button>
       </div>
       <div class="campo">
         <label>Cantidad</label>
@@ -353,6 +364,16 @@ function filaLineaFacturaNueva(productos, linea) {
       <div class="campo">
         <label>Precio unit. ($ CLP)</label>
         <input type="number" class="fn-linea-precio" min="0" step="1" value="${linea && linea.precio_unitario != null ? linea.precio_unitario : 0}">
+      </div>
+      <div class="fn-linea-crear-form" style="display:none;margin-top:6px;grid-column:1/-1">
+        <p class="ayuda-inline fn-linea-marca-hint" style="display:none;margin:0 0 6px"></p>
+        <input type="text" class="fn-crear-categoria" placeholder="Modelo (ej. JF010)" style="margin-bottom:4px">
+        <input type="text" class="fn-crear-modelo" placeholder="Detalle (ej. Pulley Set)" style="margin-bottom:4px">
+        <input type="text" class="fn-crear-marca" placeholder="Marca (ej. BOSCH — obligatoria; si no tiene, escribe GENÉRICA)"
+               value="${document.getElementById("fn-marca-todas") ? escapeHtml(document.getElementById("fn-marca-todas").value.trim()) : ""}" style="margin-bottom:4px">
+        <p class="ayuda-inline fn-crear-marca-hint" style="display:none;margin:0 0 6px"></p>
+        <input type="text" class="fn-crear-codigo-interno" placeholder="Código interno / N° de parte del fabricante" style="margin-bottom:4px">
+        <button type="button" class="btn btn-primary btn-chico fn-crear-confirmar">Crear y usar</button>
       </div>
       <div class="campo fn-modo-ot-extra" style="display:${modoInicial === "producto_ot" ? "block" : "none"};grid-column:1/-1">
         <label>N° de orden de trabajo</label>
@@ -385,6 +406,10 @@ function filaLineaFacturaNueva(productos, linea) {
   `;
 
   const select = div.querySelector(".fn-linea-producto-id");
+  const selectMarca = div.querySelector(".fn-linea-marca-id");
+  const btnNuevoRepuesto = div.querySelector(".fn-linea-btn-nuevo-repuesto");
+  const btnNuevaMarca = div.querySelector(".fn-linea-btn-nueva-marca");
+  const finalId = div.querySelector(".fn-linea-producto-final-id");
   const inputNombreNuevo = div.querySelector(".fn-linea-nombre-nuevo");
   const btnCrear = div.querySelector(".fn-linea-crear-producto");
   const formCrear = div.querySelector(".fn-linea-crear-form");
@@ -399,35 +424,86 @@ function filaLineaFacturaNueva(productos, linea) {
   const bloqueGG = div.querySelector(".fn-modo-gasto-general");
   const bloqueOtExtra = div.querySelector(".fn-modo-ot-extra");
 
-  function sincronizarVisibilidadProducto() {
+  // El repuesto (categoría+modelo) y la marca de ESE repuesto ahora se
+  // eligen en dos selects separados -- "Producto" primero, y recién ahí
+  // "Marca" se llena con las marcas ya cargadas de ese repuesto en
+  // particular (más el botón "+ Nueva marca" debajo). El id de producto
+  // que de verdad se manda al guardar queda en el input oculto
+  // 'fn-linea-producto-final-id', porque el value del select "Producto"
+  // ahora es un índice sintético (__grupo__:N) cuando agrupa varias
+  // marcas, no un id real.
+  function poblarSelectMarca(idxGrupo) {
+    selectMarca.innerHTML = '<option value="">Selecciona una marca…</option>' + opcionesMarca(idxGrupo);
+  }
+
+  function ocultarFormularioCrear() {
+    inputNombreNuevo.style.display = "none";
+    btnCrear.style.display = "none";
+    formCrear.style.display = "none";
+    marcaHint.style.display = "none";
+    inputCrearCategoria.readOnly = false;
+    inputCrearModelo.readOnly = false;
+  }
+
+  function sincronizarSeleccionProducto() {
     const valor = select.value;
-    const esNuevoTotal = valor === "__nuevo__";
-    const esNuevaMarca = valor.startsWith("__nueva_marca__:");
-    inputNombreNuevo.style.display = esNuevoTotal ? "block" : "none";
-    btnCrear.style.display = esNuevoTotal ? "inline-block" : "none";
-    if (esNuevaMarca) {
-      // Repuesto que ya existe (categoría/modelo ya identificados por el
-      // grupo elegido) pero con una marca todavía no cargada -- se salta
-      // directo al formulario de creación, con categoría/modelo ya fijos
-      // (de solo lectura: no hace falta volver a tipearlos) y el foco
-      // puesto en lo único que de verdad falta: la marca (y, si quiere,
-      // el código interno).
+    ocultarFormularioCrear();
+    btnNuevaMarca.style.display = "none";
+    if (valor.startsWith("__grupo__:")) {
       const idx = parseInt(valor.split(":")[1], 10);
-      const grupo = gruposNuevaMarca[idx];
-      inputCrearCategoria.value = grupo ? grupo.categoria : "";
-      inputCrearModelo.value = grupo ? grupo.modelo : "";
-      inputCrearCategoria.readOnly = true;
-      inputCrearModelo.readOnly = true;
-      formCrear.style.display = "block";
-      marcaHint.textContent = `Nueva marca para "${grupo ? `${grupo.categoria} — ${grupo.modelo}` : "este repuesto"}" -- especifica la marca de esta compra en particular.`;
-      marcaHint.style.display = "block";
-      inputCrearMarca.focus();
+      poblarSelectMarca(idx);
+      selectMarca.disabled = false;
+      selectMarca.value = "";
+      btnNuevaMarca.style.display = "inline-block";
+      finalId.value = "";
     } else {
-      inputCrearCategoria.readOnly = false;
-      inputCrearModelo.readOnly = false;
-      marcaHint.style.display = "none";
-      if (!esNuevoTotal) formCrear.style.display = "none";
+      selectMarca.innerHTML = '<option value="">— elige un repuesto primero —</option>';
+      selectMarca.disabled = true;
+      finalId.value = valor; // "" o el id de un producto suelto (sin categoría/modelo)
     }
+  }
+
+  function abrirNuevoRepuesto() {
+    // Puede llegar acá justo después de haber abierto "+ Nueva marca" (que
+    // deja categoría/modelo de solo lectura, precargados con el repuesto
+    // elegido) -- para un repuesto de verdad nuevo esos dos campos tienen
+    // que quedar libres para escribirse desde cero. Si ya estaba en este
+    // mismo modo, no se pisa lo que el usuario ya haya escrito.
+    if (finalId.value !== "__nuevo__") {
+      inputCrearCategoria.value = "";
+      inputCrearModelo.value = "";
+    }
+    inputCrearCategoria.readOnly = false;
+    inputCrearModelo.readOnly = false;
+    select.value = "";
+    selectMarca.innerHTML = '<option value="">— elige un repuesto primero —</option>';
+    selectMarca.disabled = true;
+    btnNuevaMarca.style.display = "none";
+    finalId.value = "__nuevo__";
+    inputNombreNuevo.style.display = "block";
+    btnCrear.style.display = "inline-block";
+  }
+
+  function abrirNuevaMarca() {
+    const valor = select.value;
+    if (!valor.startsWith("__grupo__:")) return;
+    const idx = parseInt(valor.split(":")[1], 10);
+    const g = grupos[idx];
+    // Repuesto que ya existe (categoría/modelo ya identificados por el
+    // repuesto elegido) pero con una marca todavía no cargada -- se salta
+    // directo al formulario de creación, con categoría/modelo ya fijos (de
+    // solo lectura: no hace falta volver a tipearlos) y el foco puesto en
+    // lo único que de verdad falta: la marca (y, si quiere, el código
+    // interno).
+    inputCrearCategoria.value = g ? g.categoria : "";
+    inputCrearModelo.value = g ? g.modelo : "";
+    inputCrearCategoria.readOnly = true;
+    inputCrearModelo.readOnly = true;
+    formCrear.style.display = "block";
+    marcaHint.textContent = `Nueva marca para "${g ? `${g.categoria} — ${g.modelo}` : "este repuesto"}" -- especifica la marca de esta compra en particular.`;
+    marcaHint.style.display = "block";
+    finalId.value = "__pendiente_nueva_marca__";
+    inputCrearMarca.focus();
   }
 
   function sincronizarModo() {
@@ -439,14 +515,29 @@ function filaLineaFacturaNueva(productos, linea) {
     actualizarTotalFacturaNueva();
   }
 
-  if (linea && linea.producto_id) {
-    select.value = linea.producto_id;
+  if (linea && linea.producto_id != null) {
+    const idxGrupo = grupos.findIndex(g => g.variantes.some(v => Number(v.id) === Number(linea.producto_id)));
+    if (idxGrupo >= 0) {
+      select.value = `__grupo__:${idxGrupo}`;
+      poblarSelectMarca(idxGrupo);
+      selectMarca.disabled = false;
+      selectMarca.value = linea.producto_id;
+      btnNuevaMarca.style.display = "inline-block";
+      finalId.value = linea.producto_id;
+    } else {
+      select.value = linea.producto_id;
+      finalId.value = linea.producto_id;
+    }
   } else if (sinResolverAlAbrir) {
-    select.value = "__nuevo__";
+    abrirNuevoRepuesto();
+  } else {
+    sincronizarSeleccionProducto();
   }
-  sincronizarVisibilidadProducto();
 
-  select.addEventListener("change", sincronizarVisibilidadProducto);
+  select.addEventListener("change", sincronizarSeleccionProducto);
+  selectMarca.addEventListener("change", () => { finalId.value = selectMarca.value; });
+  btnNuevoRepuesto.addEventListener("click", abrirNuevoRepuesto);
+  btnNuevaMarca.addEventListener("click", abrirNuevaMarca);
   radioProducto.addEventListener("change", sincronizarModo);
   radioOt.addEventListener("change", sincronizarModo);
   radioGG.addEventListener("change", sincronizarModo);
@@ -607,7 +698,7 @@ function renderResultadosFn(texto) {
 
 function agregarLineaDesdeAutocomplete(producto) {
   const filaExistente = Array.from(document.querySelectorAll("#fn-lineas .fac-linea-row"))
-    .find(fila => parseInt(fila.querySelector(".fn-linea-producto-id").value, 10) === producto.id);
+    .find(fila => parseInt(fila.querySelector(".fn-linea-producto-final-id").value, 10) === producto.id);
   if (filaExistente) {
     const inputCantidad = filaExistente.querySelector(".fn-linea-cantidad");
     inputCantidad.value = (parseFloat(inputCantidad.value) || 0) + 1;
@@ -703,7 +794,7 @@ function leerLineasDesdePantalla() {
       lineas.push({ es_gasto_general: true, descripcion, rubro_gav, monto });
       continue;
     }
-    const valorSelect = fila.querySelector(".fn-linea-producto-id").value;
+    const valorSelect = fila.querySelector(".fn-linea-producto-final-id").value;
     const cantidad = fila.querySelector(".fn-linea-cantidad").value;
     const precio_unitario = fila.querySelector(".fn-linea-precio").value;
     const esOt = fila.querySelector(".fn-linea-modo-ot").checked;
@@ -718,13 +809,13 @@ function leerLineasDesdePantalla() {
       const nombreNuevo = fila.querySelector(".fn-linea-nombre-nuevo").value.trim();
       if (!nombreNuevo) return { error: 'Describe el producto en cada línea marcada como "No está en el catálogo" (o crea el producto con el botón, o quita la línea)' };
       lineas.push({ producto_nuevo_nombre: nombreNuevo, cantidad, precio_unitario, ...extraDestino });
-    } else if (valorSelect.startsWith("__nueva_marca__:")) {
+    } else if (valorSelect === "__pendiente_nueva_marca__") {
       // Eligió "+ Nueva marca de este repuesto" pero todavía no la creó
       // con el botón "Crear y usar" -- ese valor sintético no es un
       // producto_id real, no se puede mandar tal cual.
       return { error: 'Termina de crear la marca nueva en cada línea marcada así (botón "Crear y usar"), o quita la línea' };
     } else if (!valorSelect) {
-      return { error: "Selecciona un producto en cada línea (o quítala)" };
+      return { error: "Selecciona un producto (y su marca) en cada línea, o quítala" };
     } else {
       lineas.push({ producto_id: valorSelect, cantidad, precio_unitario, ...extraDestino });
     }

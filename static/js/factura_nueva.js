@@ -103,6 +103,38 @@ function optionsRubroGavFactura(valorActual) {
 }
 
 // ---------------------------------------------------------------------------
+// Un mismo repuesto (categoría + modelo) puede tener varias marcas -- cada
+// marca es un producto propio en el catálogo, con su propio stock y su
+// propio precio (ej. "FRICTION KIT — 01J" en BOSCH y en GENÉRICA son dos
+// productos distintos, ver marca en _crear_producto_desde_datos en
+// app.py). Acá se agrupan solo para MOSTRARLOS juntos al armar la
+// factura -- así, al elegir un repuesto que ya existe, siempre se
+// pregunta explícitamente de qué marca es esta compra (con las marcas ya
+// cargadas + la opción de agregar una nueva), en vez de asumir cualquiera.
+// Productos sin categoría/modelo (ej. creados solo con "nombre") quedan
+// sueltos, sin agrupar.
+// ---------------------------------------------------------------------------
+
+function agruparProductosPorRepuesto(productos) {
+  const grupos = new Map();
+  const sueltos = [];
+  for (const p of productos) {
+    const categoria = (p.categoria || "").trim();
+    const modelo = (p.modelo || "").trim();
+    if (!categoria && !modelo) {
+      sueltos.push(p);
+      continue;
+    }
+    const clave = `${categoria.toLowerCase()}|||${modelo.toLowerCase()}`;
+    if (!grupos.has(clave)) grupos.set(clave, { categoria, modelo, variantes: [] });
+    grupos.get(clave).variantes.push(p);
+  }
+  const listaGrupos = Array.from(grupos.values()).sort((a, b) =>
+    (a.categoria + a.modelo).localeCompare(b.categoria + b.modelo));
+  return { grupos: listaGrupos, sueltos };
+}
+
+// ---------------------------------------------------------------------------
 // Navegación por pasos
 // ---------------------------------------------------------------------------
 
@@ -249,6 +281,30 @@ function filaLineaFacturaNueva(productos, linea) {
   if (esGastoGeneralAlAbrir) modoInicial = "gasto_general";
   else if (esOtAlAbrir) modoInicial = "producto_ot";
 
+  // Agrupados por repuesto (categoría + modelo) para que el select siempre
+  // muestre, juntas, todas las marcas ya cargadas de ese repuesto -- más
+  // una opción "+ Nueva marca" dentro del mismo grupo (ver
+  // agruparProductosPorRepuesto arriba). 'gruposNuevaMarca' guarda, por
+  // índice, a qué categoría/modelo corresponde cada opción "+ Nueva
+  // marca" -- se arma acá mismo para que el handler de "change" de más
+  // abajo (mismo closure) sepa qué precargar sin tener que codificarlo en
+  // el value de la opción.
+  const { grupos, sueltos } = agruparProductosPorRepuesto(productos);
+  const gruposNuevaMarca = [];
+  const optionsSueltos = sueltos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("");
+  const optionsGrupos = grupos.map(g => {
+    const idx = gruposNuevaMarca.push(g) - 1;
+    const variantes = g.variantes
+      .slice()
+      .sort((a, b) => (a.marca || "").localeCompare(b.marca || ""))
+      .map(p => `<option value="${p.id}">${escapeHtml(p.marca) || "(sin marca)"} — ${fmtMoney(p.costo_compra)} (stock: ${p.stock_disponible})</option>`)
+      .join("");
+    return `<optgroup label="${escapeHtml(g.categoria)} — ${escapeHtml(g.modelo)}">
+      ${variantes}
+      <option value="__nueva_marca__:${idx}">+ Nueva marca de este repuesto…</option>
+    </optgroup>`;
+  }).join("");
+
   div.innerHTML = `
     <div class="pfr-linea-modo-campo" style="grid-column:1/-1;margin-bottom:6px">
       <label class="toggle-critico">
@@ -269,9 +325,11 @@ function filaLineaFacturaNueva(productos, linea) {
         <label>Producto</label>
         <select class="fn-linea-producto-id">
           <option value="">Selecciona un producto…</option>
-          <option value="__nuevo__">✏️ No está en el catálogo — crear ahora</option>
-          ${productos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("")}
+          <option value="__nuevo__">✏️ Repuesto nuevo (no está en el catálogo) — crear ahora</option>
+          ${optionsSueltos}
+          ${optionsGrupos}
         </select>
+        <p class="ayuda-inline fn-linea-marca-hint" style="display:none;margin:6px 0 0"></p>
         <input type="text" class="fn-linea-nombre-nuevo" placeholder="¿Qué producto es? (ej. Kit de embrague ABC 2020)"
                style="display:none;margin-top:6px"
                value="${linea && linea.texto_original ? escapeHtml(linea.texto_original) : ""}">
@@ -330,6 +388,10 @@ function filaLineaFacturaNueva(productos, linea) {
   const inputNombreNuevo = div.querySelector(".fn-linea-nombre-nuevo");
   const btnCrear = div.querySelector(".fn-linea-crear-producto");
   const formCrear = div.querySelector(".fn-linea-crear-form");
+  const marcaHint = div.querySelector(".fn-linea-marca-hint");
+  const inputCrearCategoria = div.querySelector(".fn-crear-categoria");
+  const inputCrearModelo = div.querySelector(".fn-crear-modelo");
+  const inputCrearMarca = div.querySelector(".fn-crear-marca");
   const radioProducto = div.querySelector(".fn-linea-modo-producto");
   const radioOt = div.querySelector(".fn-linea-modo-ot");
   const radioGG = div.querySelector(".fn-linea-modo-gg");
@@ -338,10 +400,34 @@ function filaLineaFacturaNueva(productos, linea) {
   const bloqueOtExtra = div.querySelector(".fn-modo-ot-extra");
 
   function sincronizarVisibilidadProducto() {
-    const esNuevo = select.value === "__nuevo__";
-    inputNombreNuevo.style.display = esNuevo ? "block" : "none";
-    btnCrear.style.display = esNuevo ? "inline-block" : "none";
-    if (!esNuevo) formCrear.style.display = "none";
+    const valor = select.value;
+    const esNuevoTotal = valor === "__nuevo__";
+    const esNuevaMarca = valor.startsWith("__nueva_marca__:");
+    inputNombreNuevo.style.display = esNuevoTotal ? "block" : "none";
+    btnCrear.style.display = esNuevoTotal ? "inline-block" : "none";
+    if (esNuevaMarca) {
+      // Repuesto que ya existe (categoría/modelo ya identificados por el
+      // grupo elegido) pero con una marca todavía no cargada -- se salta
+      // directo al formulario de creación, con categoría/modelo ya fijos
+      // (de solo lectura: no hace falta volver a tipearlos) y el foco
+      // puesto en lo único que de verdad falta: la marca (y, si quiere,
+      // el código interno).
+      const idx = parseInt(valor.split(":")[1], 10);
+      const grupo = gruposNuevaMarca[idx];
+      inputCrearCategoria.value = grupo ? grupo.categoria : "";
+      inputCrearModelo.value = grupo ? grupo.modelo : "";
+      inputCrearCategoria.readOnly = true;
+      inputCrearModelo.readOnly = true;
+      formCrear.style.display = "block";
+      marcaHint.textContent = `Nueva marca para "${grupo ? `${grupo.categoria} — ${grupo.modelo}` : "este repuesto"}" -- especifica la marca de esta compra en particular.`;
+      marcaHint.style.display = "block";
+      inputCrearMarca.focus();
+    } else {
+      inputCrearCategoria.readOnly = false;
+      inputCrearModelo.readOnly = false;
+      marcaHint.style.display = "none";
+      if (!esNuevoTotal) formCrear.style.display = "none";
+    }
   }
 
   function sincronizarModo() {
@@ -506,7 +592,7 @@ function renderResultadosFn(texto) {
   resultados.innerHTML = coincidencias.map(p => `
     <div class="autocomplete-item" data-id="${p.id}">
       #${escapeHtml(p.id_sistema)} — ${escapeHtml(p.nombre)}
-      <span class="autocomplete-item-meta">Stock: ${p.stock_disponible}</span>
+      <span class="autocomplete-item-meta">Marca: ${p.marca ? escapeHtml(p.marca) : "—"} · Stock: ${p.stock_disponible}</span>
     </div>
   `).join("");
   resultados.style.display = "block";
@@ -632,6 +718,11 @@ function leerLineasDesdePantalla() {
       const nombreNuevo = fila.querySelector(".fn-linea-nombre-nuevo").value.trim();
       if (!nombreNuevo) return { error: 'Describe el producto en cada línea marcada como "No está en el catálogo" (o crea el producto con el botón, o quita la línea)' };
       lineas.push({ producto_nuevo_nombre: nombreNuevo, cantidad, precio_unitario, ...extraDestino });
+    } else if (valorSelect.startsWith("__nueva_marca__:")) {
+      // Eligió "+ Nueva marca de este repuesto" pero todavía no la creó
+      // con el botón "Crear y usar" -- ese valor sintético no es un
+      // producto_id real, no se puede mandar tal cual.
+      return { error: 'Termina de crear la marca nueva en cada línea marcada así (botón "Crear y usar"), o quita la línea' };
     } else if (!valorSelect) {
       return { error: "Selecciona un producto en cada línea (o quítala)" };
     } else {

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario Taller — Nueva factura</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+{% include "_tema.html" %}
+<link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
+{% include "_csrf.html" %}
+</head>
+<body>
+<div class="shell">
+{% include "_sidebar.html" %}
+<div class="shell-main">
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-tag">04</span>
+      <div class="brand-text">
+        <h1>Inventario<span>Taller</span></h1>
+        <p class="brand-sub">Nueva factura de compra</p>
+      </div>
+    </div>
+    <div class="topbar-acciones">
+      <span class="sesion-usuario" id="sesion-usuario"></span>
+      <button type="button" class="btn btn-secundario" id="fn-btn-salir">← Volver a Facturas</button>
+      <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+    </div>
+  </header>
+
+  <nav class="tabs" id="fn-pasos">
+    <button class="tab activo" data-paso="1" disabled>1. Datos</button>
+    <button class="tab" data-paso="2" disabled>2. Productos</button>
+    <button class="tab" data-paso="3" disabled>3. Pago y término</button>
+  </nav>
+
+  <!-- Paso 1: numero / proveedor / fecha -->
+  <section class="vista" id="fn-paso-1">
+    <div class="grid-3">
+      <div class="campo">
+        <label>N° de factura *</label>
+        <input type="text" id="fn-numero" required placeholder="Ej: F-1023">
+      </div>
+      <div class="campo">
+        <label>Proveedor</label>
+        <div class="campo-select-mas">
+          <select id="fn-proveedor-id"><option value="">Sin proveedor</option></select>
+          <button type="button" class="btn-link" id="fn-btn-nuevo-proveedor">+ Nuevo proveedor</button>
+        </div>
+      </div>
+      <div class="campo">
+        <label>Fecha</label>
+        <input type="date" id="fn-fecha">
+      </div>
+    </div>
+
+    <div id="fn-nuevo-proveedor-form" style="display:none">
+      <h3 class="subtitulo">Proveedor nuevo</h3>
+      <div class="grid-3">
+        <div class="campo"><label>Nombre *</label><input type="text" id="fn-prov-nombre" placeholder="Ej: Repuestos ABC"></div>
+        <div class="campo"><label>RUT</label><input type="text" id="fn-prov-rut" placeholder="Opcional"></div>
+        <div class="campo"><label>Teléfono</label><input type="text" id="fn-prov-telefono" placeholder="Opcional"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" id="fn-prov-cancelar">Cancelar</button>
+        <button type="button" class="btn btn-primary" id="fn-prov-guardar">Crear proveedor</button>
+      </div>
+    </div>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" id="fn-p1-salir">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="fn-p1-siguiente">Siguiente →</button>
+    </div>
+  </section>
+
+  <!-- Paso 2: productos -->
+  <section class="vista" id="fn-paso-2" style="display:none">
+    <div class="campo campo-autocomplete" id="fn-campo-buscar-producto">
+      <label>Buscar producto para agregar</label>
+      <input type="text" id="fn-buscar-producto" placeholder="Busca por nombre, código o N°… (ej: 6f35 bomba)" autocomplete="off">
+      <div class="autocomplete-resultados" id="fn-producto-resultados" style="display:none"></div>
+    </div>
+    <div class="campo" id="fn-marca-todas-wrap">
+      <label>Marca de todos los productos nuevos (opcional, si son la misma)</label>
+      <div class="campo-select-mas">
+        <input type="text" id="fn-marca-todas" placeholder="Ej: BOSCH">
+        <button type="button" class="btn-link" id="fn-btn-aplicar-marca-todas">Aplicar a todos</button>
+      </div>
+    </div>
+    <div id="fn-lineas"></div>
+    <button type="button" class="btn-link" id="fn-agregar-linea">+ Agregar línea vacía</button>
+
+    <label class="toggle-critico" style="margin-top:8px">
+      <input type="checkbox" id="fn-exento-iva"> Esta factura es exenta de IVA (no le corresponde el 19%)
+    </label>
+    <p class="fac-total-linea">
+      Neto: <strong id="fn-total-neto">$0</strong>
+      — IVA (19%): <strong id="fn-total-iva">$0</strong>
+      — Total: <strong id="fn-total-vivo">$0</strong>
+    </p>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" id="fn-p2-atras">← Atrás</button>
+      <button type="button" class="btn btn-primary" id="fn-p2-siguiente">Siguiente →</button>
+    </div>
+  </section>
+
+  <!-- Paso 3: condición de pago + término -->
+  <section class="vista" id="fn-paso-3" style="display:none">
+    <h3 class="subtitulo">Condición de pago</h3>
+    <div class="grid-3">
+      <label class="toggle-critico"><input type="radio" name="fn-condicion" value="contado"> Al contado</label>
+      <label class="toggle-critico"><input type="radio" name="fn-condicion" value="credito" checked> A crédito</label>
+      <label class="toggle-critico"><input type="radio" name="fn-condicion" value="mixto"> Mixto</label>
+    </div>
+    <div class="grid-2" id="fn-campos-mixto" style="display:none">
+      <div class="campo">
+        <label>% al contado</label>
+        <input type="number" id="fn-porcentaje-contado" min="1" max="99" value="50">
+      </div>
+    </div>
+    <div class="grid-2" id="fn-campos-credito">
+      <div class="campo">
+        <label>Plazo de crédito (días)</label>
+        <input type="number" id="fn-plazo-dias" min="1" value="30">
+      </div>
+      <div class="campo">
+        <label>&nbsp;</label>
+        <div class="pfr-plazos-rapidos">
+          <button type="button" class="btn btn-secundario" data-plazo="30">30 días</button>
+          <button type="button" class="btn btn-secundario" data-plazo="60">60 días</button>
+          <button type="button" class="btn btn-secundario" data-plazo="90">90 días</button>
+        </div>
+      </div>
+    </div>
+
+    <p class="fac-total-linea">
+      Neto: <strong id="fn-total-neto-p3">$0</strong>
+      — IVA: <strong id="fn-total-iva-p3">$0</strong>
+      — Total: <strong id="fn-total-vivo-p3">$0</strong>
+    </p>
+
+    <div class="modal-actions" style="flex-wrap:wrap">
+      <button type="button" class="btn btn-secundario" id="fn-p3-atras">← Atrás</button>
+      <button type="button" class="btn btn-secundario" id="fn-p3-guardar-despues">Guardar para continuar más adelante</button>
+      <button type="button" class="btn btn-primary" id="fn-p3-terminar">Terminar factura</button>
+    </div>
+  </section>
+
+</div>
+
+</div>
+</div>
+
+<!-- Modal: confirmar salida a medio camino -->
+<div class="modal-overlay" id="modal-fn-cerrar">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>¿Salir sin terminar la factura?</h2>
+    </div>
+    <p class="ayuda-inline">Todavía no terminaste de registrar esta factura. ¿Qué quieres hacer?</p>
+    <div class="modal-actions" style="flex-wrap:wrap">
+      <button type="button" class="btn btn-secundario" id="fn-cerrar-cancelar">Cancelar (seguir editando)</button>
+      <button type="button" class="btn btn-danger" id="fn-cerrar-descartar">Descartar</button>
+      <button type="button" class="btn btn-primary" id="fn-cerrar-guardar">Guardar para continuar más adelante</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/js/factura_nueva.js?v={{ ASSET_VERSION }}"></script>
+</body>
+</html>

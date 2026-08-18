@@ -584,9 +584,12 @@ class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
         # La lectura de /api/productos y /api/proveedores es abierta, pero
         # crear/editar/eliminar sigue siendo solo de Bodega (y, desde que el
         # taller pasó a operar con una sola persona a cargo de Bodega y
-        # Facturas, también de Finanzas para /api/productos -- ver
-        # crear_producto en app.py) -- confirma que no se "filtró" de más
-        # al resolver el escenario anterior, ni a módulos que no tienen
+        # Facturas, también de Finanzas para /api/productos Y /api/proveedores
+        # -- ver crear_producto/crear_proveedor en app.py, necesario para
+        # poder crear un repuesto con su marca y, si hace falta, su
+        # proveedor, al vuelo desde la nueva ventana de Facturas sin tener
+        # que pasar por Logística aparte) -- confirma que no se "filtró" de
+        # más al resolver el escenario anterior, ni a módulos que no tienen
         # nada que ver (operativo, convertidores).
         for modulo in ("operativo", "convertidores"):
             username = self._crear_usuario(modulos=[modulo])
@@ -597,10 +600,7 @@ class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
         username_finanzas = self._crear_usuario(modulos=["finanzas"])
         client_finanzas = self._login_como(username_finanzas)
         self.assertEqual(client_finanzas.post("/api/productos", json={"nombre": "X"}).status_code, 201)
-        # Crear PROVEEDORES sigue siendo exclusivo de Bodega -- este cambio
-        # fue solo para poder cargar el repuesto con su marca al vuelo
-        # desde una factura, no una relajación general de Logística.
-        self.assertEqual(client_finanzas.post("/api/proveedores", json={"nombre": "X"}).status_code, 403)
+        self.assertEqual(client_finanzas.post("/api/proveedores", json={"nombre": "Proveedor X"}).status_code, 201)
 
     def test_rutas_de_solo_admin_rechazan_incluso_a_bodega_y_finanzas(self):
         # panel-dueno, estado_sistema y el respaldo automático son
@@ -634,6 +634,21 @@ class TestControlAccesoApiFinanzasYOperativo(unittest.TestCase):
         self.assertIn('data-vista="facturas"', html)
         resp_api = client.get("/api/finanzas/resumen")
         self.assertEqual(resp_api.status_code, 403)  # el resumen general sigue siendo solo de Finanzas
+
+    def test_bodega_y_finanzas_entran_a_la_nueva_ventana_de_facturas_pero_operativo_no(self):
+        # /facturas/nueva (ver vista_factura_nueva en app.py) es la nueva
+        # ventana dedicada para registrar una factura de compra a mano --
+        # mismo criterio de acceso que /finanzas: Bodega y Finanzas sí,
+        # cualquier otro módulo no.
+        for modulo in ("bodega", "finanzas"):
+            username = self._crear_usuario(modulos=[modulo])
+            client = self._login_como(username)
+            self.assertEqual(client.get("/facturas/nueva").status_code, 200)
+
+        username_ajeno = self._crear_usuario(modulos=["operativo"])
+        client_ajeno = self._login_como(username_ajeno)
+        resp_ajeno = client_ajeno.get("/facturas/nueva")
+        self.assertNotEqual(resp_ajeno.status_code, 200)
 
     def test_usuario_bodega_no_puede_listar_clientes_de_operativo(self):
         username = self._crear_usuario(modulos=["bodega"])

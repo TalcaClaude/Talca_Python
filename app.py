@@ -2232,6 +2232,24 @@ def vista_finanzas():
     return render_template("finanzas.html", modulo_activo="finanzas", solo_facturas=solo_facturas)
 
 
+@app.route("/facturas/nueva")
+@requiere_modulo("finanzas", "bodega")
+def vista_factura_nueva():
+    """Ventana dedicada (página aparte, no modal) para registrar una
+    factura de compra paso a paso -- numero/proveedor/fecha, luego
+    productos (con buscador, creación de producto nuevo con marca al
+    vuelo, y la opción de descargar un repuesto directo a una OT), y por
+    último la condición de pago. Reemplaza al modal "Registrar factura de
+    compra" de Finanzas como punto de entrada para cargar una factura
+    manualmente, ahora que el taller opera con una sola persona a cargo de
+    Bodega y Facturas y ya no tiene sentido repartir esto en varias
+    pantallas -- ver static/js/factura_nueva.js. El modal (y su flujo de
+    revisar/editar/aprobar/rechazar) sigue existiendo para las facturas que
+    llegan por WhatsApp, Excel o foto escaneada, que si necesitan ese paso
+    de revisión aparte."""
+    return render_template("factura_nueva.html", modulo_activo="finanzas")
+
+
 @app.route("/agente-ia")
 @requiere_modulo("operativo")
 def vista_agente_ia():
@@ -3709,7 +3727,7 @@ def listar_proveedores():
 
 
 @app.route("/api/proveedores", methods=["POST"])
-@requiere_rol("bodega")
+@requiere_rol("finanzas", "bodega")
 def crear_proveedor():
     data = request.get_json(force=True, silent=True) or {}
     nombre = (data.get("nombre") or "").strip().upper()
@@ -4183,7 +4201,7 @@ def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validada
 
 def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True,
                         condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None,
-                        lineas_gasto_general=None, exento_iva=False):
+                        lineas_gasto_general=None, exento_iva=False, lineas_ot_destino=None):
     """Inserta la factura y sus líneas, aplicando el ingreso de stock si
     corresponde, y generando su(s) Cuenta(s) por Pagar (ver
     _generar_cxp_de_factura). Único llamador hoy:
@@ -4203,7 +4221,16 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
     'facturas' (ver Migración 33) -- el precio de cada línea es el NETO, y
     de acá sale exactamente el mismo cálculo que usa _generar_cxp_de_factura
     para la Cuenta por Pagar, así el detalle de la factura y lo que se le
-    debe al proveedor siempre calzan."""
+    debe al proveedor siempre calzan.
+
+    lineas_ot_destino es un dict {producto_id: {'orden_id': N}} para
+    líneas marcadas "directo a una orden de trabajo" (ver
+    _validar_destino_ot_linea / la nueva ventana de Facturas en
+    /facturas/nueva): además de ingresar el stock como cualquier línea, se
+    descarga esa misma cantidad de inmediato hacia la OT indicada, en la
+    misma operación -- reutiliza registrar_salida_directa_a_orden, el
+    mismo camino que ya usa Operativo para cargar un repuesto a una OT
+    (ver modulos/operativo.py), así el costeo/historial queda idéntico."""
     ts = now_iso()
     monto_neto = round(sum(cantidad * precio_unitario for _p, cantidad, precio_unitario in lineas_validadas), 2)
     monto_neto += round(sum(l["monto"] for l in (lineas_gasto_general or [])), 2)
@@ -4243,6 +4270,27 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
                 "UPDATE factura_lineas SET aplicada = 1, aplicada_en = ? WHERE id = ?",
                 (now_iso(), cur_linea.lastrowid),
             )
+            destino_ot = (lineas_ot_destino or {}).get(producto["id"])
+            if destino_ot:
+                # "Directo a una OT" (ver docstring arriba): el repuesto ya
+                # quedó en stock justo arriba -- ahora se descarga esa misma
+                # cantidad hacia la OT, en la misma operación, con el mismo
+                # criterio de costeo que usa Operativo (costo promedio del
+                # proveedor de esta factura, ver
+                # registrar_salida_directa_a_orden).
+                _item_ot, error_ot = registrar_salida_directa_a_orden(
+                    db, destino_ot["orden_id"], producto["id"], cantidad,
+                    categoria="Consumo interno", usuario=usuario,
+                    motivo=f"Compra directa — factura '{numero}'", proveedor_id=proveedor_id,
+                )
+                if error_ot:
+                    # No debería pasar (ya se revalidó en
+                    # _aprobar_pendiente_recepcion justo antes de llamar
+                    # acá), pero si pasa igual no queremos dejar la
+                    # transacción a medias -- se propaga como excepción para
+                    # que el caller (dentro de _iniciar_transaccion_stock)
+                    # la revierta entera.
+                    raise ValueError(error_ot[0])
 
     for l in (lineas_gasto_general or []):
         db.execute(
@@ -5932,6 +5980,10 @@ def _validar_lineas_pendiente(db, lineas_in):
         if precio_unitario < 0:
             return None, f"Línea {i}: el precio no puede ser negativo"
 
+        extra_destino, error = _validar_destino_ot_linea(db, linea, i)
+        if error:
+            return None, error
+
         producto_id_raw = linea.get("producto_id")
         producto_nuevo_nombre = (linea.get("producto_nuevo_nombre") or "").strip()
 
@@ -5945,6 +5997,7 @@ def _validar_lineas_pendiente(db, lineas_in):
                 "producto_id": None, "producto_nombre": None,
                 "cantidad": cantidad, "precio_unitario": precio_unitario,
                 "texto_original": producto_nuevo_nombre,
+                **extra_destino,
             })
             continue
 
@@ -5959,8 +6012,44 @@ def _validar_lineas_pendiente(db, lineas_in):
             return None, f"Línea {i}: ese producto ya está agregado en otra línea de esta misma factura"
         productos_vistos.add(producto_id)
         lineas_validadas.append({"producto_id": producto_id, "producto_nombre": producto["nombre"],
-                                  "cantidad": cantidad, "precio_unitario": precio_unitario})
+                                  "cantidad": cantidad, "precio_unitario": precio_unitario, **extra_destino})
     return lineas_validadas, None
+
+
+def _validar_destino_ot_linea(db, linea, i):
+    """Valida el destino de una línea de producto de una factura pendiente
+    de recepción -- por defecto ('stock') no cambia nada del comportamiento
+    de siempre, pero la nueva ventana de Facturas (ver /facturas/nueva)
+    permite marcar una línea como 'directo a una orden de trabajo': el
+    repuesto igual ingresa a stock (mismo costo promedio, mismo historial
+    que cualquier compra) pero se descarga altiro hacia esa OT al aprobar
+    la factura, en la misma operación -- pensado para un repuesto que se
+    compra sabiendo de antemano que va a una OT puntual (ej. "ya sabemos
+    que va a la OT 4521"), sin tener que ir después a Operativo a
+    descargarlo a mano. Ver _registrar_factura (lineas_ot_destino) y
+    registrar_salida_directa_a_orden (modulos/operativo.py) para la
+    aplicación real.
+
+    Devuelve (extra, error): 'extra' es un dict para mezclar en la línea
+    validada -- {} si va a stock normal, o {'destino': 'ot', 'orden_id': N}
+    si corresponde. La OT debe existir y seguir abierta; se vuelve a
+    chequear esto mismo justo antes de aplicar la factura (ver
+    _aprobar_pendiente_recepcion), por si se cerró entremedio."""
+    destino = (linea.get("destino") or "stock").strip().lower()
+    if destino not in ("stock", "ot"):
+        return None, f"Línea {i}: destino inválido"
+    if destino == "stock":
+        return {}, None
+    try:
+        orden_id = int(linea.get("orden_id"))
+    except (TypeError, ValueError):
+        return None, f"Línea {i}: indica el número de OT a la que va directo este repuesto"
+    orden = db.execute("SELECT estado FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if orden is None:
+        return None, f"Línea {i}: no existe una orden de trabajo #{orden_id}"
+    if orden["estado"] in ESTADOS_CERRADOS:
+        return None, f"Línea {i}: la OT #{orden_id} está '{orden['estado']}' y no admite más ítems"
+    return {"destino": "ot", "orden_id": orden_id}, None
 
 
 @app.route("/api/facturas/pendientes-recepcion", methods=["POST"])
@@ -6091,7 +6180,61 @@ def editar_factura_pendiente_recepcion(pendiente_id):
         )
     db.commit()
     actualizada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+
+    if data.get("aplicar"):
+        # "Terminar factura" desde la nueva ventana de Facturas (ver
+        # /facturas/nueva): a diferencia de un simple "Guardar para
+        # continuar más adelante" (que solo actualiza el borrador y lo deja
+        # 'pendiente'), este paso intenta aplicarla de inmediato -- mismo
+        # camino que ya usa el ingreso directo al crear (ver
+        # _crear_pendiente_y_aplicar_si_posible), pero disparado a mano
+        # sobre un pendiente que ya existía. A diferencia de ese camino, acá
+        # SÍ se responde con error si no se pudo aplicar -- quien completó
+        # el asistente espera que la factura quede lista, no que quede
+        # pendiente en silencio sin explicación.
+        _iniciar_transaccion_stock(db)
+        factura_id, lineas_recibidas_registro, error_aplicar = _aprobar_pendiente_recepcion(db, actualizada)
+        if error_aplicar:
+            return jsonify({"error": error_aplicar}), 400
+        ts = now_iso()
+        db.execute(
+            """
+            UPDATE facturas_finanzas_pendientes
+            SET estado = 'aprobada', factura_id = ?, lineas_recibidas_json = ?, revisado_por = ?, revisado_en = ?
+            WHERE id = ?
+            """,
+            (factura_id, json.dumps(lineas_recibidas_registro), usuario_actual(), ts, pendiente_id),
+        )
+        _registrar_historial_pendiente(db, pendiente_id, "aplicada_directamente")
+        db.commit()
+        actualizada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+
     return jsonify(_factura_pendiente_recepcion_dict(db, actualizada))
+
+
+@app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>", methods=["DELETE"])
+@requiere_rol("finanzas", "bodega")
+def eliminar_factura_pendiente_recepcion(pendiente_id):
+    """Descarta un borrador de factura pendiente que todavía no se aprobó
+    -- el "Descartar" del doble check al cerrar a medio camino la nueva
+    ventana de Facturas (ver /facturas/nueva). Solo borra la fila de
+    facturas_finanzas_pendientes en sí: como nunca se llegó a aprobar, no
+    hay stock ni Cuenta por Pagar que revertir (eso solo se aplica recién
+    en _aprobar_pendiente_recepcion, ver también aprobar_factura_pendiente_recepcion).
+    No se puede descartar una que ya fue aprobada (para esa no existe
+    "deshacer" acá -- ver DELETE /api/facturas/<id>, que si hace falta
+    revierte el stock de una factura real ya aplicada) ni una rechazada
+    (esa sigue disponible para corregir y reingresar, ver
+    editar_factura_pendiente_recepcion)."""
+    db = get_db()
+    fila = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
+    if fila is None:
+        return jsonify({"error": "No se encontró ese pendiente"}), 404
+    if fila["estado"] != "pendiente":
+        return jsonify({"error": f"Esta factura ya fue {fila['estado']}, no se puede descartar."}), 400
+    db.execute("DELETE FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/facturas/pendientes-recepcion/<int:pendiente_id>/lineas/<int:indice>/crear-producto", methods=["POST"])
@@ -6187,6 +6330,7 @@ def _aprobar_pendiente_recepcion(db, fila):
     lineas_validadas = []
     lineas_gasto_general = []
     lineas_recibidas_registro = []
+    lineas_ot_destino = {}
     for l in lineas_facturadas:
         if l.get("es_gasto_general"):
             # Sin concepto de "cantidad recibida" -- es un gasto, no un
@@ -6206,6 +6350,18 @@ def _aprobar_pendiente_recepcion(db, fila):
             if l["producto_id"] is None:
                 return None, None, f"La línea '{nombre}' todavía no está asociada a un producto del inventario — corrígela (editar) antes de aprobar."
             return None, None, f"El producto '{nombre}' ya no existe en el inventario"
+        if l.get("destino") == "ot":
+            # Se revalida acá (no solo al cargar la línea, ver
+            # _validar_destino_ot_linea) por si la OT se cerró entre que se
+            # armó la factura y que se aprueba -- no queremos dejar la
+            # factura a medio aplicar (stock sí, descarga a la OT no).
+            orden_id = l.get("orden_id")
+            orden = db.execute("SELECT estado FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+            if orden is None:
+                return None, None, f"La OT #{orden_id} de la línea '{producto['nombre']}' ya no existe -- corrígela (editar) antes de aprobar."
+            if orden["estado"] in ESTADOS_CERRADOS:
+                return None, None, f"La OT #{orden_id} de la línea '{producto['nombre']}' está '{orden['estado']}' y no admite más ítems -- corrígela (editar) antes de aprobar."
+            lineas_ot_destino[producto["id"]] = {"orden_id": orden_id}
         lineas_validadas.append((producto, cantidad_recibida, l["precio_unitario"]))
 
     if not lineas_validadas and not lineas_gasto_general:
@@ -6216,6 +6372,7 @@ def _aprobar_pendiente_recepcion(db, fila):
         aplicar_stock=True, condicion_pago=fila["condicion_pago"],
         porcentaje_contado=fila["porcentaje_contado"], plazo_dias_credito=fila["plazo_dias_credito"],
         lineas_gasto_general=lineas_gasto_general, exento_iva=bool(fila["exento_iva"]),
+        lineas_ot_destino=lineas_ot_destino,
     )
     return factura_id, lineas_recibidas_registro, None
 

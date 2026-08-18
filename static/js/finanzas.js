@@ -1770,7 +1770,16 @@ async function abrirDetalleFacturaPendiente(id) {
 
 document.getElementById("pfd-btn-editar").addEventListener("click", () => {
   cerrarModal("modal-factura-pendiente-detalle");
-  if (pfdPendienteActivo) abrirEdicionFacturaPendiente(pfdPendienteActivo.id);
+  if (!pfdPendienteActivo) return;
+  // Una factura tipeada a mano (origen "manual") se retoma en la nueva
+  // ventana por pasos (ver /facturas/nueva) -- las que llegaron por
+  // WhatsApp, Excel o foto escaneada siguen abriendo el modal de acá, que
+  // es el que sabe mostrar la foto original y el aviso de origen.
+  if (pfdPendienteActivo.origen === "manual") {
+    window.location.href = `/facturas/nueva?pendiente=${pfdPendienteActivo.id}`;
+  } else {
+    abrirEdicionFacturaPendiente(pfdPendienteActivo.id);
+  }
 });
 
 document.getElementById("pfd-btn-eliminar").addEventListener("click", async () => {
@@ -2132,32 +2141,14 @@ async function pfrCargarCatalogos() {
     pfrProveedoresCache.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join("");
 }
 
-document.getElementById("btn-nueva-factura-pendiente").addEventListener("click", async () => {
-  document.getElementById("form-factura-pendiente").reset();
-  document.getElementById("pfr-id").value = "";
-  document.getElementById("pfr-titulo").textContent = "Registrar factura de compra";
-  document.getElementById("pfr-btn-guardar").textContent = "Registrar factura";
-  document.getElementById("pfr-lineas").innerHTML = "";
-  document.getElementById("pfr-campos-mixto").style.display = "none";
-  document.getElementById("pfr-campos-credito").style.display = "block";
-  document.getElementById("pfr-seccion-condicion").style.display = "block";
-  document.getElementById("pfr-aviso-condicion-fija").style.display = "none";
-  document.getElementById("pfr-aviso-origen").style.display = "none";
-  document.getElementById("pfr-aviso-rechazo").style.display = "none";
-  document.getElementById("pfr-foto-whatsapp").style.display = "none";
-  document.getElementById("pfr-producto-resultados").style.display = "none";
-  try {
-    await pfrCargarCatalogos();
-  } catch (e) {
-    toast(e.message, true);
-    return;
-  }
-  // Sin línea vacía por defecto: se agrega buscando un producto arriba, o
-  // con "+ Agregar línea vacía" si hace falta describir uno nuevo -- antes
-  // siempre quedaba una fila vacía dando vueltas hasta el final aunque
-  // todo se hubiera cargado por el buscador.
-  actualizarTotalFacturaPendiente();
-  abrirModal("modal-factura-pendiente");
+// "+ Registrar factura de compra" ahora manda a la nueva ventana dedicada
+// (ver /facturas/nueva en app.py y static/js/factura_nueva.js) en vez de
+// abrir el modal de acá abajo -- el modal sigue existiendo solo para
+// revisar/editar/aprobar/rechazar facturas que llegan por WhatsApp, Excel
+// o foto escaneada (ver abrirEdicionFacturaPendiente más abajo), que sí
+// necesitan ese paso de revisión aparte.
+document.getElementById("btn-nueva-factura-pendiente").addEventListener("click", () => {
+  window.location.href = "/facturas/nueva";
 });
 
 // ---- Editar un pendiente antes de aprobar/rechazar (clave para completar

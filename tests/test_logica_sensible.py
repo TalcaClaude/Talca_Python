@@ -4946,6 +4946,214 @@ class TestProductoNuevoDesdeFacturaPendiente(unittest.TestCase):
         self.assertIsNone(pendiente_creado["lineas"][0]["producto_id"])
 
 
+class TestFacturaNuevaVentana(unittest.TestCase):
+    """Nueva ventana dedicada de Facturas (/facturas/nueva, ver
+    static/js/factura_nueva.js): reemplaza al modal como punto de entrada
+    manual para registrar una factura de compra, por pasos, con el taller
+    operando ahora con una sola persona a cargo de Bodega y Facturas. Cubre
+    las tres piezas de backend nuevas que soportan esa ventana:
+      1. Una línea de producto puede marcarse "directo a una orden de
+         trabajo" -- se ingresa a stock igual que cualquier compra, pero se
+         descarga esa misma cantidad de inmediato hacia la OT indicada (ver
+         _validar_destino_ot_linea / lineas_ot_destino en _registrar_factura).
+      2. "Guardar para continuar más adelante" y "Descartar" (ver
+         eliminar_factura_pendiente_recepcion) -- un borrador real en la
+         base de datos, no solo en el navegador.
+      3. "Terminar factura" sobre un borrador ya guardado antes (PUT con
+         aplicar=true, ver editar_factura_pendiente_recepcion) -- aplica de
+         inmediato en vez de dejarla pendiente de un segundo paso aparte."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin = taller_app.app.test_client()
+        cls.admin.post("/login", data={"username": "admin", "password": "taller2026"})
+        cls._contador = 0
+
+    def _siguiente(self, prefijo):
+        type(self)._contador += 1
+        return f"{prefijo}-{type(self)._contador}"
+
+    def _crear_orden(self):
+        resp_cliente = self.admin.post(
+            "/api/operativo/clientes", json={"nombre": self._siguiente("Cliente Factura Nueva")},
+        )
+        self.assertEqual(resp_cliente.status_code, 201, resp_cliente.get_data(as_text=True))
+        resp_orden = self.admin.post(
+            "/api/operativo/ordenes", json={"cliente_id": resp_cliente.get_json()["id"]},
+        )
+        self.assertEqual(resp_orden.status_code, 201, resp_orden.get_data(as_text=True))
+        return resp_orden.get_json()["id"]
+
+    def _crear_producto(self):
+        resp = self.admin.post(
+            "/api/productos", json={"nombre": self._siguiente("Repuesto Factura Nueva"), "costo_compra": 0},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    # ---- Línea "directo a una OT" ----
+
+    def test_linea_directo_a_ot_ingresa_stock_y_lo_descarga_de_inmediato_en_la_ot(self):
+        orden_id = self._crear_orden()
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("FACT-OT-DIRECTA"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 3, "precio_unitario": 10000,
+                            "destino": "ot", "orden_id": orden_id}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        # El producto ya existía en el catálogo -- se aplica de una, sin
+        # quedar esperando un segundo paso de aprobación (ver
+        # _crear_pendiente_y_aplicar_si_posible).
+        self.assertEqual(resp.get_json()["estado"], "aprobada")
+
+        # El stock neto queda en 0: entraron 3 (compra) y salieron 3 (se
+        # descargaron altiro en la OT) -- si se quedara solo con la
+        # entrada, el hallazgo de fondo (evitar el viaje aparte a
+        # Operativo) no se estaría cumpliendo de verdad.
+        producto_actualizado = self.admin.get(f"/api/productos/{producto['id']}").get_json()
+        self.assertEqual(producto_actualizado["stock_disponible"], 0)
+
+        orden = self.admin.get(f"/api/operativo/ordenes/{orden_id}").get_json()
+        items_repuesto = [it for it in orden["items"] if it["producto_id"] == producto["id"]]
+        self.assertEqual(len(items_repuesto), 1)
+        self.assertEqual(items_repuesto[0]["cantidad"], 3)
+
+    def test_linea_directo_a_una_ot_cerrada_se_rechaza_al_crear(self):
+        orden_id = self._crear_orden()
+        resp_cerrar = self.admin.put(f"/api/operativo/ordenes/{orden_id}", json={"estado": "entregado"})
+        self.assertEqual(resp_cerrar.status_code, 200, resp_cerrar.get_data(as_text=True))
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("FACT-OT-DIRECTA-CERRADA"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000,
+                            "destino": "ot", "orden_id": orden_id}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("no admite más ítems", resp.get_json()["error"])
+
+    def test_linea_directo_a_ot_inexistente_se_rechaza(self):
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("FACT-OT-DIRECTA-INEXISTENTE"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000,
+                            "destino": "ot", "orden_id": 999999}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("no existe una orden de trabajo", resp.get_json()["error"])
+
+    # ---- Guardar para continuar más adelante / Descartar ----
+
+    def test_descartar_borra_un_pendiente_que_todavia_no_se_aprobo(self):
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("FACT-DESCARTAR"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_nuevo_nombre": "Repuesto sin crear todavía", "cantidad": 1, "precio_unitario": 1000}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente = resp.get_json()
+        self.assertEqual(pendiente["estado"], "pendiente")  # queda sin aplicar: falta crear el producto
+
+        resp_delete = self.admin.delete(f"/api/facturas/pendientes-recepcion/{pendiente['id']}")
+        self.assertEqual(resp_delete.status_code, 200, resp_delete.get_data(as_text=True))
+        self.assertEqual(self.admin.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").status_code, 404)
+
+    def test_no_se_puede_descartar_una_factura_ya_aprobada(self):
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("FACT-NO-DESCARTAR"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente = resp.get_json()
+        self.assertEqual(pendiente["estado"], "aprobada")
+
+        resp_delete = self.admin.delete(f"/api/facturas/pendientes-recepcion/{pendiente['id']}")
+        self.assertEqual(resp_delete.status_code, 400)
+        self.assertIn("ya fue aprobada", resp_delete.get_json()["error"])
+
+    # ---- "Terminar factura" sobre un borrador guardado antes ----
+
+    def test_editar_con_aplicar_true_aplica_de_inmediato_un_borrador_ya_guardado(self):
+        producto = self._crear_producto()
+        numero = self._siguiente("FACT-TERMINAR")
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_nuevo_nombre": "Repuesto a crear después", "cantidad": 1, "precio_unitario": 500}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente = resp.get_json()
+        self.assertEqual(pendiente["estado"], "pendiente")
+
+        resp_terminar = self.admin.put(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}",
+            json={
+                "numero": numero,
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 500}],
+                "aplicar": True,
+            },
+        )
+        self.assertEqual(resp_terminar.status_code, 200, resp_terminar.get_data(as_text=True))
+        self.assertEqual(resp_terminar.get_json()["estado"], "aprobada")
+
+    def test_editar_con_aplicar_true_devuelve_error_si_todavia_falta_resolver_una_linea(self):
+        numero = self._siguiente("FACT-TERMINAR-INCOMPLETA")
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_nuevo_nombre": "Repuesto que nunca se crea", "cantidad": 1, "precio_unitario": 500}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        pendiente = resp.get_json()
+
+        resp_terminar = self.admin.put(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}",
+            json={"numero": numero, "aplicar": True},
+        )
+        self.assertEqual(resp_terminar.status_code, 400)
+        self.assertIn("todavía no está asociada a un producto", resp_terminar.get_json()["error"])
+        # No quedó aplicada -- sigue como pendiente, se puede reintentar.
+        self.assertEqual(
+            self.admin.get(f"/api/facturas/pendientes-recepcion/{pendiente['id']}").get_json()["estado"],
+            "pendiente",
+        )
+
+
 class TestRolesYPermisos(unittest.TestCase):
     """Los roles (admin/finanzas/bodega/operativo — ver ROLES_VALIDOS en
     core.py) no son solo cosméticos: los endpoints sensibles rechazan la

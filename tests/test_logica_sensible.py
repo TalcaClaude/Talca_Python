@@ -3490,6 +3490,165 @@ class TestCuentasPorCobrar(unittest.TestCase):
         self.assertEqual(fila["saldo"], 50000)
         self.assertEqual(fila["estado"], "parcial")
 
+    def _orden_row(self, orden_id):
+        with taller_app.app.app_context():
+            db = taller_app.get_db()
+            row = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+            return dict(row)
+
+    def test_fecha_lista_se_completa_al_pasar_a_listo(self):
+        # "Auto por cerrar" (roadmap del taller, ver Migración 37): la plata
+        # de una OT ya cuenta desde que queda 'listo', no recién al
+        # entregarse -- fecha_lista es la fecha que usan las métricas del
+        # dashboard para saber en qué mes contar esa plata.
+        cliente = self._crear_cliente("Cliente fecha_lista - listo")
+        orden = self._crear_orden(cliente["id"])
+        self.assertIsNone(self._orden_row(orden["id"])["fecha_lista"])
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "listo"})
+        self.assertIsNotNone(self._orden_row(orden["id"])["fecha_lista"])
+
+    def test_fecha_lista_no_se_pisa_al_pasar_de_listo_a_entregado(self):
+        cliente = self._crear_cliente("Cliente fecha_lista - no se pisa")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "listo"})
+        fecha_lista_1 = self._orden_row(orden["id"])["fecha_lista"]
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        fecha_lista_2 = self._orden_row(orden["id"])["fecha_lista"]
+        self.assertEqual(fecha_lista_1, fecha_lista_2)
+
+    def test_fecha_lista_se_completa_aunque_se_salte_el_paso_listo(self):
+        # Una orden puede llegar directo a 'entregado' sin haber pasado
+        # nunca por 'listo' (se permite saltar pasos) -- fecha_lista igual
+        # debe quedar registrada, para que el dashboard tenga una fecha de
+        # cierre con la que contar esa OT.
+        cliente = self._crear_cliente("Cliente fecha_lista - salta listo")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "entregado"})
+        row = self._orden_row(orden["id"])
+        self.assertIsNotNone(row["fecha_lista"])
+        self.assertEqual(row["fecha_lista"], row["fecha_entrega_real"])
+
+    def test_fecha_lista_se_limpia_al_reabrir_la_orden(self):
+        cliente = self._crear_cliente("Cliente fecha_lista - reabrir")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "listo"})
+        self.assertIsNotNone(self._orden_row(orden["id"])["fecha_lista"])
+
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "reparacion"})
+        self.assertIsNone(self._orden_row(orden["id"])["fecha_lista"])
+
+    def test_aprobar_control_de_calidad_genera_la_cxc_y_fecha_lista(self):
+        # Antes de este cambio, aprobar el control de calidad (que también
+        # mueve la orden a 'listo') era la única de las tres puertas hacia
+        # 'listo' que NO generaba la CxC ni fecha_lista -- quedaba "lista"
+        # en la práctica pero sin la plata contada hasta que alguien la
+        # tocara por otra vía.
+        cliente = self._crear_cliente("Cliente QC - genera CxC")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 70000})
+
+        resp_qc = self.client.put(
+            f"/api/operativo/ordenes/{orden['id']}/qc", json={"resultado": "aprobado"}
+        )
+        self.assertEqual(resp_qc.status_code, 200, resp_qc.get_data(as_text=True))
+        self.assertEqual(self._orden_row(orden["id"])["estado"], "listo")
+        self.assertIsNotNone(self._orden_row(orden["id"])["fecha_lista"])
+
+        cxc = self._cxc_de_orden(orden["id"])
+        self.assertIsNotNone(cxc)
+        self.assertEqual(cxc["monto_total"], 70000)
+
+    def test_rechazar_control_de_calidad_limpia_fecha_lista_y_borra_cxc_sin_pagos(self):
+        cliente = self._crear_cliente("Cliente QC - rechazo")
+        orden = self._crear_orden(cliente["id"])
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 70000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}/qc", json={"resultado": "aprobado"})
+        self.assertIsNotNone(self._cxc_de_orden(orden["id"]))
+
+        resp = self.client.put(f"/api/operativo/ordenes/{orden['id']}/qc", json={"resultado": "rechazado"})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertEqual(self._orden_row(orden["id"])["estado"], "reparacion")
+        self.assertIsNone(self._orden_row(orden["id"])["fecha_lista"])
+        self.assertIsNone(self._cxc_de_orden(orden["id"]))
+
+
+class TestOTListaCuentaComoCerradaEnDashboards(unittest.TestCase):
+    """"Auto por cerrar" (roadmap del taller): una OT en 'listo' ya cuenta
+    como cerrada en las métricas de Operativo, Panel Principal y el Estado
+    de Resultados -- no hace falta esperar a que se entregue físicamente
+    (ver Migración 37, ESTADOS_QUE_CIERRAN_CXC, dashboard_operativo() y
+    resumen_utilidad_mes()). Antes solo contaba 'entregado', así que un auto
+    listo pero sin retirar seguía apareciendo como "abierto" y su plata como
+    "por cerrar" en ambos dashboards."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_cliente(self, nombre):
+        resp = self.client.post("/api/operativo/clientes", json={"nombre": nombre})
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def _crear_orden_lista(self, nombre_cliente, precio_referencial=120000):
+        cliente = self._crear_cliente(nombre_cliente)
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": precio_referencial})
+        resp = self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "listo"})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        return orden
+
+    def test_ot_lista_no_entregada_cuenta_como_cerrada_en_dashboard_operativo(self):
+        orden = self._crear_orden_lista("Cliente dashboard operativo - OT lista")
+
+        # No hay un listado de ids en la respuesta del dashboard (son solo
+        # totales agregados) -- se verifica indirectamente: creando esta OT
+        # 'lista' con precio_referencial=120000 y ninguna otra orden de este
+        # test tocando el mes en curso, monto_cerradas_mes/ots_cerradas_mes
+        # deben ser AL MENOS lo que aporta esta orden.
+        data = self.client.get("/api/operativo/dashboard").get_json()
+        self.assertGreaterEqual(data["ots_cerradas_mes"], 1)
+        self.assertGreaterEqual(data["monto_cerradas_mes"], 120000)
+        self.assertIsNotNone(orden)
+
+    def test_ot_lista_no_aparece_en_monto_por_cerrar(self):
+        antes = self.client.get("/api/operativo/dashboard").get_json()
+        orden = self._crear_orden_lista("Cliente dashboard operativo - monto por cerrar", precio_referencial=55000)
+        despues = self.client.get("/api/operativo/dashboard").get_json()
+
+        # monto_por_cerrar es la suma de las OT que siguen "abiertas" -- una
+        # OT recién puesta en 'listo' con precio no debe sumarse ahí (su
+        # plata ya se contó como cerrada), así que el total no debería subir
+        # en 55000 -- si el bug existiera, subiría.
+        self.assertLess(despues["monto_por_cerrar"], antes["monto_por_cerrar"] + 55000)
+        self.assertIsNotNone(orden)
+
+    def test_ot_lista_cuenta_en_panel_principal_ventas_y_no_en_ot_abiertas(self):
+        antes = self.client.get("/api/panel-dueno").get_json()
+        self._crear_orden_lista("Cliente panel dueno - OT lista", precio_referencial=90000)
+        despues = self.client.get("/api/panel-dueno").get_json()
+
+        self.assertGreaterEqual(despues["venta_total_mes"], antes["venta_total_mes"] + 90000 - 1)
+        # ot_abiertas no debería subir por esta orden (ya cuenta cerrada).
+        self.assertEqual(despues["ot_abiertas"], antes["ot_abiertas"])
+
+    def test_tiempo_promedio_taller_usa_fecha_lista_para_una_ot_lista_no_entregada(self):
+        cliente = self._crear_cliente("Cliente tiempo promedio - OT lista")
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"precio_referencial": 10000})
+        self.client.put(f"/api/operativo/ordenes/{orden['id']}", json={"estado": "listo"})
+
+        data = self.client.get("/api/operativo/dashboard").get_json()
+        # No se puede predecir el número exacto (hay otras OTs del resto de
+        # la suite en el mismo mes), pero con al menos una OT recién creada
+        # y puesta en listo, el promedio no debería ser None/0 por falta de
+        # datos válidos.
+        self.assertIsNotNone(data["tiempo_promedio_taller_mes"])
+
 
 class TestCuentasPorPagar(unittest.TestCase):
     """La CxP se genera sola al registrar una factura de compra (por
@@ -5931,6 +6090,29 @@ class TestEstadoResultados(unittest.TestCase):
         ]
         self.assertEqual(len(coincidencias), 1, data["items"])
         self.assertAlmostEqual(coincidencias[0]["monto"], 25000.0, delta=0.01)
+
+    def test_detalle_de_ventas_ot_incluye_una_ot_lista_sin_entregar(self):
+        # "Auto por cerrar" (roadmap del taller, ver Migración 37): una OT
+        # 'listo' (no 'entregado') con fecha_lista de este mes de prueba ya
+        # debe contar en el Estado de Resultados -- la plata se cobra desde
+        # que el auto queda listo, no cuando se retira físicamente.
+        cliente = self.client.post("/api/operativo/clientes", json={"nombre": "Cliente ER - OT lista"}).get_json()
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+
+        db = taller_app._conectar_db()
+        db.execute(
+            "UPDATE ordenes_trabajo SET estado = 'listo', fecha_lista = ?, "
+            "precio_referencial = 88000, precio_iva = 0 WHERE id = ?",
+            (f"{self.MES}-05T09:00:00", orden["id"]),
+        )
+        db.commit()
+        db.close()
+
+        resp = self.client.get(f"/api/finanzas/estado-resultados/detalle?mes={self.MES}&linea=ventas_ot")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        coincidencias = [i for i in data["items"] if i["monto"] == 88000.0 and str(orden["id"]) in i["etiqueta"]]
+        self.assertEqual(len(coincidencias), 1, data["items"])
 
     def _crear_y_aprobar_factura_con_gasto_general(self, numero, monto=15000, rubro_gav="combustible", dia="10"):
         resp = self.client.post(

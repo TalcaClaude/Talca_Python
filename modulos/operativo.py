@@ -740,6 +740,29 @@ def init_operativo_db(db):
     # -- idempotente).
     convertidores.reparar_costos_congelados_convertidores_internos(db)
 
+    # ---- Migración 37: 'fecha_lista' en ordenes_trabajo -- a pedido del
+    # taller ("auto por cerrar" del roadmap): la plata de una OT ya cuenta
+    # (se genera su CxC) desde que el auto queda en estado 'listo', sin
+    # esperar a que se entregue físicamente (ver ESTADOS_QUE_CIERRAN_CXC /
+    # _generar_o_actualizar_cxc, más arriba). Pero el dashboard de Operativo
+    # ("OTs cerradas (mes)", "Monto CLP cerradas (mes)", etc. -- ver
+    # dashboard_operativo) todavía solo contaba las que llegaban a
+    # 'entregado', con fecha_entrega_real -- una orden que llevaba semanas
+    # "lista" pero sin retirar seguía apareciendo como "abierta" y su plata
+    # como "por cerrar" en las métricas, aunque ya estuviera cobrada.
+    #
+    # Esta columna guarda la fecha en que la orden entró a 'listo' por
+    # primera vez (se completa/limpia con el mismo criterio que
+    # fecha_entrega_real: se fija la primera vez, se limpia si la orden se
+    # reabre hacia un estado anterior a 'listo' -- ver editar_orden /
+    # _actualizar_estado_orden_por_agente), y dashboard_operativo() usa
+    # COALESCE(fecha_lista, fecha_entrega_real) como "fecha de cierre" para
+    # sus métricas mensuales, en vez de solo fecha_entrega_real.
+    columnas_orden_v37 = [c[1] for c in db.execute("PRAGMA table_info(ordenes_trabajo)").fetchall()]
+    if "fecha_lista" not in columnas_orden_v37:
+        db.execute("ALTER TABLE ordenes_trabajo ADD COLUMN fecha_lista TEXT")
+        db.commit()
+
 
 # ---------------------------------------------------------------------------
 # Fotos de vehículos (OTs y garantías)
@@ -1716,11 +1739,21 @@ def ventas_y_costo_ot_mes(db, prefijo_mes):
     ventas desglosado en sus 3 componentes (repuestos, mano de obra con costo
     cargado, convertidores de torque internos) además del total, para que el
     Estado de Resultados pueda mostrarlos por separado si quiere.
+
+    "Cerrada" es 'listo' o 'entregado' (ESTADOS_QUE_CIERRAN_CXC), con
+    fecha_lista (o fecha_entrega_real si se saltó 'listo') como fecha de
+    cierre -- ver Migración 37 y el mismo criterio en dashboard_operativo().
+    A pedido del taller, la plata de una OT cuenta desde que el auto queda
+    listo para retirar, no recién cuando se entrega físicamente; antes esta
+    función (y por lo tanto Panel Principal y el Estado de Resultados) solo
+    contaba órdenes 'entregado'.
     """
+    placeholders_cerradas = ", ".join("?" for _ in ESTADOS_QUE_CIERRAN_CXC)
     cerradas_mes = db.execute(
-        "SELECT id, precio_referencial, precio_iva FROM ordenes_trabajo "
-        "WHERE estado = 'entregado' AND substr(fecha_entrega_real, 1, 7) = ?",
-        (prefijo_mes,),
+        f"SELECT id, precio_referencial, precio_iva FROM ordenes_trabajo "
+        f"WHERE estado IN ({placeholders_cerradas}) "
+        f"AND substr(COALESCE(fecha_lista, fecha_entrega_real), 1, 7) = ?",
+        list(ESTADOS_QUE_CIERRAN_CXC) + [prefijo_mes],
     ).fetchall()
     ids_cerradas_mes = [r["id"] for r in cerradas_mes]
 
@@ -1799,25 +1832,34 @@ def resumen_utilidad_mes(db):
 @requiere_rol("operativo")
 def dashboard_operativo():
     """KPIs para el dashboard del módulo Operativo:
-      - ots_abiertas: órdenes cuyo estado no es un estado cerrado (entregado/cancelado).
-      - ots_cerradas_mes: órdenes entregadas cuya fecha_entrega_real cae en el mes calendario actual.
+      - ots_abiertas: órdenes cuyo estado todavía no "cierra" para efectos contables -- es decir,
+        no está en ESTADOS_QUE_CIERRAN_CXC ('listo'/'entregado') ni 'cancelado'.
+      - ots_cerradas_mes: órdenes en 'listo' o 'entregado' cuya fecha de cierre (fecha_lista, o
+        fecha_entrega_real si se saltó 'listo' -- ver Migración 37) cae en el mes calendario
+        actual. A pedido del taller, un auto "listo" ya cuenta como cerrado para estas métricas
+        desde que queda listo para retirar -- la plata ya se cobró (ver ESTADOS_QUE_CIERRAN_CXC /
+        _generar_o_actualizar_cxc), no hace falta esperar a que se entregue físicamente. Antes
+        esto solo contaba órdenes 'entregado' con fecha_entrega_real, así que un auto que llevaba
+        semanas listo pero sin retirar seguía apareciendo como "abierto" y su plata como "por
+        cerrar" en este mismo dashboard.
       - monto_cerradas_mes: valor cobrado (Neto + IVA si aplica) de esas órdenes cerradas este mes.
       - monto_por_cerrar: valor cobrado (Neto + IVA si aplica) de todas las órdenes abiertas.
-      - costo_ots_cerradas: costo real de los repuestos usados en las órdenes entregadas del mes
+      - costo_ots_cerradas: costo real de los repuestos usados en las órdenes cerradas del mes
         actual (mismo criterio "mes en curso" que el resto del dashboard de Operativo).
       - costo_mano_obra_ots_cerradas: costo real de la mano de obra CON costo unitario cargado
-        (típicamente trabajo externo/subcontratado) en las órdenes entregadas del mes actual —
+        (típicamente trabajo externo/subcontratado) en las órdenes cerradas del mes actual —
         la mano de obra interna sin costo cargado no aporta acá.
       - costo_convertidores_ots_cerradas: costo real de los convertidores de torque internos
-        cargados como repuesto en las órdenes entregadas del mes actual (ver
+        cargados como repuesto en las órdenes cerradas del mes actual (ver
         modulos/convertidores.py) — plata real que salió del taller para repararlos.
       - costo_garantias: costo real de los repuestos/mano de obra usados en TODAS las garantías
         (histórico) — es dinero que sale sin que se le cobre al cliente.
       - utilidad_mes: monto_cerradas_mes menos el costo de repuestos, de mano de obra (con costo
         cargado) y de convertidores de torque internos de esas mismas órdenes.
       - ticket_promedio_mes: monto_cerradas_mes dividido por la cantidad de OTs cerradas este mes.
-      - tiempo_promedio_taller_mes: días promedio entre recepción y entrega de las OTs cerradas
-        este mes (qué tan rápido se está resolviendo, en promedio).
+      - tiempo_promedio_taller_mes: días promedio entre recepción y la fecha de cierre (fecha_lista
+        o fecha_entrega_real) de las OTs cerradas este mes -- mide qué tan rápido el TALLER deja
+        listo un auto, no cuánto se demora el cliente en pasar a buscarlo.
       - tasa_aprobacion_presupuestos: % de presupuestos aprobados sobre (aprobados + rechazados),
         histórico completo (no depende del mes porque una orden solo tiene un estado de
         presupuesto vigente, no un registro por mes).
@@ -1829,18 +1871,27 @@ def dashboard_operativo():
     hoy = datetime.now()
     prefijo_mes = f"{hoy.year:04d}-{hoy.month:02d}"
 
-    placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
-
+    # "Cerrada" para estas métricas ya NO es solo 'entregado' -- ver
+    # ESTADOS_QUE_CIERRAN_CXC (mismo criterio que ya usa la CxC) y el
+    # docstring de arriba. ESTADOS_CERRADOS ('entregado'/'cancelado') sigue
+    # existiendo tal cual en el resto del módulo (bloquear ítems nuevos,
+    # reapertura, etc.) -- este cambio es solo para estas métricas del
+    # dashboard, no toca esa máquina de estados.
+    placeholders_abiertas = ", ".join("?" for _ in ESTADOS_QUE_CIERRAN_CXC)
     abiertas = db.execute(
-        f"SELECT id, precio_referencial, precio_iva FROM ordenes_trabajo WHERE estado NOT IN ({placeholders_cerrados})",
-        list(ESTADOS_CERRADOS),
+        f"SELECT id, precio_referencial, precio_iva FROM ordenes_trabajo "
+        f"WHERE estado != 'cancelado' AND estado NOT IN ({placeholders_abiertas})",
+        list(ESTADOS_QUE_CIERRAN_CXC),
     ).fetchall()
     ids_abiertas = [r["id"] for r in abiertas]
 
+    placeholders_cerradas = ", ".join("?" for _ in ESTADOS_QUE_CIERRAN_CXC)
     cerradas_mes = db.execute(
-        "SELECT id, precio_referencial, precio_iva, fecha_recepcion, fecha_entrega_real "
-        "FROM ordenes_trabajo WHERE estado = 'entregado' AND substr(fecha_entrega_real, 1, 7) = ?",
-        (prefijo_mes,),
+        f"SELECT id, precio_referencial, precio_iva, fecha_recepcion, "
+        f"COALESCE(fecha_lista, fecha_entrega_real) AS fecha_cierre "
+        f"FROM ordenes_trabajo WHERE estado IN ({placeholders_cerradas}) "
+        f"AND substr(COALESCE(fecha_lista, fecha_entrega_real), 1, 7) = ?",
+        list(ESTADOS_QUE_CIERRAN_CXC) + [prefijo_mes],
     ).fetchall()
     ids_cerradas_mes = [r["id"] for r in cerradas_mes]
 
@@ -1952,11 +2003,13 @@ def dashboard_operativo():
     # Ticket promedio del mes: cuánto se está facturando en promedio por OT cerrada.
     ticket_promedio_mes = round(monto_cerradas_mes / len(ids_cerradas_mes), 2) if ids_cerradas_mes else 0
 
-    # Tiempo promedio en el taller (recepción -> entrega) de las OTs cerradas este mes.
+    # Tiempo promedio en el taller (recepción -> fecha de cierre) de las OTs
+    # cerradas este mes -- fecha_cierre es fecha_lista, o fecha_entrega_real
+    # si la orden se saltó 'listo' (ver el SELECT de cerradas_mes arriba).
     def _dias(row):
         try:
             ini = datetime.fromisoformat(row["fecha_recepcion"])
-            fin = datetime.fromisoformat(row["fecha_entrega_real"])
+            fin = datetime.fromisoformat(row["fecha_cierre"])
         except (TypeError, ValueError):
             return None
         return max(0, (fin - ini).total_seconds() / 86400)
@@ -2622,9 +2675,18 @@ def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
         # vez que la orden pasa a "entregado".
         fecha_entrega_real = now_iso()
 
+    # fecha_lista (ver Migración 37): se completa sola la primera vez que la
+    # orden pasa a 'listo' (o directo a 'entregado', si se saltó ese paso) --
+    # mismo criterio de "se completa una sola vez" que fecha_entrega_real acá
+    # arriba. Este camino (agente de WhatsApp) no reabre órdenes hacia atrás,
+    # así que -- a diferencia de editar_orden() -- no hace falta limpiarla.
+    fecha_lista = row["fecha_lista"]
+    if estado_nuevo in ESTADOS_QUE_CIERRAN_CXC and not fecha_lista:
+        fecha_lista = now_iso()
+
     db.execute(
-        "UPDATE ordenes_trabajo SET estado = ?, fecha_entrega_real = ?, actualizado_en = ? WHERE id = ?",
-        (estado_nuevo, fecha_entrega_real, now_iso(), orden_id),
+        "UPDATE ordenes_trabajo SET estado = ?, fecha_entrega_real = ?, fecha_lista = ?, actualizado_en = ? WHERE id = ?",
+        (estado_nuevo, fecha_entrega_real, fecha_lista, now_iso(), orden_id),
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
@@ -2750,6 +2812,22 @@ def editar_orden(orden_id):
         # "vencida" el mismo día que se reentrega el auto (hallazgo #17).
         fecha_entrega_real = None
 
+    # fecha_lista (ver Migración 37): mismo criterio que fecha_entrega_real
+    # arriba, pero para 'listo' -- se completa la primera vez que la orden
+    # entra a un estado que "cierra" para efectos de CxC/dashboard
+    # (ESTADOS_QUE_CIERRAN_CXC = 'listo' o 'entregado'; cubre tanto el
+    # camino normal, listo -> entregado, como una orden que se saltó 'listo'
+    # y llegó directo a 'entregado'), y se limpia si la orden se reabre
+    # hacia un estado anterior -- mismo motivo que hallazgo #17: sin esto,
+    # una orden reabierta y reentregada más adelante seguiría contando como
+    # "cerrada este mes" con la fecha vieja en el dashboard de Operativo.
+    fecha_lista = row["fecha_lista"]
+    if estado in ESTADOS_QUE_CIERRAN_CXC:
+        if not fecha_lista:
+            fecha_lista = now_iso()
+    else:
+        fecha_lista = None
+
     prioridad = row["prioridad"]
     if "prioridad" in data:
         prioridad = (data.get("prioridad") or "media").strip().lower()
@@ -2822,7 +2900,7 @@ def editar_orden(orden_id):
         """
         UPDATE ordenes_trabajo SET
             estado = ?, descripcion_problema = ?, diagnostico = ?, mecanico = ?,
-            fecha_entrega_estimada = ?, fecha_entrega_real = ?, actualizado_en = ?,
+            fecha_entrega_estimada = ?, fecha_entrega_real = ?, fecha_lista = ?, actualizado_en = ?,
             prioridad = ?, kilometraje = ?, estanque_nivel = ?, precio_referencial = ?, precio_iva = ?,
             equipamiento_json = ?,
             sintoma = ?, diagnostico_tecnico = ?, falla_detectada = ?, componentes_danados = ?,
@@ -2837,6 +2915,7 @@ def editar_orden(orden_id):
             (data.get("mecanico", row["mecanico"]) or "").strip().upper(),
             (data.get("fecha_entrega_estimada", row["fecha_entrega_estimada"]) or "").strip() or None,
             fecha_entrega_real,
+            fecha_lista,
             now_iso(),
             prioridad, kilometraje, estanque_nivel, precio_referencial, precio_iva,
             equipamiento_json,
@@ -3941,14 +4020,33 @@ def actualizar_qc(orden_id):
     elif resultado == "aprobado":
         nuevo_estado_orden = "listo"
 
+    # fecha_lista (ver Migración 37) y la CxC (ver _manejar_transicion_cxc):
+    # esta era la única de las tres puertas que mueven una orden a 'listo'
+    # (junto con editar_orden y _actualizar_estado_orden_por_agente) que NO
+    # generaba la Cuenta por Cobrar ni dejaba fecha_lista al aprobar el
+    # control de calidad -- una orden aprobada por acá quedaba "lista" en
+    # la práctica, pero sin su plata contada hasta que alguien la tocara
+    # después por otra vía. 'rechazado' vuelve a 'reparacion', que sale de
+    # ESTADOS_QUE_CIERRAN_CXC -- mismo criterio de reapertura que
+    # editar_orden(): limpia fecha_lista, y _manejar_transicion_cxc borra la
+    # CxC si todavía no tenía ningún pago encima.
+    fecha_lista = row["fecha_lista"]
+    if nuevo_estado_orden in ESTADOS_QUE_CIERRAN_CXC:
+        if not fecha_lista:
+            fecha_lista = now_iso()
+    else:
+        fecha_lista = None
+
     ts = now_iso()
     db.execute(
         "UPDATE ordenes_trabajo SET qc_resultado = ?, qc_inspector = ?, qc_observaciones = ?, "
-        "estado = ?, actualizado_en = ? WHERE id = ?",
-        (resultado, inspector, observaciones, nuevo_estado_orden, ts, orden_id),
+        "estado = ?, fecha_lista = ?, actualizado_en = ? WHERE id = ?",
+        (resultado, inspector, observaciones, nuevo_estado_orden, fecha_lista, ts, orden_id),
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    _manejar_transicion_cxc(db, row["estado"], actualizada)
+    db.commit()
     return jsonify(_orden_dict_detalle(db, actualizada))
 
 

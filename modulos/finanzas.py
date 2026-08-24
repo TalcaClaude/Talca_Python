@@ -2238,20 +2238,31 @@ def finanzas_estado_resultados_detalle():
 
     items = []
 
+    # "Cerrada" acá es lo mismo que en ventas_y_costo_ot_mes (que arma el
+    # TOTAL que estas dos líneas están detallando): 'listo' o 'entregado'
+    # (operativo.ESTADOS_QUE_CIERRAN_CXC), con fecha_lista -- o
+    # fecha_entrega_real si se saltó 'listo' -- como fecha de cierre (ver
+    # Migración 37). Si acá se hubiera dejado el criterio viejo (solo
+    # 'entregado'), el detalle mostraría menos ítems/plata que el total de
+    # la línea que está detallando, apenas hubiera una OT "lista" sin
+    # entregar en el mes.
+    _placeholders_cerradas = ", ".join("?" for _ in operativo.ESTADOS_QUE_CIERRAN_CXC)
+    _fecha_cierre_sql = "COALESCE(o.fecha_lista, o.fecha_entrega_real)"
+
     if linea == "ventas_ot":
         filas = db.execute(
-            "SELECT o.id, o.precio_referencial, o.precio_iva, o.fecha_entrega_real, c.nombre AS cliente "
-            "FROM ordenes_trabajo o JOIN clientes c ON c.id = o.cliente_id "
-            "WHERE o.estado = 'entregado' AND substr(o.fecha_entrega_real, 1, 7) = ? "
-            "ORDER BY o.fecha_entrega_real",
-            (mes,),
+            f"SELECT o.id, o.precio_referencial, o.precio_iva, {_fecha_cierre_sql} AS fecha_cierre, c.nombre AS cliente "
+            f"FROM ordenes_trabajo o JOIN clientes c ON c.id = o.cliente_id "
+            f"WHERE o.estado IN ({_placeholders_cerradas}) AND substr({_fecha_cierre_sql}, 1, 7) = ? "
+            f"ORDER BY {_fecha_cierre_sql}",
+            list(operativo.ESTADOS_QUE_CIERRAN_CXC) + [mes],
         ).fetchall()
         for f in filas:
             neto = f["precio_referencial"] or 0
             iva_monto = round(neto * IVA_PORCENTAJE, 2) if f["precio_iva"] else 0.0
             items.append({
                 "etiqueta": f"OT #{f['id']} — {f['cliente']}",
-                "fecha": f["fecha_entrega_real"],
+                "fecha": f["fecha_cierre"],
                 "monto": round(neto + iva_monto, 2),
             })
 
@@ -2261,15 +2272,15 @@ def finanzas_estado_resultados_detalle():
         # Detalle a nivel de ítem (no agrupado por OT), para que se entienda
         # de qué repuesto o trabajo se trata, no solo en qué OT y cliente.
         filas = db.execute(
-            f"SELECT o.id AS ot_id, o.fecha_entrega_real, oi.descripcion AS descripcion, "
+            f"SELECT o.id AS ot_id, {_fecha_cierre_sql} AS fecha_cierre, oi.descripcion AS descripcion, "
             f"p.nombre AS producto_nombre, oi.cantidad, "
             f"(oi.cantidad * oi.costo_unitario * {_iva_case}) AS monto "
             f"FROM ordenes_trabajo o "
             f"JOIN orden_items oi ON oi.orden_id = o.id AND oi.tipo = ? "
             f"LEFT JOIN productos p ON p.id = oi.producto_id "
-            f"WHERE o.estado = 'entregado' AND substr(o.fecha_entrega_real, 1, 7) = ? "
-            f"ORDER BY o.fecha_entrega_real, o.id, oi.id",
-            (tipo_item, mes),
+            f"WHERE o.estado IN ({_placeholders_cerradas}) AND substr({_fecha_cierre_sql}, 1, 7) = ? "
+            f"ORDER BY {_fecha_cierre_sql}, o.id, oi.id",
+            (tipo_item, *operativo.ESTADOS_QUE_CIERRAN_CXC, mes),
         ).fetchall()
         for f in filas:
             nombre_item = (f["producto_nombre"] or f["descripcion"] or "").strip() or "(sin descripción)"
@@ -2278,7 +2289,7 @@ def finanzas_estado_resultados_detalle():
             if cantidad and cantidad != 1:
                 cantidad_txt = f"{cantidad:g}"
                 etiqueta += f" (x{cantidad_txt})"
-            items.append({"etiqueta": etiqueta, "fecha": f["fecha_entrega_real"], "monto": round(f["monto"], 2)})
+            items.append({"etiqueta": etiqueta, "fecha": f["fecha_cierre"], "monto": round(f["monto"], 2)})
 
     elif linea in ("ventas_ct", "costo_ct"):
         filas = db.execute(

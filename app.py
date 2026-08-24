@@ -11149,6 +11149,7 @@ from modulos.operativo import (  # noqa: E402
     ESTADOS_ORDEN,
     ESTADOS_LABEL,
     ESTADOS_CERRADOS,
+    ESTADOS_QUE_CIERRAN_CXC,
     _actualizar_estado_orden_por_agente,
     _actualizar_campos_orden_por_agente,
     resumen_utilidad_mes,
@@ -11282,10 +11283,16 @@ def panel_dueno():
     venta_total_mes = _resumen_utilidad["monto_cerradas_mes"]
     utilidad_estimada_mes = _resumen_utilidad["utilidad_mes"]
 
-    placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
+    # "Abiertas" acá usa el mismo criterio que el dashboard propio de
+    # Operativo (ver dashboard_operativo() -- ESTADOS_QUE_CIERRAN_CXC en vez
+    # de ESTADOS_CERRADOS): una OT "lista" ya no cuenta como abierta, porque
+    # su plata ya se cobró y contó (ver Migración 37). Así el número de acá
+    # coincide con el que muestra la propia pestaña de Operativo, en vez de
+    # mostrar dos cifras distintas para lo mismo.
+    placeholders_abiertas = ", ".join("?" for _ in ESTADOS_QUE_CIERRAN_CXC)
     ot_abiertas = db.execute(
-        f"SELECT COUNT(*) FROM ordenes_trabajo WHERE estado NOT IN ({placeholders_cerrados})",
-        list(ESTADOS_CERRADOS),
+        f"SELECT COUNT(*) FROM ordenes_trabajo WHERE estado != 'cancelado' AND estado NOT IN ({placeholders_abiertas})",
+        list(ESTADOS_QUE_CIERRAN_CXC),
     ).fetchone()[0]
 
     # Capacidad de referencia: promedio de OT entregadas por semana en las

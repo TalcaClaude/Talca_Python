@@ -6117,6 +6117,155 @@ class TestAccesoPorRolNotificaciones(unittest.TestCase):
         self.assertEqual(resp.status_code, 403)
 
 
+class TestModuloAceites(unittest.TestCase):
+    """"Módulo de Aceites" (roadmap del taller, ver Migración 36 en
+    app.py): un aceite es, por debajo, un producto más de 'productos' --
+    mismo stock, mismos movimientos, mismo descuento automático al usarse
+    en una orden de trabajo -- distinguido solo por tipo_producto='aceite'.
+    'categoria' guarda su tipo (lista cerrada, TIPOS_ACEITE_VALIDOS) y
+    'modelo' guarda su nombre (texto libre)."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+
+    def _crear_aceite(self, categoria="ATF", modelo="DEXRON VI SINTETICO", marca="MOBIL",
+                       stock_disponible=10, costo_compra=5000):
+        resp = self.client.post(
+            "/api/productos",
+            json={
+                "tipo_producto": "aceite",
+                "categoria": categoria,
+                "modelo": modelo,
+                "marca": marca,
+                "stock_disponible": stock_disponible,
+                "costo_compra": costo_compra,
+            },
+        )
+        return resp
+
+    def test_crear_aceite_ok_queda_marcado_como_tal_y_con_nombre_armado(self):
+        resp = self._crear_aceite(categoria="ATF", modelo="DEXRON VI SINTETICO", marca="MOBIL")
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        aceite = resp.get_json()
+        self.assertEqual(aceite["tipo_producto"], "aceite")
+        self.assertEqual(aceite["categoria"], "ATF")
+        self.assertEqual(aceite["modelo"], "DEXRON VI SINTETICO")
+        self.assertEqual(aceite["marca"], "MOBIL")
+        self.assertIn("ATF", aceite["nombre"])
+        self.assertIn("DEXRON VI SINTETICO", aceite["nombre"])
+        self.assertIn("MOBIL", aceite["nombre"])
+
+    def test_tipo_de_aceite_fuera_de_la_lista_cerrada_se_rechaza(self):
+        resp = self._crear_aceite(categoria="5W-30")
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("tipo de aceite", resp.get_json()["error"].lower())
+
+    def test_nombre_de_aceite_es_obligatorio(self):
+        resp = self._crear_aceite(modelo="")
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("nombre", resp.get_json()["error"].lower())
+
+    def test_marca_de_aceite_es_obligatoria(self):
+        resp = self._crear_aceite(marca="")
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("marca", resp.get_json()["error"].lower())
+
+    def test_dos_aceites_con_mismo_tipo_nombre_y_marca_se_rechazan_como_duplicado(self):
+        resp1 = self._crear_aceite(categoria="CVT", modelo="CVT FLUID NS-3", marca="NISSAN")
+        self.assertEqual(resp1.status_code, 201, resp1.get_data(as_text=True))
+        resp2 = self._crear_aceite(categoria="CVT", modelo="CVT FLUID NS-3", marca="NISSAN")
+        self.assertEqual(resp2.status_code, 400, resp2.get_data(as_text=True))
+        self.assertIn("ya existe", resp2.get_json()["error"].lower())
+
+        # La misma combinación de tipo+nombre en OTRA marca sí es un
+        # producto distinto (igual criterio que un repuesto en dos marcas).
+        resp3 = self._crear_aceite(categoria="CVT", modelo="CVT FLUID NS-3", marca="VALVOLINE")
+        self.assertEqual(resp3.status_code, 201, resp3.get_data(as_text=True))
+
+    def test_listar_productos_con_filtro_tipo_producto_aceite_no_trae_repuestos(self):
+        aceite = self._crear_aceite(categoria="DCT", modelo="DCT FLUID FILTRO-AC-001", marca="ZF").get_json()
+        repuesto = self.client.post(
+            "/api/productos",
+            json={"nombre": "Repuesto normal filtro-ac-001", "stock_disponible": 1, "costo_compra": 100},
+        ).get_json()
+
+        solo_aceites = self.client.get("/api/productos?tipo_producto=aceite").get_json()["productos"]
+        ids_aceites = {p["id"] for p in solo_aceites}
+        self.assertIn(aceite["id"], ids_aceites)
+        self.assertNotIn(repuesto["id"], ids_aceites)
+
+        todos = self.client.get("/api/productos").get_json()["productos"]
+        ids_todos = {p["id"] for p in todos}
+        self.assertIn(aceite["id"], ids_todos)
+        self.assertIn(repuesto["id"], ids_todos)
+
+    def test_tipos_de_aceite_no_ensucian_el_filtro_de_modelos_de_repuestos(self):
+        self._crear_aceite(categoria="80W90", modelo="EJE TRASERO FILTRO-AC-002", marca="CASTROL")
+        categorias = self.client.get("/api/productos").get_json()["categorias"]
+        self.assertNotIn("80W90", categorias)
+
+    def test_editar_aceite_respeta_el_tipo_cerrado(self):
+        aceite = self._crear_aceite(categoria="75W90", modelo="DIFERENCIAL FILTRO-AC-003", marca="SHELL").get_json()
+        resp = self.client.put(f"/api/productos/{aceite['id']}", json={"categoria": "10W-40"})
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("tipo de aceite", resp.get_json()["error"].lower())
+
+    def test_editar_aceite_no_permite_dejar_el_nombre_en_blanco(self):
+        aceite = self._crear_aceite(categoria="ATF Mineral", modelo="ATF-MIN FILTRO-AC-004", marca="TOTAL").get_json()
+        resp = self.client.put(f"/api/productos/{aceite['id']}", json={"modelo": ""})
+        self.assertEqual(resp.status_code, 400, resp.get_data(as_text=True))
+        self.assertIn("nombre", resp.get_json()["error"].lower())
+
+    def test_tipo_producto_no_cambia_al_editar_aunque_se_mande_en_el_body(self):
+        # tipo_producto es de solo-creación (ver Migración 36): un aceite se
+        # queda como aceite para siempre, incluso si alguien manda
+        # tipo_producto='repuesto' en el body de un PUT (el backend
+        # simplemente lo ignora -- ni editar_producto lo lee).
+        aceite = self._crear_aceite(categoria="ATF", modelo="ATF FILTRO-AC-005", marca="AMSOIL").get_json()
+        resp = self.client.put(
+            f"/api/productos/{aceite['id']}",
+            json={"tipo_producto": "repuesto", "modelo": "ATF FILTRO-AC-005 EDITADO"},
+        )
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        actualizado = resp.get_json()
+        self.assertEqual(actualizado["tipo_producto"], "aceite")
+        self.assertEqual(actualizado["modelo"], "ATF FILTRO-AC-005 EDITADO")
+
+    def test_aceite_se_puede_cargar_en_una_ot_y_descuenta_stock_automaticamente(self):
+        # El requisito central del taller: un aceite es un repuesto más
+        # para efectos de una orden de trabajo -- se agrega por el mismo
+        # camino (orden_items tipo='repuesto', producto_id) y descuenta
+        # stock exactamente igual (ver test_agregar_repuesto_a_una_orden_
+        # consume_stock_del_inventario en TestOperativo, que prueba lo
+        # mismo para un repuesto común).
+        aceite = self._crear_aceite(
+            categoria="ATF", modelo="ATF FILTRO-AC-OT-001", marca="MOTUL", stock_disponible=20, costo_compra=8000
+        ).get_json()
+
+        cliente = self.client.post("/api/operativo/clientes", json={"nombre": "Cliente aceite OT"}).get_json()
+        orden = self.client.post("/api/operativo/ordenes", json={"cliente_id": cliente["id"]}).get_json()
+
+        resp_item = self.client.post(
+            f"/api/operativo/ordenes/{orden['id']}/items",
+            json={"tipo": "repuesto", "producto_id": aceite["id"], "cantidad": 3},
+        )
+        self.assertEqual(resp_item.status_code, 201, resp_item.get_data(as_text=True))
+
+        actualizado = self.client.get(f"/api/productos/{aceite['id']}").get_json()
+        self.assertEqual(actualizado["stock_disponible"], 17)
+
+        # Y el ítem de la OT queda vinculado al aceite como cualquier otro
+        # repuesto -- se puede recuperar en el detalle de la orden.
+        detalle_orden = self.client.get(f"/api/operativo/ordenes/{orden['id']}").get_json()
+        items_repuesto = [i for i in detalle_orden["items"] if i["tipo"] == "repuesto"]
+        self.assertEqual(len(items_repuesto), 1)
+        self.assertEqual(items_repuesto[0]["producto_id"], aceite["id"])
+        self.assertEqual(items_repuesto[0]["cantidad"], 3)
+
+
 if __name__ == "__main__":
     try:
         unittest.main(verbosity=2)

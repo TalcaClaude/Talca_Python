@@ -1692,6 +1692,20 @@ def init_db():
         db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN tipo_documento TEXT NOT NULL DEFAULT 'factura'")
         db.commit()
 
+    # ---- Migración 36: "Módulo de Aceites" (roadmap del taller) -- los
+    # aceites son productos más de la tabla 'productos' (mismo stock, mismos
+    # movimientos, mismo descuento automático en una OT vía orden_items), y
+    # se distinguen de un repuesto común solo por esta columna nueva. Por
+    # defecto 'repuesto' -- todo lo cargado hasta ahora sigue siendo eso; el
+    # único otro valor válido es 'aceite' (ver TIPOS_PRODUCTO_VALIDOS). Ver
+    # el comentario junto a PRODUCTO_SELECT para cómo se reutilizan
+    # 'categoria' (tipo de aceite) y 'modelo' (nombre del aceite) en vez de
+    # agregar más columnas.
+    columnas_productos_v36 = [c[1] for c in db.execute("PRAGMA table_info(productos)").fetchall()]
+    if "tipo_producto" not in columnas_productos_v36:
+        db.execute("ALTER TABLE productos ADD COLUMN tipo_producto TEXT NOT NULL DEFAULT 'repuesto'")
+        db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -1712,6 +1726,29 @@ PRODUCTO_SELECT = """
     FROM productos p
     LEFT JOIN ubicaciones u ON p.ubicacion_id = u.id
 """
+
+# "Módulo de Aceites" (roadmap del taller, ver Migración 36): un aceite es,
+# por debajo, un producto más de 'productos' -- mismo stock, mismos
+# movimientos, mismo descuento automático al usarse en una orden de trabajo
+# (orden_items.producto_id ya apunta a esta misma tabla) -- así se reutiliza
+# TODO el motor de inventario ya probado en vez de construir un sistema
+# paralelo. Lo único que distingue a un aceite de un repuesto común es la
+# columna 'tipo_producto', que solo sirve para que la pestaña "Aceites" (en
+# Logística) pueda filtrar y mostrar solo los suyos -- en todo lo demás
+# (búsqueda de repuestos en una OT, en una factura de compra, control de
+# stock, etc.) un aceite se comporta exactamente igual que cualquier otro
+# producto, sin ningún código especial.
+#
+# El campo 'categoria' de un aceite guarda su "tipo" (a pedido del taller,
+# una lista cerrada -- no una categoría libre como en los repuestos, así que
+# NO pasa por el catálogo editable de categorías) y el campo 'modelo' guarda
+# su "nombre" (texto libre, ej. "DEXRON VI SINTÉTICO") -- se reutilizan esas
+# dos columnas ya existentes (en vez de agregar columnas nuevas) porque el
+# nombre automático del producto (ver nombre_automatico en core.py) ya las
+# combina como "TIPO - NOMBRE (MARCA)", que es justo lo que se necesita para
+# encontrar un aceite por nombre en el buscador de repuestos de una OT.
+TIPOS_PRODUCTO_VALIDOS = {"repuesto", "aceite"}
+TIPOS_ACEITE_VALIDOS = ["CVT", "DCT", "ATF", "ATF Mineral", "75W90", "80W90"]
 
 
 def _proveedores_origen_producto(db, producto_id):
@@ -2325,9 +2362,18 @@ def listar_productos():
     categoria = request.args.get("categoria", "").strip()
     solo_criticos = request.args.get("criticos") == "1"
     ubicacion_id = request.args.get("ubicacion_id", "").strip()
+    tipo_producto = request.args.get("tipo_producto", "").strip().lower()
 
     sql = PRODUCTO_SELECT + " WHERE 1=1"
     params = []
+
+    # Filtro opcional por tipo_producto ('repuesto' | 'aceite', ver
+    # Migración 36) -- lo usa la pestaña "Aceites" de Logística para pedir
+    # solo los suyos; el resto de pantallas (OT, facturas, Inventario) no
+    # lo manda y siguen viendo todo mezclado, como siempre.
+    if tipo_producto in TIPOS_PRODUCTO_VALIDOS:
+        sql += " AND p.tipo_producto = ?"
+        params.append(tipo_producto)
 
     # 'q' se filtra en Python (ver coincide_busqueda en core.py), no con SQL
     # LIKE: así la búsqueda ignora tildes/mayúsculas y admite varias palabras
@@ -2365,8 +2411,11 @@ def listar_productos():
     # primera página sin que nadie lo notara.
     paginar = request.args.get("pagina") is not None or request.args.get("por_pagina") is not None
 
+    # Los tipos de aceite (ver Migración 36) no entran a este listado -- son
+    # una lista cerrada aparte (TIPOS_ACEITE_VALIDOS), no "modelos" de
+    # repuesto, así que no corresponde que aparezcan en este filtro.
     categorias = [r["categoria"] for r in db.execute(
-        "SELECT DISTINCT categoria FROM productos WHERE categoria != '' ORDER BY categoria"
+        "SELECT DISTINCT categoria FROM productos WHERE categoria != '' AND tipo_producto != 'aceite' ORDER BY categoria"
     ).fetchall()]
 
     sql += " ORDER BY p.nombre COLLATE NOCASE ASC"
@@ -2692,12 +2741,29 @@ def _crear_producto_desde_datos(db, data):
     modelo = (data.get("modelo") or "").strip().upper()
     marca = (data.get("marca") or "").strip().upper()
 
+    # tipo_producto ('repuesto' | 'aceite') -- ver comentario junto a
+    # PRODUCTO_SELECT / Migración 36. Por defecto 'repuesto' (comportamiento
+    # de siempre); un aceite reutiliza 'categoria' como su "tipo" (lista
+    # cerrada, ver TIPOS_ACEITE_VALIDOS) y 'modelo' como su "nombre" libre.
+    tipo_producto = (data.get("tipo_producto") or "repuesto").strip().lower()
+    if tipo_producto not in TIPOS_PRODUCTO_VALIDOS:
+        return None, f"Tipo de producto inválido: '{tipo_producto}'", 400
+    es_aceite = tipo_producto == "aceite"
+
     if codigo_interno:
         existe = db.execute(
             "SELECT id FROM productos WHERE codigo_interno = ?", (codigo_interno,)
         ).fetchone()
         if existe:
             return None, f"Ya existe un producto con código '{codigo_interno}'", 400
+
+    if es_aceite:
+        if categoria not in {t.upper() for t in TIPOS_ACEITE_VALIDOS}:
+            return None, (
+                f"Tipo de aceite inválido: '{categoria}'. Debe ser uno de: {', '.join(TIPOS_ACEITE_VALIDOS)}."
+            ), 400
+        if not modelo:
+            return None, "El nombre del aceite es obligatorio.", 400
 
     if categoria or modelo:
         # La marca ahora es obligatoria en cuanto el producto tiene una
@@ -2708,25 +2774,32 @@ def _crear_producto_desde_datos(db, data):
         # misma fila sin marca, con un solo precio y sin poder rastrear cuál
         # unidad era de qué marca para la garantía. Si el repuesto de verdad
         # no tiene marca reconocible (ej. un perno genérico), se pide
-        # escribir algo igual (ej. "GENÉRICA") en vez de dejarlo vacío.
+        # escribir algo igual (ej. "GENÉRICA") en vez de dejarlo vacío. Para
+        # un aceite aplica el mismo criterio (la marca del aceite).
         if not marca:
+            etiqueta = "un aceite" if es_aceite else "un repuesto"
             return None, (
-                "La marca es obligatoria para crear un repuesto (ej. BOSCH, o \"GENÉRICA\" si no tiene una "
+                f"La marca es obligatoria para crear {etiqueta} (ej. BOSCH, o \"GENÉRICA\" si no tiene una "
                 "marca real) -- así se puede llevar el precio y el seguimiento de garantía por marca."
             ), 400
         # La marca entra al constraint de duplicados a propósito: un mismo
         # modelo/detalle puede existir en más de una marca (ej. una versión
         # china y una americana de la misma pieza), cada una con su propio
         # stock y costo -- por eso dos productos con igual categoria+modelo
-        # pero distinta marca NO se consideran duplicados entre sí.
+        # pero distinta marca NO se consideran duplicados entre sí. Para un
+        # aceite, esto equivale a "mismo tipo + mismo nombre + misma marca".
         duplicado = db.execute(
             "SELECT id, id AS pid FROM productos WHERE lower(trim(categoria)) = lower(trim(?)) AND lower(trim(modelo)) = lower(trim(?)) AND lower(trim(marca)) = lower(trim(?))",
             (categoria, modelo, marca),
         ).fetchone()
         if duplicado:
+            msg = (
+                f"Ya existe un aceite con ese tipo, nombre y marca (#{duplicado[0]:04d})."
+                if es_aceite else
+                f"Ya existe un producto con ese modelo, detalle y marca (#{duplicado[0]:04d})."
+            )
             return None, (
-                f"Ya existe un producto con ese modelo, detalle y marca (#{duplicado[0]:04d}). "
-                f"Si necesitas más stock, ingrésalo con una factura en vez de crear un producto nuevo."
+                f"{msg} Si necesitas más stock, ingrésalo con una factura en vez de crear un producto nuevo."
             ), 400
 
     ts = now_iso()
@@ -2767,14 +2840,14 @@ def _crear_producto_desde_datos(db, data):
         INSERT INTO productos (
             codigo_interno, nombre, descripcion, categoria, marca, modelo,
             ubicacion_id, stock_disponible, stock_reservado, stock_minimo,
-            costo_compra, creado_en, actualizado_en
-        ) VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            costo_compra, creado_en, actualizado_en, tipo_producto
+        ) VALUES (?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             codigo_interno,
             # A diferencia de código/categoría/modelo/marca (que son casi
             # como "etiquetas" cortas y se ven mejor en mayúscula), la
-            # descripción es texto libre más largo — forzarla a mayúscula
+            # descripción es texto libre más larga — forzarla a mayúscula
             # sostenida la hacía más difícil de leer, así que solo se
             # recorta espacios.
             (data.get("descripcion") or "").strip(),
@@ -2788,6 +2861,7 @@ def _crear_producto_desde_datos(db, data):
             costo_compra,
             ts,
             ts,
+            tipo_producto,
         ),
     )
     nuevo_id = cur.lastrowid
@@ -2818,8 +2892,16 @@ def _crear_producto_desde_datos(db, data):
     _recalcular_stock_minimo(db, nuevo_id)
     db.commit()
 
-    _asegurar_categoria(db, categoria)
-    _asegurar_modelo(db, modelo)
+    # Un aceite NO agrega su tipo/nombre a los catálogos compartidos de
+    # "modelos"/"detalles" de repuestos -- 'categoria' es una lista cerrada
+    # (TIPOS_ACEITE_VALIDOS) y 'modelo' es texto libre propio de cada
+    # aceite, ninguno de los dos corresponde al catálogo pensado para
+    # repuestos (evita ensuciar el panel "Gestionar modelos/detalles" y el
+    # filtro de la pestaña Productos con tipos de aceite). La marca sí se
+    # comparte a propósito -- es el mismo catálogo de marcas de siempre.
+    if not es_aceite:
+        _asegurar_categoria(db, categoria)
+        _asegurar_modelo(db, modelo)
     _asegurar_marca(db, marca)
     db.commit()
 
@@ -2881,6 +2963,19 @@ def editar_producto(producto_id):
     modelo = (data.get("modelo") if data.get("modelo") is not None else row["modelo"]).strip().upper()
     marca = (data.get("marca") if data.get("marca") is not None else row["marca"]).strip().upper()
 
+    # tipo_producto NO se edita desde acá (ver Migración 36) -- un aceite se
+    # queda como aceite para siempre; solo cambia si es 'aceite' para poder
+    # aplicar las mismas reglas de "tipo cerrado" y "nombre obligatorio" que
+    # en la creación.
+    es_aceite = row["tipo_producto"] == "aceite"
+    if es_aceite:
+        if categoria not in {t.upper() for t in TIPOS_ACEITE_VALIDOS}:
+            return jsonify({
+                "error": f"Tipo de aceite inválido: '{categoria}'. Debe ser uno de: {', '.join(TIPOS_ACEITE_VALIDOS)}."
+            }), 400
+        if not modelo:
+            return jsonify({"error": "El nombre del aceite es obligatorio."}), 400
+
     if categoria or modelo:
         # Misma lógica que en _crear_producto_desde_datos: la marca es
         # obligatoria en cuanto el producto tiene modelo y/o detalle (evita
@@ -2889,9 +2984,10 @@ def editar_producto(producto_id):
         # igual categoria+modelo pero distinta marca (ej. versión china vs.
         # americana de la misma pieza) no chocan entre sí.
         if not marca:
+            etiqueta = "este aceite" if es_aceite else "este repuesto"
             return jsonify({
                 "error": (
-                    "La marca es obligatoria para este repuesto (ej. BOSCH, o \"GENÉRICA\" si no tiene una "
+                    f"La marca es obligatoria para {etiqueta} (ej. BOSCH, o \"GENÉRICA\" si no tiene una "
                     "marca real) -- así se puede llevar el precio y el seguimiento de garantía por marca."
                 )
             }), 400
@@ -2900,9 +2996,12 @@ def editar_producto(producto_id):
             (categoria, modelo, marca, producto_id),
         ).fetchone()
         if duplicado_pm:
-            return jsonify({
-                "error": f"Ya existe otro producto con ese modelo, detalle y marca (#{duplicado_pm[0]:04d})."
-            }), 400
+            msg = (
+                f"Ya existe otro aceite con ese tipo, nombre y marca (#{duplicado_pm[0]:04d})."
+                if es_aceite else
+                f"Ya existe otro producto con ese modelo, detalle y marca (#{duplicado_pm[0]:04d})."
+            )
+            return jsonify({"error": msg}), 400
 
     nombre = nombre_automatico(categoria, modelo, codigo_interno, producto_id, marca)
 
@@ -2932,8 +3031,11 @@ def editar_producto(producto_id):
     )
     db.commit()
 
-    _asegurar_categoria(db, categoria)
-    _asegurar_modelo(db, modelo)
+    # Ver el mismo criterio en _crear_producto_desde_datos: un aceite no
+    # ensucia los catálogos compartidos de modelos/detalles de repuestos.
+    if not es_aceite:
+        _asegurar_categoria(db, categoria)
+        _asegurar_modelo(db, modelo)
     _asegurar_marca(db, marca)
     db.commit()
 

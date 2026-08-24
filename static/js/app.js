@@ -15,6 +15,7 @@ const state = {
   categoriasDisponibles: [],
   modelosDisponibles: [],
   marcasDisponibles: [],
+  aceites: [],
   facturaEncontrada: null, // resultado del último lookup por número en el form de movimiento
   proveedores: [],
   proveedorActivoId: null,
@@ -119,6 +120,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     const vista = tabBtn.dataset.vista;
     document.getElementById("vista-dashboard").style.display = vista === "dashboard" ? "block" : "none";
     document.getElementById("vista-productos").style.display = vista === "productos" ? "block" : "none";
+    document.getElementById("vista-aceites").style.display = vista === "aceites" ? "block" : "none";
     document.getElementById("vista-bodega").style.display = vista === "bodega" ? "block" : "none";
     document.getElementById("vista-proveedores").style.display = vista === "proveedores" ? "block" : "none";
     document.getElementById("vista-movimientos").style.display = vista === "movimientos" ? "block" : "none";
@@ -133,6 +135,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     const titulos = {
       dashboard: "Dashboard",
       productos: "Administración de Inventario",
+      aceites: "Aceites",
       bodega: "Organización Física de Bodega",
       proveedores: "Proveedores",
       movimientos: "Control de Movimientos",
@@ -144,6 +147,7 @@ document.querySelectorAll(".tab").forEach(tabBtn => {
     };
     document.getElementById("brand-sub").textContent = titulos[vista];
     if (vista === "dashboard") cargarDashboard();
+    if (vista === "aceites") cargarAceites();
     if (vista === "bodega") cargarUbicaciones();
     if (vista === "proveedores") cargarProveedores();
     if (vista === "movimientos") cargarMovimientos();
@@ -1146,6 +1150,195 @@ formProducto.addEventListener("submit", async (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Pestaña "Aceites" (ver Migración 36 en app.py): un aceite es, por debajo,
+// un producto más de la misma tabla (mismo stock, mismos movimientos,
+// mismo descuento automático al usarse en una OT) -- solo se distingue por
+// tipo_producto='aceite' y tiene su propio formulario más simple ("Tipo" +
+// "Nombre" + "Marca" en vez de "Modelo"/"Detalle"/"Marca"). El registro de
+// movimientos de stock (entrada/salida/ajuste) se reutiliza tal cual desde
+// el modal "Detalle producto" (ver abrirDetalle más abajo), que ya es
+// genérico para cualquier producto sin importar su tipo.
+//
+// Esta lista debe reflejar exactamente TIPOS_ACEITE_VALIDOS en app.py -- es
+// una lista cerrada a pedido del taller (no un catálogo editable como
+// modelos/categorías de repuestos), así que se mantiene en duro acá en vez
+// de ir a buscarla a la API.
+const TIPOS_ACEITE = ["CVT", "DCT", "ATF", "ATF Mineral", "75W90", "80W90"];
+
+function renderSelectTipoAceite(seleccionActual) {
+  const select = document.getElementById("ac-tipo");
+  const actual = seleccionActual !== undefined ? seleccionActual : select.value;
+  select.innerHTML = '<option value="">Selecciona un tipo…</option>' +
+    TIPOS_ACEITE.map(t => `<option value="${escapeHtml(t.toUpperCase())}">${escapeHtml(t)}</option>`).join("");
+  select.value = actual || "";
+}
+
+function renderSelectMarcaAceite(seleccionActual) {
+  const select = document.getElementById("ac-marca");
+  const actual = seleccionActual !== undefined ? seleccionActual : select.value;
+  select.innerHTML = '<option value="">Selecciona una marca…</option>' +
+    state.marcasDisponibles.map(m => `<option value="${escapeHtml(m.nombre)}">${escapeHtml(m.nombre)}</option>`).join("");
+  select.value = actual || "";
+}
+
+document.getElementById("btn-nuevo-marca-aceite").addEventListener("click", () => {
+  abrirModalAltaRapida({
+    titulo: "Nueva marca",
+    label: "Nombre de la marca",
+    callback: async (nombre) => {
+      try {
+        await api("/api/marcas", { method: "POST", body: JSON.stringify({ nombre }) });
+        await cargarCategoriasYMarcas();
+        renderSelectMarcaAceite(nombre);
+        toast("Marca agregada");
+        cerrarModal("modal-alta-rapida");
+      } catch (e) {
+        toast(e.message, true);
+      }
+    },
+  });
+});
+
+async function cargarAceites() {
+  const tbody = document.getElementById("tbody-aceites");
+  try {
+    const data = await api("/api/productos?tipo_producto=aceite");
+    state.aceites = data.productos;
+    renderTablaAceites();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">Error al cargar aceites: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function renderTablaAceites() {
+  const tbody = document.getElementById("tbody-aceites");
+  const q = document.getElementById("buscar-aceites").value.trim();
+  const lista = q
+    ? state.aceites.filter(p => coincideBusqueda(q, p.categoria, p.modelo, p.marca))
+    : state.aceites;
+
+  if (lista.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" class="vacio">No se encontraron aceites.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = lista.map(p => {
+    const critico = p.stock_disponible <= p.stock_minimo;
+    return `
+      <tr data-id="${p.id}">
+        <td><span class="codigo-pill">#${escapeHtml(p.id_sistema)}</span></td>
+        <td>${escapeHtml(p.categoria) || "—"}</td>
+        <td>
+          <div class="nombre-producto">${escapeHtml(p.modelo) || "—"} ${critico ? '<span class="badge-critico">Crítico</span>' : ""}</div>
+        </td>
+        <td>${escapeHtml(p.marca) || "—"}</td>
+        <td class="num mono">${p.stock_disponible}</td>
+        <td class="num mono">${fmtMoney(p.costo_compra)}</td>
+        <td><button type="button" class="btn-link" data-mov-rapido="${p.id}" title="Registrar un movimiento de stock para este aceite">+ Movimiento</button></td>
+      </tr>
+    `;
+  }).join("");
+
+  tbody.querySelectorAll("tr[data-id]").forEach(tr => {
+    tr.addEventListener("click", () => abrirDetalle(parseInt(tr.dataset.id, 10)));
+  });
+
+  tbody.querySelectorAll("[data-mov-rapido]").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      abrirDetalle(parseInt(btn.dataset.movRapido, 10), true);
+    });
+  });
+}
+
+document.getElementById("buscar-aceites").addEventListener("input", renderTablaAceites);
+
+document.getElementById("btn-nuevo-aceite").addEventListener("click", async () => {
+  document.getElementById("form-aceite").reset();
+  document.getElementById("ac-id").value = "";
+  document.getElementById("ac-id-sistema-tag").style.display = "none";
+  document.getElementById("modal-aceite-titulo").textContent = "Nuevo aceite";
+  document.getElementById("ac-grid-stock-inicial").style.display = "grid";
+  document.getElementById("ac-ayuda-stock").style.display = "block";
+  document.getElementById("ac-precio-label").textContent = "Precio ($ CLP)";
+  document.getElementById("ac-precio").readOnly = false;
+  await cargarCategoriasYMarcas();
+  renderSelectTipoAceite("");
+  renderSelectMarcaAceite("");
+  abrirModal("modal-aceite");
+});
+
+async function abrirEdicionAceite(p) {
+  document.getElementById("ac-id").value = p.id;
+  document.getElementById("ac-id-sistema-tag").textContent = `N° de sistema: #${p.id_sistema} (no editable)`;
+  document.getElementById("ac-id-sistema-tag").style.display = "block";
+  document.getElementById("ac-nombre").value = p.modelo || "";
+  // El precio, igual que el costo promedio de un repuesto, ya no se edita
+  // a mano acá una vez creado -- se recalcula solo como promedio ponderado
+  // con cada entrada de stock (ver "Registrar movimiento" en el modal de
+  // detalle). Se deja solo como dato de solo lectura.
+  document.getElementById("ac-precio").value = p.costo_compra;
+  document.getElementById("ac-precio").readOnly = true;
+  document.getElementById("ac-precio-label").textContent = "Precio actual ($ CLP) — solo lectura";
+
+  await cargarCategoriasYMarcas();
+  renderSelectTipoAceite(p.categoria || "");
+  renderSelectMarcaAceite(p.marca || "");
+
+  document.getElementById("modal-aceite-titulo").textContent = "Editar aceite";
+  document.getElementById("ac-grid-stock-inicial").style.display = "grid";
+  document.getElementById("ac-ayuda-stock").style.display = "none";
+  document.getElementById("ac-cantidad").closest(".campo").style.display = "none";
+
+  abrirModal("modal-aceite");
+}
+
+document.getElementById("form-aceite").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const id = document.getElementById("ac-id").value;
+
+  const payload = {
+    tipo_producto: "aceite",
+    categoria: document.getElementById("ac-tipo").value,
+    modelo: document.getElementById("ac-nombre").value,
+    marca: document.getElementById("ac-marca").value,
+  };
+
+  if (!payload.categoria) {
+    toast("Selecciona el tipo de aceite", true);
+    return;
+  }
+  if (!payload.modelo.trim()) {
+    toast("Ingresa el nombre del aceite", true);
+    return;
+  }
+  if (!payload.marca) {
+    toast('Elige (o crea con "+ Nuevo") una marca para este aceite.', true);
+    return;
+  }
+
+  if (!id) {
+    payload.stock_disponible = document.getElementById("ac-cantidad").value;
+    payload.costo_compra = document.getElementById("ac-precio").value;
+  }
+
+  try {
+    if (id) {
+      await api(`/api/productos/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast("Aceite actualizado");
+    } else {
+      await api("/api/productos", { method: "POST", body: JSON.stringify(payload) });
+      toast("Aceite creado");
+    }
+    cerrarModal("modal-aceite");
+    document.getElementById("ac-cantidad").closest(".campo").style.display = "flex";
+    await Promise.all([cargarAceites(), cargarResumen()]);
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Modal: detalle + movimientos
 // ---------------------------------------------------------------------------
 
@@ -1190,12 +1383,17 @@ function renderDetalle(p) {
     ? `<span class="mono">${escapeHtml(p.ubicacion_codigo)}</span>`
     : (p.ubicacion ? `${escapeHtml(p.ubicacion)} <span class="subtexto">(pendiente de asignar)</span>` : "—");
 
+  // Un aceite (ver Migración 36) reutiliza 'categoria'/'modelo' para
+  // "Tipo"/"Nombre" en vez de "Modelo"/"Detalle" -- mismos campos, otra
+  // etiqueta, para que esta misma ficha genérica quede bien para los dos
+  // tipos de producto sin duplicar el modal completo.
+  const esAceite = p.tipo_producto === "aceite";
   const ficha = document.getElementById("detalle-ficha");
   ficha.innerHTML = `
     <dt>N° de sistema</dt><dd class="mono">#${escapeHtml(p.id_sistema)}</dd>
     <dt>Código interno</dt><dd class="mono">${escapeHtml(p.codigo_interno) || "—"}</dd>
-    <dt>Modelo</dt><dd>${escapeHtml(p.categoria) || "—"}</dd>
-    <dt>Detalle</dt><dd>${escapeHtml(p.modelo) || "—"}</dd>
+    <dt>${esAceite ? "Tipo de aceite" : "Modelo"}</dt><dd>${escapeHtml(p.categoria) || "—"}</dd>
+    <dt>${esAceite ? "Nombre" : "Detalle"}</dt><dd>${escapeHtml(p.modelo) || "—"}</dd>
     <dt>Marca</dt><dd>${escapeHtml(p.marca) || "—"}</dd>
     <dt>Ubicación</dt><dd>${ubicacionTexto}</dd>
     <dt>Descripción</dt><dd>${escapeHtml(p.descripcion) || "—"}</dd>
@@ -1204,7 +1402,7 @@ function renderDetalle(p) {
     <dt>Total</dt><dd class="mono">${p.stock_total}</dd>
     <dt>En merma</dt><dd class="mono">${p.stock_merma}${p.stock_merma > 0 ? " <span class=\"subtexto\">(ver pestaña Mermas)</span>" : ""}</dd>
     <dt>Stock mínimo</dt><dd class="mono">${p.stock_minimo} <span class="badge-urgencia badge-urgencia--proximo" title="Se recalcula solo con cada movimiento de stock">AUTO</span></dd>
-    <dt>Costo promedio</dt><dd class="mono">${fmtMoney(p.costo_compra)}</dd>
+    <dt>${esAceite ? "Precio promedio" : "Costo promedio"}</dt><dd class="mono">${fmtMoney(p.costo_compra)}</dd>
   `;
 
   const contCalculo = document.getElementById("detalle-stock-minimo-calculo");
@@ -1590,7 +1788,15 @@ document.getElementById("form-movimiento").addEventListener("submit", async (e) 
 
 document.getElementById("btn-editar-producto").addEventListener("click", () => {
   cerrarModal("modal-detalle");
-  abrirEdicion(state.productoActivo);
+  // Un aceite se edita con su propio formulario, más simple (Tipo/Nombre/
+  // Marca) -- el formulario genérico de "Editar producto" deja el "tipo"
+  // como una categoría libre con su propio "+ Nuevo", lo que rompería la
+  // lista cerrada de tipos de aceite (ver Migración 36).
+  if (state.productoActivo && state.productoActivo.tipo_producto === "aceite") {
+    abrirEdicionAceite(state.productoActivo);
+  } else {
+    abrirEdicion(state.productoActivo);
+  }
 });
 
 document.getElementById("btn-eliminar-producto").addEventListener("click", async () => {

@@ -41,6 +41,7 @@
   <nav class="tabs">
     <button class="tab activo" data-vista="dashboard">Dashboard</button>
     <button class="tab" data-vista="productos">Productos</button>
+    <button class="tab" data-vista="aceites">Aceites</button>
     <button class="tab" data-vista="bodega">Bodega</button>
     <button class="tab" data-vista="proveedores">Proveedores</button>
     <button class="tab" data-vista="movimientos">Movimientos</button>
@@ -171,6 +172,34 @@
   </section>
 
   <section class="paginacion" id="paginacion-productos"></section>
+
+  </section>
+
+  <section class="vista" id="vista-aceites" style="display:none">
+
+  <section class="toolbar">
+    <input type="text" id="buscar-aceites" placeholder="Buscar por tipo, nombre o marca…">
+    <button class="btn btn-primary" id="btn-nuevo-aceite">+ Nuevo aceite</button>
+  </section>
+
+  <section class="tabla-wrap">
+    <table class="tabla">
+      <thead>
+        <tr>
+          <th>N°</th>
+          <th>Tipo</th>
+          <th>Nombre</th>
+          <th>Marca</th>
+          <th class="num">Cantidad</th>
+          <th class="num">Precio</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="tbody-aceites">
+        <tr><td colspan="7" class="vacio">Cargando…</td></tr>
+      </tbody>
+    </table>
+  </section>
 
   </section>
 
@@ -654,6 +683,54 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-producto">Cancelar</button>
         <button type="submit" class="btn btn-primary">Guardar producto</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: crear / editar aceite (ver Migración 36 -- por debajo es un
+     producto más, solo que con tipo_producto='aceite' y su propio
+     formulario, más simple, en vez del de "Nuevo producto") -->
+<div class="modal-overlay" id="modal-aceite">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modal-aceite-titulo">Nuevo aceite</h2>
+      <button class="modal-close" data-close="modal-aceite">&times;</button>
+    </div>
+    <form id="form-aceite">
+      <input type="hidden" id="ac-id">
+      <p class="id-sistema-tag" id="ac-id-sistema-tag" style="display:none"></p>
+      <div class="campo">
+        <label>Tipo de aceite *</label>
+        <select id="ac-tipo">
+          <option value="">Selecciona un tipo…</option>
+        </select>
+      </div>
+      <div class="campo">
+        <label>Nombre *</label>
+        <input type="text" id="ac-nombre" placeholder="Ej: DEXRON VI SINTÉTICO">
+      </div>
+      <div class="campo">
+        <label>Marca *</label>
+        <div class="campo-select-mas">
+          <select id="ac-marca"><option value="">Selecciona una marca…</option></select>
+          <button type="button" class="btn-link" id="btn-nuevo-marca-aceite">+ Nuevo</button>
+        </div>
+      </div>
+      <div class="grid-2" id="ac-grid-stock-inicial">
+        <div class="campo">
+          <label>Cantidad inicial</label>
+          <input type="number" id="ac-cantidad" min="0" value="0">
+        </div>
+        <div class="campo">
+          <label id="ac-precio-label">Precio ($ CLP)</label>
+          <input type="number" id="ac-precio" min="0" step="1" value="0">
+        </div>
+      </div>
+      <p class="ayuda" id="ac-ayuda-stock">La cantidad inicial queda registrada como primer movimiento de entrada. Una vez creado el aceite, los cambios de stock (y el precio, que se recalcula solo como promedio ponderado) se hacen desde "Registrar movimiento".</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-aceite">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar aceite</button>
       </div>
     </form>
   </div>

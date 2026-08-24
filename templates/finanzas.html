@@ -66,33 +66,36 @@
       <span class="summary-label">Ingresos cobrados a clientes</span>
       <span class="summary-value" id="fin-s-ingresos">—</span>
     </div>
-    <div class="summary-card summary-card--warn">
+    <a href="#caja" class="summary-card summary-card--warn summary-card--clic" title="Ver el detalle en Caja Chica">
       <span class="summary-label">Gastos de Caja Chica</span>
       <span class="summary-value" id="fin-s-gastos">—</span>
-    </div>
-    <div class="summary-card">
+      <span class="summary-sub">Ver detalle →</span>
+    </a>
+    <a href="#estado-resultados" class="summary-card summary-card--clic" title="Ver el detalle en Estado de Resultados">
       <span class="summary-label">Resultado del período</span>
       <span class="summary-value" id="fin-s-resultado">—</span>
-    </div>
-    <div class="summary-card">
+      <span class="summary-sub">Ver detalle →</span>
+    </a>
+    <a href="#caja" class="summary-card summary-card--clic" title="Ver el detalle en Caja Chica">
       <span class="summary-label">Saldo actual de Caja Chica</span>
       <span class="summary-value" id="fin-s-saldo-caja">—</span>
-    </div>
+      <span class="summary-sub">Ver detalle →</span>
+    </a>
   </section>
 
   <p class="ayuda-inline">Estos dos son una foto de hoy, no del período filtrado arriba — igual que el saldo de Caja Chica, lo que importa es cuánto falta por cobrar o pagar ahora mismo.</p>
 
   <section class="summary" id="fin-resumen-summary-cxcxp">
-    <div class="summary-card">
+    <a href="#cxc" class="summary-card summary-card--clic" title="Ver el detalle de Cuentas por Cobrar">
       <span class="summary-label">Cuentas por Cobrar pendientes</span>
       <span class="summary-value" id="fin-s-cxc-pendiente">—</span>
       <span class="summary-sub" id="fin-s-cxc-vencido"></span>
-    </div>
-    <div class="summary-card summary-card--warn">
+    </a>
+    <a href="#cxp" class="summary-card summary-card--warn summary-card--clic" title="Ver el detalle de Cuentas por Pagar">
       <span class="summary-label">Cuentas por Pagar pendientes</span>
       <span class="summary-value" id="fin-s-cxp-pendiente">—</span>
       <span class="summary-sub" id="fin-s-cxp-vencido"></span>
-    </div>
+    </a>
   </section>
 
   <div class="chart-grid">
@@ -103,7 +106,7 @@
     </div>
     <div class="chart-card">
       <h3>Antigüedad de Cuentas por Cobrar</h3>
-      <p class="chart-sub">Saldo pendiente por tramo de vencimiento</p>
+      <p class="chart-sub">Saldo pendiente por tramo de vencimiento — <a href="#cxc" class="btn-link">Ver detalle →</a></p>
       <div id="fin-chart-aging">Cargando…</div>
     </div>
   </div>
@@ -111,7 +114,7 @@
   <div class="chart-grid">
     <div class="chart-card">
       <h3>Antigüedad de Cuentas por Pagar</h3>
-      <p class="chart-sub">Saldo pendiente por tramo de vencimiento (a proveedores)</p>
+      <p class="chart-sub">Saldo pendiente por tramo de vencimiento (a proveedores) — <a href="#cxp" class="btn-link">Ver detalle →</a></p>
       <div id="fin-chart-aging-cxp">Cargando…</div>
     </div>
     <div class="chart-card">

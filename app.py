@@ -1663,6 +1663,35 @@ def init_db():
     db.execute("CREATE INDEX IF NOT EXISTS idx_login_intentos_ip ON login_intentos_fallidos (ip)")
     db.commit()
 
+    # ---- Migración 35: "boleta de compra" como tipo de documento
+    # alternativo a "factura" (roadmap del taller). Se agrega
+    # 'tipo_documento' tanto a facturas como a facturas_finanzas_pendientes
+    # -- por defecto 'factura' (todo lo registrado hasta ahora sigue siendo
+    # eso), con 'boleta' como el único otro valor válido (ver
+    # TIPOS_DOCUMENTO_VALIDOS). A pedido del taller, una boleta SIEMPRE es
+    # al contado: no genera Cuenta por Pagar pendiente ni pide condición de
+    # pago/plazo -- se fuerza condicion_pago='contado' sin importar lo que
+    # mande quien llama (ver _crear_pendiente_recepcion), igual que ya
+    # existía para facturas al contado (_generar_cxp_de_factura genera su
+    # CxP ya pagada, para no perder el registro de la compra).
+    #
+    # El número de documento sigue siendo único a nivel GLOBAL (no se
+    # separa por tipo): varios lugares del sistema hoy identifican una
+    # factura por su número como llave natural (ver movimientos.factura_numero
+    # y sus JOIN contra facturas.numero) -- separar la unicidad por tipo
+    # obligaría a reescribir esos caminos para usar factura_id en vez de
+    # numero. En la práctica una boleta y una factura jamás comparten
+    # folio (son series de documentos distintas), así que esta restricción
+    # no debería molestar.
+    columnas_facturas_v35 = [c[1] for c in db.execute("PRAGMA table_info(facturas)").fetchall()]
+    if "tipo_documento" not in columnas_facturas_v35:
+        db.execute("ALTER TABLE facturas ADD COLUMN tipo_documento TEXT NOT NULL DEFAULT 'factura'")
+        db.commit()
+    columnas_ffp_v35 = [c[1] for c in db.execute("PRAGMA table_info(facturas_finanzas_pendientes)").fetchall()]
+    if "tipo_documento" not in columnas_ffp_v35:
+        db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN tipo_documento TEXT NOT NULL DEFAULT 'factura'")
+        db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -4127,7 +4156,7 @@ def verificar_numero_factura(numero):
     if existe:
         return jsonify({
             "existe": True,
-            "mensaje": f"Ya existe una factura registrada con el número '{numero_norm}'",
+            "mensaje": f"Ya existe un documento registrado con el número '{numero_norm}'",
         })
     query = "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente'"
     params = [numero_norm]
@@ -4138,7 +4167,7 @@ def verificar_numero_factura(numero):
     if ya_pendiente:
         return jsonify({
             "existe": True,
-            "mensaje": f"Ya hay una factura pendiente de recepción con el número '{numero_norm}'",
+            "mensaje": f"Ya hay un documento pendiente de recepción con el número '{numero_norm}'",
         })
     return jsonify({"existe": False})
 
@@ -4242,7 +4271,8 @@ def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validada
 
 def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True,
                         condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None,
-                        lineas_gasto_general=None, exento_iva=False, lineas_ot_destino=None):
+                        lineas_gasto_general=None, exento_iva=False, lineas_ot_destino=None,
+                        tipo_documento="factura"):
     """Inserta la factura y sus líneas, aplicando el ingreso de stock si
     corresponde, y generando su(s) Cuenta(s) por Pagar (ver
     _generar_cxp_de_factura). Único llamador hoy:
@@ -4282,11 +4312,11 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
         """
         INSERT INTO facturas
             (numero, proveedor_id, fecha, creado_en, condicion_pago, porcentaje_contado, plazo_dias_credito,
-             exento_iva, monto_neto, monto_iva, monto_total)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             exento_iva, monto_neto, monto_iva, monto_total, tipo_documento)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (numero, proveedor_id, fecha, ts, condicion_pago, porcentaje_contado, plazo_dias_credito,
-         1 if exento_iva else 0, monto_neto, monto_iva, monto_total),
+         1 if exento_iva else 0, monto_neto, monto_iva, monto_total, (tipo_documento or "factura").strip().lower()),
     )
     factura_id = cur.lastrowid
     factura_row = {"id": factura_id, "numero": numero, "proveedor_id": proveedor_id}
@@ -5690,6 +5720,11 @@ def _procesar_foto_factura_whatsapp(db, telefono, mecanico_nombre, imagen_bytes,
 
 CONDICIONES_PAGO_VALIDAS = {"contado", "credito", "mixto"}
 
+# "Boleta de compra" como alternativa a "factura" (ver Migración 35): una
+# boleta siempre es al contado -- se fuerza en _crear_pendiente_recepcion,
+# sin importar lo que mande quien llama.
+TIPOS_DOCUMENTO_VALIDOS = {"factura", "boleta"}
+
 
 def _factura_pendiente_recepcion_dict(db, row):
     d = dict(row)
@@ -5811,7 +5846,8 @@ def detalle_factura_pendiente_recepcion(pendiente_id):
 
 def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
                                  porcentaje_contado, plazo_dias_credito, creado_por, origen="manual",
-                                 foto_archivo="", exigir_numero=True, exento_iva=False):
+                                 foto_archivo="", exigir_numero=True, exento_iva=False,
+                                 tipo_documento="factura"):
     """Inserta una fila en facturas_finanzas_pendientes — punto de entrada
     ÚNICO para las cuatro formas de registrar una factura de compra (manual,
     carga masiva por Excel, foto escaneada, foto de WhatsApp), sin importar
@@ -5833,10 +5869,21 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
     HTTP (que responde con el mensaje) como el pipeline del agente de
     WhatsApp (que lo manda de vuelta como texto)."""
     numero = (numero or "").strip().upper()
+    tipo_documento = (tipo_documento or "factura").strip().lower()
+    if tipo_documento not in TIPOS_DOCUMENTO_VALIDOS:
+        return None, f"Tipo de documento inválido. Usa uno de: {', '.join(TIPOS_DOCUMENTO_VALIDOS)}"
+    etiqueta_doc = "boleta" if tipo_documento == "boleta" else "factura"
+    if tipo_documento == "boleta":
+        # Una boleta siempre es al contado -- se fuerza acá, en el único
+        # punto de entrada, sin importar lo que haya mandado quien llama
+        # (defensa en profundidad además de lo que ya valida el asistente
+        # en el navegador, ver factura_nueva.js).
+        condicion_pago = "contado"
+        porcentaje_contado = 100
     if exigir_numero and not numero:
-        return None, "El número de factura es obligatorio"
+        return None, f"El número de {etiqueta_doc} es obligatorio"
     if not lineas_validadas:
-        return None, "Agrega al menos un producto a la factura"
+        return None, f"Agrega al menos un producto a la {etiqueta_doc}"
     if condicion_pago not in CONDICIONES_PAGO_VALIDAS:
         return None, f"Condición de pago inválida. Usa una de: {', '.join(CONDICIONES_PAGO_VALIDAS)}"
     if condicion_pago == "mixto" and not (0 < porcentaje_contado < 100):
@@ -5858,12 +5905,12 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
     if numero:
         existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
         if existe:
-            return None, f"Ya existe una factura registrada con el número '{numero}'"
+            return None, f"Ya existe un documento registrado con el número '{numero}'"
         ya_pendiente = db.execute(
             "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente'", (numero,)
         ).fetchone()
         if ya_pendiente:
-            return None, f"Ya hay una factura pendiente de recepción con el número '{numero}'"
+            return None, f"Ya hay un documento pendiente de recepción con el número '{numero}'"
 
     ts = now_iso()
     # El primer evento del historial usa 'creado_por' (el parámetro, no
@@ -5877,11 +5924,12 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
         INSERT INTO facturas_finanzas_pendientes
             (numero, proveedor_id, fecha, lineas_json, condicion_pago, porcentaje_contado,
              plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo, historial_json,
-             exento_iva)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?, ?)
+             exento_iva, tipo_documento)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?, ?, ?)
         """,
         (numero, proveedor_id, fecha, json.dumps(lineas_validadas), condicion_pago, porcentaje_contado,
-         plazo_dias_credito, creado_por, ts, origen, foto_archivo, historial_inicial, 1 if exento_iva else 0),
+         plazo_dias_credito, creado_por, ts, origen, foto_archivo, historial_inicial, 1 if exento_iva else 0,
+         tipo_documento),
     )
     db.commit()
     nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -5891,7 +5939,7 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
 def _crear_pendiente_y_aplicar_si_posible(db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
                                             porcentaje_contado, plazo_dias_credito, creado_por, origen,
                                             foto_archivo="", exigir_numero=True, auto_aplicar=True,
-                                            exento_iva=False):
+                                            exento_iva=False, tipo_documento="factura"):
     """Como _crear_pendiente_recepcion, pero además -- si auto_aplicar es
     True y la factura recién creada queda con TODAS sus líneas ya
     resueltas contra el catálogo -- la aplica de inmediato (stock + CxP)
@@ -5925,6 +5973,7 @@ def _crear_pendiente_y_aplicar_si_posible(db, numero, proveedor_id, fecha, linea
         db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
         porcentaje_contado, plazo_dias_credito, creado_por, origen=origen,
         foto_archivo=foto_archivo, exigir_numero=exigir_numero, exento_iva=exento_iva,
+        tipo_documento=tipo_documento,
     )
     if error:
         return None, error, False
@@ -6101,6 +6150,9 @@ def crear_factura_pendiente_recepcion():
     proveedor_id = data.get("proveedor_id") or None
     fecha = (data.get("fecha") or "").strip()
     lineas_in = data.get("lineas") or []
+    tipo_documento = (data.get("tipo_documento") or "factura").strip().lower()
+    if tipo_documento not in TIPOS_DOCUMENTO_VALIDOS:
+        return jsonify({"error": f"Tipo de documento inválido. Usa uno de: {', '.join(TIPOS_DOCUMENTO_VALIDOS)}"}), 400
     condicion_pago = (data.get("condicion_pago") or "credito").strip().lower()
     exento_iva = bool(data.get("exento_iva"))
     try:
@@ -6113,7 +6165,7 @@ def crear_factura_pendiente_recepcion():
         return jsonify({"error": "El plazo de crédito debe ser un número de días"}), 400
 
     if not lineas_in:
-        return jsonify({"error": "Agrega al menos un producto a la factura"}), 400
+        return jsonify({"error": f"Agrega al menos un producto a la {'boleta' if tipo_documento == 'boleta' else 'factura'}"}), 400
 
     db = get_db()
     if proveedor_id:
@@ -6131,7 +6183,7 @@ def crear_factura_pendiente_recepcion():
     nueva, error, _se_aplico = _crear_pendiente_y_aplicar_si_posible(
         db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
         porcentaje_contado, plazo_dias_credito, usuario_actual(), origen="manual",
-        exento_iva=exento_iva,
+        exento_iva=exento_iva, tipo_documento=tipo_documento,
     )
     if error:
         return jsonify({"error": error}), 400
@@ -6163,8 +6215,13 @@ def editar_factura_pendiente_recepcion(pendiente_id):
     data = request.get_json(force=True, silent=True) or {}
     numero = (data.get("numero") if "numero" in data else fila["numero"]) or ""
     numero = numero.strip().upper()
+    tipo_documento = (data.get("tipo_documento") if "tipo_documento" in data else fila["tipo_documento"]) or "factura"
+    tipo_documento = tipo_documento.strip().lower()
+    if tipo_documento not in TIPOS_DOCUMENTO_VALIDOS:
+        return jsonify({"error": f"Tipo de documento inválido. Usa uno de: {', '.join(TIPOS_DOCUMENTO_VALIDOS)}"}), 400
+    etiqueta_doc = "boleta" if tipo_documento == "boleta" else "factura"
     if not numero:
-        return jsonify({"error": "El número de factura es obligatorio"}), 400
+        return jsonify({"error": f"El número de {etiqueta_doc} es obligatorio"}), 400
 
     proveedor_id = fila["proveedor_id"]
     if "proveedor_id" in data:
@@ -6189,35 +6246,50 @@ def editar_factura_pendiente_recepcion(pendiente_id):
 
     exento_iva = bool(data.get("exento_iva")) if "exento_iva" in data else bool(fila["exento_iva"])
 
+    # Una boleta siempre es al contado (ver Migración 35 / _crear_pendiente_recepcion)
+    # -- si al editar el borrador se cambia el interruptor de factura a
+    # boleta, la condición de pago que hubiera quedado guardada de antes
+    # (ej. crédito) se pisa acá para no dejar una boleta "a crédito" a
+    # medio camino.
+    condicion_pago = fila["condicion_pago"]
+    porcentaje_contado = fila["porcentaje_contado"]
+    if tipo_documento == "boleta":
+        condicion_pago = "contado"
+        porcentaje_contado = 100
+
     if numero != fila["numero"]:
         existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (numero,)).fetchone()
         if existe:
-            return jsonify({"error": f"Ya existe una factura registrada con el número '{numero}'"}), 400
+            return jsonify({"error": f"Ya existe un documento registrado con el número '{numero}'"}), 400
         ya_pendiente = db.execute(
             "SELECT id FROM facturas_finanzas_pendientes WHERE numero = ? AND estado = 'pendiente' AND id != ?",
             (numero, pendiente_id),
         ).fetchone()
         if ya_pendiente:
-            return jsonify({"error": f"Ya hay una factura pendiente de recepción con el número '{numero}'"}), 400
+            return jsonify({"error": f"Ya hay un documento pendiente de recepción con el número '{numero}'"}), 400
 
     if estaba_rechazada:
         db.execute(
             """
             UPDATE facturas_finanzas_pendientes
-            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, estado = 'pendiente', exento_iva = ?
+            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, estado = 'pendiente', exento_iva = ?,
+                tipo_documento = ?, condicion_pago = ?, porcentaje_contado = ?
             WHERE id = ?
             """,
-            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), 1 if exento_iva else 0, pendiente_id),
+            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), 1 if exento_iva else 0,
+             tipo_documento, condicion_pago, porcentaje_contado, pendiente_id),
         )
         _registrar_historial_pendiente(db, pendiente_id, "corregida_reingresada")
     else:
         db.execute(
             """
             UPDATE facturas_finanzas_pendientes
-            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, exento_iva = ?
+            SET numero = ?, proveedor_id = ?, fecha = ?, lineas_json = ?, exento_iva = ?,
+                tipo_documento = ?, condicion_pago = ?, porcentaje_contado = ?
             WHERE id = ?
             """,
-            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), 1 if exento_iva else 0, pendiente_id),
+            (numero, proveedor_id, fecha, json.dumps(lineas_validadas), 1 if exento_iva else 0,
+             tipo_documento, condicion_pago, porcentaje_contado, pendiente_id),
         )
     db.commit()
     actualizada = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (pendiente_id,)).fetchone()
@@ -6357,12 +6429,14 @@ def _aprobar_pendiente_recepcion(db, fila):
     la fila de pendientes en sí (dejarla 'pendiente' tal cual para
     reintentar después, o responder ese error directo a quien la estaba
     aprobando a mano)."""
+    tipo_documento = (fila["tipo_documento"] or "factura").strip().lower()
+    etiqueta_doc = "boleta" if tipo_documento == "boleta" else "factura"
     if not (fila["numero"] or "").strip():
-        return None, None, "Esta factura todavía no tiene número de folio — complétalo (editar) antes de aprobarla."
+        return None, None, f"Esta {etiqueta_doc} todavía no tiene número de folio — complétalo (editar) antes de aprobarla."
 
     ya_existe = db.execute("SELECT id FROM facturas WHERE numero = ?", (fila["numero"],)).fetchone()
     if ya_existe:
-        return None, None, f"Ya existe una factura registrada con el número '{fila['numero']}'"
+        return None, None, f"Ya existe un documento registrado con el número '{fila['numero']}'"
 
     lineas_facturadas = json.loads(fila["lineas_json"])
 
@@ -6408,12 +6482,24 @@ def _aprobar_pendiente_recepcion(db, fila):
     if not lineas_validadas and not lineas_gasto_general:
         return None, None, "No se puede aprobar una recepción sin ningún producto recibido — si nada llegó, rechaza la factura."
 
+    # Defensa en profundidad (ver Migración 35): una boleta siempre es al
+    # contado, sin importar lo que haya quedado guardado en condicion_pago
+    # -- normalmente ya viene forzado desde que se creó/editó el pendiente
+    # (ver _crear_pendiente_recepcion / editar_factura_pendiente_recepcion),
+    # pero se revalida acá mismo, justo antes de aplicar, para no depender
+    # de que todos los caminos anteriores lo hayan hecho bien.
+    condicion_pago = fila["condicion_pago"]
+    porcentaje_contado = fila["porcentaje_contado"]
+    if tipo_documento == "boleta":
+        condicion_pago = "contado"
+        porcentaje_contado = 100
+
     factura_id = _registrar_factura(
         db, fila["numero"], fila["proveedor_id"], fila["fecha"], lineas_validadas, usuario_actual(),
-        aplicar_stock=True, condicion_pago=fila["condicion_pago"],
-        porcentaje_contado=fila["porcentaje_contado"], plazo_dias_credito=fila["plazo_dias_credito"],
+        aplicar_stock=True, condicion_pago=condicion_pago,
+        porcentaje_contado=porcentaje_contado, plazo_dias_credito=fila["plazo_dias_credito"],
         lineas_gasto_general=lineas_gasto_general, exento_iva=bool(fila["exento_iva"]),
-        lineas_ot_destino=lineas_ot_destino,
+        lineas_ot_destino=lineas_ot_destino, tipo_documento=tipo_documento,
     )
     return factura_id, lineas_recibidas_registro, None
 
@@ -6672,6 +6758,8 @@ def cambiar_condicion_pago_factura(factura_id):
     factura = db.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
     if factura is None:
         return jsonify({"error": "Factura no encontrada"}), 404
+    if (factura["tipo_documento"] or "factura") == "boleta":
+        return jsonify({"error": "Una boleta siempre es al contado -- no tiene condición de pago que corregir."}), 400
 
     data = request.get_json(force=True, silent=True) or {}
     condicion_pago = (data.get("condicion_pago") or "").strip().lower()

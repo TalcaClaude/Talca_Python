@@ -1507,7 +1507,7 @@ async function cargarFacturasPendientesRecepcion() {
       ].filter(Boolean).join(" ");
       return `
       <tr class="fila-clicable" data-id="${p.id}">
-        <td>${escapeHtml(p.numero) || "—"}</td>
+        <td>${p.tipo_documento === "boleta" ? '<span class="badge-origen">Boleta</span> ' : ""}${escapeHtml(p.numero) || "—"}</td>
         <td>${escapeHtml(p.proveedor_nombre) || "—"}</td>
         <td>${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}${p.condicion_pago === "credito" ? ` (${p.plazo_dias_credito}d)` : ""}${p.condicion_pago === "mixto" ? ` (${p.porcentaje_contado}% contado)` : ""}</td>
         <td class="num mono">${fmtMoney(p.monto_total)}</td>
@@ -1639,7 +1639,7 @@ async function abrirDetalleFacturaPendiente(id) {
   pfdPendienteActivo = p;
   pfdFacturaIdReal = null;
 
-  document.getElementById("pfd-titulo").textContent = `Factura ${p.numero || "(sin folio)"}`;
+  document.getElementById("pfd-titulo").textContent = `${p.tipo_documento === "boleta" ? "Boleta" : "Factura"} ${p.numero || "(sin folio)"}`;
   document.getElementById("pfd-confirmar-eliminar").style.display = "none";
   document.getElementById("pfd-btn-eliminar-confirmar").style.display = "none";
   document.getElementById("pfd-btn-eliminar").style.display = "none";
@@ -1682,6 +1682,7 @@ async function abrirDetalleFacturaPendiente(id) {
   const exentoIva = facturaReal ? facturaReal.exento_iva : p.exento_iva;
 
   document.getElementById("pfd-info").innerHTML = `
+    <p><strong>Tipo:</strong> ${p.tipo_documento === "boleta" ? "Boleta (al contado)" : "Factura"}</p>
     <p><strong>Proveedor:</strong> ${escapeHtml(p.proveedor_nombre) || "—"}</p>
     <p><strong>Fecha:</strong> ${escapeHtml(p.fecha) || "—"}</p>
     <p><strong>Condición de pago:</strong> ${etiquetaCondicion[p.condicion_pago] || p.condicion_pago}</p>

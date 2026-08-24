@@ -38,11 +38,22 @@
     <button class="tab" data-paso="3" disabled>3. Pago y término</button>
   </nav>
 
-  <!-- Paso 1: numero / proveedor / fecha -->
+  <!-- Paso 1: tipo de documento / numero / proveedor / fecha -->
   <section class="vista" id="fn-paso-1">
+    <div class="campo" style="margin-bottom:14px">
+      <label>Tipo de documento</label>
+      <div class="pfr-linea-modo-campo">
+        <label class="toggle-critico">
+          <input type="radio" name="fn-tipo-documento" value="factura" checked> Factura
+        </label>
+        <label class="toggle-critico">
+          <input type="radio" name="fn-tipo-documento" value="boleta"> Boleta (siempre al contado)
+        </label>
+      </div>
+    </div>
     <div class="grid-3">
       <div class="campo">
-        <label>N° de factura *</label>
+        <label id="fn-numero-label">N° de factura *</label>
         <input type="text" id="fn-numero" required placeholder="Ej: F-1023">
       </div>
       <div class="campo">
@@ -111,32 +122,37 @@
 
   <!-- Paso 3: condición de pago + término -->
   <section class="vista" id="fn-paso-3" style="display:none">
-    <h3 class="subtitulo">Condición de pago</h3>
-    <div class="grid-3">
-      <label class="toggle-critico"><input type="radio" name="fn-condicion" value="contado"> Al contado</label>
-      <label class="toggle-critico"><input type="radio" name="fn-condicion" value="credito" checked> A crédito</label>
-      <label class="toggle-critico"><input type="radio" name="fn-condicion" value="mixto"> Mixto</label>
-    </div>
-    <div class="grid-2" id="fn-campos-mixto" style="display:none">
-      <div class="campo">
-        <label>% al contado</label>
-        <input type="number" id="fn-porcentaje-contado" min="1" max="99" value="50">
+    <div id="fn-condicion-pago-wrap">
+      <h3 class="subtitulo">Condición de pago</h3>
+      <div class="grid-3">
+        <label class="toggle-critico"><input type="radio" name="fn-condicion" value="contado"> Al contado</label>
+        <label class="toggle-critico"><input type="radio" name="fn-condicion" value="credito" checked> A crédito</label>
+        <label class="toggle-critico"><input type="radio" name="fn-condicion" value="mixto"> Mixto</label>
       </div>
-    </div>
-    <div class="grid-2" id="fn-campos-credito">
-      <div class="campo">
-        <label>Plazo de crédito (días)</label>
-        <input type="number" id="fn-plazo-dias" min="1" value="30">
+      <div class="grid-2" id="fn-campos-mixto" style="display:none">
+        <div class="campo">
+          <label>% al contado</label>
+          <input type="number" id="fn-porcentaje-contado" min="1" max="99" value="50">
+        </div>
       </div>
-      <div class="campo">
-        <label>&nbsp;</label>
-        <div class="pfr-plazos-rapidos">
-          <button type="button" class="btn btn-secundario" data-plazo="30">30 días</button>
-          <button type="button" class="btn btn-secundario" data-plazo="60">60 días</button>
-          <button type="button" class="btn btn-secundario" data-plazo="90">90 días</button>
+      <div class="grid-2" id="fn-campos-credito">
+        <div class="campo">
+          <label>Plazo de crédito (días)</label>
+          <input type="number" id="fn-plazo-dias" min="1" value="30">
+        </div>
+        <div class="campo">
+          <label>&nbsp;</label>
+          <div class="pfr-plazos-rapidos">
+            <button type="button" class="btn btn-secundario" data-plazo="30">30 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo="60">60 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo="90">90 días</button>
+          </div>
         </div>
       </div>
     </div>
+    <p class="ayuda-inline" id="fn-boleta-contado-nota" style="display:none">
+      Esta boleta se registra como pagada al contado -- no genera Cuenta por Pagar pendiente.
+    </p>
 
     <p class="fac-total-linea">
       Neto: <strong id="fn-total-neto-p3">$0</strong>

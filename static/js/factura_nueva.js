@@ -135,6 +135,31 @@ function agruparProductosPorRepuesto(productos) {
 }
 
 // ---------------------------------------------------------------------------
+// Tipo de documento: factura o boleta (ver Migración 35 en app.py). Una
+// boleta siempre es al contado -- no tiene condición de pago que elegir,
+// así que el paso 3 esconde ese bloque entero y se avisa con una nota en
+// vez de dejar los campos de crédito/mixto ahí sin sentido.
+// ---------------------------------------------------------------------------
+
+function tipoDocumentoActual() {
+  const marcado = document.querySelector('input[name="fn-tipo-documento"]:checked');
+  return marcado ? marcado.value : "factura";
+}
+
+function sincronizarTipoDocumento() {
+  const esBoleta = tipoDocumentoActual() === "boleta";
+  document.getElementById("fn-numero-label").textContent = esBoleta ? "N° de boleta *" : "N° de factura *";
+  document.getElementById("fn-condicion-pago-wrap").style.display = esBoleta ? "none" : "block";
+  document.getElementById("fn-boleta-contado-nota").style.display = esBoleta ? "block" : "none";
+  const btnTerminar = document.getElementById("fn-p3-terminar");
+  if (btnTerminar) btnTerminar.textContent = esBoleta ? "Terminar boleta" : "Terminar factura";
+}
+
+document.querySelectorAll('input[name="fn-tipo-documento"]').forEach(radio => {
+  radio.addEventListener("change", sincronizarTipoDocumento);
+});
+
+// ---------------------------------------------------------------------------
 // Navegación por pasos
 // ---------------------------------------------------------------------------
 
@@ -143,7 +168,10 @@ function mostrarPaso(n) {
     document.getElementById(`fn-paso-${i}`).style.display = i === n ? "block" : "none";
     document.querySelector(`#fn-pasos [data-paso="${i}"]`).classList.toggle("activo", i === n);
   }
-  if (n === 3) actualizarTotalesPaso3();
+  if (n === 3) {
+    sincronizarTipoDocumento();
+    actualizarTotalesPaso3();
+  }
 }
 
 document.getElementById("fn-p1-siguiente").addEventListener("click", async () => {
@@ -824,6 +852,12 @@ function leerLineasDesdePantalla() {
 }
 
 function leerCondicionPago() {
+  if (tipoDocumentoActual() === "boleta") {
+    // Una boleta siempre es al contado -- ni se muestran los campos de
+    // crédito/mixto en el paso 3 (ver sincronizarTipoDocumento), así que
+    // acá se fuerza directo en vez de leer un radio que no está visible.
+    return { condicion_pago: "contado", porcentaje_contado: 100, plazo_dias_credito: 30 };
+  }
   const condicion = document.querySelector('input[name="fn-condicion"]:checked').value;
   return {
     condicion_pago: condicion,
@@ -857,12 +891,13 @@ async function guardarBorrador() {
   const proveedor_id = document.getElementById("fn-proveedor-id").value || null;
   const fecha = document.getElementById("fn-fecha").value;
   const exento_iva = document.getElementById("fn-exento-iva").checked;
+  const tipo_documento = tipoDocumentoActual();
   try {
     if (state.pendienteId == null) {
       const condicion = leerCondicionPago();
       const creada = await api("/api/facturas/pendientes-recepcion", {
         method: "POST",
-        body: JSON.stringify({ numero, proveedor_id, fecha, lineas, exento_iva, ...condicion }),
+        body: JSON.stringify({ numero, proveedor_id, fecha, lineas, exento_iva, tipo_documento, ...condicion }),
       });
       // Puede haber quedado aplicada de una si todos los productos ya
       // estaban resueltos (ver _crear_pendiente_y_aplicar_si_posible) --
@@ -872,7 +907,7 @@ async function guardarBorrador() {
     } else {
       await api(`/api/facturas/pendientes-recepcion/${state.pendienteId}`, {
         method: "PUT",
-        body: JSON.stringify({ numero, proveedor_id, fecha, lineas, exento_iva }),
+        body: JSON.stringify({ numero, proveedor_id, fecha, lineas, exento_iva, tipo_documento }),
       });
       toast("Factura guardada — puedes continuarla más adelante desde Facturas");
     }
@@ -913,6 +948,7 @@ document.getElementById("fn-p3-terminar").addEventListener("click", async () => 
   const proveedor_id = document.getElementById("fn-proveedor-id").value || null;
   const fecha = document.getElementById("fn-fecha").value;
   const exento_iva = document.getElementById("fn-exento-iva").checked;
+  const tipo_documento = tipoDocumentoActual();
   const condicion = leerCondicionPago();
   const btn = document.getElementById("fn-p3-terminar");
   state.guardando = true;
@@ -922,7 +958,7 @@ document.getElementById("fn-p3-terminar").addEventListener("click", async () => 
     if (state.pendienteId == null) {
       resultado = await api("/api/facturas/pendientes-recepcion", {
         method: "POST",
-        body: JSON.stringify({ numero, proveedor_id, fecha, lineas, exento_iva, ...condicion }),
+        body: JSON.stringify({ numero, proveedor_id, fecha, lineas, exento_iva, tipo_documento, ...condicion }),
       });
       if (resultado.estado !== "aprobada") {
         // Solo puede pasar si quedó una línea sin producto resuelto -- con
@@ -936,7 +972,7 @@ document.getElementById("fn-p3-terminar").addEventListener("click", async () => 
     } else {
       resultado = await api(`/api/facturas/pendientes-recepcion/${state.pendienteId}`, {
         method: "PUT",
-        body: JSON.stringify({ numero, proveedor_id, fecha, lineas, exento_iva, aplicar: true }),
+        body: JSON.stringify({ numero, proveedor_id, fecha, lineas, exento_iva, tipo_documento, aplicar: true }),
       });
     }
     toast("Factura terminada: stock actualizado y Cuenta por Pagar generada");
@@ -965,6 +1001,9 @@ async function retomarBorrador(id) {
   document.getElementById("fn-proveedor-id").value = p.proveedor_id || "";
   document.getElementById("fn-fecha").value = (p.fecha || "").slice(0, 10);
   document.getElementById("fn-exento-iva").checked = !!p.exento_iva;
+  const radioTipo = document.querySelector(`input[name="fn-tipo-documento"][value="${p.tipo_documento === "boleta" ? "boleta" : "factura"}"]`);
+  if (radioTipo) radioTipo.checked = true;
+  sincronizarTipoDocumento();
   const cont = document.getElementById("fn-lineas");
   cont.innerHTML = "";
   (p.lineas || []).forEach(linea => {

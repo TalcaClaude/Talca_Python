@@ -5241,6 +5241,147 @@ class TestVerificarNumeroFactura(unittest.TestCase):
         self.assertFalse(resp_excluyendo.get_json()["existe"])
 
 
+class TestBoletaDeCompra(unittest.TestCase):
+    """"Boleta de compra" como tipo de documento alternativo a "factura"
+    (ver Migración 35, TIPOS_DOCUMENTO_VALIDOS, y el interruptor
+    Factura/Boleta del asistente en /facturas/nueva). A pedido del taller,
+    una boleta es SIEMPRE al contado -- no genera Cuenta por Pagar
+    pendiente ni admite condición de pago/plazo, sin importar lo que se
+    mande al crearla o editarla (defensa en profundidad en varios puntos:
+    _crear_pendiente_recepcion, editar_factura_pendiente_recepcion,
+    _aprobar_pendiente_recepcion)."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.admin = taller_app.app.test_client()
+        cls.admin.post("/login", data={"username": "admin", "password": "taller2026"})
+        cls._contador = 0
+
+    def _siguiente(self, prefijo):
+        type(self)._contador += 1
+        return f"{prefijo}-{type(self)._contador}"
+
+    def _crear_producto(self):
+        resp = self.admin.post(
+            "/api/productos", json={"nombre": self._siguiente("Repuesto Boleta"), "costo_compra": 0},
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        return resp.get_json()
+
+    def test_tipo_documento_por_defecto_es_factura(self):
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("FACT-SIN-TIPO"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
+                "condicion_pago": "credito",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        self.assertEqual(resp.get_json()["tipo_documento"], "factura")
+
+    def test_tipo_documento_invalido_se_rechaza(self):
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("FACT-TIPO-MALO"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
+                "tipo_documento": "guia_despacho",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Tipo de documento inválido", resp.get_json()["error"])
+
+    def test_boleta_fuerza_contado_aunque_se_mande_credito(self):
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("BOL-FUERZA-CONTADO"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 2, "precio_unitario": 5000}],
+                "tipo_documento": "boleta",
+                "condicion_pago": "credito",
+                "plazo_dias_credito": 60,
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        datos = resp.get_json()
+        self.assertEqual(datos["tipo_documento"], "boleta")
+        self.assertEqual(datos["condicion_pago"], "contado")
+        # Con todas las líneas resueltas queda aplicada de una (ver
+        # _crear_pendiente_y_aplicar_si_posible) -- la factura real también
+        # debe haber quedado con condicion_pago='contado'.
+        self.assertEqual(datos["estado"], "aprobada")
+        factura_real = self.admin.get(f"/api/facturas/{datos['factura_id']}").get_json()
+        self.assertEqual(factura_real["tipo_documento"], "boleta")
+        self.assertEqual(factura_real["condicion_pago"], "contado")
+
+    def test_boleta_no_deja_cuenta_por_pagar_pendiente(self):
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("BOL-SIN-CXP-PENDIENTE"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 10000}],
+                "tipo_documento": "boleta",
+            },
+        )
+        self.assertEqual(resp.status_code, 201, resp.get_data(as_text=True))
+        cxps = self.admin.get("/api/finanzas/cxp").get_json()
+        propias = [c for c in cxps.get("cuentas", []) if c.get("factura_id") == resp.get_json()["factura_id"]]
+        self.assertTrue(propias, "debería haber generado al menos una CxP (ya pagada) para dejar registro de la compra")
+        self.assertTrue(all(c["estado"] == "pagada" for c in propias), propias)
+
+    def test_editar_borrador_de_factura_a_boleta_fuerza_contado(self):
+        producto = self._crear_producto()
+        numero = self._siguiente("FACT-A-BOLETA")
+        pendiente = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": numero,
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_nuevo_nombre": "Repuesto que se deja sin resolver", "cantidad": 1, "precio_unitario": 500}],
+                "condicion_pago": "credito",
+                "plazo_dias_credito": 45,
+            },
+        ).get_json()
+        self.assertEqual(pendiente["condicion_pago"], "credito")
+
+        resp_editar = self.admin.put(
+            f"/api/facturas/pendientes-recepcion/{pendiente['id']}",
+            json={"tipo_documento": "boleta"},
+        )
+        self.assertEqual(resp_editar.status_code, 200, resp_editar.get_data(as_text=True))
+        actualizado = resp_editar.get_json()
+        self.assertEqual(actualizado["tipo_documento"], "boleta")
+        self.assertEqual(actualizado["condicion_pago"], "contado")
+
+    def test_no_se_puede_cambiar_condicion_de_pago_de_una_boleta_ya_aplicada(self):
+        producto = self._crear_producto()
+        resp = self.admin.post(
+            "/api/facturas/pendientes-recepcion",
+            json={
+                "numero": self._siguiente("BOL-CONDICION-BLOQUEADA"),
+                "fecha": datetime.now().strftime("%Y-%m-%d"),
+                "lineas": [{"producto_id": producto["id"], "cantidad": 1, "precio_unitario": 1000}],
+                "tipo_documento": "boleta",
+            },
+        ).get_json()
+        resp_cambiar = self.admin.put(
+            f"/api/facturas/{resp['factura_id']}/condicion-pago",
+            json={"condicion_pago": "credito", "plazo_dias_credito": 30},
+        )
+        self.assertEqual(resp_cambiar.status_code, 400)
+        self.assertIn("boleta", resp_cambiar.get_json()["error"].lower())
+
+
 class TestRolesYPermisos(unittest.TestCase):
     """Los roles (admin/finanzas/bodega/operativo — ver ROLES_VALIDOS en
     core.py) no son solo cosméticos: los endpoints sensibles rechazan la

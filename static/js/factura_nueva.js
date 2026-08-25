@@ -362,7 +362,7 @@ function filaLineaFacturaNueva(productos, linea) {
       </label>
     </div>
     <div class="fn-modo-producto" style="display:${modoInicial === "gasto_general" ? "none" : "contents"}">
-      <div class="campo">
+      <div class="campo fn-linea-producto-campo">
         <label>Producto</label>
         <select class="fn-linea-producto-id">
           <option value="">Selecciona un repuesto…</option>
@@ -385,11 +385,11 @@ function filaLineaFacturaNueva(productos, linea) {
         </select>
         <button type="button" class="btn-link fn-linea-btn-nueva-marca" style="display:none">+ Nueva marca de este repuesto…</button>
       </div>
-      <div class="campo">
+      <div class="campo fn-linea-cantidad-campo">
         <label>Cantidad</label>
         <input type="number" class="fn-linea-cantidad" min="1" value="${linea && linea.cantidad != null ? linea.cantidad : 1}">
       </div>
-      <div class="campo">
+      <div class="campo fn-linea-precio-campo">
         <label>Precio unit. ($ CLP)</label>
         <input type="number" class="fn-linea-precio" min="0" step="1" value="${linea && linea.precio_unitario != null ? linea.precio_unitario : 0}">
       </div>
@@ -413,19 +413,19 @@ function filaLineaFacturaNueva(productos, linea) {
       </div>
     </div>
     <div class="fn-modo-gasto-general" style="display:${modoInicial === "gasto_general" ? "contents" : "none"}">
-      <div class="campo">
+      <div class="campo fn-linea-descripcion-gg-campo">
         <label>Descripción</label>
         <input type="text" class="fn-linea-descripcion-gg" placeholder="Ej: Bencina para el generador"
                value="${linea && linea.descripcion ? escapeHtml(linea.descripcion) : ""}">
       </div>
-      <div class="campo">
+      <div class="campo fn-linea-rubro-gg-campo">
         <label>Rubro</label>
         <select class="fn-linea-rubro-gg">
           <option value="">Selecciona…</option>
           ${optionsRubroGavFactura(linea ? linea.rubro_gav : "")}
         </select>
       </div>
-      <div class="campo">
+      <div class="campo fn-linea-monto-gg-campo">
         <label>Monto ($ CLP)</label>
         <input type="number" class="fn-linea-monto-gg" min="0" step="1" value="${linea && linea.monto != null ? linea.monto : 0}">
       </div>

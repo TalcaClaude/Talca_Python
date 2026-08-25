@@ -2048,6 +2048,22 @@ svg .chart-punto-hover {
 }
 .fac-linea-row:last-child { border-bottom: none; }
 .fac-linea-row .campo { margin-bottom: 0; }
+/* Cada campo de la línea con una columna FIJA y explícita (en vez de dejar
+   que el navegador las ubique solo, "auto") -- se detectó que el
+   auto-posicionamiento de CSS Grid combinado con "display:contents" (en
+   .fn-modo-producto / .fn-modo-gasto-general, ver factura_nueva.js) hacía
+   que "Producto" terminara saltando a la columna del botón "Quitar" y el
+   resto de los campos se apilara desordenado -- quedaba "corrido" en vez
+   de en una sola línea. Fijar la columna de cada campo a mano elimina esa
+   ambigüedad y garantiza que Producto/Marca/Cantidad/Precio (o
+   Descripción/Rubro/Monto en modo Gasto general) queden siempre en fila. */
+.fac-linea-row .fn-linea-producto-campo,
+.fac-linea-row .fn-linea-descripcion-gg-campo { grid-column: 1; }
+.fac-linea-row .fn-linea-marca-campo,
+.fac-linea-row .fn-linea-rubro-gg-campo { grid-column: 2; }
+.fac-linea-row .fn-linea-cantidad-campo,
+.fac-linea-row .fn-linea-monto-gg-campo { grid-column: 3; }
+.fac-linea-row .fn-linea-precio-campo { grid-column: 4; }
 /* Interruptor "Repuesto / Gasto general" de cada línea de factura -- a
    propósito NO tiene clase "campo" (para que no le pegue la regla
    ".campo input { width:100% }" de más abajo, que estiraba cada radio a

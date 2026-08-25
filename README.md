@@ -1,7 +1,45 @@
-# Inventario Taller — Módulos 1 y 2 + primera pieza del Módulo 4
+# Inventario Taller — Talleres Calificados
 
-Sistema de logística y abastecimiento para el taller, basado en el documento
-`Software inventario.docx`.
+Sistema de gestión para el taller (Flask + SQLite), desplegado en Railway.
+Nació como un inventario de repuestos basado en el documento `Software
+inventario.docx` (ver secciones "Módulo N" más abajo, que documentan esa
+primera etapa con detalle) y desde entonces creció hasta cubrir la operación
+completa del taller.
+
+## Estado actual (qué hay hoy, en una pasada)
+
+- **Logística**: inventario de repuestos y aceites (categoría/marca/modelo,
+  costo promedio ponderado, ubicación física en bodega, proveedores,
+  facturas de compra con ingreso automático de stock).
+- **Operativo**: órdenes de trabajo (OT) de principio a fin — ingreso,
+  diagnóstico, presupuesto (con envío por correo al cliente), reparación,
+  control de calidad, entrega —, fotos de recepción, garantías, clientes,
+  seguimiento público de una OT por patente (sin login), dashboard con
+  métricas del taller, y reportes exportables (Excel/PDF).
+- **Finanzas**: Cuentas por Cobrar/Pagar, Caja Chica (gastos, boletas
+  parciales, rendiciones), Estado de Resultados, Facturación Electrónica
+  (DTE) simulada — ver nota abajo sobre SimpleAPI —, y respaldo de datos
+  (copias locales automáticas + respaldo diario fuera de Railway).
+- **Convertidores de Torque**: módulo aparte para ese tipo de trabajo
+  específico del taller (inventario propio, ligado a OTs/garantías).
+- **Agente IA**: lee facturas por foto/WhatsApp y ayuda con diagnóstico.
+- **Administración**: usuarios y roles (multi-módulo por usuario),
+  respaldo/restauración de la base de datos, estado del sistema.
+
+**Nota sobre Facturación Electrónica real (SII)**: hoy el módulo de
+Facturación Electrónica emite documentos en modo simulado — la integración
+real con el proveedor (SimpleAPI) quedó pendiente a propósito (ver
+`modulos/facturacion.py`, función que arma `BASE_URL`) porque el taller sigue
+facturando por otro medio. Si en algún momento se necesita emitir DTE
+válidos ante el SII desde este sistema, ese es el trabajo que falta —
+conseguir una cuenta de SimpleAPI y su documentación real (Postman) y
+programar contra eso.
+
+Las secciones "Módulo N" que siguen documentan con detalle esa primera
+etapa (inventario/bodega/facturas de compra) — siguen siendo válidas para
+esas funciones puntuales, aunque el sistema hoy es bastante más grande que
+eso. Para el detalle de despliegue, respaldos y variables de entorno, ver
+`DEPLOY.md`.
 
 ## Módulo 2: Administración de Inventario
 - **N° de sistema** correlativo y único por producto (ej: `#0007`).
@@ -189,23 +227,39 @@ como marca en vez de modelo (el error de la versión anterior).
 
 ```
 taller-inventario/
-├── app.py              -> Backend (servidor + toda la lógica y la API)
-├── inventario.db        -> Base de datos (se crea sola)
-├── requirements.txt      -> Lo que hay que instalar
-├── templates/index.html  -> Estructura de la página
+├── app.py                 -> Backend principal: servidor, login/CSRF, Logística/Inventario,
+│                              Administración, respaldo, Sentry opcional, /health
+├── core.py                 -> Utilidades compartidas por app.py y modulos/ (DB, roles, etc.)
+├── modulos/
+│   ├── operativo.py         -> Órdenes de trabajo, garantías, clientes, dashboard operativo
+│   ├── finanzas.py          -> CxC/CxP, Caja Chica, Estado de Resultados, respaldos
+│   ├── facturacion.py        -> Facturación Electrónica (DTE simulado, ver nota arriba)
+│   └── convertidores.py      -> Módulo de Convertidores de Torque
+├── inventario.db            -> Base de datos local (se crea sola; en Railway vive en el volumen)
+├── requirements.txt          -> Dependencias de Python
+├── tests/                    -> 13 archivos, ~595 tests (unittest, sin dependencias externas)
+├── templates/                 -> Una plantilla Jinja2 por página (index, operativo, finanzas, ...)
 └── static/
-    ├── css/style.css     -> Estilos visuales
-    └── js/app.js          -> Lógica de la interfaz (conecta con el backend)
+    ├── css/style.css          -> Estilos visuales (compartidos por todas las páginas)
+    └── js/                     -> Un archivo JS por módulo (app.js, operativo.js, finanzas.js, ...)
 ```
 
-## Próximos pasos (los vamos armando juntos)
+## Próximos pasos
 
-1. Subir esto a internet para que lo usen 2-3 personas del taller desde
-   cualquier lugar.
-2. Completar el Módulo 4 (proveedores como entidad propia, carga masiva
-   desde Excel, adjuntar el PDF/foto de la factura).
-3. Dashboard visual.
-4. El resto de los módulos del documento original.
+El grueso de la lista original (subirlo a internet, dashboard, proveedores,
+Caja Chica, Facturación, Convertidores, WhatsApp, etc.) ya está construido y
+en uso. Lo que queda realmente pendiente, a la fecha:
+
+1. **Facturación Electrónica real (SII)** — solo si el taller alguna vez
+   necesita emitir DTE válidos desde este sistema en vez de por otro medio
+   (ver nota arriba). No es necesario para operar hoy.
+2. Mejoras menores de monitoreo/hardening que no bloquean el uso diario
+   (quedan registradas como comentarios en el código donde corresponde,
+   ej. `SENTRY_DSN` en `app.py` para activar reporte de errores).
+
+Si esta lista vuelve a quedar desactualizada, lo más simple es preguntarle
+directamente a quien esté ayudando con el sistema "¿qué falta antes de
+productivo?" en vez de confiar en este archivo a ciegas.
 
 
 

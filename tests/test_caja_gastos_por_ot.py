@@ -409,5 +409,69 @@ class TestGastosPorOtQuedaComoCostoDeLaOt(_Base):
         self.assertEqual(d_b["costos_caja_chica"], [])
 
 
+class TestCajaVaciarSoloAdmin(_Base):
+    """POST /api/admin/caja/vaciar borra TODO Caja Chica (gastos, boletas,
+    rendiciones) de una sola vez -- pensado solo para volver a un estado
+    limpio mientras se prueba el módulo, nunca para uso normal. No tenía
+    ningún test que confirmara ni (a) que de verdad borra todo, ni (b) que
+    un usuario sin rol admin no puede llamarlo directo a la API aunque el
+    botón esté escondido en la interfaz (ver @requiere_rol() sin argumentos
+    en modulos/finanzas.py -- "sin argumentos" significa "solo admin")."""
+
+    def _crear_usuario_no_admin(self, modulos=None, password="clave123456"):
+        username = "caja_vaciar_no_admin"
+        resp = self.client.post(
+            "/api/admin/usuarios",
+            json={
+                "username": username, "password": password, "nombre": username,
+                "es_admin": False, "modulos": modulos or ["finanzas"],
+            },
+        )
+        self.assertIn(resp.status_code, (200, 201), resp.get_data(as_text=True))
+        cliente_no_admin = taller_app.app.test_client()
+        resp_login = cliente_no_admin.post("/login", data={"username": username, "password": password})
+        self.assertEqual(resp_login.status_code, 302, resp_login.get_data(as_text=True))
+        return cliente_no_admin
+
+    def test_usuario_con_modulo_finanzas_pero_sin_ser_admin_no_puede_vaciar_caja(self):
+        gasto = self._crear_gasto(monto="5000", fecha="2026-07-01").get_json()
+        self._agregar_boleta(gasto["id"], monto="5000", numero_documento="F-NOBORRAR", rubro_gav="otros")
+
+        cliente_finanzas = self._crear_usuario_no_admin(modulos=["finanzas"])
+        resp = cliente_finanzas.post("/api/admin/caja/vaciar")
+        self.assertEqual(resp.status_code, 403, resp.get_data(as_text=True))
+
+        # No basta con que devuelva 403 -- hay que confirmar que el efecto
+        # (borrar todo) tampoco ocurrió: el gasto sigue existiendo.
+        resp_pendientes = self.client.get("/api/caja/pendientes")
+        self.assertEqual(resp_pendientes.status_code, 200, resp_pendientes.get_data(as_text=True))
+        ids_pendientes = [g["id"] for g in resp_pendientes.get_json()["gastos"]]
+        self.assertIn(gasto["id"], ids_pendientes)
+
+    def test_admin_vacia_caja_por_completo_y_devuelve_los_conteos(self):
+        # Ojo: esta clase comparte la base de datos con TODAS las demás
+        # clases de este archivo (un solo setUpClass a nivel de módulo,
+        # sin reset entre tests) -- así que a esta altura ya puede haber
+        # gastos/boletas de tests anteriores. Por eso los conteos que
+        # devuelve /vaciar se comparan "al menos los 2 que agregamos acá",
+        # no con un número exacto -- lo exacto y confiable de verificar es
+        # que, DESPUÉS de vaciar, no quede ningún pendiente.
+        gasto_1 = self._crear_gasto(monto="10000", fecha="2026-07-01").get_json()
+        self._agregar_boleta(gasto_1["id"], monto="10000", numero_documento="F-VAC-1", rubro_gav="otros")
+        gasto_2 = self._crear_gasto(monto="20000", fecha="2026-07-02").get_json()
+        self._agregar_boleta(gasto_2["id"], monto="20000", numero_documento="F-VAC-2", rubro_gav="otros")
+
+        resp_vaciar = self.client.post("/api/admin/caja/vaciar")
+        self.assertEqual(resp_vaciar.status_code, 200, resp_vaciar.get_data(as_text=True))
+        d = resp_vaciar.get_json()
+        self.assertTrue(d["ok"])
+        self.assertGreaterEqual(d["boletas_eliminadas"], 2)
+        self.assertGreaterEqual(d["movimientos_eliminados"], 2)
+
+        resp_pendientes = self.client.get("/api/caja/pendientes")
+        self.assertEqual(resp_pendientes.status_code, 200, resp_pendientes.get_data(as_text=True))
+        self.assertEqual(resp_pendientes.get_json()["gastos"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

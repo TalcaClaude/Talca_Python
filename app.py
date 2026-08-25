@@ -182,6 +182,35 @@ def _inyectar_modulos_usuario():
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taller")
 
+# ---------------------------------------------------------------------------
+# Monitoreo de errores (Sentry) -- OPCIONAL. Sin SENTRY_DSN configurada, esto
+# no hace nada distinto a antes: los errores solo quedan en el log de
+# Railway (visible, pero nadie se entera hasta que entra a mirarlo). Con la
+# variable configurada, cada excepción no controlada además se reporta a
+# Sentry (que sí puede avisar por correo/Slack apenas pasa). Para activarlo:
+# crear una cuenta gratis en https://sentry.io, un proyecto tipo "Flask", y
+# copiar el DSN que te da a la variable de entorno SENTRY_DSN en Railway --
+# no requiere ningún cambio de código adicional.
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+sentry_sdk = None
+if SENTRY_DSN:
+    try:
+        import sentry_sdk as _sentry_sdk
+        _sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment=os.environ.get("RAILWAY_ENVIRONMENT_NAME", "production"),
+            # Solo errores, sin tracing de performance -- lo único que se
+            # pidió es enterarse cuando algo se rompe, no medir latencias
+            # (eso además consume la cuota gratis de Sentry más rápido).
+            traces_sample_rate=0.0,
+        )
+        sentry_sdk = _sentry_sdk
+        logger.info("Sentry activado (SENTRY_DSN configurada) -- los errores no controlados también se reportan ahí.")
+    except Exception:
+        logger.exception("SENTRY_DSN está configurada pero Sentry no pudo inicializarse -- sigue funcionando solo con el log de Railway.")
+else:
+    logger.info("Sentry no configurado (falta SENTRY_DSN) -- los errores no controlados solo quedan en el log de Railway.")
+
 
 @app.errorhandler(Exception)
 def _manejar_error_inesperado(e):
@@ -190,12 +219,18 @@ def _manejar_error_inesperado(e):
     (que el frontend no puede parsear como JSON y termina mostrando el
     genérico "Error inesperado"), y en un deploy de producción se veía
     todavía peor. Ahora: se registra el traceback completo en el log del
-    servidor (para poder diagnosticarlo) y se le devuelve al navegador un
+    servidor (para poder diagnosticarlo), se reporta a Sentry si está
+    configurado (ver SENTRY_DSN arriba), y se le devuelve al navegador un
     JSON con el mensaje real del error, para saber altiro qué pasó."""
     from werkzeug.exceptions import HTTPException
     if isinstance(e, HTTPException):
         return e
     logger.error("Error no controlado en %s %s:\n%s", request.method, request.path, traceback.format_exc())
+    if sentry_sdk is not None:
+        try:
+            sentry_sdk.capture_exception(e)
+        except Exception:
+            logger.exception("No se pudo reportar el error a Sentry (no afecta la respuesta al usuario).")
     if request.path.startswith("/api/"):
         return jsonify({"error": f"Error interno del servidor: {e}"}), 500
     raise e
@@ -1873,6 +1908,10 @@ RUTAS_PUBLICAS = {
     # sistema — la única verificación posible es la firma de Twilio, ver
     # _validar_firma_twilio).
     "webhook_whatsapp",
+    # Chequeo de salud para Railway (y cualquier monitor externo tipo
+    # UptimeRobot) -- sin login a propósito, porque quien pregunta "¿está
+    # viva la app?" no tiene (ni debería necesitar) una sesión de usuario.
+    "salud",
 }
 
 
@@ -1885,6 +1924,21 @@ def exigir_login():
     if request.path.startswith("/api/"):
         return jsonify({"error": "Debes iniciar sesión"}), 401
     return redirect(url_for("login"))
+
+
+@app.route("/health")
+def salud():
+    """Chequeo de salud trivial para el healthcheck de Railway (o cualquier
+    monitor externo tipo UptimeRobot/BetterStack) -- a propósito NO consulta
+    la base de datos ni nada más: solo confirma que el proceso de la app
+    está vivo y respondiendo. Un healthcheck que dependiera de la base de
+    datos podría marcar la app como "caída" durante, por ejemplo, una
+    restauración de respaldo (que sí toma unos segundos con la base
+    bloqueada), lo que sería un falso positivo. Si algún día se necesita
+    distinguir "el proceso vive" de "la base responde", lo más simple es
+    agregar un ?db=1 opcional acá en vez de complicar este endpoint por
+    defecto."""
+    return jsonify({"ok": True}), 200
 
 
 # ---------------------------------------------------------------------------

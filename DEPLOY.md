@@ -109,6 +109,33 @@ la dirección con el resto del taller:
 3. No olvides la variable `SECRET_KEY` del Paso 5: sin ella, el login
    funciona pero no es seguro.
 
+## Chequeo de salud (/health)
+
+La app expone `/health` (sin login, no consulta la base de datos) que
+devuelve `{"ok": true}` con código 200 mientras el proceso esté vivo. Sirve
+para que Railway (Settings del servicio → Healthcheck Path) o un monitor
+externo gratis (ej. UptimeRobot, Better Stack) te avisen apenas la app deja
+de responder, en vez de enterarte porque un cliente te llama a decir que no
+puede ver su OT. Configurarlo en Railway es opcional pero recomendado antes
+de depender del sistema todos los días.
+
+## Monitoreo de errores (Sentry, opcional pero recomendado)
+
+Hoy, si algo se rompe en el sistema, el error queda registrado en el log de
+Railway — pero nadie se entera hasta que entra a mirarlo. Sentry (gratis
+para este volumen de uso) manda un aviso apenas ocurre un error real.
+
+1. Crea una cuenta gratis en https://sentry.io.
+2. Crea un proyecto nuevo, tipo "Flask" (o "Python" genérico).
+3. Copia el DSN que te da (una URL larga tipo `https://xxxx@oXXXX.ingest.
+   sentry.io/XXXX`).
+4. En Railway → tu servicio → Variables, agrega `SENTRY_DSN` con ese valor.
+
+Con eso solo, sin tocar nada más, el sistema empieza a reportar ahí cada
+error inesperado (además de seguir dejándolo en el log de Railway como
+siempre). Si no configuras esta variable, el sistema sigue funcionando
+exactamente igual que hasta ahora — es 100% opcional.
+
 ## Si en algún momento se te vuelven a borrar los datos
 
 Primero, entra a `https://tu-dominio.up.railway.app/api/estado` en el
@@ -346,6 +373,11 @@ Se descartó a favor de este enfoque más simple porque:
   minutos" y "hace unos segundos" no justifica esa complejidad extra --
   sobre todo combinado con el respaldo diario por correo como red de
   seguridad adicional, ya fuera de Railway.
+
+(El `entrypoint.sh` que se había armado para esto ya no está en el repo --
+nunca llegó a usarse en producción, porque el `Procfile` siempre arrancó la
+app directo con `gunicorn`, sin pasar por ese script. Se eliminó para que
+nadie piense que la replicación a R2 está activa.)
 
 ### Los dos respaldos trabajando juntos
 

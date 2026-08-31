@@ -383,6 +383,7 @@
     <button class="btn btn-secundario" id="btn-cxp-carga-masiva">Carga masiva (Excel)</button>
     <button class="btn btn-secundario" id="btn-cxp-escanear-foto">📷 Escanear foto</button>
     <input type="file" id="input-cxp-escanear-foto" accept="image/jpeg,image/png,image/webp,image/gif" capture="environment" style="display:none">
+    <button class="btn btn-secundario" id="btn-factura-internacional">🌎 Agregar factura internacional</button>
     <button class="btn btn-primary" id="btn-nueva-factura-pendiente">+ Registrar factura de compra</button>
   </section>
   <section class="tabla-wrap">
@@ -884,6 +885,107 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-secundario" data-close="modal-factura-pendiente">Cancelar</button>
         <button type="submit" class="btn btn-primary" id="pfr-btn-guardar">Registrar factura</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Modal: Registrar factura de compra internacional (prorratea flete,
+     PayPal y agente de aduana entre las líneas y convierte a pesos -- ver
+     _calcular_prorrateo_internacional en app.py, reemplaza el Excel manual
+     que se usaba para esto) -->
+<div class="modal-overlay" id="modal-factura-internacional">
+  <div class="modal modal-ancho">
+    <div class="modal-head">
+      <h2>Agregar factura internacional</h2>
+      <button class="modal-close" data-close="modal-factura-internacional">&times;</button>
+    </div>
+    <p class="ayuda-inline">Para una compra en el extranjero: ingresa el costo unitario de cada producto en dólares (tal como viene en la factura del proveedor) y los gastos de la importación completa -- el sistema reparte el flete, PayPal y el agente de aduana (DHL) entre los productos y calcula el costo final de cada uno en pesos, igual que el Excel que se usaba para esto.</p>
+    <form id="form-factura-internacional">
+      <div class="grid-3">
+        <div class="campo">
+          <label>N° de factura *</label>
+          <input type="text" id="fi-numero" required placeholder="Ej: TRANSPEED 9062026">
+        </div>
+        <div class="campo">
+          <label>Proveedor</label>
+          <select id="fi-proveedor-id"><option value="">Sin proveedor</option></select>
+        </div>
+        <div class="campo">
+          <label>Fecha</label>
+          <input type="date" id="fi-fecha">
+        </div>
+      </div>
+
+      <h3 class="subtitulo">Datos de la importación</h3>
+      <div class="grid-4">
+        <div class="campo">
+          <label>Tipo de cambio (US$ → CLP) *</label>
+          <input type="number" id="fi-tipo-cambio" min="0" step="0.01" required placeholder="Ej: 944.48">
+        </div>
+        <div class="campo">
+          <label>Shipping (US$)</label>
+          <input type="number" id="fi-shipping-usd" min="0" step="0.01" value="0">
+        </div>
+        <div class="campo">
+          <label>PayPal (US$)</label>
+          <input type="number" id="fi-paypal-usd" min="0" step="0.01" value="0">
+        </div>
+        <div class="campo">
+          <label>DHL / agente de aduana ($ CLP)</label>
+          <input type="number" id="fi-dhl-clp" min="0" step="1" value="0">
+        </div>
+      </div>
+      <p class="ayuda-inline">El flete y PayPal se reparten entre los productos según su costo unitario en dólares (a más valor unitario, más flete le toca) y se convierten a pesos con el tipo de cambio de arriba. El agente de aduana/DHL (que llega directo en pesos) se reparte después, según cuánto pesa en pesos cada producto ya con flete y PayPal sumados.</p>
+
+      <h3 class="subtitulo">Productos de la factura</h3>
+      <div class="campo campo-autocomplete" id="fi-campo-buscar-producto">
+        <label>Buscar producto para agregar</label>
+        <input type="text" id="fi-buscar-producto" placeholder="Busca por nombre, código o N°… (ej: 6f35 bomba)" autocomplete="off">
+        <div class="autocomplete-resultados" id="fi-producto-resultados" style="display:none"></div>
+      </div>
+      <div id="fi-lineas"></div>
+      <button type="button" class="btn-link" id="fi-agregar-linea">+ Agregar línea vacía</button>
+
+      <label class="toggle-critico" style="margin-top:8px">
+        <input type="checkbox" id="fi-exento-iva"> Esta factura es exenta de IVA (no le corresponde el 19%)
+      </label>
+      <p class="fac-total-linea">
+        Neto (estimado): <strong id="fi-total-neto">$0</strong>
+        — IVA (19%): <strong id="fi-total-iva">$0</strong>
+        — Total: <strong id="fi-total-vivo">$0</strong>
+      </p>
+
+      <h3 class="subtitulo">Condición de pago</h3>
+      <div class="grid-3">
+        <label class="toggle-critico"><input type="radio" name="fi-condicion" value="contado"> Al contado</label>
+        <label class="toggle-critico"><input type="radio" name="fi-condicion" value="credito" checked> A crédito</label>
+        <label class="toggle-critico"><input type="radio" name="fi-condicion" value="mixto"> Mixto</label>
+      </div>
+      <div class="grid-2" id="fi-campos-mixto" style="display:none">
+        <div class="campo">
+          <label>% al contado</label>
+          <input type="number" id="fi-porcentaje-contado" min="1" max="99" value="50">
+        </div>
+      </div>
+      <div class="grid-2" id="fi-campos-credito">
+        <div class="campo">
+          <label>Plazo de crédito (días)</label>
+          <input type="number" id="fi-plazo-dias" min="1" value="30">
+        </div>
+        <div class="campo">
+          <label>&nbsp;</label>
+          <div class="pfr-plazos-rapidos">
+            <button type="button" class="btn btn-secundario" data-plazo-fi="30">30 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo-fi="60">60 días</button>
+            <button type="button" class="btn btn-secundario" data-plazo-fi="90">90 días</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" data-close="modal-factura-internacional">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="fi-btn-guardar">Registrar factura internacional</button>
       </div>
     </form>
   </div>

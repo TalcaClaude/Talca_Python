@@ -1691,6 +1691,11 @@ async function abrirDetalleFacturaPendiente(id) {
     <p><strong>Origen:</strong> ${ORIGEN_PFR_LABEL[p.origen] || p.origen || "—"}</p>
     <p><strong>Registrada por:</strong> ${escapeHtml(p.creado_por) || "—"}</p>
     ${p.estado === "rechazada" && p.nota_rechazo ? `<p><strong>Motivo de rechazo:</strong> ${escapeHtml(p.nota_rechazo)}</p>` : ""}
+    ${p.internacional ? `
+      <p class="ayuda-inline">🌎 Factura internacional — Tipo de cambio: ${p.internacional.tipo_cambio} ·
+        Shipping: US$${p.internacional.shipping_usd} · PayPal: US$${p.internacional.paypal_usd} ·
+        DHL/agente de aduana: ${fmtMoney(p.internacional.dhl_clp)}. El costo unitario de cada línea de abajo
+        ya incluye su parte del prorrateo de estos gastos, convertido a pesos.</p>` : ""}
     ${(p.historial && p.historial.length) ? `
       <h3 class="subtitulo">Historial</h3>
       <ul class="pfd-historial">
@@ -1698,8 +1703,19 @@ async function abrirDetalleFacturaPendiente(id) {
       </ul>` : ""}
   `;
 
-  document.getElementById("pfd-lineas").innerHTML = lineasParaMostrar.map(l => {
+  document.getElementById("pfd-lineas").innerHTML = lineasParaMostrar.map((l, idx) => {
     const sinResolver = l.producto_id == null;
+    // Detalle del prorrateo internacional de esta línea (ver p.internacional
+    // más arriba) -- el orden de p.internacional.lineas quedó fijado al
+    // crear la factura y calza 1 a 1 con lineasParaMostrar (ni la
+    // aprobación ni la carga de la factura real reordenan ni fusionan
+    // líneas), así que se puede matchear por índice sin necesidad de
+    // guardar un id de línea aparte.
+    const calcInternacional = (p.internacional && p.internacional.lineas[idx])
+      ? `<div class="pfd-linea-leido">US$${p.internacional.lineas[idx].costo_unitario_usd}/u ·
+          ${(p.internacional.lineas[idx].pct_flete * 100).toFixed(1)}% flete/PayPal ·
+          ${(p.internacional.lineas[idx].pct_dhl * 100).toFixed(1)}% DHL</div>`
+      : "";
     // "Leído: ..." se muestra SIEMPRE que haya texto_original (viene de
     // una foto leída por IA -- WhatsApp o "Escanear foto"; las líneas
     // tipeadas a mano/Excel no traen este campo), matcheó producto o no.
@@ -1712,8 +1728,8 @@ async function abrirDetalleFacturaPendiente(id) {
       ? `<div class="pfd-linea-leido">Leído: "${escapeHtml(l.texto_original)}"${l.modelo_leido ? ` · modelo: "${escapeHtml(l.modelo_leido)}"` : ""}${l.codigo_leido ? ` · código: "${escapeHtml(l.codigo_leido)}"` : ""}</div>`
       : "";
     const nombreCelda = sinResolver
-      ? `⚠️ Producto nuevo, falta crear${leido}`
-      : `${escapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}${leido}`;
+      ? `⚠️ Producto nuevo, falta crear${leido}${calcInternacional}`
+      : `${escapeHtml(l.producto_nombre) || `Producto #${l.producto_id}`}${leido}${calcInternacional}`;
     return `
     <tr>
       <td>${nombreCelda}</td>
@@ -2426,6 +2442,274 @@ document.getElementById("form-factura-pendiente").addEventListener("submit", asy
     toast(e.message, true);
   } finally {
     btnGuardarFactura.disabled = false;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// "Agregar factura internacional": reemplaza el Excel que el taller usaba
+// para prorratear flete/PayPal/agente de aduana entre los productos de una
+// importación y convertir a pesos. Cada línea acá va con su costo unitario
+// en DÓLARES (no en pesos, a diferencia del resto de las facturas de
+// compra) -- el cálculo real (idéntico al del Excel) lo hace el backend
+// (ver _calcular_prorrateo_internacional en app.py); lo que se recalcula
+// acá en el navegador es solo una VISTA PREVIA en vivo para que quien carga
+// la factura vea de inmediato el costo final estimado de cada producto
+// antes de guardar -- si hay cualquier diferencia de redondeo, manda
+// siempre lo que devuelve el servidor al guardar.
+// ---------------------------------------------------------------------------
+
+function filaLineaFacturaInternacional(productos, linea) {
+  linea = linea || {};
+  const div = document.createElement("div");
+  div.className = "fac-linea-row";
+  div.innerHTML = `
+    <div class="campo fi-linea-producto-campo">
+      <label>Producto</label>
+      <select class="fi-linea-producto-id">
+        <option value="">Selecciona un producto…</option>
+        <option value="__nuevo__">✏️ No está en el catálogo — describir para Bodega</option>
+        ${productos.map(p => `<option value="${p.id}">#${p.id_sistema} — ${escapeHtml(p.nombre)}</option>`).join("")}
+      </select>
+      <input type="text" class="fi-linea-nombre-nuevo" placeholder="¿Qué producto es? (ej. Kit de embrague ABC 2020)" style="display:none;margin-top:6px">
+    </div>
+    <div class="campo fi-linea-cantidad-campo">
+      <label>Cantidad</label>
+      <input type="number" class="fi-linea-cantidad" min="1" value="${linea.cantidad != null ? linea.cantidad : 1}">
+    </div>
+    <div class="campo fi-linea-costo-campo">
+      <label>Costo unit. (US$)</label>
+      <input type="number" class="fi-linea-costo-usd" min="0" step="0.01" value="${linea.costo_unitario_usd != null ? linea.costo_unitario_usd : 0}">
+    </div>
+    <p class="fi-linea-calculo">Completa el costo unitario y el tipo de cambio para ver el costo final estimado.</p>
+    <button type="button" class="fac-linea-quitar">Quitar</button>
+  `;
+  const select = div.querySelector(".fi-linea-producto-id");
+  const inputNombreNuevo = div.querySelector(".fi-linea-nombre-nuevo");
+  if (linea.producto_id) select.value = linea.producto_id;
+  function sincronizarVisibilidad() {
+    inputNombreNuevo.style.display = select.value === "__nuevo__" ? "block" : "none";
+  }
+  sincronizarVisibilidad();
+  select.addEventListener("change", () => { sincronizarVisibilidad(); fiRecalcular(); });
+  div.querySelector(".fi-linea-cantidad").addEventListener("input", fiRecalcular);
+  div.querySelector(".fi-linea-costo-usd").addEventListener("input", fiRecalcular);
+  div.querySelector(".fac-linea-quitar").addEventListener("click", () => { div.remove(); fiRecalcular(); });
+  return div;
+}
+
+// Reproduce en el navegador, como vista previa, la misma lógica de
+// _calcular_prorrateo_internacional (app.py) -- ver el comentario de esa
+// función para la explicación completa de las dos pasadas de prorrateo
+// (flete+PayPal por costo unitario US$, después DHL por peso en pesos).
+function fiRecalcular() {
+  const filas = Array.from(document.querySelectorAll("#fi-lineas .fac-linea-row"));
+  const tipoCambio = parseFloat(document.getElementById("fi-tipo-cambio").value) || 0;
+  const shippingUsd = parseFloat(document.getElementById("fi-shipping-usd").value) || 0;
+  const paypalUsd = parseFloat(document.getElementById("fi-paypal-usd").value) || 0;
+  const dhlClp = parseFloat(document.getElementById("fi-dhl-clp").value) || 0;
+
+  const datos = filas.map(fila => ({
+    fila,
+    cantidad: parseFloat(fila.querySelector(".fi-linea-cantidad").value) || 0,
+    costoUsd: parseFloat(fila.querySelector(".fi-linea-costo-usd").value) || 0,
+  }));
+  const totalUsdUnitario = datos.reduce((acc, d) => acc + d.costoUsd, 0);
+
+  let netoEstimado = 0;
+  if (tipoCambio > 0 && totalUsdUnitario > 0 && datos.length) {
+    let totalClpPreDhl = 0;
+    datos.forEach(d => {
+      d.pctFlete = d.costoUsd / totalUsdUnitario;
+      d.clpPreDhl = (d.costoUsd + shippingUsd * d.pctFlete + paypalUsd * d.pctFlete) * tipoCambio;
+      totalClpPreDhl += d.clpPreDhl;
+    });
+    datos.forEach(d => {
+      const pctDhl = totalClpPreDhl > 0 ? d.clpPreDhl / totalClpPreDhl : 0;
+      const totalClpLinea = d.clpPreDhl + dhlClp * pctDhl;
+      const costoFinalUnit = d.cantidad > 0 ? Math.round(totalClpLinea / d.cantidad) : 0;
+      d.fila.querySelector(".fi-linea-calculo").textContent = d.cantidad > 0
+        ? `Prorrateo: ${(d.pctFlete * 100).toFixed(1)}% flete/PayPal, ${(pctDhl * 100).toFixed(1)}% DHL — costo final estimado: ${fmtMoney(costoFinalUnit)} c/u (${fmtMoney(totalClpLinea)} la línea)`
+        : "Ingresa una cantidad válida para ver el costo final estimado.";
+      netoEstimado += totalClpLinea;
+    });
+  } else {
+    datos.forEach(d => {
+      d.fila.querySelector(".fi-linea-calculo").textContent = "Completa el costo unitario y el tipo de cambio para ver el costo final estimado.";
+    });
+  }
+
+  const exento = document.getElementById("fi-exento-iva").checked;
+  const iva = exento ? 0 : netoEstimado * 0.19;
+  document.getElementById("fi-total-neto").textContent = fmtMoney(netoEstimado);
+  document.getElementById("fi-total-iva").textContent = fmtMoney(iva);
+  document.getElementById("fi-total-vivo").textContent = fmtMoney(netoEstimado + iva);
+}
+
+async function fiAbrir() {
+  try {
+    await pfrCargarCatalogos();
+    const selectProveedor = document.getElementById("fi-proveedor-id");
+    selectProveedor.innerHTML = '<option value="">Sin proveedor</option>' +
+      pfrProveedoresCache.map(p => `<option value="${p.id}">${escapeHtml(p.nombre)}</option>`).join("");
+    document.getElementById("form-factura-internacional").reset();
+    document.querySelector('input[name="fi-condicion"][value="credito"]').checked = true;
+    document.getElementById("fi-campos-mixto").style.display = "none";
+    document.getElementById("fi-campos-credito").style.display = "grid";
+    document.getElementById("fi-producto-resultados").style.display = "none";
+    const cont = document.getElementById("fi-lineas");
+    cont.innerHTML = "";
+    cont.appendChild(filaLineaFacturaInternacional(pfrProductosCache));
+    fiRecalcular();
+    abrirModal("modal-factura-internacional");
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("btn-factura-internacional").addEventListener("click", fiAbrir);
+
+document.getElementById("fi-agregar-linea").addEventListener("click", () => {
+  document.getElementById("fi-lineas").appendChild(filaLineaFacturaInternacional(pfrProductosCache));
+  fiRecalcular();
+});
+
+["fi-tipo-cambio", "fi-shipping-usd", "fi-paypal-usd", "fi-dhl-clp", "fi-exento-iva"].forEach(id => {
+  document.getElementById(id).addEventListener("input", fiRecalcular);
+  document.getElementById(id).addEventListener("change", fiRecalcular);
+});
+
+function renderResultadosFi(texto) {
+  const resultados = document.getElementById("fi-producto-resultados");
+  const q = texto.trim();
+  if (!q) {
+    resultados.style.display = "none";
+    return;
+  }
+  const coincidencias = pfrProductosCache.filter(p =>
+    coincideBusqueda(q, p.nombre, p.descripcion, p.codigo_interno, p.id_sistema)
+  ).slice(0, 8);
+  if (coincidencias.length === 0) {
+    resultados.innerHTML = '<div class="autocomplete-sin-resultados">Sin productos que coincidan</div>';
+    resultados.style.display = "block";
+    return;
+  }
+  resultados.innerHTML = coincidencias.map(p => `
+    <div class="autocomplete-item" data-id="${p.id}">
+      #${escapeHtml(p.id_sistema)} — ${escapeHtml(p.nombre)}
+      <span class="autocomplete-item-meta">Stock: ${p.stock_disponible}</span>
+    </div>
+  `).join("");
+  resultados.style.display = "block";
+  resultados.querySelectorAll(".autocomplete-item").forEach(item => {
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const p = pfrProductosCache.find(x => x.id === parseInt(item.dataset.id, 10));
+      if (p) agregarLineaFacturaInternacionalDesdeAutocomplete(p);
+    });
+  });
+}
+
+function agregarLineaFacturaInternacionalDesdeAutocomplete(producto) {
+  const filaExistente = Array.from(document.querySelectorAll("#fi-lineas .fac-linea-row"))
+    .find(fila => parseInt(fila.querySelector(".fi-linea-producto-id").value, 10) === producto.id);
+  if (filaExistente) {
+    const inputCantidad = filaExistente.querySelector(".fi-linea-cantidad");
+    inputCantidad.value = (parseFloat(inputCantidad.value) || 0) + 1;
+  } else {
+    document.getElementById("fi-lineas").appendChild(filaLineaFacturaInternacional(pfrProductosCache, {
+      producto_id: producto.id, cantidad: 1,
+    }));
+  }
+  fiRecalcular();
+  toast(`Agregado: ${producto.nombre}`);
+}
+
+document.getElementById("fi-buscar-producto").addEventListener("input", (e) => {
+  renderResultadosFi(e.target.value);
+});
+document.getElementById("fi-buscar-producto").addEventListener("focus", (e) => {
+  if (e.target.value.trim()) renderResultadosFi(e.target.value);
+});
+document.getElementById("fi-buscar-producto").addEventListener("blur", () => {
+  setTimeout(() => { document.getElementById("fi-producto-resultados").style.display = "none"; }, 150);
+});
+
+document.querySelectorAll('input[name="fi-condicion"]').forEach(radio => {
+  radio.addEventListener("change", () => {
+    const condicion = document.querySelector('input[name="fi-condicion"]:checked').value;
+    document.getElementById("fi-campos-mixto").style.display = condicion === "mixto" ? "grid" : "none";
+    document.getElementById("fi-campos-credito").style.display = condicion === "contado" ? "none" : "grid";
+  });
+});
+
+document.querySelectorAll(".pfr-plazos-rapidos [data-plazo-fi]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.getElementById("fi-plazo-dias").value = btn.dataset.plazoFi;
+  });
+});
+
+document.getElementById("form-factura-internacional").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const tipoCambio = document.getElementById("fi-tipo-cambio").value;
+  if (!tipoCambio || Number(tipoCambio) <= 0) {
+    toast("Ingresa el tipo de cambio de esta factura", true);
+    return;
+  }
+  const filas = Array.from(document.querySelectorAll("#fi-lineas .fac-linea-row"));
+  const lineas = [];
+  for (const fila of filas) {
+    const valorSelect = fila.querySelector(".fi-linea-producto-id").value;
+    const cantidad = fila.querySelector(".fi-linea-cantidad").value;
+    const costo_unitario_usd = fila.querySelector(".fi-linea-costo-usd").value;
+    if (valorSelect === "__nuevo__") {
+      const nombreNuevo = fila.querySelector(".fi-linea-nombre-nuevo").value.trim();
+      if (!nombreNuevo) {
+        toast("Describe el producto en cada línea marcada como \"No está en el catálogo\" (o quítala)", true);
+        return;
+      }
+      lineas.push({ producto_nuevo_nombre: nombreNuevo, cantidad, costo_unitario_usd });
+    } else if (!valorSelect) {
+      toast("Selecciona un producto en cada línea (o quítala)", true);
+      return;
+    } else {
+      lineas.push({ producto_id: valorSelect, cantidad, costo_unitario_usd });
+    }
+  }
+  if (!lineas.length) {
+    toast("Agrega al menos un producto a la factura internacional", true);
+    return;
+  }
+
+  const condicion = document.querySelector('input[name="fi-condicion"]:checked').value;
+  const btnGuardar = e.target.querySelector('button[type="submit"]');
+  btnGuardar.disabled = true;
+  try {
+    const creada = await api("/api/facturas/internacional", {
+      method: "POST",
+      body: JSON.stringify({
+        numero: document.getElementById("fi-numero").value,
+        proveedor_id: document.getElementById("fi-proveedor-id").value || null,
+        fecha: document.getElementById("fi-fecha").value,
+        tipo_cambio: Number(tipoCambio),
+        shipping_usd: Number(document.getElementById("fi-shipping-usd").value || 0),
+        paypal_usd: Number(document.getElementById("fi-paypal-usd").value || 0),
+        dhl_clp: Number(document.getElementById("fi-dhl-clp").value || 0),
+        lineas,
+        condicion_pago: condicion,
+        porcentaje_contado: condicion === "mixto" ? Number(document.getElementById("fi-porcentaje-contado").value) : (condicion === "contado" ? 100 : 0),
+        plazo_dias_credito: Number(document.getElementById("fi-plazo-dias").value || 30),
+        exento_iva: document.getElementById("fi-exento-iva").checked,
+      }),
+    });
+    toast(creada.estado === "aprobada"
+      ? "Factura internacional aplicada: stock actualizado y Cuenta por Pagar generada"
+      : "Factura internacional registrada — queda pendiente de recepción (falta vincular un producto nuevo, ver el aviso 📦)");
+    cerrarModal("modal-factura-internacional");
+    await cargarFacturasPendientesRecepcion();
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btnGuardar.disabled = false;
   }
 });
 

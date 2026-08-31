@@ -1741,6 +1741,23 @@ def init_db():
         db.execute("ALTER TABLE productos ADD COLUMN tipo_producto TEXT NOT NULL DEFAULT 'repuesto'")
         db.commit()
 
+    # ---- Migración 37: "Factura internacional" (roadmap del taller) -- un
+    # botón nuevo en Facturas para registrar una importación (flete, PayPal
+    # y agente de aduana/DHL se prorratean entre las líneas y se convierten
+    # a pesos con un tipo de cambio) reemplazando el Excel manual que se
+    # usaba para esto. La factura resultante es una facturas_finanzas_pendientes
+    # común y corriente -- mismo camino de aprobación/stock/CxP que
+    # cualquier otra (ver crear_factura_internacional / _calcular_prorrateo_internacional)
+    # -- esta columna solo guarda el desglose (tipo de cambio, flete,
+    # PayPal, DHL y el % de prorrateo que le tocó a cada línea) para poder
+    # mostrarlo después en "Ver factura" y que quede trazable de dónde salió
+    # el costo unitario final en pesos de cada producto. NULL en cualquier
+    # factura que no se haya creado por este camino.
+    columnas_ffp_v37 = [c[1] for c in db.execute("PRAGMA table_info(facturas_finanzas_pendientes)").fetchall()]
+    if "internacional_json" not in columnas_ffp_v37:
+        db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN internacional_json TEXT")
+        db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -5896,6 +5913,8 @@ def _factura_pendiente_recepcion_dict(db, row):
     recibidas = d.pop("lineas_recibidas_json", None)
     d["lineas_recibidas"] = json.loads(recibidas) if recibidas else None
     d["historial"] = json.loads(d.pop("historial_json", None) or "[]")
+    internacional = d.pop("internacional_json", None)
+    d["internacional"] = json.loads(internacional) if internacional else None
     # Las líneas de gasto general (ver es_gasto_general en
     # _validar_lineas_pendiente) no tienen cantidad/precio_unitario, van
     # con un 'monto' único -- el neto de la factura suma ambos tipos (ver
@@ -6296,6 +6315,231 @@ def _validar_destino_ot_linea(db, linea, i):
     if orden["estado"] in ESTADOS_CERRADOS:
         return None, f"Línea {i}: la OT #{orden_id} está '{orden['estado']}' y no admite más ítems"
     return {"destino": "ot", "orden_id": orden_id}, None
+
+
+def _calcular_prorrateo_internacional(lineas_in, tipo_cambio, shipping_usd, paypal_usd, dhl_clp):
+    """Reproduce, línea por línea, el Excel de prorrateo de importaciones
+    que ya usaba el taller ("GUIAS DE IMPORTACION...xlsx") para repartir el
+    flete, PayPal y el agente de aduana (DHL) entre los productos de una
+    factura internacional y sacar el costo final en pesos de cada uno --
+    ver /api/facturas/internacional, que es el único que llama a esto.
+
+    La lógica (confirmada con el taller, se replica tal cual el Excel, sin
+    "corregirla" aunque a primera vista mezcle precio unitario con montos
+    de línea -- así es como el taller la viene usando):
+
+      1) El % de prorrateo de flete/PayPal de cada línea es su COSTO
+         UNITARIO en dólares (no el valor extendido cantidad×precio) sobre
+         la suma de los costos unitarios de TODAS las líneas. O sea, un
+         repuesto caro pero de poca cantidad puede llevarse más prorrateo
+         que uno barato pedido en volumen -- así calcula el Excel y así se
+         pidió mantenerlo.
+      2) Esa misma proporción se usa para repartir tanto el flete como
+         PayPal (ambos en dólares) -- se suman al costo unitario para
+         llegar a un "total dólares" por línea, que se convierte a pesos
+         con el tipo de cambio de la factura.
+      3) El agente de aduana / DHL (que en el Excel llega directo en
+         PESOS, no en dólares) se prorratea en una SEGUNDA pasada aparte,
+         esta vez según el peso en pesos de cada línea sobre el total en
+         pesos de todas (ya con flete y PayPal sumados).
+      4) El resultado de sumar ambos prorrateos es el costo total en pesos
+         "de la línea"; dividido por la cantidad de esa línea da el costo
+         final POR UNIDAD (columna S del Excel) -- ese es el número que
+         termina como precio_unitario de la factura, en pesos, IVA no
+         incluido, listo para entrar al mismo camino que cualquier otra
+         factura de compra.
+
+    OJO -- esto puede parecer un error a primera vista, y por eso se
+    verificó dos veces con el taller antes de dejarlo así: el costo unitario
+    en dólares (I) NUNCA se multiplica por la cantidad en ningún paso de la
+    cadena (I→K→L→M→N→O→P→Q) -- se suma tal cual, como si la línea fuera de
+    una sola unidad -- y recién al final se divide por la cantidad real para
+    sacar el "costo final por unidad". Con una línea de varias unidades esto
+    da un número bastante menor al costo de fábrica en dólares convertido a
+    pesos (para 15 unidades a US$576 cada una, por ejemplo, el resultado
+    queda por debajo del valor de UNA sola unidad al tipo de cambio). Se le
+    mostró este caso concreto al taller (con esos mismos números) y
+    confirmaron que así es como calculan hoy el "precio unitario real" que
+    tipean a mano en el sistema -- así que se replica exactamente así,
+    tal como venía del Excel, sin "corregir" la fórmula.
+
+    Devuelve (desglose, error): 'desglose' es una lista alineada 1 a 1 con
+    lineas_in, cada una con el detalle completo del cálculo (para poder
+    mostrarlo después en "Ver factura", ver internacional_json) además de
+    'costo_unitario_final_clp', que es lo que crear_factura_internacional
+    usa como precio_unitario al armar las líneas para _validar_lineas_pendiente."""
+    if tipo_cambio <= 0:
+        return None, "El tipo de cambio debe ser mayor a 0"
+    if shipping_usd < 0 or paypal_usd < 0 or dhl_clp < 0:
+        return None, "Shipping, PayPal y DHL/agente de aduana no pueden ser negativos"
+
+    previas = []
+    total_usd_unitario = 0.0
+    for i, linea in enumerate(lineas_in, start=1):
+        if linea.get("es_gasto_general"):
+            return None, f"Línea {i}: una factura internacional no admite líneas de gasto general"
+        try:
+            cantidad = int(linea.get("cantidad"))
+            costo_unitario_usd = float(linea.get("costo_unitario_usd"))
+        except (TypeError, ValueError):
+            return None, f"Línea {i}: la cantidad y el costo unitario en dólares deben ser válidos"
+        if cantidad <= 0:
+            return None, f"Línea {i}: la cantidad debe ser mayor a 0"
+        if costo_unitario_usd < 0:
+            return None, f"Línea {i}: el costo unitario en dólares no puede ser negativo"
+        previas.append({"cantidad": cantidad, "costo_unitario_usd": costo_unitario_usd})
+        total_usd_unitario += costo_unitario_usd
+
+    if not previas:
+        return None, "Agrega al menos un producto a la factura internacional"
+    if total_usd_unitario <= 0:
+        return None, "Agrega costos unitarios en dólares mayores a 0 (el prorrateo se reparte según ese valor)"
+
+    # Primera pasada: flete + PayPal, prorrateados por costo unitario USD,
+    # convertidos a pesos con el tipo de cambio de la factura.
+    total_clp_pre_dhl = 0.0
+    for p in previas:
+        pct_flete = p["costo_unitario_usd"] / total_usd_unitario
+        shipping_prorrateado_usd = shipping_usd * pct_flete
+        paypal_prorrateado_usd = paypal_usd * pct_flete
+        total_usd_linea = p["costo_unitario_usd"] + shipping_prorrateado_usd + paypal_prorrateado_usd
+        clp_pre_dhl_linea = total_usd_linea * tipo_cambio
+        p["pct_flete"] = pct_flete
+        p["shipping_prorrateado_usd"] = round(shipping_prorrateado_usd, 4)
+        p["paypal_prorrateado_usd"] = round(paypal_prorrateado_usd, 4)
+        p["total_usd_linea"] = round(total_usd_linea, 4)
+        p["clp_pre_dhl_linea"] = clp_pre_dhl_linea
+        total_clp_pre_dhl += clp_pre_dhl_linea
+
+    if total_clp_pre_dhl <= 0:
+        return None, "El total en pesos antes de DHL/agente de aduana quedó en 0 -- revisa los costos unitarios"
+
+    # Segunda pasada: DHL/agente de aduana, prorrateado por el peso en
+    # pesos de cada línea (ya con flete+PayPal sumados) sobre ese total.
+    desglose = []
+    for p in previas:
+        pct_dhl = p["clp_pre_dhl_linea"] / total_clp_pre_dhl
+        dhl_prorrateado_clp = dhl_clp * pct_dhl
+        total_clp_linea = p["clp_pre_dhl_linea"] + dhl_prorrateado_clp
+        costo_unitario_final_clp = round(total_clp_linea / p["cantidad"])
+        desglose.append({
+            "cantidad": p["cantidad"],
+            "costo_unitario_usd": p["costo_unitario_usd"],
+            "pct_flete": round(p["pct_flete"], 6),
+            "shipping_prorrateado_usd": p["shipping_prorrateado_usd"],
+            "paypal_prorrateado_usd": p["paypal_prorrateado_usd"],
+            "total_usd_linea": p["total_usd_linea"],
+            "clp_pre_dhl_linea": round(p["clp_pre_dhl_linea"], 2),
+            "pct_dhl": round(pct_dhl, 6),
+            "dhl_prorrateado_clp": round(dhl_prorrateado_clp, 2),
+            "total_clp_linea": round(total_clp_linea, 2),
+            "costo_unitario_final_clp": costo_unitario_final_clp,
+        })
+    return desglose, None
+
+
+@app.route("/api/facturas/internacional", methods=["POST"])
+@requiere_rol("finanzas", "bodega")
+def crear_factura_internacional():
+    """Registra una factura de compra internacional: a diferencia de
+    crear_factura_pendiente_recepcion (que recibe el precio unitario en
+    pesos ya calculado), acá cada línea viene con su costo unitario en
+    DÓLARES tal como aparece en la factura del proveedor, más los datos de
+    la importación completa (tipo de cambio, flete y PayPal en dólares,
+    DHL/agente de aduana en pesos) -- ver _calcular_prorrateo_internacional
+    para la lógica exacta, que replica el Excel que usaba el taller para
+    esto ("GUIAS DE IMPORTACION...xlsx").
+
+    Una vez calculado el costo final en pesos de cada línea, el resto es
+    EXACTAMENTE el mismo camino que cualquier otra factura de compra
+    manual (_validar_lineas_pendiente + _crear_pendiente_y_aplicar_si_posible):
+    misma cola de aprobación de Bodega si trae un producto nuevo, mismo
+    stock y misma Cuenta por Pagar si todos los productos ya existen en el
+    catálogo. El desglose del prorrateo se guarda aparte (internacional_json)
+    solo para poder mostrarlo después en "Ver factura", nunca se usa para
+    nada más."""
+    data = request.get_json(force=True, silent=True) or {}
+    numero = (data.get("numero") or "").strip().upper()
+    proveedor_id = data.get("proveedor_id") or None
+    fecha = (data.get("fecha") or "").strip()
+    lineas_in = data.get("lineas") or []
+    condicion_pago = (data.get("condicion_pago") or "credito").strip().lower()
+    exento_iva = bool(data.get("exento_iva"))
+    try:
+        porcentaje_contado = float(data.get("porcentaje_contado") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El porcentaje al contado debe ser un número"}), 400
+    try:
+        plazo_dias_credito = int(data.get("plazo_dias_credito") or CXP_DIAS_VENCIMIENTO_DEFECTO)
+    except (TypeError, ValueError):
+        return jsonify({"error": "El plazo de crédito debe ser un número de días"}), 400
+    try:
+        tipo_cambio = float(data.get("tipo_cambio"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "El tipo de cambio debe ser un número"}), 400
+    try:
+        shipping_usd = float(data.get("shipping_usd") or 0)
+        paypal_usd = float(data.get("paypal_usd") or 0)
+        dhl_clp = float(data.get("dhl_clp") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Shipping, PayPal y DHL/agente de aduana deben ser números"}), 400
+
+    if not lineas_in:
+        return jsonify({"error": "Agrega al menos un producto a la factura internacional"}), 400
+
+    desglose, error = _calcular_prorrateo_internacional(lineas_in, tipo_cambio, shipping_usd, paypal_usd, dhl_clp)
+    if error:
+        return jsonify({"error": error}), 400
+
+    db = get_db()
+    if proveedor_id:
+        try:
+            proveedor_id = int(proveedor_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Proveedor inválido"}), 400
+        if not db.execute("SELECT id FROM proveedores WHERE id = ?", (proveedor_id,)).fetchone():
+            return jsonify({"error": "El proveedor seleccionado no existe"}), 400
+
+    # Arma las líneas en el mismo formato que espera _validar_lineas_pendiente
+    # (producto_id o producto_nuevo_nombre + cantidad + precio_unitario),
+    # con precio_unitario = el costo final en pesos que recién calculó
+    # _calcular_prorrateo_internacional -- de acá en adelante es una factura
+    # de compra común y corriente, sin ningún trato especial.
+    lineas_para_validar = []
+    for linea_in, calc in zip(lineas_in, desglose):
+        nueva_linea = {"cantidad": calc["cantidad"], "precio_unitario": calc["costo_unitario_final_clp"]}
+        if (linea_in.get("producto_nuevo_nombre") or "").strip():
+            nueva_linea["producto_nuevo_nombre"] = linea_in["producto_nuevo_nombre"].strip()
+        else:
+            nueva_linea["producto_id"] = linea_in.get("producto_id")
+        lineas_para_validar.append(nueva_linea)
+
+    lineas_validadas, error = _validar_lineas_pendiente(db, lineas_para_validar)
+    if error:
+        return jsonify({"error": error}), 400
+
+    nueva, error, _se_aplico = _crear_pendiente_y_aplicar_si_posible(
+        db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
+        porcentaje_contado, plazo_dias_credito, usuario_actual(), origen="manual",
+        exento_iva=exento_iva, tipo_documento="factura",
+    )
+    if error:
+        return jsonify({"error": error}), 400
+
+    internacional_meta = {
+        "tipo_cambio": tipo_cambio,
+        "shipping_usd": shipping_usd,
+        "paypal_usd": paypal_usd,
+        "dhl_clp": dhl_clp,
+        "lineas": desglose,
+    }
+    db.execute(
+        "UPDATE facturas_finanzas_pendientes SET internacional_json = ? WHERE id = ?",
+        (json.dumps(internacional_meta), nueva["id"]),
+    )
+    db.commit()
+    nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (nueva["id"],)).fetchone()
+    return jsonify(_factura_pendiente_recepcion_dict(db, nueva)), 201
 
 
 @app.route("/api/facturas/pendientes-recepcion", methods=["POST"])

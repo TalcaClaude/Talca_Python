@@ -1607,7 +1607,8 @@ svg .chart-punto-hover {
 
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-width: 0; }
 .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; min-width: 0; }
-.grid-2 > *, .grid-3 > * { min-width: 0; }
+.grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 14px; min-width: 0; }
+.grid-2 > *, .grid-3 > *, .grid-4 > * { min-width: 0; }
 
 .id-sistema-tag {
   font-family: var(--font-mono);
@@ -2064,6 +2065,17 @@ svg .chart-punto-hover {
 .fac-linea-row .fn-linea-cantidad-campo,
 .fac-linea-row .fn-linea-monto-gg-campo { grid-column: 3; }
 .fac-linea-row .fn-linea-precio-campo { grid-column: 4; }
+/* Misma fila fac-linea-row, ahora para "Agregar factura internacional" (ver
+   filaLineaFacturaInternacional en finanzas.js) -- solo 3 campos (sin modo
+   Gasto general, así que sin display:contents de por medio), pero se fijan
+   igual las columnas por prolijidad y para no repetir el mismo bug si el
+   día de mañana se le agrega un modo alternativo. fi-linea-calculo es el
+   resultado del prorrateo en vivo (% y costo final en pesos) mostrado bajo
+   los 3 campos, sin invadir la columna del botón "Quitar".*/
+.fac-linea-row .fi-linea-producto-campo { grid-column: 1; }
+.fac-linea-row .fi-linea-cantidad-campo { grid-column: 2; }
+.fac-linea-row .fi-linea-costo-campo { grid-column: 3; }
+.fac-linea-row .fi-linea-calculo { grid-column: 1 / 5; font-size: 0.85em; color: var(--text-muted); }
 /* Interruptor "Repuesto / Gasto general" de cada línea de factura -- a
    propósito NO tiene clase "campo" (para que no le pegue la regla
    ".campo input { width:100% }" de más abajo, que estiraba cada radio a
@@ -2630,7 +2642,7 @@ svg .chart-punto-hover {
 
 @media (max-width: 760px) {
   .summary { grid-template-columns: 1fr 1fr; }
-  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
   .detalle-grid { grid-template-columns: 1fr; }
   .tabla { min-width: 720px; }
   .fac-linea-row { grid-template-columns: 1fr; }

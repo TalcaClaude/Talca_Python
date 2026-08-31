@@ -2387,6 +2387,26 @@ def vista_factura_nueva():
     return render_template("factura_nueva.html", modulo_activo="finanzas")
 
 
+@app.route("/facturas/nueva-internacional")
+@requiere_modulo("finanzas", "bodega")
+def vista_factura_internacional():
+    """Ventana dedicada (página aparte, no modal -- mismo criterio que
+    /facturas/nueva) para registrar una factura de compra internacional
+    paso a paso: datos de la factura + de la importación (tipo de cambio,
+    flete, PayPal, DHL/agente de aduana), luego productos con su costo
+    unitario en dólares (con vista previa en vivo del prorrateo), y por
+    último la condición de pago -- ver static/js/factura_internacional.js
+    y POST /api/facturas/internacional (_calcular_prorrateo_internacional)
+    para el cálculo real.
+
+    A diferencia de /facturas/nueva, esta ventana NO tiene "guardar para
+    continuar más adelante": recién se crea el registro real al terminar
+    (paso 3), porque hasta ese punto no hay con qué calcular el costo final
+    de cada línea (falta el tipo de cambio y/o los gastos de la
+    importación) -- no tiene sentido guardar un pendiente a medio calcular."""
+    return render_template("factura_internacional.html", modulo_activo="finanzas")
+
+
 @app.route("/agente-ia")
 @requiere_modulo("operativo")
 def vista_agente_ia():

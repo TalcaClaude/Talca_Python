@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario Taller — Factura internacional</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+{% include "_tema.html" %}
+<link rel="stylesheet" href="/static/css/style.css?v={{ ASSET_VERSION }}">
+{% include "_csrf.html" %}
+</head>
+<body>
+<div class="shell">
+{% include "_sidebar.html" %}
+<div class="shell-main">
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-tag">04</span>
+      <div class="brand-text">
+        <h1>Inventario<span>Taller</span></h1>
+        <p class="brand-sub">🌎 Nueva factura internacional</p>
+      </div>
+    </div>
+    <div class="topbar-acciones">
+      <span class="sesion-usuario" id="sesion-usuario"></span>
+      <button type="button" class="btn btn-secundario" id="fi-btn-salir">← Volver a Facturas</button>
+      <a href="/logout" class="btn btn-secundario">Cerrar sesión</a>
+    </div>
+  </header>
+
+  <nav class="tabs" id="fi-pasos">
+    <button class="tab activo" data-paso="1" disabled>1. Datos e importación</button>
+    <button class="tab" data-paso="2" disabled>2. Productos</button>
+    <button class="tab" data-paso="3" disabled>3. Pago y término</button>
+  </nav>
+
+  <!-- Paso 1: numero/proveedor/fecha + datos de la importación -->
+  <section class="vista" id="fi-paso-1">
+    <p class="ayuda-inline">Para una compra en el extranjero: más adelante vas a ingresar el costo de cada producto en dólares (tal como viene en la factura del proveedor) -- acá primero van los datos generales y los gastos de la importación completa (flete, PayPal, agente de aduana), que el sistema reparte entre los productos igual que el Excel que se usaba para esto.</p>
+    <div class="grid-3">
+      <div class="campo">
+        <label>N° de factura *</label>
+        <input type="text" id="fi-numero" required placeholder="Ej: TRANSPEED 9062026">
+      </div>
+      <div class="campo">
+        <label>Proveedor</label>
+        <div class="campo-select-mas">
+          <select id="fi-proveedor-id"><option value="">Sin proveedor</option></select>
+          <button type="button" class="btn-link" id="fi-btn-nuevo-proveedor">+ Nuevo proveedor</button>
+        </div>
+      </div>
+      <div class="campo">
+        <label>Fecha</label>
+        <input type="date" id="fi-fecha">
+      </div>
+    </div>
+
+    <div id="fi-nuevo-proveedor-form" style="display:none">
+      <h3 class="subtitulo">Proveedor nuevo</h3>
+      <div class="grid-3">
+        <div class="campo"><label>Nombre *</label><input type="text" id="fi-prov-nombre" placeholder="Ej: Transpeed"></div>
+        <div class="campo"><label>RUT</label><input type="text" id="fi-prov-rut" placeholder="Opcional"></div>
+        <div class="campo"><label>Teléfono</label><input type="text" id="fi-prov-telefono" placeholder="Opcional"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" id="fi-prov-cancelar">Cancelar</button>
+        <button type="button" class="btn btn-primary" id="fi-prov-guardar">Crear proveedor</button>
+      </div>
+    </div>
+
+    <h3 class="subtitulo">Datos de la importación</h3>
+    <div class="grid-4">
+      <div class="campo">
+        <label>Tipo de cambio (US$ → CLP) *</label>
+        <input type="number" id="fi-tipo-cambio" min="0" step="0.01" required placeholder="Ej: 944.48">
+      </div>
+      <div class="campo">
+        <label>Shipping (US$)</label>
+        <input type="number" id="fi-shipping-usd" min="0" step="0.01" value="0">
+      </div>
+      <div class="campo">
+        <label>PayPal (US$)</label>
+        <input type="number" id="fi-paypal-usd" min="0" step="0.01" value="0">
+      </div>
+      <div class="campo">
+        <label>DHL / agente de aduana ($ CLP)</label>
+        <input type="number" id="fi-dhl-clp" min="0" step="1" value="0">
+      </div>
+    </div>
+    <p class="ayuda-inline">El flete y PayPal se reparten entre los productos según su costo unitario en dólares (a más valor unitario, más flete le toca) y se convierten a pesos con el tipo de cambio de arriba. El agente de aduana/DHL (que llega directo en pesos) se reparte después, según cuánto pesa en pesos cada producto ya con flete y PayPal sumados.</p>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" id="fi-p1-salir">Cancelar</button>
+      <button type="button" class="btn btn-primary" id="fi-p1-siguiente">Siguiente →</button>
+    </div>
+  </section>
+
+  <!-- Paso 2: productos -->
+  <section class="vista" id="fi-paso-2" style="display:none">
+    <div class="campo campo-autocomplete" id="fi-campo-buscar-producto">
+      <label>Buscar producto para agregar</label>
+      <input type="text" id="fi-buscar-producto" placeholder="Busca por nombre, código o N°… (ej: 6f35 bomba)" autocomplete="off">
+      <div class="autocomplete-resultados" id="fi-producto-resultados" style="display:none"></div>
+    </div>
+    <div id="fi-lineas"></div>
+    <button type="button" class="btn-link" id="fi-agregar-linea">+ Agregar línea vacía</button>
+
+    <label class="toggle-critico" style="margin-top:8px">
+      <input type="checkbox" id="fi-exento-iva"> Esta factura es exenta de IVA (no le corresponde el 19%)
+    </label>
+    <p class="fac-total-linea">
+      Neto (estimado): <strong id="fi-total-neto">$0</strong>
+      — IVA (19%): <strong id="fi-total-iva">$0</strong>
+      — Total: <strong id="fi-total-vivo">$0</strong>
+    </p>
+
+    <div class="modal-actions">
+      <button type="button" class="btn btn-secundario" id="fi-p2-atras">← Atrás</button>
+      <button type="button" class="btn btn-primary" id="fi-p2-siguiente">Siguiente →</button>
+    </div>
+  </section>
+
+  <!-- Paso 3: condición de pago + término -->
+  <section class="vista" id="fi-paso-3" style="display:none">
+    <h3 class="subtitulo">Condición de pago</h3>
+    <div class="grid-3">
+      <label class="toggle-critico"><input type="radio" name="fi-condicion" value="contado"> Al contado</label>
+      <label class="toggle-critico"><input type="radio" name="fi-condicion" value="credito" checked> A crédito</label>
+      <label class="toggle-critico"><input type="radio" name="fi-condicion" value="mixto"> Mixto</label>
+    </div>
+    <div class="grid-2" id="fi-campos-mixto" style="display:none">
+      <div class="campo">
+        <label>% al contado</label>
+        <input type="number" id="fi-porcentaje-contado" min="1" max="99" value="50">
+      </div>
+    </div>
+    <div class="grid-2" id="fi-campos-credito">
+      <div class="campo">
+        <label>Plazo de crédito (días)</label>
+        <input type="number" id="fi-plazo-dias" min="1" value="30">
+      </div>
+      <div class="campo">
+        <label>&nbsp;</label>
+        <div class="pfr-plazos-rapidos">
+          <button type="button" class="btn btn-secundario" data-plazo-fi="30">30 días</button>
+          <button type="button" class="btn btn-secundario" data-plazo-fi="60">60 días</button>
+          <button type="button" class="btn btn-secundario" data-plazo-fi="90">90 días</button>
+        </div>
+      </div>
+    </div>
+
+    <p class="fac-total-linea">
+      Neto: <strong id="fi-total-neto-p3">$0</strong>
+      — IVA: <strong id="fi-total-iva-p3">$0</strong>
+      — Total: <strong id="fi-total-vivo-p3">$0</strong>
+    </p>
+
+    <div class="modal-actions" style="flex-wrap:wrap">
+      <button type="button" class="btn btn-secundario" id="fi-p3-atras">← Atrás</button>
+      <button type="button" class="btn btn-primary" id="fi-p3-terminar">Registrar factura internacional</button>
+    </div>
+  </section>
+
+</div>
+
+</div>
+</div>
+
+<!-- Modal: confirmar salida a medio camino -->
+<div class="modal-overlay" id="modal-fi-cerrar">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>¿Salir sin terminar la factura?</h2>
+    </div>
+    <p class="ayuda-inline">Todavía no terminaste de registrar esta factura internacional -- nada de lo que escribiste se guarda hasta que la termines en el paso 3 (recién ahí se puede calcular el costo final de cada producto).</p>
+    <div class="modal-actions" style="flex-wrap:wrap">
+      <button type="button" class="btn btn-secundario" id="fi-cerrar-cancelar">Cancelar (seguir editando)</button>
+      <button type="button" class="btn btn-danger" id="fi-cerrar-descartar">Descartar y salir</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/static/js/factura_internacional.js?v={{ ASSET_VERSION }}"></script>
+</body>
+</html>

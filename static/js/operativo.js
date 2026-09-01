@@ -11,7 +11,26 @@ const state = {
   catalogoVehiculos: null, // { marcas: [...], modelos: {marca: [...]} } — catálogo de referencia (no depende del historial de OTs)
   opMesTablero: null, // mes elegido para el tablero de OTs (null = mes en curso, "todos" = historial completo)
   opMesDashboard: null, // mismo criterio, para los gráficos del dashboard
+  opSugerencias: null, // {colores, transmisiones, referencias} de /api/operativo/sugerencias
 };
+
+// Página actual de cada listado paginado (ver renderPaginador más abajo).
+// **Se declara acá arriba a propósito.** activarPestanaDesdeHash() corre al
+// evaluar el script, así que entrar directo a /operativo#clientes reventaba
+// con "Cannot access 'paginaActual' before initialization".
+const paginaActual = { clientes: 1, vehiculos: 1, listado: 1 };
+
+// Los controles del formulario de la pestaña "OT" del modal de detalle: los
+// mismos que manda el botón Guardar. Si esa lista y la del payload se
+// separan, un campo editable queda sin protección contra el refresco.
+const OP_CAMPOS_FORMULARIO_OT = [
+  "opod-estado", "opod-estado-talca", "opod-prioridad", "opod-trabajo",
+  "opod-descripcion", "opod-valor", "opod-iva-check",
+];
+
+// Foto del formulario tal como quedó la última vez que se cargó o se guardó.
+// null = no hay modal abierto.
+let opFormularioOTGuardado = null;
 
 const OP_MESES_NOMBRE = [
   "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
@@ -182,10 +201,27 @@ function cerrarModal(id) {
   const el = document.getElementById(id);
   el.classList.remove("abierto");
   el.style.zIndex = "";
+  if (id === "modal-op-orden-detalle") {
+    // Sin esto, la foto del formulario de la OT anterior seguiría viva y
+    // `opHayCambiosSinGuardarOT` compararía contra una orden que ya no está
+    // en pantalla: el refresco de fondo se quedaría bloqueado para siempre.
+    opFormularioOTGuardado = null;
+    state.opOrdenActivaId = null;
+    opActualizarAvisoCambiosOT();
+  }
 }
 
 document.querySelectorAll("[data-close]").forEach(btn => {
   btn.addEventListener("click", () => cerrarModal(btn.dataset.close));
+});
+
+// Mantiene al día el aviso de "cambios sin guardar". `input` cubre lo que se
+// teclea y `change` los selects y el checkbox.
+OP_CAMPOS_FORMULARIO_OT.forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("input", opActualizarAvisoCambiosOT);
+  el.addEventListener("change", opActualizarAvisoCambiosOT);
 });
 
 // Los modales ya NO se cierran al hacer click afuera NI con ESC (para no
@@ -466,18 +502,28 @@ const OP_ESTADOS_LABEL = {
 
 async function cargarOperativo(silencioso = false) {
   try {
-    const mesQS = state.opMesTablero ? `?mes=${encodeURIComponent(state.opMesTablero)}` : "";
+    const mesQS = state.opMesTablero ? `mes=${encodeURIComponent(state.opMesTablero)}&` : "";
+    // por_pagina=todos: el tablero arma sus columnas con TODAS las OT del mes
+    // y los selectores necesitan la lista completa de clientes. Desde que los
+    // listados paginan de a 50 por defecto, pedirlo es obligatorio — si no, el
+    // tablero mostraría solo las primeras 50 tarjetas.
+    //
+    // **El tablero NO pagina, y es deliberado**: el filtro de mes ya lo acota,
+    // paginarlo rompería el arrastre entre columnas y pelearía con el refresco
+    // automático. Lo que sí se hace es pedir `vista=tablero`, que trae solo lo
+    // que pinta la tarjeta en vez de las 68 claves por orden.
     const [dataOrdenes, dataClientes, dataProductos] = await Promise.all([
-      api(`/api/operativo/ordenes${mesQS}`),
-      api("/api/operativo/clientes"),
+      api(`/api/operativo/ordenes?${mesQS}vista=tablero&por_pagina=todos`),
+      api("/api/operativo/clientes?por_pagina=todos"),
       api("/api/productos"),
     ]);
     state.opOrdenes = dataOrdenes.ordenes;
     state.opClientes = dataClientes.clientes;
     state.opProductos = dataProductos.productos;
+    mostrarAvisoVolumenTablero(dataOrdenes.aviso_volumen || "");
     renderTableroOperativo();
     await cargarCatalogoVehiculos();
-    poblarDatalistsOperativo();
+    await poblarDatalistsOperativo();
   } catch (e) {
     // silencioso=true: se usa desde el refresco automático de fondo (ver
     // iniciarPollingOrdenes) — un error de red pasajero ahí no debería
@@ -549,22 +595,25 @@ const TRABAJOS_COMUNES_BASE = [
 // Transmisión/Referencia (Marca/Modelo dejaron de ser datalist de texto
 // libre — ver poblarSelectMarca/poblarSelectModelo más arriba, ahora son
 // <select> de verdad).
-function poblarDatalistsOperativo() {
-  const colores = new Set();
-  const transmisiones = new Set(), referencias = new Set();
-  state.opOrdenes.forEach(o => {
-    if (o.equipo) {
-      if (o.equipo.color) colores.add(o.equipo.color);
-      if (o.equipo.modelo_transmision) transmisiones.add(o.equipo.modelo_transmision);
+// Antes esto salía de state.opOrdenes, que obligaba a traer el historial
+// completo (23,5 MB con 7.116 OT) solo para sacar tres listas de valores
+// distintos. Ahora las trae un endpoint que hace tres SELECT DISTINCT.
+async function poblarDatalistsOperativo(refrescar = false) {
+  if (refrescar || !state.opSugerencias) {
+    try {
+      state.opSugerencias = await api("/api/operativo/sugerencias");
+    } catch (e) {
+      // Un fallo acá deja los autocompletados vacíos, que es molesto pero no
+      // impide crear la orden: los tres campos aceptan texto libre.
+      state.opSugerencias = { colores: [], transmisiones: [], referencias: [] };
     }
-    if (o.referencia) referencias.add(o.referencia);
-  });
+  }
   const llenar = (id, valores) => {
-    document.getElementById(id).innerHTML = [...valores].sort((a, b) => a.localeCompare(b, "es")).map(v => `<option value="${escapeHtml(v)}">`).join("");
+    document.getElementById(id).innerHTML = [...(valores || [])].sort((a, b) => a.localeCompare(b, "es")).map(v => `<option value="${escapeHtml(v)}">`).join("");
   };
-  llenar("dl-op-colores", colores);
-  llenar("dl-op-transmisiones", transmisiones);
-  llenar("dl-op-referencias", referencias);
+  llenar("dl-op-colores", state.opSugerencias.colores);
+  llenar("dl-op-transmisiones", state.opSugerencias.transmisiones);
+  llenar("dl-op-referencias", state.opSugerencias.referencias);
 }
 
 // "Trabajo a Realizar" es un <select> bloqueado: solo se puede elegir un
@@ -739,7 +788,7 @@ function renderTableroOperativo() {
 
   const coincide = (orden) => coincideBusqueda(
     busqueda,
-    String(orden.id),
+    numeroOT(orden),
     orden.cliente ? orden.cliente.nombre : "",
     orden.equipo ? `${orden.equipo.marca} ${orden.equipo.modelo} ${orden.equipo.identificador}` : "",
     orden.descripcion_problema || "",
@@ -757,7 +806,7 @@ function renderTableroOperativo() {
     cont.innerHTML = ordenes.map(o => `
       <div class="op-card op-card--${o.prioridad || "media"}" data-id="${o.id}" draggable="true">
         <div class="op-card-top">
-          <span class="op-card-ot">OT #${o.id}</span>
+          <span class="op-card-ot">OT ${etiquetaOT(o)}</span>
           ${o.prioridad && o.prioridad !== "media" ? `<span class="badge-prioridad badge-prioridad--${o.prioridad}">${escapeHtml(o.prioridad)}</span>` : ""}
         </div>
         <div class="op-card-cliente">${escapeHtml(o.cliente ? o.cliente.nombre : "Sin cliente")}</div>
@@ -846,10 +895,19 @@ async function cargarListadoOperativo() {
     const qs = new URLSearchParams();
     if (desde) qs.set("desde", desde);
     if (hasta) qs.set("hasta", hasta);
-    const query = qs.toString() ? `?${qs.toString()}` : "";
-    const data = await api(`/api/operativo/listado${query}`);
+    // **La búsqueda de ESTA pestaña va al servidor, no como la del tablero.**
+    // No es una inconsistencia: el Listado pagina y el tablero no. Filtrando
+    // en el navegador solo se vería la página cargada, que es peor que antes.
+    const busqueda = document.getElementById("op-list-buscar").value.trim();
+    if (busqueda) qs.set("q", busqueda);
+    qs.set("pagina", paginaActual.listado || 1);
+    const data = await api(`/api/operativo/listado?${qs.toString()}`);
     state.opListado = data.filas;
     renderListadoOperativo();
+    renderPaginador("paginador-listado", data, (pag) => {
+      paginaActual.listado = pag;
+      cargarListadoOperativo();
+    });
   } catch (e) {
     toast(e.message, true);
     if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="vacio">No se pudo cargar el listado.</td></tr>`;
@@ -903,7 +961,7 @@ function renderListadoOperativo() {
     const esGarantia = f.tipo === "garantia";
     return `
       <tr data-id="${f.id}" data-tipo="${f.tipo}">
-        <td class="mono">${esGarantia ? "G" : "OT"} #${f.id}</td>
+        <td class="mono">${esGarantia ? `G #${f.id}` : `OT ${etiquetaOT(f)}`}</td>
         <td>${esGarantia ? "Garantía" : "Nuevo"}</td>
         <td>${dias === null ? "—" : dias}</td>
         <td>${escapeHtml(f.cliente_nombre || "—")}</td>
@@ -958,7 +1016,14 @@ function actualizarOpcionesEstadoListado() {
   if (!sigueValido) selectEstado.value = "";
 }
 
-["op-list-buscar"].forEach(id => document.getElementById(id).addEventListener("input", renderListadoOperativo));
+// Debounce de 250 ms, igual que Clientes: cada tecla consulta al servidor,
+// así que no se dispara una petición por pulsación.
+document.getElementById("op-list-buscar").addEventListener("input", () => {
+  const campo = document.getElementById("op-list-buscar");
+  clearTimeout(campo._t);
+  paginaActual.listado = 1;
+  campo._t = setTimeout(cargarListadoOperativo, 250);
+});
 document.getElementById("op-list-filtro-tipo").addEventListener("change", () => {
   actualizarOpcionesEstadoListado();
   renderListadoOperativo();
@@ -1089,7 +1154,7 @@ document.querySelectorAll("#op-kanban .op-columna").forEach(columna => {
     if (orden && orden.estado === nuevoEstado) return; // soltada en su propia columna
     try {
       await api(`/api/operativo/ordenes/${ordenId}`, { method: "PUT", body: JSON.stringify({ estado: nuevoEstado }) });
-      toast(`Orden #${ordenId} movida a "${OP_ESTADOS_LABEL[nuevoEstado] || nuevoEstado}".`);
+      toast(`Orden ${etiquetaOT(orden || { id: ordenId })} movida a "${OP_ESTADOS_LABEL[nuevoEstado] || nuevoEstado}".`);
       await cargarOperativo();
     } catch (err) {
       toast(err.message, true);
@@ -1150,7 +1215,7 @@ function abrirEdicionClienteOperativo(id) {
 
 document.getElementById("opon-nuevo-cliente").addEventListener("click", () => {
   opClienteCallback = async (nuevo) => {
-    const data = await api("/api/operativo/clientes");
+    const data = await api("/api/operativo/clientes?por_pagina=todos");
     state.opClientes = data.clientes;
     renderSelectClientesOperativo("opon-cliente-id", nuevo.id);
     document.getElementById("opon-cliente-id").dispatchEvent(new Event("change"));
@@ -1163,7 +1228,12 @@ document.getElementById("opon-nuevo-cliente").addEventListener("click", () => {
 async function cargarClientesTab() {
   try {
     const busqueda = document.getElementById("cli-buscar").value.trim();
-    const data = await api(`/api/operativo/clientes${busqueda ? "?q=" + encodeURIComponent(busqueda) : ""}`);
+    const params = new URLSearchParams({ pagina: paginaActual.clientes });
+    if (busqueda) params.set("q", busqueda);
+    const data = await api(`/api/operativo/clientes?${params}`);
+    // Ojo: state.opClientes lo usan los selectores de cliente, y acá solo
+    // llega la página visible. Los selectores se llenan aparte con
+    // por_pagina=todos (ver cargarOperativo).
     state.opClientes = data.clientes;
     const tbody = document.getElementById("tbody-clientes");
     if (data.clientes.length === 0) {
@@ -1193,6 +1263,10 @@ async function cargarClientesTab() {
     tbody.querySelectorAll("[data-eliminar-cliente]").forEach(btn => {
       btn.addEventListener("click", () => eliminarClienteTab(parseInt(btn.dataset.eliminarCliente, 10)));
     });
+    renderPaginador("paginador-clientes", data, (p) => {
+      paginaActual.clientes = p;
+      cargarClientesTab();
+    });
   } catch (e) {
     toast(e.message, true);
   }
@@ -1200,6 +1274,9 @@ async function cargarClientesTab() {
 
 document.getElementById("cli-buscar").addEventListener("input", () => {
   clearTimeout(document.getElementById("cli-buscar")._t);
+  // Al cambiar la búsqueda se vuelve a la página 1: quedarse en la 7 de un
+  // resultado que ahora tiene 2 páginas mostraría una tabla vacía.
+  paginaActual.clientes = 1;
   document.getElementById("cli-buscar")._t = setTimeout(cargarClientesTab, 250);
 });
 
@@ -1233,9 +1310,9 @@ async function abrirRevisarVehiculos() {
   abrirModal("modal-op-revisar-vehiculos");
   try {
     await cargarCatalogoVehiculos();
-    const dataEquipos = await api("/api/operativo/equipos");
+    const dataEquipos = await api("/api/operativo/equipos?por_pagina=todos");
     if (!state.opClientes || state.opClientes.length === 0) {
-      const dataClientes = await api("/api/operativo/clientes");
+      const dataClientes = await api("/api/operativo/clientes?por_pagina=todos");
       state.opClientes = dataClientes.clientes;
     }
     const clientesPorId = new Map(state.opClientes.map(c => [c.id, c.nombre]));
@@ -1365,9 +1442,9 @@ async function chequearBloqueoEquipo(equipoId, tipo, contenedorId) {
   const sujeto = tipo === "orden" ? "una OT abierta" : "una garantía abierta";
   const cierre = tipo === "orden" ? "se entregue o se cancele" : "se entregue o se rechace";
   cont.innerHTML =
-    `⚠️ Este vehículo ya tiene ${sujeto} (${etiqueta} #${bloqueo.id}, estado: ${escapeHtml(bloqueo.estado_label)}). ` +
+    `⚠️ Este vehículo ya tiene ${sujeto} (${etiqueta} ${etiqueta === "OT" ? etiquetaOT(bloqueo) : "#" + bloqueo.id}, estado: ${escapeHtml(bloqueo.estado_label)}). ` +
     `No se puede crear otra hasta que ${cierre}. ` +
-    `<button type="button" class="btn-link" id="${contenedorId}-btn">Ver ${etiqueta} #${bloqueo.id} →</button>`;
+    `<button type="button" class="btn-link" id="${contenedorId}-btn">Ver ${etiqueta} ${etiqueta === "OT" ? etiquetaOT(bloqueo) : "#" + bloqueo.id} →</button>`;
   cont.style.display = "";
   document.getElementById(`${contenedorId}-btn`).addEventListener("click", () => {
     if (tipo === "orden") {
@@ -1388,7 +1465,7 @@ async function renderSelectEquiposOperativo(clienteId, valorActual) {
     chequearBloqueoEquipo(null, "orden", "opon-equipo-bloqueo");
     return;
   }
-  const data = await api(`/api/operativo/equipos?cliente_id=${clienteId}`);
+  const data = await api(`/api/operativo/equipos?cliente_id=${clienteId}&por_pagina=todos`);
   state.opEquiposClienteActual = data.equipos;
   select.innerHTML = '<option value="">Selecciona un vehículo…</option>' +
     data.equipos.map(eq => `<option value="${eq.id}">${escapeHtml([eq.marca, eq.modelo, eq.identificador].filter(Boolean).join(" · ") || "Equipo #" + eq.id)}</option>`).join("");
@@ -1478,7 +1555,7 @@ document.getElementById("ope-identificador").addEventListener("blur", async (e) 
     return;
   }
   try {
-    const data = await api(`/api/operativo/equipos?identificador=${encodeURIComponent(patente)}`);
+    const data = await api(`/api/operativo/equipos?identificador=${encodeURIComponent(patente)}&por_pagina=todos`);
     if (data.equipos.length === 0) {
       aviso.style.display = "none";
       return;
@@ -1697,7 +1774,7 @@ function renderResumenClienteAuto(orden) {
   const cliente = orden.cliente;
   const equipo = orden.equipo;
 
-  const partesTitulo = [`Orden #${orden.id}`];
+  const partesTitulo = [`Orden ${etiquetaOT(orden)}`];
   const identificacion = [cliente ? cliente.nombre : "", equipo ? equipo.identificador : ""]
     .filter(Boolean).join(" · ");
   if (identificacion) partesTitulo.push(identificacion);
@@ -1774,7 +1851,7 @@ document.getElementById("btn-op-link-seguimiento-copiar").addEventListener("clic
 document.getElementById("btn-opod-eliminar-orden").addEventListener("click", async () => {
   const id = document.getElementById("opod-id").value;
   if (!id) return;
-  if (!confirm(`¿Eliminar la orden #${id} por completo? Esta acción no se puede deshacer. Se devolverá al inventario el stock de los repuestos que tenga cargados.`)) return;
+  if (!confirm(`¿Eliminar la orden ${etiquetaOT(state.opOrdenActiva || { id })} por completo? Esta acción no se puede deshacer. Se devolverá al inventario el stock de los repuestos que tenga cargados.`)) return;
   try {
     await api(`/api/operativo/ordenes/${id}`, { method: "DELETE" });
     toast("Orden eliminada.");
@@ -1789,7 +1866,7 @@ document.getElementById("btn-opod-eliminar-orden").addEventListener("click", asy
 // abierta en el hub. Se llama al abrir la orden y después de cada
 // acción que pueda cambiar el valor o los pagos (guardar cambios,
 // registrar/eliminar un pago, refrescos automáticos de estado).
-function renderValorYPagosOrden(orden) {
+function renderValorYPagosOrden(orden, { conservarEdicion = false } = {}) {
   // Si el usuario está escribiendo en el campo de valor (o tiene el foco en
   // el check de IVA) justo cuando llega un refresco automático de fondo (ver
   // iniciarPollingOrdenes), no pisar lo que está escribiendo -- antes esto
@@ -1797,13 +1874,10 @@ function renderValorYPagosOrden(orden) {
   // en el valor guardado en el servidor (ej. "0") antes de que alcanzara a
   // guardar. Al guardar (btn-opod-guardar) o al reabrir la orden, el campo
   // sí se sincroniza porque en esos momentos no tiene el foco.
-  const inputValor = document.getElementById("opod-valor");
-  if (document.activeElement !== inputValor) {
-    inputValor.value = formatearMontoEnVivo(String(orden.valor_neto != null ? orden.valor_neto : 0));
-  }
-  const checkIva = document.getElementById("opod-iva-check");
-  if (document.activeElement !== checkIva) {
-    checkIva.checked = !!orden.precio_iva;
+  if (!conservarEdicion) {
+    document.getElementById("opod-valor").value =
+      formatearMontoEnVivo(String(orden.valor_neto != null ? orden.valor_neto : 0));
+    document.getElementById("opod-iva-check").checked = !!orden.precio_iva;
   }
   document.getElementById("opod-r-neto").textContent = fmtMoney(orden.valor_neto || 0);
   document.getElementById("opod-r-iva").textContent = fmtMoney(orden.valor_iva_monto || 0);
@@ -1953,16 +2027,22 @@ async function abrirDetalleOrden(id) {
     const orden = await api(`/api/operativo/ordenes/${id}`);
     state.opOrdenActivaId = id;
     document.getElementById("opod-id").value = id;
-    document.getElementById("opod-titulo").textContent = `Orden #${id}`;
+    document.getElementById("opod-titulo").textContent = `Orden ${etiquetaOT(orden)}`;
     activarTabOtPorDefecto();
     renderResumenClienteAuto(orden);
 
     document.getElementById("opod-estado").value = orden.estado;
+    document.getElementById("opod-estado-talca").value = orden.estado_talca || "ABIERTA";
     document.getElementById("opod-prioridad").value = orden.prioridad || "media";
     poblarSelectTrabajo(orden.trabajo_a_realizar || "", "opod-trabajo");
     document.getElementById("opod-descripcion").value = orden.descripcion_problema || "";
     renderValorYPagosOrden(orden);
     renderCostosOrden(orden);
+
+    // Punto de partida: lo que se muestra es lo que tiene el servidor. A
+    // partir de acá, cualquier diferencia son cambios sin guardar y el
+    // refresco de fondo deja de tocar el formulario.
+    opMarcarFormularioOTSincronizado();
 
     const btnHistorial = document.getElementById("btn-opod-ver-historial");
     if (orden.equipo) {
@@ -1984,15 +2064,26 @@ async function abrirDetalleOrden(id) {
 async function refrescarResumenHub(ordenId) {
   try {
     const orden = await api(`/api/operativo/ordenes/${ordenId}`);
-    renderResumenClienteAuto(orden);
-    // Mismo cuidado que en renderValorYPagosOrden: no pisar el <select> de
-    // estado si el usuario lo tiene abierto/enfocado en este momento.
-    const selectEstado = document.getElementById("opod-estado");
-    if (document.activeElement !== selectEstado) {
-      selectEstado.value = orden.estado;
+    // **Nunca repintar un formulario que el usuario está editando.** Mismo
+    // criterio que `opArrastrandoTarjeta` en el polling: un refresco de fondo
+    // no puede deshacer lo que la persona está haciendo.
+    //
+    // La detección es por CAMBIOS PENDIENTES, no por foco: escribir el precio
+    // y después hacer clic fuera del input dejaría el formulario desprotegido
+    // y el refresco volvería a pisarlo.
+    //
+    // Solo se saltan los CONTROLES. Lo demás —resumen de cliente y auto, tabla
+    // de pagos, costos, y el tablero de atrás— son hechos del servidor que el
+    // usuario no está editando, así que se siguen actualizando.
+    const editando = opHayCambiosSinGuardarOT();
+    if (!editando) {
+      document.getElementById("opod-estado").value = orden.estado;
+      document.getElementById("opod-estado-talca").value = orden.estado_talca || "ABIERTA";
     }
-    renderValorYPagosOrden(orden);
+    renderResumenClienteAuto(orden);
+    renderValorYPagosOrden(orden, { conservarEdicion: editando });
     renderCostosOrden(orden);
+    if (!editando) opMarcarFormularioOTSincronizado();
     cargarOperativo();
   } catch (e) {
     // silencioso: esto es un refresco de fondo, no una acción explícita del usuario
@@ -2003,6 +2094,7 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
   const id = document.getElementById("opod-id").value;
   const payload = {
     estado: document.getElementById("opod-estado").value,
+    estado_talca: document.getElementById("opod-estado-talca").value,
     prioridad: document.getElementById("opod-prioridad").value,
     trabajo_a_realizar: document.getElementById("opod-trabajo").value,
     descripcion_problema: document.getElementById("opod-descripcion").value.trim(),
@@ -2015,6 +2107,9 @@ document.getElementById("btn-opod-guardar").addEventListener("click", async () =
     renderResumenClienteAuto(actualizada);
     renderValorYPagosOrden(actualizada);
     renderCostosOrden(actualizada);
+    // Ya no hay cambios pendientes: el refresco de fondo vuelve a poder
+    // repintar el formulario.
+    opMarcarFormularioOTSincronizado();
     cargarOperativo();
   } catch (e) {
     toast(e.message, true);
@@ -3793,7 +3888,7 @@ function renderSelectEquiposGarantia(equipos, valorActual) {
 function renderSelectOrdenesGarantia(ordenes, valorActual) {
   const select = document.getElementById("garn-orden-origen-id");
   select.innerHTML = '<option value="">Sin OT asociada</option>' +
-    (ordenes || []).map(o => `<option value="${o.id}">OT #${o.id} — ${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</option>`).join("");
+    (ordenes || []).map(o => `<option value="${o.id}">OT ${etiquetaOT(o)} — ${fmtFechaSolo((o.fecha_recepcion || "").slice(0, 10))}</option>`).join("");
   select.value = valorActual || "";
 }
 
@@ -3805,7 +3900,7 @@ async function cargarOrdenesGarantiaParaEquipo(equipoId, valorActual) {
     return;
   }
   ayuda.style.display = "none";
-  const dataOrdenes = await api(`/api/operativo/ordenes?equipo_id=${equipoId}`);
+  const dataOrdenes = await api(`/api/operativo/ordenes?equipo_id=${equipoId}&por_pagina=todos`);
   renderSelectOrdenesGarantia(dataOrdenes.ordenes, valorActual || "");
 }
 
@@ -3813,12 +3908,12 @@ async function abrirNuevaGarantia(prefill) {
   document.getElementById("form-op-garantia-nueva").reset();
   renderMotivoChipsGarantia();
   if (state.opClientes.length === 0) {
-    const dataClientes = await api("/api/operativo/clientes");
+    const dataClientes = await api("/api/operativo/clientes?por_pagina=todos");
     state.opClientes = dataClientes.clientes;
   }
   renderSelectClientesOperativo("garn-cliente-id", prefill ? prefill.clienteId : "");
   if (prefill && prefill.clienteId) {
-    const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${prefill.clienteId}`);
+    const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${prefill.clienteId}&por_pagina=todos`);
     renderSelectEquiposGarantia(dataEquipos.equipos, prefill.equipoId);
     await cargarOrdenesGarantiaParaEquipo(prefill.equipoId, "");
   } else {
@@ -3837,7 +3932,7 @@ document.getElementById("garn-cliente-id").addEventListener("change", async (e) 
     await cargarOrdenesGarantiaParaEquipo(null, "");
     return;
   }
-  const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${clienteId}`);
+  const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${clienteId}&por_pagina=todos`);
   renderSelectEquiposGarantia(dataEquipos.equipos, "");
   await cargarOrdenesGarantiaParaEquipo(null, "");
 });
@@ -3855,7 +3950,7 @@ document.getElementById("garn-ver-historial").addEventListener("click", () => {
 
 document.getElementById("garn-nuevo-cliente").addEventListener("click", () => {
   opClienteCallback = async (nuevo) => {
-    const data = await api("/api/operativo/clientes");
+    const data = await api("/api/operativo/clientes?por_pagina=todos");
     state.opClientes = data.clientes;
     renderSelectClientesOperativo("garn-cliente-id", nuevo.id);
     document.getElementById("garn-cliente-id").dispatchEvent(new Event("change"));
@@ -3877,7 +3972,7 @@ document.getElementById("garn-nuevo-equipo").addEventListener("click", () => {
   renderSelectClienteEquipoModal(clienteId);
   document.getElementById("modal-op-equipo-titulo").textContent = "Nuevo equipo";
   opEquipoCallback = async (nuevo, payload) => {
-    const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${payload.cliente_id}`);
+    const dataEquipos = await api(`/api/operativo/equipos?cliente_id=${payload.cliente_id}&por_pagina=todos`);
     renderSelectEquiposGarantia(dataEquipos.equipos, nuevo.id);
     await cargarOrdenesGarantiaParaEquipo(nuevo.id, "");
   };
@@ -4214,3 +4309,87 @@ document.getElementById("btn-rep-garantias-excel").addEventListener("click", () 
 
 cargarSesion();
 cargarDashboardOperativo();
+
+
+// ---------------------------------------------------------------------------
+// Piezas que llegaron con el sync de Talca: paginación de listados, aviso de
+// volumen del tablero, y la protección del formulario de OT contra el
+// refresco de fondo. Ver CLAUDE.md.
+// ---------------------------------------------------------------------------
+
+function opLeerFormularioOT() {
+  const valores = {};
+  for (const id of OP_CAMPOS_FORMULARIO_OT) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    valores[id] = el.type === "checkbox" ? el.checked : el.value;
+  }
+  return valores;
+}
+
+function opMarcarFormularioOTSincronizado() {
+  opFormularioOTGuardado = opLeerFormularioOT();
+  opActualizarAvisoCambiosOT();
+}
+
+function opHayCambiosSinGuardarOT() {
+  if (!opFormularioOTGuardado) return false;
+  const actual = opLeerFormularioOT();
+  return Object.keys(actual).some(id => actual[id] !== opFormularioOTGuardado[id]);
+}
+
+function opActualizarAvisoCambiosOT() {
+  const aviso = document.getElementById("opod-cambios-pendientes");
+  if (!aviso) return;
+  aviso.style.display = opHayCambiosSinGuardarOT() ? "inline" : "none";
+}
+
+function renderPaginador(contenedorId, data, irAPagina) {
+  const cont = document.getElementById(contenedorId);
+  if (!cont) return;
+  const totalPaginas = data.total_paginas || 1;
+  const pagina = data.pagina || 1;
+
+  // Con una sola página igual se muestra el total: saber cuántos hay es
+  // justamente una de las cosas que no se podían saber antes.
+  const desde = data.total === 0 ? 0 : (pagina - 1) * (data.por_pagina || data.total) + 1;
+  const hasta = Math.min(pagina * (data.por_pagina || data.total), data.total);
+
+  cont.innerHTML = `
+    <span class="paginador-info">${data.total === 0 ? "Sin resultados" :
+      `Mostrando ${desde}–${hasta} de ${data.total}`}</span>
+    <button type="button" data-pag="primera" ${pagina <= 1 ? "disabled" : ""}>« Primera</button>
+    <button type="button" data-pag="anterior" ${pagina <= 1 ? "disabled" : ""}>‹ Anterior</button>
+    <span class="paginador-actual">Página ${pagina} de ${totalPaginas}</span>
+    <button type="button" data-pag="siguiente" ${pagina >= totalPaginas ? "disabled" : ""}>Siguiente ›</button>
+    <button type="button" data-pag="ultima" ${pagina >= totalPaginas ? "disabled" : ""}>Última »</button>
+  `;
+  cont.querySelectorAll("[data-pag]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const destino = {
+        primera: 1, anterior: pagina - 1, siguiente: pagina + 1, ultima: totalPaginas,
+      }[btn.dataset.pag];
+      irAPagina(Math.min(Math.max(1, destino), totalPaginas));
+    });
+  });
+}
+
+function mostrarAvisoVolumenTablero(texto) {
+  let caja = document.getElementById("op-aviso-volumen");
+  if (!caja) {
+    if (!texto) return;
+    caja = document.createElement("p");
+    caja.id = "op-aviso-volumen";
+    caja.className = "ayuda-inline";
+    const kanban = document.getElementById("op-kanban");
+    if (kanban && kanban.parentNode) kanban.parentNode.insertBefore(caja, kanban);
+  }
+  caja.textContent = texto;
+  caja.style.display = texto ? "block" : "none";
+}
+
+function formatearKilometraje(km) {
+  if (km === null || km === undefined || km === "") return "—";
+  const n = Number(km);
+  return isNaN(n) ? "—" : n.toLocaleString("es-CL");
+}

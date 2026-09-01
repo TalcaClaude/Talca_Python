@@ -358,6 +358,8 @@
     </table>
   </section>
 
+  <section class="paginador" id="paginador-listado"></section>
+
   </section>
 
   <section class="vista" id="vista-clientes" style="display:none">
@@ -386,6 +388,8 @@
       </tbody>
     </table>
   </section>
+
+  <section class="paginador" id="paginador-clientes"></section>
 
   </section>
 
@@ -957,6 +961,20 @@
           </select>
         </div>
         <div class="campo">
+          <!-- El estado que ve Talca. Es otro campo que el de arriba: Talca
+               tiene cuatro valores y Python diez. Lo que viaja en el push es
+               este; el de arriba manda sobre si está abierta o cerrada. -->
+          <label>Estado en Talca</label>
+          <select id="opod-estado-talca">
+            <option value="ABIERTA">ABIERTA</option>
+            <option value="CERRADA">CERRADA</option>
+            <option value="CERRADA BLOQUEADA">CERRADA BLOQUEADA</option>
+            <option value="PRESUPUESTO NO ACEPTADO">PRESUPUESTO NO ACEPTADO</option>
+          </select>
+          <span class="hint">Se ajusta solo al abrir o cerrar la orden. Cámbialo
+            a mano solo para elegir entre CERRADA y CERRADA BLOQUEADA.</span>
+        </div>
+        <div class="campo">
           <label>Prioridad</label>
           <select id="opod-prioridad">
             <option value="baja">Baja</option>
@@ -992,6 +1010,13 @@
       </div>
       <div class="modal-actions modal-actions--start">
         <button type="button" class="btn btn-primary" id="btn-opod-guardar">Guardar cambios</button>
+        <!-- Mientras haya cambios sin guardar, el refresco automático deja de
+             repintar este formulario (ver refrescarResumenHub). Este aviso
+             hace visible ese estado: si no, el usuario ve que su edición
+             sobrevive pero no sabe si quedó guardada. -->
+        <span id="opod-cambios-pendientes" class="hint" style="display:none; align-self:center;">
+          Cambios sin guardar
+        </span>
       </div>
 
       <div class="op-pagos">

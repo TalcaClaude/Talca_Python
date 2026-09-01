@@ -339,6 +339,80 @@ def coincide_busqueda(consulta, *campos):
     texto = normalizar_busqueda(" ".join(str(c) for c in campos if c))
     return all(t in texto for t in terminos)
 
+# Se cubren los diacríticos que aparecen en datos chilenos (español) más los
+# del francés que llegaron en algunos apellidos del padrón real. Cualquier
+# diacrítico fuera de esta lista haría que SQL y Python difieran, y por eso
+# el test compara las dos implementaciones sobre un conjunto que los incluye.
+_MAPA_SIN_TILDES = (
+    ("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ü", "u"), ("ñ", "n"),
+    ("Á", "a"), ("É", "e"), ("Í", "i"), ("Ó", "o"), ("Ú", "u"), ("Ü", "u"), ("Ñ", "n"),
+    ("à", "a"), ("è", "e"), ("ì", "i"), ("ò", "o"), ("ù", "u"),
+    ("À", "a"), ("È", "e"), ("Ì", "i"), ("Ò", "o"), ("Ù", "u"),
+    ("â", "a"), ("ê", "e"), ("î", "i"), ("ô", "o"), ("û", "u"),
+    ("Â", "a"), ("Ê", "e"), ("Î", "i"), ("Ô", "o"), ("Û", "u"),
+    ("ç", "c"), ("Ç", "c"),
+)
+
+
+
+def sql_normalizar_busqueda(expresion, letras=None):
+    """La expresión SQL que deja `expresion` en minúsculas y sin tildes.
+
+    Equivale a normalizar_busqueda() del lado de Python. Se aplica UNA vez
+    sobre la concatenación de las columnas, no una vez por columna, que es lo
+    que hace que el costo no crezca con la cantidad de campos.
+
+    `letras` es la optimización que hace esto viable. Aplicar los 33 replace()
+    del mapa a cada fila costaba 140 ms sobre 4.212 clientes -- más caro que
+    todo lo demás junto. Pero **un reemplazo cuyo destino no aparece en el
+    término buscado no puede cambiar si ese término calza o no**: todos los
+    pares del mapa son de un carácter a un carácter, así que reemplazar 'ñ'
+    por 'n' no puede acercar ni separar las letras vecinas, solo cambiar una
+    que al término no le importa. Entonces, para buscar "perez" basta con
+    plegar las variantes de 'e' (y de 'p', 'r', 'z', que no tienen): 2
+    replace() en vez de 33.
+
+    Con `letras=None` se aplica el mapa completo, que es lo correcto cuando
+    no se sabe qué se va a comparar contra el resultado."""
+    if letras is None:
+        pares = _MAPA_SIN_TILDES
+    else:
+        pares = [(original, plano) for original, plano in _MAPA_SIN_TILDES if plano in letras]
+
+    sql = expresion
+    for original, plano in pares:
+        sql = f"replace({sql}, '{original}', '{plano}')"
+    return f"lower({sql})"
+
+
+def sql_filtro_busqueda(consulta, *columnas):
+    """(condicion_sql, parametros) que replica coincide_busqueda() sobre las
+    columnas dadas. Con la consulta vacía devuelve ("", []) -- no filtra nada,
+    igual que coincide_busqueda.
+
+    Las columnas se pasan como nombres SQL ya calificados ('c.nombre'), no
+    como valores: van directo a la consulta. **No armar esta lista con algo
+    que venga del request.** La consulta del usuario sí viaja parametrizada.
+    """
+    terminos = normalizar_busqueda(consulta).split()
+    if not terminos:
+        return "", []
+
+    texto = "(" + " || ' ' || ".join(f"COALESCE({c}, '')" for c in columnas) + ")"
+
+    condiciones = []
+    parametros = []
+    for termino in terminos:
+        # Cada término lleva su propia expresión, plegando SOLO los acentos
+        # que podrían afectarlo (ver sql_normalizar_busqueda).
+        normalizado = sql_normalizar_busqueda(texto, letras=set(termino))
+        # El escape evita que un % o un _ tecleados por el usuario se
+        # comporten como comodines: buscar "50%" tiene que buscar "50%".
+        escapado = termino.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        condiciones.append(f"{normalizado} LIKE ? ESCAPE '\\'")
+        parametros.append(f"%{escapado}%")
+    return " AND ".join(condiciones), parametros
+
 
 def nombre_automatico(categoria, modelo, codigo_interno, id_num, marca=""):
     """El producto ya no tiene un campo 'nombre' editable: se arma solo a

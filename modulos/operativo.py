@@ -54,6 +54,7 @@ from core import (
     get_db,
     now_iso,
     requiere_rol,
+    sql_filtro_busqueda,
     sumar_dias_iso,
     usuario_actual,
 )
@@ -1331,6 +1332,219 @@ def _cliente_dict(db, row):
         "SELECT COUNT(*) FROM equipos WHERE cliente_id = ?", (row["id"],)
     ).fetchone()[0]
     return d
+
+
+# ---------------------------------------------------------------------------
+# Paginación de los listados
+# ---------------------------------------------------------------------------
+# Con lo que trajo el sync (4.212 clientes, 5.161 vehículos, ~7.100 órdenes)
+# devolver la tabla entera dejó de ser gratis: el listado de órdenes completo
+# pesaba 13 MB y tardaba 1,7 s.
+#
+# `por_pagina=todos` existe para los llamadores que de verdad necesitan cada
+# fila y que ya funcionaban así antes de que esto existiera: el tablero
+# kanban (que arma sus columnas con todas las OT del mes), los selectores de
+# cliente/vehículo, y el modal "revisar vehículos" (que filtra el catálogo
+# completo del lado del navegador). Que tengan que pedirlo explícitamente es
+# la gracia: así ningún listado se queda corto en silencio.
+
+POR_PAGINA_DEFECTO = 50
+
+# Umbral a partir del cual el tablero avisa que está mostrando mucho. No es
+# un límite: sigue mostrando todo. Ver el comentario en listar_ordenes.
+ORDENES_TABLERO_AVISO = 400
+POR_PAGINA_MAXIMO = 500
+
+
+def _paginacion():
+    """(pagina, por_pagina, offset) desde el request. `por_pagina` es None
+    cuando el llamador pidió 'todos', que significa sin paginar."""
+    crudo = (request.args.get("por_pagina") or "").strip().lower()
+    if crudo in ("todos", "todas", "0"):
+        return 1, None, 0
+
+    try:
+        por_pagina = int(crudo) if crudo else POR_PAGINA_DEFECTO
+    except ValueError:
+        por_pagina = POR_PAGINA_DEFECTO
+    # Un valor sin sentido (negativo, o que no es número) cae al defecto y no
+    # se recorta a 1: una página de una fila es técnicamente válida, así que
+    # nadie la leería como un error, y el listado parecería roto.
+    if por_pagina < 1:
+        por_pagina = POR_PAGINA_DEFECTO
+    # El tope evita que alguien pida por_pagina=999999 y vuelva a traer la
+    # tabla entera sin querer. Para eso está 'todos', que al menos se lee.
+    por_pagina = min(por_pagina, POR_PAGINA_MAXIMO)
+
+    try:
+        pagina = int((request.args.get("pagina") or "1").strip())
+    except ValueError:
+        pagina = 1
+    pagina = max(1, pagina)
+
+    return pagina, por_pagina, (pagina - 1) * por_pagina
+
+
+def _sql_limite(por_pagina, offset):
+    if por_pagina is None:
+        return "", []
+    return " LIMIT ? OFFSET ?", [por_pagina, offset]
+
+
+def _respuesta_paginada(clave, filas, total, pagina, por_pagina):
+    total_paginas = 1 if por_pagina is None else max(1, -(-total // por_pagina))
+    return jsonify({
+        clave: filas,
+        "total": total,
+        "pagina": pagina,
+        "por_pagina": por_pagina,
+        "total_paginas": total_paginas,
+    })
+
+
+def _consultar_pagina(db, columnas, desde, where_sql, orden, params, por_pagina, offset):
+    """(filas, total) de una página. Elige entre dos estrategias, y cuál se
+    usa está medido, no supuesto (números sobre las 4.212 filas reales):
+
+      - **Sin filtro**: dos consultas. El ORDER BY sale del índice, así que
+        SQLite corta a las 50 filas sin leer el resto (0,2 ms) y el COUNT(*)
+        de la tabla entera es inmediato. Total: 0,2 ms.
+      - **Con filtro**: una sola consulta con COUNT(*) OVER (). Cualquier
+        WHERE con LIKE obliga a recorrer la tabla igual, y hacerlo dos veces
+        —una para contar y otra para traer la página— costaba 47 ms contra
+        13 ms de la versión con ventana.
+
+    Lo que NO hay que hacer es usar la ventana siempre: sin filtro obliga a
+    materializar la tabla completa y sube de 0,2 ms a 20 ms. La ventana paga
+    justo cuando el escaneo ya era inevitable."""
+    limite_sql, limite_params = _sql_limite(por_pagina, offset)
+
+    if not where_sql:
+        total = db.execute(f"SELECT COUNT(*){desde}").fetchone()[0]
+        filas = db.execute(
+            f"SELECT {columnas}{desde} ORDER BY {orden}{limite_sql}", limite_params
+        ).fetchall()
+        return [dict(f) for f in filas], total
+
+    filas = db.execute(
+        f"SELECT {columnas}, COUNT(*) OVER () AS _total_filtrado"
+        f"{desde}{where_sql} ORDER BY {orden}{limite_sql}",
+        params + limite_params,
+    ).fetchall()
+
+    if not filas:
+        # Puede pasar pidiendo una página más allá de la última: sin filas no
+        # hay de dónde sacar el total, y devolver 0 haría desaparecer el
+        # paginador entero.
+        total = db.execute(f"SELECT COUNT(*){desde}{where_sql}", params).fetchone()[0]
+        return [], total
+
+    total = filas[0]["_total_filtrado"]
+    return [{k: v for k, v in dict(f).items() if k != "_total_filtrado"} for f in filas], total
+
+
+def _conteos_por_id(db, sql, ids):
+    """{id: cuantos} para los ids de UNA página, con una sola consulta.
+
+    Reemplaza el patrón de "una consulta por fila" que hacía que listar
+    5.161 vehículos costara más de diez mil consultas. `sql` tiene que
+    seleccionar (id, conteo) y traer un único placeholder para el IN."""
+    if not ids:
+        return {}
+    marcadores = ", ".join("?" for _ in ids)
+    return {
+        fila[0]: fila[1]
+        for fila in db.execute(sql.format(marcadores=marcadores), list(ids)).fetchall()
+    }
+
+
+def _ordenes_dict_tablero(db, rows):
+    """Variante liviana de _ordenes_dict_lote para el tablero kanban.
+
+    El tablero se refresca solo cada pocos segundos, así que su peso se paga
+    una y otra vez. Medido sobre las 99 OT del mes en curso: 305 KB con
+    _ordenes_dict_lote contra los campos de acá, que son el 12,7% de eso.
+
+    `modelo_transmision` y `color` no los usa la tarjeta pero sí los datalists
+    que se arman desde la misma lista (ver poblarDatalistsOperativo); salen
+    igual porque cuestan nada y evitan una segunda consulta."""
+    rows = list(rows)
+    if not rows:
+        return []
+
+    cliente_ids = sorted({r["cliente_id"] for r in rows if r["cliente_id"]})
+    clientes = {}
+    if cliente_ids:
+        m = ", ".join("?" for _ in cliente_ids)
+        cols = ", ".join(_CAMPOS_CLIENTE_TABLERO)
+        clientes = {f["id"]: dict(f) for f in db.execute(
+            f"SELECT {cols} FROM clientes WHERE id IN ({m})", cliente_ids).fetchall()}
+
+    equipo_ids = sorted({r["equipo_id"] for r in rows if r["equipo_id"]})
+    equipos = {}
+    if equipo_ids:
+        m = ", ".join("?" for _ in equipo_ids)
+        cols = ", ".join(_CAMPOS_EQUIPO_TABLERO)
+        equipos = {f["id"]: dict(f) for f in db.execute(
+            f"SELECT {cols} FROM equipos WHERE id IN ({m})", equipo_ids).fetchall()}
+
+    salida = []
+    for r in rows:
+        d = {c: r[c] for c in _CAMPOS_ORDEN_TABLERO if c in r.keys()}
+        d["cliente"] = clientes.get(r["cliente_id"])
+        d["equipo"] = equipos.get(r["equipo_id"]) if r["equipo_id"] else None
+        # `referencia` la usa el datalist de referencias, no la tarjeta.
+        d["referencia"] = r["referencia"] if "referencia" in r.keys() else ""
+        salida.append(d)
+    return salida
+
+
+@bp.route("/api/operativo/sugerencias", methods=["GET"])
+@requiere_rol("operativo")
+def sugerencias_operativo():
+    """Los valores distintos que alimentan los tres datalists del modal de
+    orden nueva: colores, transmisiones y referencias.
+
+    **Existe para no traer el historial completo.** Antes el modal pedía
+    `/api/operativo/ordenes?mes=todos&por_pagina=todos` —las 7.116 órdenes con
+    sus ítems, pagos y `datos_talca_json`: **23,5 MB y 1,95 s**— y con todo eso
+    solo armaba estas tres listas, que son 156 + 213 + 15 valores distintos.
+
+    Tres SELECT DISTINCT y unos pocos KB."""
+    db = get_db()
+
+    def distintos(sql):
+        return [f[0] for f in db.execute(sql).fetchall()]
+
+    return jsonify({
+        "colores": distintos(
+            "SELECT DISTINCT color FROM equipos"
+            " WHERE color IS NOT NULL AND TRIM(color) != '' ORDER BY color COLLATE NOCASE"
+        ),
+        "transmisiones": distintos(
+            "SELECT DISTINCT modelo_transmision FROM equipos"
+            " WHERE modelo_transmision IS NOT NULL AND TRIM(modelo_transmision) != ''"
+            " ORDER BY modelo_transmision COLLATE NOCASE"
+        ),
+        "referencias": distintos(
+            "SELECT DISTINCT referencia FROM ordenes_trabajo"
+            " WHERE referencia IS NOT NULL AND TRIM(referencia) != ''"
+            " ORDER BY referencia COLLATE NOCASE"
+        ),
+    })
+
+
+# Lo único que pinta una tarjeta del tablero. El resto de las 68 claves que
+# devuelve _orden_dict -- ítems, pagos, costos, QC, datos_talca_json -- es el
+# 87,3% del payload y la tarjeta no lo mira.
+_CAMPOS_ORDEN_TABLERO = (
+    "id", "talca_id", "estado", "prioridad", "precio_referencial",
+    "fecha_recepcion", "fecha_entrega_real", "descripcion_problema",
+    "cliente_id", "equipo_id",
+)
+_CAMPOS_CLIENTE_TABLERO = ("id", "nombre")
+_CAMPOS_EQUIPO_TABLERO = ("id", "marca", "modelo", "identificador", "anio",
+                          "color", "modelo_transmision")
 
 
 @bp.route("/api/operativo/clientes", methods=["GET"])
@@ -2645,31 +2859,83 @@ def listar_ordenes():
     if not mes and not cliente_id and not equipo_id:
         mes = f"{datetime.now().year:04d}-{datetime.now().month:02d}"
 
-    sql = "SELECT * FROM ordenes_trabajo WHERE 1=1"
+    q = (request.args.get("q") or "").strip()
+    pagina, por_pagina, offset = _paginacion()
+
+    condiciones = []
     params = []
     if estado:
-        sql += " AND estado = ?"
+        condiciones.append("o.estado = ?")
         params.append(estado)
     if cliente_id:
-        sql += " AND cliente_id = ?"
+        condiciones.append("o.cliente_id = ?")
         params.append(cliente_id)
     if equipo_id:
-        sql += " AND equipo_id = ?"
+        condiciones.append("o.equipo_id = ?")
         params.append(equipo_id)
     if mes and mes != "todos":
         placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
-        sql += f" AND (estado NOT IN ({placeholders_cerrados}) OR substr(fecha_entrega_real, 1, 7) = ?)"
+        condiciones.append(
+            f"(o.estado NOT IN ({placeholders_cerrados}) OR substr(o.fecha_entrega_real, 1, 7) = ?)"
+        )
         params.extend(ESTADOS_CERRADOS)
         params.append(mes)
-    # Por número de OT de Talca, que es el que el taller reconoce. Las
-    # locales sin talca_id (NULL) quedan al final en SQLite, y es lo
-    # correcto: son las más nuevas y todavía sin número definitivo.
-    sql += " ORDER BY talca_id DESC, creado_en DESC"
-    rows = db.execute(sql, params).fetchall()
-    return jsonify({"ordenes": [_orden_dict(db, r) for r in rows], "total": len(rows), "mes_filtrado": mes or "todos"})
+    if q:
+        # Mismo criterio de varias palabras que el resto del sistema. Se
+        # busca por número de OT, por cliente y por vehículo: es lo que se
+        # tiene a mano cuando alguien llama preguntando por su auto.
+        #
+        # **`o.id` NO va en el filtro.** El número que la gente tipea es el de
+        # Talca, y las dos series se solapan en 6.117 valores: buscar también
+        # por el id interno devolvería, junto a la orden correcta, otra que no
+        # tiene nada que ver, sin ninguna señal de cuál es cuál.
+        filtro, params_q = sql_filtro_busqueda(
+            q, "o.talca_id", "o.patente", "c.nombre", "e.identificador", "e.marca", "e.modelo"
+        )
+        condiciones.append(f"({filtro})")
+        params.extend(params_q)
+
+    where_sql = f" WHERE {' AND '.join(condiciones)}" if condiciones else ""
+    desde_sql = (
+        " FROM ordenes_trabajo o"
+        " LEFT JOIN clientes c ON c.id = o.cliente_id"
+        " LEFT JOIN equipos e ON e.id = o.equipo_id"
+    )
+
+    rows, total = _consultar_pagina(
+        db, "o.*", desde_sql, where_sql,
+        # Por número de OT de Talca, que es el que el taller reconoce. Las
+        # locales sin talca_id (NULL) quedan al final en SQLite, y es lo
+        # correcto: son las más nuevas y todavía sin número definitivo.
+        "o.talca_id DESC, o.creado_en DESC, o.id DESC", params, por_pagina, offset,
+    )
+
+    # `vista=tablero` devuelve solo lo que pinta la tarjeta del kanban. El
+    # tablero se refresca solo cada pocos segundos, así que su peso se paga
+    # una y otra vez; el dict completo trae 68 claves por orden y la tarjeta
+    # usa nueve.
+    if request.args.get("vista") == "tablero":
+        ordenes = _ordenes_dict_tablero(db, rows)
+    else:
+        ordenes = [_orden_dict(db, r) for r in rows]
+
+    respuesta = _respuesta_paginada("ordenes", ordenes, total, pagina, por_pagina)
+    datos = respuesta.get_json()
+    datos["mes_filtrado"] = mes or "todos"
+    # El tablero NO pagina: muestra el mes entero de un vistazo, y paginarlo
+    # rompería el arrastre entre columnas. Está acotado por el filtro de mes
+    # (hoy 99 OT, 218 en el peor mes del histórico), así que el volumen no es
+    # problema -- pero si algún día lo fuera, esto avisa en pantalla en vez de
+    # degradar en silencio, que es lo que de verdad se quiere evitar.
+    datos["aviso_volumen"] = (
+        f"Este mes tiene {total} órdenes. El tablero las muestra todas y puede "
+        f"ponerse lento; usa el filtro de estado o la pestaña Listado."
+        if total > ORDENES_TABLERO_AVISO else ""
+    )
+    return jsonify(datos)
 
 
-def _listado_ordenes_liviano(db, desde=None, hasta=None):
+def _listado_ordenes_liviano(db, desde=None, hasta=None, q=None):
     """Una fila liviana por OT para la pestaña 'Listado' -- a propósito NO
     usa _orden_dict (que trae items/pagos completos con varias queries por
     fila): con el historial completo (~3.000+ cerradas, ver comentario de
@@ -2711,7 +2977,15 @@ def _listado_ordenes_liviano(db, desde=None, hasta=None):
         placeholders_cerrados = ", ".join("?" for _ in ESTADOS_CERRADOS)
         sql += f" AND (o.estado NOT IN ({placeholders_cerrados}) OR ({' AND '.join(condiciones_fecha)}))"
         params = list(ESTADOS_CERRADOS) + params_fecha
-    sql += " ORDER BY o.id DESC"
+    if q:
+        # Mismo criterio que el resto del sistema, y las mismas columnas que
+        # filtraba el navegador. `o.id` NO va: es la llave interna y las dos
+        # series de números se solapan (ver numero_ot).
+        filtro, params_q = sql_filtro_busqueda(
+            q, "o.talca_id", "c.nombre", "e.marca", "e.modelo", "e.identificador")
+        sql += f" AND ({filtro})"
+        params.extend(params_q)
+    sql += " ORDER BY o.talca_id DESC, o.id DESC"
     rows = db.execute(sql, params).fetchall()
     filas = []
     for r in rows:
@@ -2740,7 +3014,7 @@ def _listado_ordenes_liviano(db, desde=None, hasta=None):
     return filas
 
 
-def _listado_garantias_liviano(db, desde=None, hasta=None):
+def _listado_garantias_liviano(db, desde=None, hasta=None, q=None):
     """Misma idea que _listado_ordenes_liviano pero para garantías -- estas
     no tienen precio/pagos propios (una garantía no se le cobra al
     cliente), así que 'valor_total'/'total_pagado' quedan en None (el
@@ -2769,6 +3043,11 @@ def _listado_garantias_liviano(db, desde=None, hasta=None):
         placeholders_cerrados = ", ".join("?" for _ in ESTADOS_GARANTIA_CERRADOS)
         sql += f" AND (g.estado NOT IN ({placeholders_cerrados}) OR ({' AND '.join(condiciones_fecha)}))"
         params = list(ESTADOS_GARANTIA_CERRADOS) + params_fecha
+    if q:
+        filtro, params_q = sql_filtro_busqueda(
+            q, "g.id", "c.nombre", "e.marca", "e.modelo", "e.identificador")
+        sql += f" AND ({filtro})"
+        params.extend(params_q)
     sql += " ORDER BY g.id DESC"
     rows = db.execute(sql, params).fetchall()
     filas = []
@@ -2817,13 +3096,31 @@ def listado_operativo():
     desde = (request.args.get("desde") or "").strip() or None
     hasta = (request.args.get("hasta") or "").strip() or None
 
+    q = (request.args.get("q") or "").strip()
+    pagina, por_pagina, offset = _paginacion()
+
+    # El filtro se aplica en SQL, no sobre las filas ya armadas: buscar en el
+    # historial completo tocaría ~3.000 registros por cada tecla (el buscador
+    # consulta con debounce de 250 ms).
     filas = []
     if tipo != "garantia":
-        filas.extend(_listado_ordenes_liviano(db, desde, hasta))
+        filas.extend(_listado_ordenes_liviano(db, desde, hasta, q))
     if tipo != "nuevo":
-        filas.extend(_listado_garantias_liviano(db, desde, hasta))
+        filas.extend(_listado_garantias_liviano(db, desde, hasta, q))
     filas.sort(key=lambda f: f["fecha_recepcion"] or "", reverse=True)
-    return jsonify({"filas": filas, "total": len(filas)})
+
+    # La página se corta acá y no en SQL porque la vista MEZCLA dos tablas
+    # (ordenes_trabajo y garantias) y el orden es por fecha de recepción, que
+    # no se puede resolver con un LIMIT por tabla. Ya filtrado, el conjunto es
+    # chico; sin filtro lo acota el `desde` que manda el frontend.
+    total = len(filas)
+    if por_pagina is not None:
+        filas = filas[offset:offset + por_pagina]
+
+    # Misma forma que _respuesta_paginada (que no se puede reusar tal cual
+    # porque la clave de las filas y el corte de página son propios de acá):
+    # renderPaginador del frontend espera `total_paginas`, no `paginas`.
+    return _respuesta_paginada("filas", filas, total, pagina, por_pagina)
 
 
 def _orden_dict_detalle(db, row):

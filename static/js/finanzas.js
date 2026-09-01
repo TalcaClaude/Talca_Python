@@ -1646,6 +1646,8 @@ async function abrirDetalleFacturaPendiente(id) {
   document.getElementById("pfd-btn-editar").style.display = "none";
   document.getElementById("pfd-condicion-pago").style.display = "none";
   document.getElementById("pfd-btn-condicion-pago").style.display = "none";
+  document.getElementById("pfd-tipo-cambio-definitivo").style.display = "none";
+  document.getElementById("pfd-btn-tipo-cambio-definitivo").style.display = "none";
   document.getElementById("pfd-acciones-principales").style.display = "";
 
   const etiquetaCondicion = {
@@ -1695,7 +1697,12 @@ async function abrirDetalleFacturaPendiente(id) {
       <p class="ayuda-inline">🌎 Factura internacional — Tipo de cambio: ${p.internacional.tipo_cambio} ·
         Shipping: US$${p.internacional.shipping_usd} · PayPal: US$${p.internacional.paypal_usd} ·
         DHL/agente de aduana: ${fmtMoney(p.internacional.dhl_clp)}. El costo unitario de cada línea de abajo
-        ya incluye su parte del prorrateo de estos gastos, convertido a pesos.</p>` : ""}
+        ya incluye su parte del prorrateo de estos gastos, convertido a pesos.</p>
+      <p class="ayuda-inline${p.internacional.definitivo ? "" : " ayuda-inline--bloqueado"}">
+        ${p.internacional.definitivo
+          ? `✅ Tipo de cambio definitivo confirmado: ${p.internacional.tipo_cambio_definitivo} (el ${fmtFecha(p.internacional.fecha_definitivo)}). Los precios de esta factura ya reflejan el dólar real.`
+          : "⏳ Tipo de cambio PROVISORIO -- el dólar real todavía no se confirma (normalmente se sabe a fin de mes, al pagar la tarjeta en dólares)."}
+      </p>` : ""}
     ${(p.historial && p.historial.length) ? `
       <h3 class="subtitulo">Historial</h3>
       <ul class="pfd-historial">
@@ -1780,6 +1787,15 @@ async function abrirDetalleFacturaPendiente(id) {
     document.getElementById("pfd-plazo-dias").value = p.plazo_dias_credito || 30;
     document.getElementById("pfd-campos-mixto").style.display = p.condicion_pago === "mixto" ? "grid" : "none";
     document.getElementById("pfd-campos-credito").style.display = p.condicion_pago === "contado" ? "none" : "grid";
+  }
+
+  // Confirmar tipo de cambio definitivo: mismo criterio de permisos que
+  // "Cambiar condición de pago" (solo Finanzas/admin, ver arriba) -- solo
+  // tiene sentido sobre una factura internacional YA aplicada (factura_id
+  // real) que todavía no tenga su dólar confirmado.
+  if (pfdFacturaIdReal && state.puedeEditarCondicionPago && p.internacional && !p.internacional.definitivo) {
+    document.getElementById("pfd-btn-tipo-cambio-definitivo").style.display = "";
+    document.getElementById("pfd-tcd-valor").value = "";
   }
 
   abrirModal("modal-factura-pendiente-detalle");
@@ -1873,6 +1889,44 @@ document.getElementById("pfd-cond-guardar").addEventListener("click", async () =
       }),
     });
     toast("Condición de pago corregida");
+    cerrarModal("modal-factura-pendiente-detalle");
+    await cargarFacturasPendientesRecepcion();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Confirmar el "tipo de cambio definitivo" de una factura internacional (ver
+// POST /api/facturas/<id>/tipo-cambio-definitivo) -- recalcula el costo de
+// cada línea con el dólar real y lo propaga a stock, CxP y a cualquier OT/
+// garantía (abierta o cerrada) que ya haya consumido ese stock.
+// ---------------------------------------------------------------------------
+
+document.getElementById("pfd-btn-tipo-cambio-definitivo").addEventListener("click", () => {
+  document.getElementById("pfd-acciones-principales").style.display = "none";
+  document.getElementById("pfd-tipo-cambio-definitivo").style.display = "block";
+});
+
+document.getElementById("pfd-tcd-cancelar").addEventListener("click", () => {
+  document.getElementById("pfd-tipo-cambio-definitivo").style.display = "none";
+  document.getElementById("pfd-acciones-principales").style.display = "";
+});
+
+document.getElementById("pfd-tcd-guardar").addEventListener("click", async () => {
+  if (!pfdFacturaIdReal) return;
+  const valor = Number(document.getElementById("pfd-tcd-valor").value);
+  if (!valor || valor <= 0) {
+    toast("Ingresa un tipo de cambio definitivo válido", true);
+    return;
+  }
+  try {
+    const resultado = await api(`/api/facturas/${pfdFacturaIdReal}/tipo-cambio-definitivo`, {
+      method: "POST",
+      body: JSON.stringify({ tipo_cambio_definitivo: valor }),
+    });
+    const corregidos = resultado.items_ot_garantia_corregidos || 0;
+    toast(`Tipo de cambio definitivo confirmado${corregidos ? ` -- se corrigió el costo en ${corregidos} ítem(s) de OT/garantía` : ""}`);
     cerrarModal("modal-factura-pendiente-detalle");
     await cargarFacturasPendientesRecepcion();
   } catch (e) {

@@ -954,10 +954,24 @@
       </div>
     </div>
 
+    <div id="pfd-tipo-cambio-definitivo" style="display:none">
+      <h3 class="subtitulo">Confirmar tipo de cambio definitivo</h3>
+      <p class="ayuda-inline">El dólar con el que se ingresó esta factura es tentativo. Cuando se sepa el valor real (al pagar la tarjeta en dólares, normalmente a fin de mes), escríbelo acá -- la factura recalcula el costo de cada línea con ese dólar y corrige el stock, la Cuenta por Pagar y el costo ya cargado en cualquier orden de trabajo o garantía que haya usado estos repuestos (aunque ya esté cerrada).</p>
+      <div class="campo">
+        <label>Tipo de cambio definitivo (US$ → CLP) *</label>
+        <input type="number" id="pfd-tcd-valor" min="0" step="0.01" placeholder="Ej: 951.20">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secundario" id="pfd-tcd-cancelar">Cancelar</button>
+        <button type="button" class="btn btn-primary" id="pfd-tcd-guardar">Confirmar tipo de cambio definitivo</button>
+      </div>
+    </div>
+
     <div class="modal-actions" id="pfd-acciones-principales">
       <button type="button" class="btn btn-secundario" data-close="modal-factura-pendiente-detalle">Cerrar</button>
       <button type="button" class="btn btn-secundario" id="pfd-btn-editar" style="display:none">Editar</button>
       <button type="button" class="btn btn-secundario" id="pfd-btn-condicion-pago" style="display:none">Cambiar condición de pago</button>
+      <button type="button" class="btn btn-secundario" id="pfd-btn-tipo-cambio-definitivo" style="display:none">🌎 Confirmar tipo de cambio definitivo</button>
       <button type="button" class="btn btn-danger" id="pfd-btn-eliminar" style="display:none">Eliminar factura</button>
       <button type="button" class="btn btn-danger" id="pfd-btn-eliminar-confirmar" style="display:none">Sí, eliminar y revertir stock</button>
     </div>

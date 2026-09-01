@@ -1631,12 +1631,19 @@ async function cargarProveedoresSalida(productoId) {
   select.innerHTML = '<option value="">Cargando…</option>';
   try {
     const data = await api(`/api/productos/${productoId}/stock-proveedores`);
-    if (data.proveedores.length === 0) {
+    // "Registrar movimiento" no sabe elegir entre varios baldes de un mismo
+    // proveedor (eso solo lo maneja la pantalla de OT, ver
+    // poblarOpcionesProveedorRepuesto en operativo.js) -- se filtran acá los
+    // baldes exclusivos de una factura internacional (factura_id no nulo,
+    // ver Migración 38) para no ofrecer una opción que el backend igual va
+    // a rechazar (ver ids_posibles_salida en registrar_movimiento).
+    const proveedores = data.proveedores.filter(p => !p.factura_id);
+    if (proveedores.length === 0) {
       select.innerHTML = '<option value="">Este producto no tiene stock disponible</option>';
       return;
     }
     const opciones = ['<option value="">-- Selecciona un proveedor --</option>'];
-    data.proveedores.forEach(p => {
+    proveedores.forEach(p => {
       const valor = p.proveedor_id === null ? "__sin_proveedor__" : p.proveedor_id;
       opciones.push(`<option value="${valor}">${escapeHtml(p.proveedor_nombre)} (${p.cantidad} disponibles, ${fmtMoney(p.costo_promedio)} c/u)</option>`);
     });

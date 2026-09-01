@@ -1758,6 +1758,27 @@ def init_db():
         db.execute("ALTER TABLE facturas_finanzas_pendientes ADD COLUMN internacional_json TEXT")
         db.commit()
 
+    # ---- Migración 38: "Tipo de cambio definitivo" de facturas internacionales
+    # (pedido del taller, septiembre 2026) -- el dólar que se tipea al
+    # ingresar una factura internacional es siempre TENTATIVO (el real recién
+    # se sabe a fin de mes, cuando se paga la tarjeta en dólares), así que
+    # hace falta poder corregirlo después y que la factura "cambie sus
+    # precios en base a eso" -- ver /api/facturas/<id>/tipo-cambio-definitivo.
+    # Para poder corregir con precisión el costo del stock que vino de ESA
+    # factura puntual (y no mezclarlo con el resto de las compras del mismo
+    # proveedor), stock_proveedores gana una dimensión extra opcional:
+    # factura_id. NULL (default, todas las filas existentes y toda compra
+    # NACIONAL de ahora en adelante) es el balde "de siempre", mezclado por
+    # proveedor -- sin cambios de comportamiento para lo nacional. Un id real
+    # solo lo usan las facturas internacionales (ver _registrar_factura,
+    # parámetro es_internacional), donde cada factura queda en su propio
+    # balde exclusivo. Ver _stockprov_bucket_get/_stockprov_bucket_entrada en
+    # core.py para el detalle de cómo se arma la clave del balde.
+    columnas_sp_v38 = [c[1] for c in db.execute("PRAGMA table_info(stock_proveedores)").fetchall()]
+    if "factura_id" not in columnas_sp_v38:
+        db.execute("ALTER TABLE stock_proveedores ADD COLUMN factura_id INTEGER REFERENCES facturas(id)")
+        db.commit()
+
     # ---- Módulo Operativo (órdenes de trabajo): cada módulo separado
     # (ver modulos/) es dueño de su propia migración, para que agregar un
     # módulo nuevo no implique tocar el resto de init_db(). Va al final
@@ -1881,27 +1902,54 @@ def _stockprov_buckets_producto(db, producto_id):
     para poblar el selector de "de qué proveedor sale esto" al registrar una
     salida. A diferencia de _proveedores_origen_producto (que mira TODO el
     historial de compras, sirve para la pérdida), esto solo muestra
-    proveedores con stock vivo ahora mismo."""
+    proveedores con stock vivo ahora mismo.
+
+    Desde Migración 38, un mismo proveedor puede tener MÁS de un balde vivo
+    a la vez: el balde mezclado de siempre (factura_id NULL, toda compra
+    nacional) y, además, uno POR CADA factura internacional suya que
+    todavía tenga stock sin consumir (ver _stockprov_bucket_get en core.py).
+    Cada balde de factura internacional viene con 'factura_id'/
+    'factura_numero' propios para poder distinguirlo en el selector (ver
+    poblarOpcionesProveedorRepuesto en operativo.js); los baldes nacionales
+    de siempre traen ambos en None, sin cambios de comportamiento."""
     filas = db.execute(
         """
-        SELECT sp.proveedor_id, pr.nombre AS proveedor_nombre, sp.cantidad, sp.costo_promedio, sp.actualizado_en
+        SELECT sp.proveedor_id, pr.nombre AS proveedor_nombre, sp.cantidad, sp.costo_promedio,
+               sp.actualizado_en, sp.factura_id, f.numero AS factura_numero
         FROM stock_proveedores sp
         LEFT JOIN proveedores pr ON pr.id = sp.proveedor_id
+        LEFT JOIN facturas f ON f.id = sp.factura_id
         WHERE sp.producto_id = ? AND sp.cantidad > 0
-        ORDER BY (sp.proveedor_id IS NULL), pr.nombre COLLATE NOCASE
+        ORDER BY (sp.proveedor_id IS NULL), pr.nombre COLLATE NOCASE, (sp.factura_id IS NULL), f.numero
         """,
         (producto_id,),
     ).fetchall()
     baldes = []
     permite_sin_proveedor = False
     for f in filas:
-        if f["proveedor_id"] is None:
+        if f["proveedor_id"] is None and f["factura_id"] is None:
+            # El balde "sin proveedor conocido, sin factura" de siempre --
+            # es el único caso donde una salida sin elegir nada (ej. desde
+            # Logística) tiene sentido, por eso es el único que prende
+            # permite_sin_proveedor.
             permite_sin_proveedor = True
             baldes.append({
                 "proveedor_id": None,
                 "proveedor_nombre": "Sin proveedor conocido (stock inicial / sin factura)",
                 "cantidad": f["cantidad"],
                 "costo_promedio": f["costo_promedio"],
+                "factura_id": None,
+                "factura_numero": None,
+            })
+        elif f["factura_id"] is not None:
+            nombre_base = f["proveedor_nombre"] if f["proveedor_id"] is not None else "Sin proveedor"
+            baldes.append({
+                "proveedor_id": f["proveedor_id"],
+                "proveedor_nombre": f"{nombre_base} — Factura internacional {f['factura_numero'] or f['factura_id']}",
+                "cantidad": f["cantidad"],
+                "costo_promedio": f["costo_promedio"],
+                "factura_id": f["factura_id"],
+                "factura_numero": f["factura_numero"],
             })
         else:
             baldes.append({
@@ -1909,6 +1957,8 @@ def _stockprov_buckets_producto(db, producto_id):
                 "proveedor_nombre": f["proveedor_nombre"],
                 "cantidad": f["cantidad"],
                 "costo_promedio": f["costo_promedio"],
+                "factura_id": None,
+                "factura_numero": None,
             })
     return baldes, permite_sin_proveedor
 
@@ -3356,7 +3406,17 @@ def registrar_movimiento(producto_id):
             # quede registrado -- y el que se le carga a una orden de
             # trabajo si corresponde -- sea el real de ESE proveedor.
             baldes_posibles, permite_sin_proveedor_salida = _stockprov_buckets_producto(db, producto_id)
-            ids_posibles_salida = {b["proveedor_id"] for b in baldes_posibles if b["proveedor_id"] is not None}
+            # Solo cuenta baldes NACIONALES (factura_id None) -- "Registrar
+            # movimiento" (Logística) no tiene selector de factura
+            # internacional, así que un proveedor cuyo ÚNICO stock vivo esté
+            # en un balde de factura internacional no debe aparecer como
+            # "disponible" acá (ver _stockprov_buckets_producto, Migración
+            # 38); si se necesita descargar justo ese stock, se hace desde
+            # una OT (agregar_item_orden), que sí sabe elegir entre baldes.
+            ids_posibles_salida = {
+                b["proveedor_id"] for b in baldes_posibles
+                if b["proveedor_id"] is not None and b.get("factura_id") is None
+            }
             proveedor_id_crudo_salida = data.get("proveedor_id")
             if proveedor_id_crudo_salida in (None, ""):
                 if not permite_sin_proveedor_salida:
@@ -4465,7 +4525,7 @@ def _generar_cxp_de_factura(db, factura_id, proveedor_id, fecha, lineas_validada
 def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuario, aplicar_stock=True,
                         condicion_pago="credito", porcentaje_contado=0, plazo_dias_credito=None,
                         lineas_gasto_general=None, exento_iva=False, lineas_ot_destino=None,
-                        tipo_documento="factura"):
+                        tipo_documento="factura", es_internacional=False):
     """Inserta la factura y sus líneas, aplicando el ingreso de stock si
     corresponde, y generando su(s) Cuenta(s) por Pagar (ver
     _generar_cxp_de_factura). Único llamador hoy:
@@ -4494,7 +4554,16 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
     descarga esa misma cantidad de inmediato hacia la OT indicada, en la
     misma operación -- reutiliza registrar_salida_directa_a_orden, el
     mismo camino que ya usa Operativo para cargar un repuesto a una OT
-    (ver modulos/operativo.py), así el costeo/historial queda idéntico."""
+    (ver modulos/operativo.py), así el costeo/historial queda idéntico.
+
+    es_internacional (Migración 38, ver crear_factura_internacional): si es
+    True, el stock de cada línea entra a un balde de stock_proveedores
+    EXCLUSIVO de esta factura (factura_id = el id recién creado) en vez de
+    mezclarse con el balde de siempre de ese proveedor -- ver
+    _aplicar_entrada_stock/factura_id_bucket. Necesario para poder corregir
+    después el costo exacto de ESA importación cuando se confirme el "tipo
+    de cambio definitivo" (ver /api/facturas/<id>/tipo-cambio-definitivo),
+    sin afectar el resto de las compras (nacionales) del mismo proveedor."""
     ts = now_iso()
     monto_neto = round(sum(cantidad * precio_unitario for _p, cantidad, precio_unitario in lineas_validadas), 2)
     monto_neto += round(sum(l["monto"] for l in (lineas_gasto_general or [])), 2)
@@ -4529,6 +4598,7 @@ def _registrar_factura(db, numero, proveedor_id, fecha, lineas_validadas, usuari
                 db, producto, cantidad, precio_unitario,
                 f"Ingreso automático al registrar la factura '{numero}'",
                 usuario, factura_row,
+                factura_id_bucket=(factura_id if es_internacional else None),
             )
             db.execute(
                 "UPDATE factura_lineas SET aplicada = 1, aplicada_en = ? WHERE id = ?",
@@ -6042,7 +6112,7 @@ def detalle_factura_pendiente_recepcion(pendiente_id):
 def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
                                  porcentaje_contado, plazo_dias_credito, creado_por, origen="manual",
                                  foto_archivo="", exigir_numero=True, exento_iva=False,
-                                 tipo_documento="factura"):
+                                 tipo_documento="factura", internacional_json=None):
     """Inserta una fila en facturas_finanzas_pendientes — punto de entrada
     ÚNICO para las cuatro formas de registrar una factura de compra (manual,
     carga masiva por Excel, foto escaneada, foto de WhatsApp), sin importar
@@ -6062,7 +6132,18 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
     Devuelve (fila_dict, None) si se creó, o (None, mensaje_de_error) si
     algo no es válido — nunca lanza, así lo puede llamar tanto un endpoint
     HTTP (que responde con el mensaje) como el pipeline del agente de
-    WhatsApp (que lo manda de vuelta como texto)."""
+    WhatsApp (que lo manda de vuelta como texto).
+
+    'internacional_json' (ver crear_factura_internacional) se guarda ACÁ,
+    en el INSERT inicial, en vez de con un UPDATE posterior -- a propósito:
+    cuando esta fila entra por la ruta de aplicación automática (ver
+    _crear_pendiente_y_aplicar_si_posible con auto_aplicar=True, el camino
+    normal para una factura internacional cuyas líneas ya calzan con el
+    catálogo), _aprobar_pendiente_recepcion corre DENTRO de esa misma
+    llamada y necesita saber ahí mismo si es internacional para decidir en
+    qué balde de stock_proveedores entra el stock (ver
+    _registrar_factura/es_internacional) -- si se guardara con un UPDATE
+    después, como se hacía antes, ese chequeo llegaría siempre tarde."""
     numero = (numero or "").strip().upper()
     tipo_documento = (tipo_documento or "factura").strip().lower()
     if tipo_documento not in TIPOS_DOCUMENTO_VALIDOS:
@@ -6119,12 +6200,12 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
         INSERT INTO facturas_finanzas_pendientes
             (numero, proveedor_id, fecha, lineas_json, condicion_pago, porcentaje_contado,
              plazo_dias_credito, estado, creado_por, creado_en, origen, foto_archivo, historial_json,
-             exento_iva, tipo_documento)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?, ?, ?)
+             exento_iva, tipo_documento, internacional_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (numero, proveedor_id, fecha, json.dumps(lineas_validadas), condicion_pago, porcentaje_contado,
          plazo_dias_credito, creado_por, ts, origen, foto_archivo, historial_inicial, 1 if exento_iva else 0,
-         tipo_documento),
+         tipo_documento, internacional_json),
     )
     db.commit()
     nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -6134,7 +6215,7 @@ def _crear_pendiente_recepcion(db, numero, proveedor_id, fecha, lineas_validadas
 def _crear_pendiente_y_aplicar_si_posible(db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
                                             porcentaje_contado, plazo_dias_credito, creado_por, origen,
                                             foto_archivo="", exigir_numero=True, auto_aplicar=True,
-                                            exento_iva=False, tipo_documento="factura"):
+                                            exento_iva=False, tipo_documento="factura", internacional_json=None):
     """Como _crear_pendiente_recepcion, pero además -- si auto_aplicar es
     True y la factura recién creada queda con TODAS sus líneas ya
     resueltas contra el catálogo -- la aplica de inmediato (stock + CxP)
@@ -6168,7 +6249,7 @@ def _crear_pendiente_y_aplicar_si_posible(db, numero, proveedor_id, fecha, linea
         db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
         porcentaje_contado, plazo_dias_credito, creado_por, origen=origen,
         foto_archivo=foto_archivo, exigir_numero=exigir_numero, exento_iva=exento_iva,
-        tipo_documento=tipo_documento,
+        tipo_documento=tipo_documento, internacional_json=internacional_json,
     )
     if error:
         return None, error, False
@@ -6538,28 +6619,239 @@ def crear_factura_internacional():
     if error:
         return jsonify({"error": error}), 400
 
-    nueva, error, _se_aplico = _crear_pendiente_y_aplicar_si_posible(
-        db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
-        porcentaje_contado, plazo_dias_credito, usuario_actual(), origen="manual",
-        exento_iva=exento_iva, tipo_documento="factura",
-    )
-    if error:
-        return jsonify({"error": error}), 400
-
+    # El desglose (tipo de cambio, flete/PayPal/DHL y el detalle por línea,
+    # incluido cantidad/costo_unitario_usd de cada una -- la base que
+    # /api/facturas/<id>/tipo-cambio-definitivo vuelve a usar más adelante
+    # para recalcular con el dólar real) se arma ACÁ, antes de crear el
+    # pendiente, para poder guardarlo en el INSERT inicial en vez de con un
+    # UPDATE después (ver docstring de _crear_pendiente_recepcion sobre por
+    # qué eso importa para la ruta de aplicación automática). "definitivo"
+    # empieza en False: el dólar recién tipeado es siempre tentativo, tal
+    # como pidió el taller -- se pasa a True solo al confirmar el tipo de
+    # cambio definitivo.
     internacional_meta = {
         "tipo_cambio": tipo_cambio,
         "shipping_usd": shipping_usd,
         "paypal_usd": paypal_usd,
         "dhl_clp": dhl_clp,
         "lineas": desglose,
+        "definitivo": False,
+        "tipo_cambio_definitivo": None,
     }
+
+    nueva, error, _se_aplico = _crear_pendiente_y_aplicar_si_posible(
+        db, numero, proveedor_id, fecha, lineas_validadas, condicion_pago,
+        porcentaje_contado, plazo_dias_credito, usuario_actual(), origen="manual",
+        exento_iva=exento_iva, tipo_documento="factura",
+        internacional_json=json.dumps(internacional_meta),
+    )
+    if error:
+        return jsonify({"error": error}), 400
+
+    return jsonify(_factura_pendiente_recepcion_dict(db, nueva)), 201
+
+
+@app.route("/api/facturas/<int:factura_id>/tipo-cambio-definitivo", methods=["POST"])
+@requiere_rol("finanzas", "bodega")
+def confirmar_tipo_cambio_definitivo(factura_id):
+    """Confirma (o corrige) el "tipo de cambio definitivo" de una factura
+    internacional YA APLICADA -- a pedido del taller: el dólar que se tipea
+    al ingresar una factura internacional es siempre TENTATIVO (el real
+    recién se sabe a fin de mes, cuando se paga la tarjeta en dólares), así
+    que hace falta poder corregirlo después y que "la factura cambie sus
+    precios en base a eso definitivamente". Se puede llamar más de una vez
+    (ej. para corregir un error de tipeo) -- cada llamada vuelve a calcular
+    todo desde cero con los mismos cantidad/costo_unitario_usd originales
+    de cada línea (ver internacional_json), así que es seguro repetirla.
+
+    Recalcula el prorrateo completo (_calcular_prorrateo_internacional) con
+    el nuevo tipo de cambio -- shipping/PayPal/DHL no cambian, solo el
+    dólar -- y propaga el costo nuevo de cada línea a TODO lo que depende
+    de él:
+      - factura_lineas.precio_unitario (y los totales de 'facturas').
+      - El balde de stock_proveedores exclusivo de esta factura (ver
+        Migración 38), si todavía le queda stock sin consumir -- se
+        corrige directo (SET, no promedio: todo ese balde vino de esta
+        misma factura al mismo costo de origen).
+      - El movimiento de 'entrada' original de cada línea, para que quede
+        auditable con el costo real.
+      - TODOS los orden_items/garantia_items que consumieron ese balde,
+        aunque la orden/garantía ya esté cerrada -- a pedido explícito del
+        taller ("es fundamental que el costo sea el real... con eso se
+        calcula el costo final del mes y de cada OT"), porque el Estado de
+        Resultados lee el costo directamente desde ahí (ver
+        modulos/finanzas.py), nunca desde el promedio general del producto.
+      - La(s) Cuenta(s) por Pagar de la factura: se reemplazan por unas
+        nuevas con el monto correcto (mismo patrón "anular y regenerar" que
+        cambiar_condicion_pago_factura), bloqueado si ya tiene abonos
+        registrados -- no hay forma de revertir un pago que ya "salió".
+
+    'productos.costo_compra' (el Costo Promedio Ponderado GENERAL, que
+    mezcla TODOS los proveedores/compras históricas) se ajusta también,
+    pero solo de forma aproximada -- no hay manera de saber con exactitud
+    cuánto de ese número mezclado vino de esta factura puntual (ver
+    comentario largo sobre stock_proveedores en core.py). No es grave: ese
+    número ya es "último recurso" en todo el sistema, nunca la fuente real
+    de un costo (ver agregar_item_orden)."""
+    db = get_db()
+    _iniciar_transaccion_stock(db)
+    factura = db.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
+    if factura is None:
+        return jsonify({"error": "Factura no encontrada"}), 404
+
+    pendiente = db.execute(
+        "SELECT * FROM facturas_finanzas_pendientes WHERE factura_id = ?", (factura_id,)
+    ).fetchone()
+    if pendiente is None or not pendiente["internacional_json"]:
+        return jsonify({"error": "Esta factura no es una factura internacional -- no tiene tipo de cambio que confirmar."}), 400
+
+    meta = json.loads(pendiente["internacional_json"])
+
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        tipo_cambio_definitivo = float(data.get("tipo_cambio_definitivo"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "El tipo de cambio definitivo debe ser un número"}), 400
+
+    # Bloqueado si la CxP ya tiene abonos -- mismo criterio de seguridad
+    # que cambiar_condicion_pago_factura: no hay forma de revertir un pago
+    # que ya "salió", así que no se puede reescribir el monto por debajo
+    # de un pago ya hecho.
+    cxp_existentes = db.execute(
+        "SELECT * FROM cuentas_por_pagar WHERE factura_id = ? AND estado != 'anulada'", (factura_id,)
+    ).fetchall()
+    for cxp in cxp_existentes:
+        total_pagado = db.execute(
+            "SELECT COALESCE(SUM(monto), 0) FROM cxp_pagos WHERE cxp_id = ?", (cxp["id"],)
+        ).fetchone()[0]
+        if total_pagado > 0:
+            return jsonify({
+                "error": "Esta factura ya tiene abonos registrados en su Cuenta por Pagar y no se puede "
+                         "confirmar el tipo de cambio definitivo sin revertirlos primero.",
+            }), 400
+
+    # Recalcula el prorrateo completo con el dólar nuevo -- 'meta["lineas"]'
+    # ya trae 'cantidad'/'costo_unitario_usd' de cada línea (lo que pide
+    # _calcular_prorrateo_internacional como 'lineas_in'), sin tocar, así
+    # que esto es seguro de repetir tantas veces como haga falta.
+    desglose_nuevo, error = _calcular_prorrateo_internacional(
+        meta["lineas"], tipo_cambio_definitivo, meta["shipping_usd"], meta["paypal_usd"], meta["dhl_clp"],
+    )
+    if error:
+        return jsonify({"error": error}), 400
+
+    lineas_factura = db.execute(
+        "SELECT * FROM factura_lineas WHERE factura_id = ? ORDER BY id", (factura_id,)
+    ).fetchall()
+    if len(lineas_factura) != len(desglose_nuevo):
+        # No debería pasar nunca -- factura_lineas se llenó 1 a 1 desde
+        # este mismo desglose al aprobar la factura (ver crear_factura_internacional
+        # / _registrar_factura) y nadie más agrega/quita líneas de una
+        # factura internacional después. Se corta acá en vez de aplicar
+        # una corrección desalineada.
+        return jsonify({"error": "El detalle de esta factura no calza con su desglose internacional original -- contacta soporte antes de continuar."}), 400
+
+    # 'lineas_json' del pendiente (que sigue existiendo aunque la factura ya
+    # esté aprobada) también se actualiza -- _factura_pendiente_recepcion_dict
+    # calcula monto_neto/monto_iva/monto_total EN VIVO desde acá (no desde
+    # 'facturas'), y es lo que usa la lista de Facturas para mostrar el monto
+    # facturado. Sin esto, la lista seguiría mostrando el total viejo aunque
+    # el detalle (que sí trae la factura real) ya mostrara el corregido.
+    lineas_json_pendiente = json.loads(pendiente["lineas_json"])
+
+    ts = now_iso()
+    items_corregidos = 0
+    for idx, (linea, nuevo) in enumerate(zip(lineas_factura, desglose_nuevo)):
+        costo_nuevo = nuevo["costo_unitario_final_clp"]
+        db.execute("UPDATE factura_lineas SET precio_unitario = ? WHERE id = ?", (costo_nuevo, linea["id"]))
+        lineas_json_pendiente[idx]["precio_unitario"] = costo_nuevo
+
+        producto_id = linea["producto_id"]
+        producto = db.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
+        if producto is not None:
+            balde = db.execute(
+                "SELECT * FROM stock_proveedores WHERE producto_id = ? AND factura_id = ?",
+                (producto_id, factura_id),
+            ).fetchone()
+            if balde is not None:
+                # Todo ese balde vino de ESTA factura al mismo costo de
+                # origen -- se corrige con un SET directo, no un promedio
+                # ponderado (no hay nada más con qué ponderar).
+                db.execute(
+                    "UPDATE stock_proveedores SET costo_promedio = ?, actualizado_en = ? WHERE id = ?",
+                    (costo_nuevo, ts, balde["id"]),
+                )
+                # Ajuste aproximado del CPP general del producto (ver
+                # docstring de la función): solo la porción del stock
+                # actual que sigue viva en ESTE balde se corrige acá.
+                if producto["stock_disponible"] and producto["stock_disponible"] > 0:
+                    delta = costo_nuevo - linea["precio_unitario"]
+                    ajuste = (balde["cantidad"] * delta) / producto["stock_disponible"]
+                    db.execute(
+                        "UPDATE productos SET costo_compra = costo_compra + ?, actualizado_en = ? WHERE id = ?",
+                        (ajuste, ts, producto_id),
+                    )
+
+        # El movimiento de 'entrada' original de esta línea (ver
+        # _aplicar_entrada_stock, que lo deja con factura_id/factura_numero
+        # puestos) -- se corrige para que quede auditable con el costo real.
+        db.execute(
+            "UPDATE movimientos SET costo_unitario = ? WHERE producto_id = ? AND factura_id = ? AND tipo = 'entrada'",
+            (costo_nuevo, producto_id, factura_id),
+        )
+
+        # Todo ítem de OT/garantía que consumió el balde de esta factura --
+        # ABIERTA O CERRADA, no importa -- queda con el costo real (a
+        # pedido explícito del taller, ver docstring de la función).
+        items_corregidos += db.execute(
+            "UPDATE orden_items SET costo_unitario = ? WHERE factura_internacional_id = ? AND producto_id = ?",
+            (costo_nuevo, factura_id, producto_id),
+        ).rowcount
+        items_corregidos += db.execute(
+            "UPDATE garantia_items SET costo_unitario = ? WHERE factura_internacional_id = ? AND producto_id = ?",
+            (costo_nuevo, factura_id, producto_id),
+        ).rowcount
+
+    # Totales de la factura (mismo cálculo que _registrar_factura la
+    # primera vez) -- las líneas de gasto general de una factura
+    # internacional no existen (_calcular_prorrateo_internacional las
+    # rechaza), así que no hace falta sumarlas acá.
+    monto_neto = round(sum(l["cantidad"] * d["costo_unitario_final_clp"] for l, d in zip(lineas_factura, desglose_nuevo)), 2)
+    monto_iva = 0 if factura["exento_iva"] else round(monto_neto * 0.19, 2)
+    monto_total = round(monto_neto + monto_iva, 2)
     db.execute(
-        "UPDATE facturas_finanzas_pendientes SET internacional_json = ? WHERE id = ?",
-        (json.dumps(internacional_meta), nueva["id"]),
+        "UPDATE facturas SET monto_neto = ?, monto_iva = ?, monto_total = ? WHERE id = ?",
+        (monto_neto, monto_iva, monto_total, factura_id),
+    )
+
+    # Reemplaza la(s) CxP activa(s) por unas nuevas con el monto correcto
+    # -- mismo patrón "anular y regenerar" que cambiar_condicion_pago_factura
+    # (las viejas se anulan, nunca se borran, para no perder el rastro),
+    # con la MISMA condición de pago que ya tenía la factura (esto no la
+    # cambia, solo corrige el monto).
+    lineas_validadas_cxp = [(None, l["cantidad"], d["costo_unitario_final_clp"]) for l, d in zip(lineas_factura, desglose_nuevo)]
+    for cxp in cxp_existentes:
+        db.execute("UPDATE cuentas_por_pagar SET estado = 'anulada', actualizado_en = ? WHERE id = ?", (ts, cxp["id"]))
+    _generar_cxp_de_factura(
+        db, factura_id, factura["proveedor_id"], factura["fecha"], lineas_validadas_cxp,
+        condicion_pago=factura["condicion_pago"], porcentaje_contado=factura["porcentaje_contado"],
+        plazo_dias_credito=factura["plazo_dias_credito"], exento_iva=bool(factura["exento_iva"]),
+    )
+
+    meta["tipo_cambio_definitivo"] = tipo_cambio_definitivo
+    meta["definitivo"] = True
+    meta["fecha_definitivo"] = ts
+    meta["lineas"] = desglose_nuevo
+    db.execute(
+        "UPDATE facturas_finanzas_pendientes SET internacional_json = ?, lineas_json = ? WHERE id = ?",
+        (json.dumps(meta), json.dumps(lineas_json_pendiente), pendiente["id"]),
     )
     db.commit()
-    nueva = db.execute("SELECT * FROM facturas_finanzas_pendientes WHERE id = ?", (nueva["id"],)).fetchone()
-    return jsonify(_factura_pendiente_recepcion_dict(db, nueva)), 201
+
+    nueva = db.execute(FACTURA_SELECT + " WHERE f.id = ?", (factura_id,)).fetchone()
+    detalle = _factura_detalle(db, nueva)
+    detalle["items_ot_garantia_corregidos"] = items_corregidos
+    return jsonify(detalle)
 
 
 @app.route("/api/facturas/pendientes-recepcion", methods=["POST"])
@@ -6914,12 +7206,19 @@ def _aprobar_pendiente_recepcion(db, fila):
         condicion_pago = "contado"
         porcentaje_contado = 100
 
+    # 'es_internacional' se lee de internacional_json (no de un flag aparte)
+    # -- ver el docstring de _crear_pendiente_recepcion sobre por qué esa
+    # columna se guarda en el INSERT inicial y no con un UPDATE después:
+    # este chequeo tiene que ver el valor correcto incluso cuando 'fila'
+    # viene de la ruta de aplicación automática (auto_aplicar=True), que
+    # corre en la misma operación en que se crea el pendiente.
     factura_id = _registrar_factura(
         db, fila["numero"], fila["proveedor_id"], fila["fecha"], lineas_validadas, usuario_actual(),
         aplicar_stock=True, condicion_pago=condicion_pago,
         porcentaje_contado=porcentaje_contado, plazo_dias_credito=fila["plazo_dias_credito"],
         lineas_gasto_general=lineas_gasto_general, exento_iva=bool(fila["exento_iva"]),
         lineas_ot_destino=lineas_ot_destino, tipo_documento=tipo_documento,
+        es_internacional=fila["internacional_json"] is not None,
     )
     return factura_id, lineas_recibidas_registro, None
 

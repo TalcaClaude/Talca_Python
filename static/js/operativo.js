@@ -3095,11 +3095,20 @@ async function abrirRepuestosModal() {
 // rehacer un movimiento de stock si la persona cambia de opinión.
 let opoiPendienteProveedor = null; // { producto, cantidad, textoBusqueda }
 
+// El valor de cada <option> codifica AMBOS ejes del balde ("proveedor_id|
+// factura_id", cada parte vacía si es null) -- desde que un mismo proveedor
+// puede tener más de un balde vivo a la vez (el mezclado de siempre + uno
+// por cada factura internacional suya con stock, ver Migración 38 /
+// _stockprov_buckets_producto), ya no alcanza con distinguir solo por
+// proveedor_id. 'proveedor_nombre' ya viene armado desde el backend
+// incluyendo "— Factura internacional N°..." cuando corresponde, así que
+// la etiqueta no necesita tocarse acá.
 function poblarOpcionesProveedorRepuesto(selectEl, proveedores) {
   selectEl.innerHTML = '<option value="" disabled selected>Proveedor</option>' +
     proveedores.map(p => {
-      const valor = p.proveedor_id === null ? "__sin_proveedor__" : p.proveedor_id;
-      return `<option value="${valor}">${escapeHtml(p.proveedor_nombre)} (${p.cantidad} disp., ${fmtMoney(p.costo_promedio)} c/u)</option>`;
+      const provParte = p.proveedor_id === null ? "" : p.proveedor_id;
+      const facParte = (p.factura_id === null || p.factura_id === undefined) ? "" : p.factura_id;
+      return `<option value="${provParte}|${facParte}">${escapeHtml(p.proveedor_nombre)} (${p.cantidad} disp., ${fmtMoney(p.costo_promedio)} c/u)</option>`;
     }).join("");
 }
 
@@ -3175,10 +3184,14 @@ async function agregarRepuestoDesdeAutocomplete(producto) {
 // cuando el producto no tenía más de un proveedor (comportamiento de
 // siempre, sin tocar ese campo); viene con un valor (número o null, "sin
 // proveedor conocido") cuando la persona ya lo eligió en el selector.
-async function agregarItemRepuestoOpoi(producto, cantidad, textoBusqueda, proveedorId) {
+// 'facturaId' (Migración 38) acompaña a 'proveedorId' solo cuando el balde
+// elegido es de una factura internacional puntual -- ver
+// poblarOpcionesProveedorRepuesto.
+async function agregarItemRepuestoOpoi(producto, cantidad, textoBusqueda, proveedorId, facturaId) {
   const ordenId = document.getElementById("opod-id").value;
   const payload = { tipo: "repuesto", producto_id: producto.id, cantidad };
   if (proveedorId !== undefined) payload.proveedor_id = proveedorId;
+  if (facturaId !== undefined && facturaId !== null) payload.factura_id = facturaId;
   try {
     await api(`/api/operativo/ordenes/${ordenId}/items`, { method: "POST", body: JSON.stringify(payload) });
     toast(`Agregado: ${producto.nombre}`);
@@ -3211,8 +3224,10 @@ document.getElementById("opoi-proveedor-repuesto").addEventListener("change", (e
   const valor = e.target.value;
   if (!valor || !opoiPendienteProveedor) return;
   const { producto, cantidad, textoBusqueda } = opoiPendienteProveedor;
-  const proveedorId = valor === "__sin_proveedor__" ? null : parseInt(valor, 10);
-  agregarItemRepuestoOpoi(producto, cantidad, textoBusqueda, proveedorId);
+  const [provParte, facParte] = valor.split("|");
+  const proveedorId = provParte === "" ? null : parseInt(provParte, 10);
+  const facturaId = facParte === "" ? null : parseInt(facParte, 10);
+  agregarItemRepuestoOpoi(producto, cantidad, textoBusqueda, proveedorId, facturaId);
 });
 
 document.getElementById("opoi-producto-buscar").addEventListener("input", (e) => {
@@ -4031,10 +4046,11 @@ async function agregarRepuestoGarantiaDesdeAutocomplete(producto) {
   await agregarItemRepuestoGari(producto, cantidad, textoBusqueda, undefined);
 }
 
-async function agregarItemRepuestoGari(producto, cantidad, textoBusqueda, proveedorId) {
+async function agregarItemRepuestoGari(producto, cantidad, textoBusqueda, proveedorId, facturaId) {
   const garantiaId = document.getElementById("gard-id").value;
   const payload = { tipo: "repuesto", producto_id: producto.id, cantidad };
   if (proveedorId !== undefined) payload.proveedor_id = proveedorId;
+  if (facturaId !== undefined && facturaId !== null) payload.factura_id = facturaId;
   try {
     await api(`/api/operativo/garantias/${garantiaId}/items`, { method: "POST", body: JSON.stringify(payload) });
     toast(`Agregado: ${producto.nombre}`);
@@ -4060,8 +4076,10 @@ document.getElementById("gari-proveedor-repuesto").addEventListener("change", (e
   const valor = e.target.value;
   if (!valor || !gariPendienteProveedor) return;
   const { producto, cantidad, textoBusqueda } = gariPendienteProveedor;
-  const proveedorId = valor === "__sin_proveedor__" ? null : parseInt(valor, 10);
-  agregarItemRepuestoGari(producto, cantidad, textoBusqueda, proveedorId);
+  const [provParte, facParte] = valor.split("|");
+  const proveedorId = provParte === "" ? null : parseInt(provParte, 10);
+  const facturaId = facParte === "" ? null : parseInt(facParte, 10);
+  agregarItemRepuestoGari(producto, cantidad, textoBusqueda, proveedorId, facturaId);
 });
 
 document.getElementById("gari-producto-buscar").addEventListener("input", (e) => {

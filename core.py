@@ -714,24 +714,55 @@ def _recalcular_stock_minimo(db, producto_id):
 # límite de que no exista ningún balde vivo (dato legado/inconsistencia).
 # ---------------------------------------------------------------------------
 
-def _stockprov_bucket_get(db, producto_id, proveedor_id):
+def _stockprov_bucket_get(db, producto_id, proveedor_id, factura_id=None):
+    """Busca el balde de stock_proveedores para (producto_id, proveedor_id,
+    factura_id). 'factura_id' es una dimensión EXTRA opcional (ver Migración
+    38): por defecto (None) apunta al balde "de siempre" -- mezclado por
+    proveedor, sin importar de qué compra vino cada unidad -- que es como
+    se comportan TODAS las compras nacionales, sin excepción. Solo las
+    facturas INTERNACIONALES (ver _registrar_factura/es_internacional) usan
+    un factura_id real acá, para que cada factura internacional quede en su
+    propio balde en vez de mezclarse con el resto de las compras de ese
+    proveedor -- la razón es el "tipo de cambio definitivo" (ver
+    /api/facturas/<id>/tipo-cambio-definitivo): cuando se sabe el dólar
+    real, hay que poder encontrar EXACTAMENTE el stock que vino de esa
+    factura para corregirle el costo, sin tocar el resto."""
     if proveedor_id is None:
+        if factura_id is None:
+            return db.execute(
+                "SELECT * FROM stock_proveedores WHERE producto_id = ? AND proveedor_id IS NULL AND factura_id IS NULL",
+                (producto_id,),
+            ).fetchone()
         return db.execute(
-            "SELECT * FROM stock_proveedores WHERE producto_id = ? AND proveedor_id IS NULL",
-            (producto_id,),
+            "SELECT * FROM stock_proveedores WHERE producto_id = ? AND proveedor_id IS NULL AND factura_id = ?",
+            (producto_id, factura_id),
+        ).fetchone()
+    if factura_id is None:
+        return db.execute(
+            "SELECT * FROM stock_proveedores WHERE producto_id = ? AND proveedor_id = ? AND factura_id IS NULL",
+            (producto_id, proveedor_id),
         ).fetchone()
     return db.execute(
-        "SELECT * FROM stock_proveedores WHERE producto_id = ? AND proveedor_id = ?",
-        (producto_id, proveedor_id),
+        "SELECT * FROM stock_proveedores WHERE producto_id = ? AND proveedor_id = ? AND factura_id = ?",
+        (producto_id, proveedor_id, factura_id),
     ).fetchone()
 
 
-def _stockprov_bucket_entrada(db, producto_id, proveedor_id, cantidad, costo_unitario, recalcular_costo=True):
+def _stockprov_bucket_entrada(db, producto_id, proveedor_id, cantidad, costo_unitario, recalcular_costo=True, factura_id=None):
     """Suma unidades al balde de stock de un proveedor específico (o NULL =
     sin proveedor conocido, ej. stock inicial o entrada sin factura) y, por
     defecto, recalcula el costo promedio de ESE balde en particular
     (independiente del costo promedio general del producto). Crea el
     balde si no existía.
+
+    'factura_id' (ver _stockprov_bucket_get): None para toda compra
+    nacional (el balde sigue siendo "uno por proveedor", como siempre). Un
+    id real solo para facturas internacionales -- ahí el balde queda
+    exclusivo de esa factura, así que 'recalcular_costo' en la práctica no
+    pondera con nada más (el balde nace vacío la primera vez, y una factura
+    internacional nunca vuelve a aportarle unidades a un balde ya
+    existente salvo que sea la misma factura entrando dos veces, lo que no
+    pasa hoy).
 
     recalcular_costo=False se usa para DEVOLUCIONES de stock (ver
     _aplicar_entrada_stock más abajo, que es quien decide cuándo pasar
@@ -744,12 +775,12 @@ def _stockprov_bucket_entrada(db, producto_id, proveedor_id, cantidad, costo_uni
     fila -- ver _stockprov_bucket_salida), igual se recrea usando
     'costo_unitario' tal cual (es el costo real conocido de esas
     unidades, no una compra nueva que haya que ponderar con nada más)."""
-    bucket = _stockprov_bucket_get(db, producto_id, proveedor_id)
+    bucket = _stockprov_bucket_get(db, producto_id, proveedor_id, factura_id)
     ts = now_iso()
     if bucket is None:
         db.execute(
-            "INSERT INTO stock_proveedores (producto_id, proveedor_id, cantidad, costo_promedio, actualizado_en) VALUES (?, ?, ?, ?, ?)",
-            (producto_id, proveedor_id, cantidad, costo_unitario if costo_unitario is not None else 0, ts),
+            "INSERT INTO stock_proveedores (producto_id, proveedor_id, factura_id, cantidad, costo_promedio, actualizado_en) VALUES (?, ?, ?, ?, ?, ?)",
+            (producto_id, proveedor_id, factura_id, cantidad, costo_unitario if costo_unitario is not None else 0, ts),
         )
         return
     cantidad_actual = bucket["cantidad"]
@@ -765,15 +796,18 @@ def _stockprov_bucket_entrada(db, producto_id, proveedor_id, cantidad, costo_uni
     )
 
 
-def _stockprov_bucket_salida(db, producto_id, proveedor_id, cantidad):
+def _stockprov_bucket_salida(db, producto_id, proveedor_id, cantidad, factura_id=None):
     """Descuenta unidades del balde de un proveedor específico (no toca su
     costo promedio, igual que una salida no toca el CPP general). Se usa
     cuando la persona elige a mano de qué proveedor está saliendo el
-    producto (formulario de "Registrar movimiento"). Lanza ValueError si ese
-    balde no tiene stock suficiente -- a propósito, para que quien eligió
-    mal el proveedor vea el error de inmediato en vez de dejar el balde en
-    negativo."""
-    bucket = _stockprov_bucket_get(db, producto_id, proveedor_id)
+    producto (formulario de "Registrar movimiento", o el selector de OT/
+    garantía cuando hay más de un balde vivo -- ver agregar_item_orden).
+    'factura_id' identifica un balde de factura internacional puntual (ver
+    _stockprov_bucket_get); None descuenta del balde mezclado de siempre.
+    Lanza ValueError si ese balde no tiene stock suficiente -- a propósito,
+    para que quien eligió mal el balde vea el error de inmediato en vez de
+    dejarlo en negativo."""
+    bucket = _stockprov_bucket_get(db, producto_id, proveedor_id, factura_id)
     disponible = bucket["cantidad"] if bucket else 0
     if cantidad > disponible:
         raise ValueError(f"Ese proveedor solo tiene {disponible} unidad(es) disponibles de este producto")
@@ -839,7 +873,7 @@ def _stockprov_descontar_preferido(db, producto_id, proveedor_id_preferido, cant
         _stockprov_descontar_automatico(db, producto_id, restante)
 
 
-def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra", proveedor_id=None, recalcular_costo_promedio=True):
+def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, usuario, factura=None, categoria="Compra", proveedor_id=None, recalcular_costo_promedio=True, factura_id_bucket=None):
     """Aplica una entrada de stock a un producto, recalculando el Costo
     Promedio Ponderado si se informa costo_unitario, y deja el movimiento
     registrado con la referencia a la factura si corresponde.
@@ -855,6 +889,16 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
     esa trazabilidad (ver eliminar_item_orden/eliminar_item_garantia en
     modulos/operativo.py). Si no hay ninguno de los dos, cae en "sin
     proveedor conocido", igual que siempre.
+
+    factura_id_bucket (ver _registrar_factura/es_internacional, septiembre
+    2026): None para toda entrada normal (el balde de stock_proveedores
+    sigue siendo "uno por proveedor", mezclado, como siempre). Solo se
+    manda un id real cuando la entrada viene de una factura INTERNACIONAL
+    -- ahí el balde queda exclusivo de esa factura en vez de mezclarse con
+    el resto de las compras de ese proveedor, para poder encontrar después
+    exactamente qué stock vino de esa factura (ver
+    /api/facturas/<id>/tipo-cambio-definitivo, que corrige el costo de ese
+    balde puntual cuando se sabe el dólar real).
 
     recalcular_costo_promedio=False (reportado por el taller, julio 2026):
     se usa para DEVOLUCIONES de stock -- al eliminar un ítem que ya había
@@ -914,14 +958,14 @@ def _aplicar_entrada_stock(db, producto_row, cantidad, costo_unitario, motivo, u
         proveedor_id_entrada = proveedor_id
     _stockprov_bucket_entrada(
         db, producto_row["id"], proveedor_id_entrada, cantidad, costo_unitario,
-        recalcular_costo=recalcular_costo_promedio,
+        recalcular_costo=recalcular_costo_promedio, factura_id=factura_id_bucket,
     )
     _recalcular_stock_minimo(db, producto_row["id"])
     return nuevo_stock
 
 
 def _aplicar_salida_stock(db, producto_row, cantidad, motivo, usuario, categoria="Consumo interno",
-                           proveedor_id=None, proveedor_manual=False):
+                           proveedor_id=None, proveedor_manual=False, factura_id=None):
     """Aplica una salida de stock a un producto (sin tocar el Costo Promedio
     Ponderado — una salida no cambia lo que costó lo que queda en bodega).
     Deja el movimiento registrado y recalcula el stock mínimo, porque una
@@ -936,6 +980,12 @@ def _aplicar_salida_stock(db, producto_row, cantidad, motivo, usuario, categoria
     ese selector), se descuenta automáticamente del/los balde(s) disponibles
     sin bloquear la operación.
 
+    'factura_id' (solo tiene efecto junto con proveedor_manual=True) apunta
+    a un balde de factura internacional puntual en vez del balde mezclado
+    de ese proveedor -- ver agregar_item_orden en modulos/operativo.py, que
+    lo manda cuando el balde elegido (único o seleccionado a mano entre
+    varios) resultó ser de una factura internacional.
+
     Lanza ValueError si no hay stock disponible suficiente, con el mismo
     mensaje que usa el resto del sistema para este caso — el que llama debe
     capturarlo y devolver un 400 (ver registrar_movimiento en app.py o
@@ -949,7 +999,7 @@ def _aplicar_salida_stock(db, producto_row, cantidad, motivo, usuario, categoria
         # general aplicado si después falla el descuento del balde de
         # proveedor (mismo criterio que la validación de stock_actual de
         # arriba, ambas fallan "limpio" sin tocar la base).
-        bucket = _stockprov_bucket_get(db, producto_row["id"], proveedor_id)
+        bucket = _stockprov_bucket_get(db, producto_row["id"], proveedor_id, factura_id)
         disponible_proveedor = bucket["cantidad"] if bucket else 0
         if cantidad > disponible_proveedor:
             raise ValueError(f"Ese proveedor solo tiene {disponible_proveedor} unidad(es) disponibles de este producto")
@@ -966,7 +1016,7 @@ def _aplicar_salida_stock(db, producto_row, cantidad, motivo, usuario, categoria
         (producto_row["id"], ts, categoria, cantidad, motivo, usuario, nuevo_stock),
     )
     if proveedor_manual:
-        _stockprov_bucket_salida(db, producto_row["id"], proveedor_id, cantidad)
+        _stockprov_bucket_salida(db, producto_row["id"], proveedor_id, cantidad, factura_id=factura_id)
     else:
         _stockprov_descontar_automatico(db, producto_row["id"], cantidad)
     _recalcular_stock_minimo(db, producto_row["id"])

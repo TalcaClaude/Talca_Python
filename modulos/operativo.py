@@ -593,6 +593,23 @@ def init_operativo_db(db):
         db.execute("ALTER TABLE orden_items ADD COLUMN proveedor_id INTEGER REFERENCES proveedores(id)")
         db.commit()
 
+    # orden_items.factura_internacional_id (Migración 38 de app.py, pedido
+    # del taller septiembre 2026): si este ítem 'repuesto' salió de un
+    # balde de stock_proveedores exclusivo de una factura internacional
+    # (ver _stockprov_buckets_producto/factura_id), acá queda registrado
+    # cuál -- NULL para todo lo demás (compra nacional, o repuesto sin
+    # proveedor conocido). Es lo que permite encontrar y corregir el costo
+    # de CADA ítem de OT/garantía que consumió ese stock (abierta o cerrada
+    # la orden, no importa) cuando se confirma el "tipo de cambio
+    # definitivo" de esa factura (ver
+    # /api/facturas/<id>/tipo-cambio-definitivo en app.py) -- a pedido
+    # explícito del taller: "es fundamental que el costo sea el real...
+    # con eso se calcula el costo final del mes y de cada OT", así que
+    # también se corrige acá aunque la OT ya esté cerrada.
+    if "factura_internacional_id" not in columnas_orden_items:
+        db.execute("ALTER TABLE orden_items ADD COLUMN factura_internacional_id INTEGER REFERENCES facturas(id)")
+        db.commit()
+
     # Repara orden_items si su llave foránea convertidor_id quedó
     # apuntando a 'convertidores_torque_legado...' en vez de
     # 'convertidores_torque' (mismo mecanismo que ya se documentó arriba
@@ -618,7 +635,8 @@ def init_operativo_db(db):
             detalle TEXT DEFAULT '',
             aplica_iva INTEGER NOT NULL DEFAULT 0,
             convertidor_id INTEGER REFERENCES convertidores_torque(id),
-            proveedor_id INTEGER REFERENCES proveedores(id)
+            proveedor_id INTEGER REFERENCES proveedores(id),
+            factura_internacional_id INTEGER REFERENCES facturas(id)
         );
     """
     _reparar_fk_hacia_tabla_renombrada(
@@ -629,6 +647,7 @@ def init_operativo_db(db):
             "id", "orden_id", "tipo", "producto_id", "descripcion", "cantidad",
             "costo_unitario", "movimiento_id", "usuario", "creado_en",
             "detalle", "aplica_iva", "convertidor_id", "proveedor_id",
+            "factura_internacional_id",
         ],
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_orden_items_orden_id ON orden_items (orden_id)")
@@ -669,6 +688,13 @@ def init_operativo_db(db):
         db.execute("ALTER TABLE garantia_items ADD COLUMN proveedor_id INTEGER REFERENCES proveedores(id)")
         db.commit()
 
+    # garantia_items.factura_internacional_id: mismo criterio que
+    # orden_items.factura_internacional_id de arriba, para cuando el
+    # repuesto se cargó desde una garantía en vez de una OT normal.
+    if "factura_internacional_id" not in columnas_garantia_items:
+        db.execute("ALTER TABLE garantia_items ADD COLUMN factura_internacional_id INTEGER REFERENCES facturas(id)")
+        db.commit()
+
     # Repara garantia_items si su llave foránea convertidor_id quedó
     # apuntando a 'convertidores_torque_legado...' -- mismo mecanismo que
     # ya se documentó arriba para orden_items.convertidor_id. Se corre en
@@ -688,7 +714,8 @@ def init_operativo_db(db):
             detalle TEXT DEFAULT '',
             aplica_iva INTEGER NOT NULL DEFAULT 0,
             convertidor_id INTEGER REFERENCES convertidores_torque(id),
-            proveedor_id INTEGER REFERENCES proveedores(id)
+            proveedor_id INTEGER REFERENCES proveedores(id),
+            factura_internacional_id INTEGER REFERENCES facturas(id)
         );
     """
     _reparar_fk_hacia_tabla_renombrada(
@@ -699,6 +726,7 @@ def init_operativo_db(db):
             "id", "garantia_id", "tipo", "producto_id", "descripcion", "cantidad",
             "costo_unitario", "movimiento_id", "usuario", "creado_en",
             "detalle", "aplica_iva", "convertidor_id", "proveedor_id",
+            "factura_internacional_id",
         ],
     )
     db.commit()
@@ -3169,6 +3197,7 @@ def agregar_item_orden(orden_id):
     producto_id = None
     movimiento_id = None
     proveedor_id_salida = None
+    factura_id_salida = None
     descripcion = (data.get("descripcion") or "").strip().upper()
 
     if tipo == "repuesto":
@@ -3219,7 +3248,23 @@ def agregar_item_orden(orden_id):
                 proveedor_id_salida = None if proveedor_id_crudo in (None, "", "__sin_proveedor__") else int(proveedor_id_crudo)
             except (TypeError, ValueError):
                 return jsonify({"error": "Proveedor inválido"}), 400
-            balde_elegido = next((b for b in baldes_proveedor if b["proveedor_id"] == proveedor_id_salida), None)
+            # 'factura_id' (Migración 38): un mismo proveedor puede tener
+            # ahora más de un balde vivo -- el mezclado de siempre
+            # (factura_id None) y uno por cada factura internacional suya
+            # con stock -- así que ya no alcanza con matchear solo por
+            # proveedor_id (ver _stockprov_buckets_producto). Ausente/vacío
+            # sigue significando "el balde mezclado de siempre", sin
+            # cambios para quien no manda nada (compatibilidad hacia atrás).
+            factura_id_crudo = data.get("factura_id")
+            try:
+                factura_id_salida = None if factura_id_crudo in (None, "") else int(factura_id_crudo)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Factura inválida"}), 400
+            balde_elegido = next(
+                (b for b in baldes_proveedor
+                 if b["proveedor_id"] == proveedor_id_salida and b.get("factura_id") == factura_id_salida),
+                None,
+            )
             if balde_elegido is None:
                 return jsonify({
                     "error": "Ese proveedor ya no tiene stock disponible de este producto -- vuelve a intentarlo.",
@@ -3231,6 +3276,7 @@ def agregar_item_orden(orden_id):
         elif len(baldes_proveedor) == 1:
             unico = baldes_proveedor[0]
             proveedor_id_salida = unico["proveedor_id"]
+            factura_id_salida = unico.get("factura_id")
             proveedor_manual = True
             costo_unitario = unico["costo_promedio"]
 
@@ -3262,6 +3308,7 @@ def agregar_item_orden(orden_id):
                 motivo=f"ORDEN DE TRABAJO #{orden_id}" + (f" - {descripcion}" if descripcion else ""),
                 usuario=usuario, categoria="Consumo interno",
                 proveedor_id=proveedor_id_salida, proveedor_manual=proveedor_manual,
+                factura_id=factura_id_salida,
             )
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
@@ -3289,10 +3336,11 @@ def agregar_item_orden(orden_id):
         """
         INSERT INTO orden_items (
             orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
-            movimiento_id, usuario, creado_en, detalle, aplica_iva, proveedor_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            movimiento_id, usuario, creado_en, detalle, aplica_iva, proveedor_id,
+            factura_internacional_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva, proveedor_id_salida),
+        (orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva, proveedor_id_salida, factura_id_salida),
     )
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
     db.commit()
@@ -3340,6 +3388,7 @@ def eliminar_item_orden(orden_id, item_id):
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE ORDEN #{orden_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
                 proveedor_id=item["proveedor_id"], recalcular_costo_promedio=False,
+                factura_id_bucket=item["factura_internacional_id"],
             )
 
     if item["tipo"] == "convertidor_torque" and item["convertidor_id"]:
@@ -4435,6 +4484,7 @@ def agregar_item_garantia(garantia_id):
     producto_id = None
     movimiento_id = None
     proveedor_id_salida = None
+    factura_id_salida = None
     descripcion = (data.get("descripcion") or "").strip().upper()
 
     if tipo == "repuesto":
@@ -4473,7 +4523,21 @@ def agregar_item_garantia(garantia_id):
                 proveedor_id_salida = None if proveedor_id_crudo in (None, "", "__sin_proveedor__") else int(proveedor_id_crudo)
             except (TypeError, ValueError):
                 return jsonify({"error": "Proveedor inválido"}), 400
-            balde_elegido = next((b for b in baldes_proveedor if b["proveedor_id"] == proveedor_id_salida), None)
+            # 'factura_id' (Migración 38): ver el comentario largo en
+            # agregar_item_orden() -- un mismo proveedor puede tener ahora
+            # más de un balde vivo (el mezclado de siempre + uno por cada
+            # factura internacional con stock), así que hace falta
+            # distinguir cuál.
+            factura_id_crudo = data.get("factura_id")
+            try:
+                factura_id_salida = None if factura_id_crudo in (None, "") else int(factura_id_crudo)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Factura inválida"}), 400
+            balde_elegido = next(
+                (b for b in baldes_proveedor
+                 if b["proveedor_id"] == proveedor_id_salida and b.get("factura_id") == factura_id_salida),
+                None,
+            )
             if balde_elegido is None:
                 return jsonify({
                     "error": "Ese proveedor ya no tiene stock disponible de este producto -- vuelve a intentarlo.",
@@ -4485,6 +4549,7 @@ def agregar_item_garantia(garantia_id):
         elif len(baldes_proveedor) == 1:
             unico = baldes_proveedor[0]
             proveedor_id_salida = unico["proveedor_id"]
+            factura_id_salida = unico.get("factura_id")
             proveedor_manual = True
             costo_unitario = unico["costo_promedio"]
 
@@ -4506,6 +4571,7 @@ def agregar_item_garantia(garantia_id):
                 motivo=f"GARANTÍA #{garantia_id}" + (f" - {descripcion}" if descripcion else ""),
                 usuario=usuario, categoria="Garantía",
                 proveedor_id=proveedor_id_salida, proveedor_manual=proveedor_manual,
+                factura_id=factura_id_salida,
             )
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
@@ -4530,10 +4596,11 @@ def agregar_item_garantia(garantia_id):
         """
         INSERT INTO garantia_items (
             garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario,
-            movimiento_id, usuario, creado_en, detalle, aplica_iva, proveedor_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            movimiento_id, usuario, creado_en, detalle, aplica_iva, proveedor_id,
+            factura_internacional_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva, proveedor_id_salida),
+        (garantia_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva, proveedor_id_salida, factura_id_salida),
     )
     db.execute("UPDATE garantias SET actualizado_en = ? WHERE id = ?", (ts, garantia_id))
     db.commit()
@@ -4561,6 +4628,7 @@ def eliminar_item_garantia(garantia_id, item_id):
                 motivo=f"DEVOLUCIÓN AL ELIMINAR ÍTEM DE GARANTÍA #{garantia_id}",
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
                 proveedor_id=item["proveedor_id"], recalcular_costo_promedio=False,
+                factura_id_bucket=item["factura_internacional_id"],
             )
 
     if item["tipo"] == "convertidor_torque" and item["convertidor_id"]:

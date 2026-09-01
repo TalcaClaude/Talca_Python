@@ -2100,7 +2100,7 @@ def _validar_csrf():
 
 def _calcular_hashes_scripts_inline():
     """Calcula los hashes 'sha256-<base64>' de los <script> inline estáticos
-    (_csrf.html, _sidebar.html, migracion_datos.html -- los únicos 3 <script>
+    (_csrf.html, _sidebar.html, _tema.html, migracion_datos.html -- los únicos <script>
     sin src="" de todo el sistema, y ninguno tiene variables de Jinja
     adentro, así que su contenido final es siempre el mismo que en el
     archivo fuente). Se calculan acá a partir de la plantilla real, no se
@@ -2111,7 +2111,7 @@ def _calcular_hashes_scripts_inline():
     problema de seguridad, pero igual conviene evitarlo)."""
     hashes = []
     directorio_templates = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
-    for nombre_archivo in ("_csrf.html", "_sidebar.html", "migracion_datos.html"):
+    for nombre_archivo in ("_csrf.html", "_sidebar.html", "_tema.html", "migracion_datos.html"):
         with open(os.path.join(directorio_templates, nombre_archivo), encoding="utf-8") as f:
             contenido = f.read()
         for bloque in re.findall(r"<script>(.*?)</script>", contenido, re.DOTALL):

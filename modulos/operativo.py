@@ -1550,20 +1550,37 @@ _CAMPOS_EQUIPO_TABLERO = ("id", "marca", "modelo", "identificador", "anio",
 @bp.route("/api/operativo/clientes", methods=["GET"])
 @requiere_rol("operativo")
 def listar_clientes():
+    """Clientes, paginados y buscados en SQL.
+
+    Antes traía las 4.212 filas, hacía un COUNT por cada una para `n_equipos`
+    y recién después filtraba en Python: buscar costaba lo mismo que listar
+    (206 ms contra 154 ms, o sea que buscar salía MÁS caro).
+
+    La búsqueda conserva el criterio de coincide_busqueda -- varias palabras
+    sueltas, sin tildes, cada una puede caer en un campo distinto ("perez
+    9912" encuentra por apellido y por teléfono a la vez) -- pero resuelta
+    dentro de SQLite, ver sql_filtro_busqueda en core.py."""
     db = get_db()
     q = (request.args.get("q") or "").strip()
-    rows = db.execute("SELECT * FROM clientes ORDER BY nombre COLLATE NOCASE").fetchall()
-    clientes = [_cliente_dict(db, r) for r in rows]
-    if q:
-        # Se filtra en Python con coincide_busqueda (ver core.py): admite
-        # varias palabras sueltas, sin tildes, que pueden calzar en campos
-        # distintos (ej. "perez 9912" encuentra por apellido Y por parte
-        # del teléfono a la vez).
-        clientes = [
-            c for c in clientes
-            if coincide_busqueda(q, c.get("nombre"), c.get("rut"), c.get("telefono"))
-        ]
-    return jsonify({"clientes": clientes, "total": len(clientes)})
+    pagina, por_pagina, offset = _paginacion()
+
+    where, params = sql_filtro_busqueda(q, "c.nombre", "c.rut", "c.telefono")
+    where_sql = f" WHERE {where}" if where else ""
+
+    clientes, total = _consultar_pagina(
+        db, "c.*", " FROM clientes c", where_sql,
+        "c.nombre COLLATE NOCASE, c.id", params, por_pagina, offset,
+    )
+
+    conteos = _conteos_por_id(
+        db,
+        "SELECT cliente_id, COUNT(*) FROM equipos WHERE cliente_id IN ({marcadores}) GROUP BY cliente_id",
+        [c["id"] for c in clientes],
+    )
+    for c in clientes:
+        c["n_equipos"] = conteos.get(c["id"], 0)
+
+    return _respuesta_paginada("clientes", clientes, total, pagina, por_pagina)
 
 
 @bp.route("/api/operativo/clientes/<int:cliente_id>", methods=["GET"])
@@ -1722,33 +1739,71 @@ def eliminar_cliente(cliente_id):
 @bp.route("/api/operativo/equipos", methods=["GET"])
 @requiere_rol("operativo")
 def listar_equipos():
+    """Vehículos, paginados y buscados en SQL, con el nombre del dueño.
+
+    Antes traía las 5.161 filas y por cada una hacía DOS consultas más para
+    contar órdenes y garantías: más de diez mil consultas por petición, 268 ms
+    y 1,6 MB. Ahora son cuatro consultas fijas, no importa el tamaño de la
+    página.
+
+    `q` busca por patente, marca, modelo y nombre del dueño, con el mismo
+    criterio de varias palabras de coincide_busqueda. Es lo que permite
+    encontrar un auto teniendo solo la patente en la mano, sin saber de quién
+    es -- ver la pestaña Vehículos.
+
+    `identificador` sigue siendo la coincidencia EXACTA que usa el
+    autocompletado al crear una OT, y no se toca: es otra pregunta ("¿esta
+    patente ya está registrada?") y necesita ser exacta para no autocompletar
+    con los datos del auto equivocado."""
     db = get_db()
     cliente_id = request.args.get("cliente_id")
     identificador = (request.args.get("identificador") or "").strip()
-    sql = "SELECT * FROM equipos WHERE 1=1"
+    q = (request.args.get("q") or "").strip()
+    pagina, por_pagina, offset = _paginacion()
+
+    condiciones = []
     params = []
     if cliente_id:
-        sql += " AND cliente_id = ?"
+        condiciones.append("e.cliente_id = ?")
         params.append(cliente_id)
     if identificador:
         # Coincidencia exacta (sin importar mayúsculas/espacios), para poder
         # autocompletar marca/modelo si esa patente ya está registrada en el
         # taller (aunque sea con otro cliente — ej. el auto cambió de dueño).
-        sql += " AND UPPER(TRIM(identificador)) = UPPER(TRIM(?))"
+        condiciones.append("UPPER(TRIM(e.identificador)) = UPPER(TRIM(?))")
         params.append(identificador)
-    sql += " ORDER BY creado_en DESC"
-    rows = db.execute(sql, params).fetchall()
-    equipos = []
-    for r in rows:
-        d = dict(r)
-        d["n_ordenes"] = db.execute(
-            "SELECT COUNT(*) FROM ordenes_trabajo WHERE equipo_id = ?", (d["id"],)
-        ).fetchone()[0]
-        d["n_garantias"] = db.execute(
-            "SELECT COUNT(*) FROM garantias WHERE equipo_id = ?", (d["id"],)
-        ).fetchone()[0]
-        equipos.append(d)
-    return jsonify({"equipos": equipos, "total": len(equipos)})
+    if q:
+        filtro, params_q = sql_filtro_busqueda(
+            q, "e.identificador", "e.marca", "e.modelo", "c.nombre"
+        )
+        condiciones.append(f"({filtro})")
+        params.extend(params_q)
+
+    where_sql = f" WHERE {' AND '.join(condiciones)}" if condiciones else ""
+    desde_sql = " FROM equipos e LEFT JOIN clientes c ON c.id = e.cliente_id"
+
+    equipos, total = _consultar_pagina(
+        db, "e.*, c.nombre AS cliente_nombre", desde_sql, where_sql,
+        "e.creado_en DESC, e.id DESC", params, por_pagina, offset,
+    )
+    ids = [e["id"] for e in equipos]
+    n_ordenes = _conteos_por_id(
+        db,
+        "SELECT equipo_id, COUNT(*) FROM ordenes_trabajo WHERE equipo_id IN ({marcadores})"
+        " GROUP BY equipo_id",
+        ids,
+    )
+    n_garantias = _conteos_por_id(
+        db,
+        "SELECT equipo_id, COUNT(*) FROM garantias WHERE equipo_id IN ({marcadores})"
+        " GROUP BY equipo_id",
+        ids,
+    )
+    for e in equipos:
+        e["n_ordenes"] = n_ordenes.get(e["id"], 0)
+        e["n_garantias"] = n_garantias.get(e["id"], 0)
+
+    return _respuesta_paginada("equipos", equipos, total, pagina, por_pagina)
 
 
 @bp.route("/api/operativo/equipos", methods=["POST"])

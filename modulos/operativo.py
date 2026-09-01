@@ -58,8 +58,112 @@ from core import (
     usuario_actual,
 )
 import modulos.convertidores as convertidores
+import modulos.push_talca as push_talca
 
 bp = Blueprint("operativo", __name__)
+
+def numero_ot(orden):
+    """El número de OT que ve el taller y que se le dice al cliente.
+
+    **El `id` de Python es una llave técnica interna y nunca se muestra.**
+    Durante el mes de convivencia Talca es quien reparte los números de orden,
+    y las dos series se solapan: de las 7.116 órdenes importadas hay 6.117
+    números que existen en ambas apuntando a órdenes distintas. Mostrar el id
+    no es un detalle cosmético — es decirle a un cliente un número que en
+    Talca corresponde al auto de otra persona.
+
+    Las órdenes creadas acá que todavía no tienen `talca_id` (el push aún no
+    confirmó) se muestran con prefijo `L-`, para que nadie las confunda con un
+    número de Talca ni las tipee en el sistema viejo.
+
+    Acepta una fila de sqlite3 o un dict.
+
+    El gemelo de esta función en el navegador es `numeroOT` en
+    static/js/ot_numero.js. Si cambia una, cambia la otra."""
+    if orden is None:
+        return "—"
+    try:
+        talca = orden["talca_id"]
+    except (KeyError, IndexError, TypeError):
+        talca = None
+    if talca:
+        return str(talca)
+    try:
+        interno = orden["id"]
+    except (KeyError, IndexError, TypeError):
+        interno = None
+    return f"L-{interno}" if interno is not None else "—"
+
+
+def _numero_ot_por_id(db, orden_id):
+    """`numero_ot` cuando solo se tiene la llave interna. Para los payloads que
+    llevan un `orden_id` suelto (FK) y no la fila completa."""
+    if orden_id is None:
+        return "—"
+    fila = db.execute(
+        "SELECT id, talca_id FROM ordenes_trabajo WHERE id = ?", (orden_id,)
+    ).fetchone()
+    return numero_ot(fila) if fila is not None else f"L-{orden_id}"
+
+
+ESTADOS_ORDEN = [
+    "recibido", "diagnostico", "presupuesto", "esperando_aprobacion", "reparacion",
+    "esperando_repuesto", "control_calidad", "listo", "entregado", "cancelado",
+]
+# Estados que cuentan como "la orden ya terminó" — no deberían poder seguir
+# recibiendo repuestos o mano de obra nueva sin primero reabrirlas.
+ESTADOS_CERRADOS = {"entregado", "cancelado"}
+
+# Estados que están MÁS ADELANTE que "esperando_aprobacion" en el flujo normal
+# de una OT. Se usan para que la transición automática "presupuesto enviado
+# -> esperando_aprobacion" no empuje HACIA ATRÁS una orden que ya avanzó (ej.
+# si se reenvía el presupuesto por correo después de que el cliente ya
+# aprobó y el auto ya está en reparación, o incluso ya entregado).
+ESTADOS_POSTERIORES_A_APROBACION = {
+    "reparacion", "esperando_repuesto", "control_calidad", "listo", "entregado", "cancelado",
+}
+
+# Secuencia "normal" de una OT para el stepper del seguimiento público — sin
+# "cancelado", que no es un paso sino un estado terminal alternativo (se
+# muestra aparte, con su propio mensaje).
+PASOS_SEGUIMIENTO_PUBLICO = [e for e in ESTADOS_ORDEN if e != "cancelado"]
+
+TIPOS_ITEM = ["repuesto", "mano_obra"]
+# Solo válido para ítems de orden_items (OT de un auto), no para
+# garantia_items ni convertidor_items -- ver modulos/convertidores.py:
+# agregar_convertidor_a_orden().
+TIPOS_ITEM_ORDEN = TIPOS_ITEM + ["convertidor_torque"]
+
+# ---- Fase 3.5: constantes de los sub-flujos ampliados ----
+PRIORIDADES_ORDEN = ["baja", "media", "alta", "urgente"]
+TIPOS_PRESUPUESTO_ITEM = ["mano_obra", "repuesto", "insumo", "servicio_externo", "descuento"]
+TIPOS_PRESUPUESTO_ITEM_LABEL = {
+    "mano_obra": "Mano de obra", "repuesto": "Repuesto", "insumo": "Insumo",
+    "servicio_externo": "Servicio externo", "descuento": "Descuento",
+}
+ESTADOS_PRESUPUESTO = ["pendiente", "enviado", "aprobado", "rechazado"]
+RESULTADOS_QC_ITEM = ["ok", "falla", "na"]  # resultado de cada punto del checklist
+RESULTADOS_QC = ["pendiente", "aprobado", "rechazado"]  # veredicto general de la orden
+# IVA_PORCENTAJE se importa de core.py (ver arriba) — compartido con
+# modulos/finanzas.py para que ambos calculen el mismo total de una OT.
+
+# Cuentas por Cobrar (CxC) — plazo por defecto para pagar una OT entregada,
+# usado solo para calcular 'fecha_vencimiento' al generar la CxC (ver
+# _generar_o_actualizar_cxc). No es un plazo legal ni contractual, es solo
+# el criterio con el que el taller quiere que el sistema marque una deuda
+# de cliente como "vencida" en los reportes — se puede ajustar acá si el
+# taller define otro plazo estándar más adelante.
+CXC_DIAS_VENCIMIENTO_DEFECTO = 30
+
+# Estados que disparan la generación de la CxC "cerrada" (ver
+# _generar_o_actualizar_cxc). Antes solo era 'entregado'; ahora también
+# 'listo' — el taller pidió que la vista "CxC OTs cerradas" (Finanzas)
+# muestre el auto desde que queda listo para retirar, no recién cuando ya
+# se entregó físicamente. Es idempotente (ver _generar_o_actualizar_cxc),
+# así que si una orden pasa primero por 'listo' y luego por 'entregado' no
+# se genera ni se pisa una segunda vez.
+ESTADOS_QUE_CIERRAN_CXC = {"listo", "entregado"}
+
 
 ESTADOS_ORDEN = [
     "recibido", "diagnostico", "presupuesto", "esperando_aprobacion", "reparacion",
@@ -1271,21 +1375,46 @@ def crear_cliente():
     if not nombre:
         return jsonify({"error": "El nombre del cliente es obligatorio"}), 400
 
-    ts = now_iso()
+    ts     = now_iso()
+    campos = {
+        "nombre":    nombre,
+        "telefono":  (data.get("telefono") or "").strip(),
+        "email":     (data.get("email") or "").strip(),
+        "rut":       formatear_rut((data.get("rut") or "").strip()),
+        "direccion": (data.get("direccion") or "").strip().upper(),
+        "notas":     (data.get("notas") or "").strip().upper(),
+    }
     cur = db.execute(
         "INSERT INTO clientes (nombre, telefono, email, rut, direccion, notas, creado_en) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            nombre,
-            (data.get("telefono") or "").strip(),
-            (data.get("email") or "").strip(),
-            formatear_rut((data.get("rut") or "").strip()),
-            (data.get("direccion") or "").strip().upper(),
-            (data.get("notas") or "").strip().upper(),
-            ts,
-        ),
+        (campos["nombre"], campos["telefono"], campos["email"],
+         campos["rut"], campos["direccion"], campos["notas"], ts),
     )
+    python_id = cur.lastrowid
+
+    # Encolado de push Python -> Talca: dentro de la misma transacción que el
+    # INSERT. Si falla la transacción, tampoco queda la entrada de cola.
+    campos_push = {k: v for k, v in {
+        "nombre_cliente": campos["nombre"],
+        "rut":            campos["rut"],
+        "direccion":      campos["direccion"],
+        "comuna":         (data.get("comuna") or "").strip(),
+        "telefono":       campos["telefono"],
+        "email":          campos["email"],
+    }.items()}
+    push_talca.encolar_push(db, "clientes", python_id, None, "crear", campos_push, "")
+    db.execute("UPDATE clientes SET push_pendiente = 1 WHERE id = ?", (python_id,))
+
     db.commit()
-    nuevo = db.execute("SELECT * FROM clientes WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+    # Fire-and-forget: intenta el push de inmediato sin bloquear la respuesta.
+    id_cola = db.execute(
+        "SELECT id FROM sync_talca_push_pendientes WHERE python_id = ? AND resuelto_en = '' ORDER BY id DESC LIMIT 1",
+        (python_id,),
+    ).fetchone()
+    if id_cola:
+        push_talca.disparar_push(id_cola["id"])
+
+    nuevo = db.execute("SELECT * FROM clientes WHERE id = ?", (python_id,)).fetchone()
     return jsonify(_cliente_dict(db, nuevo)), 201
 
 
@@ -1302,19 +1431,52 @@ def editar_cliente(cliente_id):
     if not nombre:
         return jsonify({"error": "El nombre del cliente es obligatorio"}), 400
 
+    # Snapshot ANTES del UPDATE: es lo que necesita calcular_diff_cliente.
+    antes = {
+        "nombre":    row["nombre"],
+        "telefono":  row["telefono"] or "",
+        "email":     row["email"] or "",
+        "rut":       row["rut"] or "",
+        "direccion": row["direccion"] or "",
+        "comuna":    row["comuna"] if "comuna" in row.keys() else "",
+    }
+    nuevos = {
+        "nombre":    nombre,
+        "telefono":  (data.get("telefono", row["telefono"]) or "").strip(),
+        "email":     (data.get("email", row["email"]) or "").strip(),
+        "rut":       formatear_rut((data.get("rut", row["rut"]) or "").strip()),
+        "direccion": (data.get("direccion", row["direccion"]) or "").strip().upper(),
+        "notas":     (data.get("notas", row["notas"]) or "").strip().upper(),
+    }
     db.execute(
         "UPDATE clientes SET nombre = ?, telefono = ?, email = ?, rut = ?, direccion = ?, notas = ? WHERE id = ?",
-        (
-            nombre,
-            (data.get("telefono", row["telefono"]) or "").strip(),
-            (data.get("email", row["email"]) or "").strip(),
-            formatear_rut((data.get("rut", row["rut"]) or "").strip()),
-            (data.get("direccion", row["direccion"]) or "").strip().upper(),
-            (data.get("notas", row["notas"]) or "").strip().upper(),
-            cliente_id,
-        ),
+        (nuevos["nombre"], nuevos["telefono"], nuevos["email"],
+         nuevos["rut"], nuevos["direccion"], nuevos["notas"], cliente_id),
     )
+
+    # Diff y encolado (dentro de la misma transacción).
+    talca_id = row["talca_id"] if "talca_id" in row.keys() else None
+    diff = push_talca.calcular_diff_cliente(antes, nuevos)
+    id_cola = None
+    if diff and talca_id:
+        talca_updated_at = row["talca_updated_at"] if "talca_updated_at" in row.keys() else ""
+        push_talca.encolar_push(
+            db, "clientes", cliente_id, talca_id,
+            "actualizar", diff, talca_updated_at or "",
+        )
+        db.execute("UPDATE clientes SET push_pendiente = 1 WHERE id = ?", (cliente_id,))
+
     db.commit()
+
+    # Fire-and-forget solo si había diff y hay talca_id.
+    if diff and talca_id:
+        entrada = db.execute(
+            "SELECT id FROM sync_talca_push_pendientes WHERE python_id = ? AND resuelto_en = '' ORDER BY id DESC LIMIT 1",
+            (cliente_id,),
+        ).fetchone()
+        if entrada:
+            push_talca.disparar_push(entrada["id"])
+
     actualizado = db.execute("SELECT * FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
     return jsonify(_cliente_dict(db, actualizado))
 
@@ -1384,9 +1546,40 @@ def crear_equipo():
         cliente_id = int(data.get("cliente_id"))
     except (TypeError, ValueError):
         return jsonify({"error": "Debes indicar un cliente válido"}), 400
-    cliente = db.execute("SELECT id FROM clientes WHERE id = ?", (cliente_id,)).fetchone()
+    cliente = db.execute(
+        "SELECT id, marcador_sync FROM clientes WHERE id = ?", (cliente_id,)
+    ).fetchone()
     if cliente is None:
         return jsonify({"error": "El cliente indicado no existe"}), 400
+
+    # El cliente genérico del sync (marcador_sync = 'sin_dueno_talca') no
+    # admite equipos nuevos. Es un CONTENEDOR para los 60 vehículos huérfanos
+    # que llegaron de Talca apuntando a un dueño que ya no existe, no un
+    # destino para registros que se crean acá.
+    #
+    # Dos razones, y la segunda es la que cierra el tema:
+    #
+    # 1. No tiene talca_id y nunca lo va a tener, así que el push del equipo
+    #    quedaría esperando `dueno` para siempre (ver _resolver_dueno en
+    #    push_talca.py). El equipo viviría solo en Python, y su push_pendiente
+    #    en 1 dejaría al pull sin poder actualizarlo.
+    # 2. Empujar el genérico a Talca para darle un talca_id sería PEOR: le
+    #    crearía un cliente sintético llamado "SIN DUEÑO REGISTRADO EN TALCA"
+    #    que el pull traería de vuelta como un cliente normal, metiendo una
+    #    construcción interna de Python en la lista que usa el taller.
+    #
+    # Los 60 equipos que ya cuelgan de acá no se tocan: siguen funcionando,
+    # incluido su push de edición (ya tienen talca_id propio, y `dueno` no
+    # viaja si el dueño no cambió).
+    #
+    # Se comprueba `marcador_sync != ''` y no el literal 'sin_dueno_talca':
+    # cualquier marcador futuro del sync es igual de sintético y tampoco
+    # debería recibir equipos nuevos.
+    if (cliente["marcador_sync"] or "") != "":
+        return jsonify({
+            "error": "Este cliente es un marcador interno del sync; "
+                     "asigna el vehículo a un cliente real."
+        }), 400
 
     anio = None
     if data.get("anio") not in (None, ""):
@@ -1396,6 +1589,19 @@ def crear_equipo():
             return jsonify({"error": "El año debe ser un número entero"}), 400
 
     ts = now_iso()
+    campos = {
+        "identificador":      (data.get("identificador") or "").strip().upper(),
+        "marca":              (data.get("marca") or "").strip().upper(),
+        "modelo":             (data.get("modelo") or "").strip().upper(),
+        "notas":              (data.get("notas") or "").strip().upper(),
+        "color":              (data.get("color") or "").strip().upper(),
+        "anio":               anio,
+        "modelo_transmision": (data.get("modelo_transmision") or "").strip().upper(),
+        "puertas":            (data.get("puertas") or "").strip(),
+        "motor_cc":           (data.get("motor_cc") or "").strip().upper(),
+        "vin":                (data.get("vin") or "").strip().upper(),
+        "kilometraje":        None,
+    }
     cur = db.execute(
         """
         INSERT INTO equipos (
@@ -1405,21 +1611,40 @@ def crear_equipo():
         """,
         (
             cliente_id,
-            (data.get("identificador") or "").strip().upper(),
-            (data.get("marca") or "").strip().upper(),
-            (data.get("modelo") or "").strip().upper(),
-            (data.get("notas") or "").strip().upper(),
-            ts,
-            (data.get("color") or "").strip().upper(),
-            anio,
-            (data.get("modelo_transmision") or "").strip().upper(),
-            (data.get("puertas") or "").strip(),
-            (data.get("motor_cc") or "").strip().upper(),
-            (data.get("vin") or "").strip().upper(),
+            campos["identificador"], campos["marca"], campos["modelo"],
+            campos["notas"], ts, campos["color"], anio,
+            campos["modelo_transmision"], campos["puertas"],
+            campos["motor_cc"], campos["vin"],
         ),
     )
+    python_id = cur.lastrowid
+
+    # Encolado del push Python -> Talca, dentro de la misma transacción que el
+    # INSERT. `notas` y `motor_cc` están en el dict pero NO en la tabla de
+    # campos de push_talca, así que no pueden viajar: son locales.
+    #
+    # requiere_dueno=1: el campo `dueno` NO se guarda en la cola. Se resuelve
+    # al pushear, leyendo clientes.talca_id del dueño de este equipo. Si el
+    # cliente todavía no tiene talca_id (fue creado recién y su propio push no
+    # confirmó), la entrada queda en espera en vez de fallar.
+    push_talca.encolar_push(
+        db, "vehiculos", python_id, None, "crear",
+        push_talca.campos_completos("vehiculos", campos), "",
+        requiere_dueno=1,
+    )
+    db.execute("UPDATE equipos SET push_pendiente = 1 WHERE id = ?", (python_id,))
+
     db.commit()
-    nuevo = db.execute("SELECT * FROM equipos WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+    # Fire-and-forget: intenta el push de inmediato sin bloquear la respuesta.
+    id_cola = db.execute(
+        "SELECT id FROM sync_talca_push_pendientes WHERE entidad = 'vehiculos' AND python_id = ? AND resuelto_en = '' ORDER BY id DESC LIMIT 1",
+        (python_id,),
+    ).fetchone()
+    if id_cola:
+        push_talca.disparar_push(id_cola["id"])
+
+    nuevo = db.execute("SELECT * FROM equipos WHERE id = ?", (python_id,)).fetchone()
     return jsonify(dict(nuevo)), 201
 
 
@@ -1443,28 +1668,90 @@ def editar_equipo(equipo_id):
             except (TypeError, ValueError):
                 return jsonify({"error": "El año debe ser un número entero"}), 400
 
+    # El kilometraje se corrige desde acá porque es el dato que más cambia al
+    # recibir un auto. Vacío significa "no sé", que no es lo mismo que 0: se
+    # guarda NULL. Al empujarlo a Talca, `vehiculos.kilometraje` es NOT NULL y
+    # el push traduce ese NULL a 0 (ver CENTINELAS_SALIDA en push_talca.py).
+    kilometraje = row["kilometraje"] if "kilometraje" in row.keys() else None
+    if "kilometraje" in data:
+        if data.get("kilometraje") in (None, ""):
+            kilometraje = None
+        else:
+            try:
+                kilometraje = int(data.get("kilometraje"))
+            except (TypeError, ValueError):
+                return jsonify({"error": "El kilometraje debe ser un número entero"}), 400
+            if kilometraje < 0:
+                return jsonify({"error": "El kilometraje no puede ser negativo"}), 400
+
+    # `cliente_id` se ignora a propósito aunque venga en el body: reasignar el
+    # dueño de un vehículo es otra operación, con otras consecuencias (habría
+    # que mandar `dueno` a Talca, que no sale del diff). Que este endpoint lo
+    # aceptara "de pasada" sería la peor forma de tenerlo.
+
+    # Snapshot ANTES del UPDATE: es lo que necesita calcular_diff.
+    antes = {c: row[c] for c in (
+        "identificador", "marca", "modelo", "color", "anio",
+        "modelo_transmision", "puertas", "vin", "kilometraje",
+    ) if c in row.keys()}
+    nuevos = {
+        "identificador":      (data.get("identificador", row["identificador"]) or "").strip().upper(),
+        "marca":              (data.get("marca", row["marca"]) or "").strip().upper(),
+        "modelo":             (data.get("modelo", row["modelo"]) or "").strip().upper(),
+        "notas":              (data.get("notas", row["notas"]) or "").strip().upper(),
+        "color":              (data.get("color", row["color"]) or "").strip().upper(),
+        "anio":               anio,
+        "modelo_transmision": (data.get("modelo_transmision", row["modelo_transmision"]) or "").strip().upper(),
+        "puertas":            (data.get("puertas", row["puertas"]) or "").strip(),
+        "motor_cc":           (data.get("motor_cc", row["motor_cc"]) or "").strip().upper(),
+        "vin":                (data.get("vin", row["vin"]) or "").strip().upper(),
+        "kilometraje":        kilometraje,
+    }
     db.execute(
         """
         UPDATE equipos SET
             identificador = ?, marca = ?, modelo = ?, notas = ?,
-            color = ?, anio = ?, modelo_transmision = ?, puertas = ?, motor_cc = ?, vin = ?
+            color = ?, anio = ?, modelo_transmision = ?, puertas = ?, motor_cc = ?,
+            vin = ?, kilometraje = ?
         WHERE id = ?
         """,
         (
-            (data.get("identificador", row["identificador"]) or "").strip().upper(),
-            (data.get("marca", row["marca"]) or "").strip().upper(),
-            (data.get("modelo", row["modelo"]) or "").strip().upper(),
-            (data.get("notas", row["notas"]) or "").strip().upper(),
-            (data.get("color", row["color"]) or "").strip().upper(),
-            anio,
-            (data.get("modelo_transmision", row["modelo_transmision"]) or "").strip().upper(),
-            (data.get("puertas", row["puertas"]) or "").strip(),
-            (data.get("motor_cc", row["motor_cc"]) or "").strip().upper(),
-            (data.get("vin", row["vin"]) or "").strip().upper(),
-            equipo_id,
+            nuevos["identificador"], nuevos["marca"], nuevos["modelo"], nuevos["notas"],
+            nuevos["color"], anio, nuevos["modelo_transmision"], nuevos["puertas"],
+            nuevos["motor_cc"], nuevos["vin"], kilometraje, equipo_id,
         ),
     )
+
+    # Diff y encolado, dentro de la misma transacción.
+    talca_id = row["talca_id"] if "talca_id" in row.keys() else None
+    diff = push_talca.calcular_diff("vehiculos", antes, nuevos)
+
+    # Este endpoint no permite reasignar el dueño: `cliente_id` ni se lee del
+    # body. Queda anotado porque el día que se agregue hay que encolar con
+    # requiere_dueno=1: `dueno` NO sale del diff (no está en CAMPOS_VEHICULOS),
+    # se resuelve al pushear. Sin esa bandera el cambio de dueño se guardaría
+    # acá y nunca llegaría a Talca.
+    requiere_dueno = 0
+
+    if (diff or requiere_dueno) and talca_id:
+        talca_updated_at = row["talca_updated_at"] if "talca_updated_at" in row.keys() else ""
+        push_talca.encolar_push(
+            db, "vehiculos", equipo_id, talca_id,
+            "actualizar", diff, talca_updated_at or "",
+            requiere_dueno=requiere_dueno,
+        )
+        db.execute("UPDATE equipos SET push_pendiente = 1 WHERE id = ?", (equipo_id,))
+
     db.commit()
+
+    if (diff or requiere_dueno) and talca_id:
+        entrada = db.execute(
+            "SELECT id FROM sync_talca_push_pendientes WHERE entidad = 'vehiculos' AND python_id = ? AND resuelto_en = '' ORDER BY id DESC LIMIT 1",
+            (equipo_id,),
+        ).fetchone()
+        if entrada:
+            push_talca.disparar_push(entrada["id"])
+
     actualizado = db.execute("SELECT * FROM equipos WHERE id = ?", (equipo_id,)).fetchone()
     return jsonify(dict(actualizado))
 
@@ -2374,7 +2661,10 @@ def listar_ordenes():
         sql += f" AND (estado NOT IN ({placeholders_cerrados}) OR substr(fecha_entrega_real, 1, 7) = ?)"
         params.extend(ESTADOS_CERRADOS)
         params.append(mes)
-    sql += " ORDER BY creado_en DESC"
+    # Por número de OT de Talca, que es el que el taller reconoce. Las
+    # locales sin talca_id (NULL) quedan al final en SQLite, y es lo
+    # correcto: son las más nuevas y todavía sin número definitivo.
+    sql += " ORDER BY talca_id DESC, creado_en DESC"
     rows = db.execute(sql, params).fetchall()
     return jsonify({"ordenes": [_orden_dict(db, r) for r in rows], "total": len(rows), "mes_filtrado": mes or "todos"})
 
@@ -2398,7 +2688,7 @@ def _listado_ordenes_liviano(db, desde=None, hasta=None):
     usa el botón "Ver historial completo" del frontend)."""
     sql = """
         SELECT
-            o.id, o.estado, o.fecha_recepcion, o.fecha_entrega_real,
+            o.id, o.talca_id, o.estado, o.fecha_recepcion, o.fecha_entrega_real,
             o.precio_referencial, o.precio_iva,
             c.nombre AS cliente_nombre,
             e.marca, e.modelo, e.color, e.identificador AS patente,
@@ -2430,6 +2720,9 @@ def _listado_ordenes_liviano(db, desde=None, hasta=None):
         valor_total = round(valor_neto + valor_iva_monto, 2)
         filas.append({
             "id": r["id"],
+            # El número que ve el taller. Sin esto la pestaña mostraría L-
+            # en todas las filas (ver numero_ot / numeroOT).
+            "talca_id": r["talca_id"],
             "tipo": "nuevo",
             "estado": r["estado"],
             "estado_label": ESTADOS_LABEL.get(r["estado"], r["estado"]),
@@ -2676,6 +2969,7 @@ def crear_orden():
     )
     db.commit()
     nueva = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (nuevo_id,)).fetchone()
+    push_talca.disparar_ordenes_marcadas()
     return jsonify(_orden_dict(db, nueva)), 201
 
 
@@ -2720,6 +3014,7 @@ def _actualizar_estado_orden_por_agente(db, orden_id, estado_nuevo):
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     _manejar_transicion_cxc(db, row["estado"], actualizada)
     db.commit()
+    push_talca.disparar_ordenes_marcadas()
     return _orden_dict(db, actualizada), None
 
 
@@ -2781,6 +3076,7 @@ def _actualizar_campos_orden_por_agente(db, orden_id, campos):
     )
     db.commit()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    push_talca.disparar_ordenes_marcadas()
     return _orden_dict(db, actualizada), None
 
 
@@ -2924,6 +3220,48 @@ def editar_orden(orden_id):
     else:
         responsable_diagnostico = row["responsable_diagnostico"]
 
+    # Estado que ve Talca. Es un campo aparte del `estado` interno: Python
+    # tiene diez estados de flujo y Talca cuatro, y lo que viaja en el push es
+    # este (ver _estado_talca_para_push en push_talca.py). Se deja fijarlo a
+    # mano porque hay un matiz que Python no puede deducir: 'CERRADA
+    # BLOQUEADA' contra 'CERRADA'.
+    #
+    # Si no viene en el body no se toca; el barrido lo recalcula solo cuando
+    # cambia el carácter abierto/cerrado de la orden.
+    if "estado_talca" in data:
+        estado_talca = (data.get("estado_talca") or "").strip().upper()
+        if estado_talca and estado_talca not in push_talca.ESTADOS_TALCA_VALIDOS:
+            return jsonify({
+                "error": "Estado de Talca inválido. Valores posibles: "
+                         + ", ".join(push_talca.ESTADOS_TALCA_VALIDOS)
+            }), 400
+
+        # Los dos estados tienen que coincidir en abierto/cerrado. El selector
+        # sirve para elegir el SABOR del cerrado —CERRADA, CERRADA BLOQUEADA o
+        # PRESUPUESTO NO ACEPTADO, que Python no puede deducir— no para decidir
+        # si la orden está cerrada: eso lo dice el estado del tablero.
+        #
+        # Sin esta comprobación la combinación incoherente se acepta y el
+        # barrido la revierte en la vuelta siguiente, que desde la pantalla se
+        # ve como "el selector no guarda".
+        if estado_talca:
+            cerrada_python = estado in ESTADOS_CERRADOS
+            cerrada_talca = estado_talca in push_talca.ESTADOS_TALCA_CERRADOS
+            if cerrada_python != cerrada_talca:
+                return jsonify({
+                    "error": (
+                        f"'{estado_talca}' es un estado cerrado y la orden está en "
+                        f"'{estado}', o al revés. Primero cambia el estado de la orden."
+                        if cerrada_talca else
+                        f"'{estado_talca}' es un estado abierto y la orden está en "
+                        f"'{estado}'. Primero cambia el estado de la orden."
+                    )
+                }), 400
+        db.execute(
+            "UPDATE ordenes_trabajo SET estado_talca = ? WHERE id = ?",
+            (estado_talca, orden_id),
+        )
+
     db.execute(
         """
         UPDATE ordenes_trabajo SET
@@ -2959,6 +3297,9 @@ def editar_orden(orden_id):
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     _manejar_transicion_cxc(db, row["estado"], actualizada)
     db.commit()
+    # El trigger trg_ordenes_push_pendiente ya marcó la orden dentro de la
+    # transacción; esto solo adelanta el envío. Ver disparar_ordenes_marcadas.
+    push_talca.disparar_ordenes_marcadas()
     return jsonify(_orden_dict(db, actualizada))
 
 
@@ -3458,6 +3799,7 @@ def bloqueo_equipo(equipo_id):
     return jsonify({
         "ot_abierta": {
             "id": ot_abierta["id"],
+            "talca_id": ot_abierta["talca_id"],
             "estado": ot_abierta["estado"],
             "estado_label": ESTADOS_LABEL.get(ot_abierta["estado"], ot_abierta["estado"]),
         } if ot_abierta else None,
@@ -3625,6 +3967,7 @@ def actualizar_presupuesto(orden_id):
         (estado_presupuesto, iva, notas, diagnostico, responsable_diagnostico, nuevo_estado_orden, ts, orden_id),
     )
     db.commit()
+    push_talca.disparar_ordenes_marcadas()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
     return jsonify(_orden_dict_detalle(db, actualizada))
 
@@ -3843,6 +4186,7 @@ def presupuesto_enviar(orden_id):
             ("enviado", nuevo_estado_orden, now_iso(), orden_id),
         )
         db.commit()
+        push_talca.disparar_ordenes_marcadas()
     actualizada = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
 
     return jsonify({

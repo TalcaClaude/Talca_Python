@@ -1785,6 +1785,12 @@ def init_db():
     # porque orden_items referencia productos y movimientos.
     init_operativo_db(db)
 
+    # ---- Sincronización con Talca.PHP (ver modulos/sync_talca.py y CLAUDE.md):
+    # agrega clientes.talca_id + su índice único, clientes.comuna, y las tablas
+    # de estado del sync. Va DESPUÉS de init_operativo_db() porque la tabla
+    # `clientes` la crea ese módulo.
+    init_sync_talca_db(db)
+
     db.close()
 
 
@@ -8397,7 +8403,8 @@ def _agente_ejecutar_una_accion(db, mecanico, accion):
         if not isinstance(ot_id, int):
             return resultado(None, False, f"No pude identificar con claridad el número de OT en tu mensaje sobre el {etiqueta_accion}.")
 
-        orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (ot_id,)).fetchone()
+        # El número que manda el mecánico es el de Talca, no la llave interna.
+        orden = _agente_resolver_orden(db, ot_id)
         if orden is None:
             return resultado(ot_id, False, f"No encontré ninguna OT con el número {ot_id}.")
 
@@ -8440,7 +8447,8 @@ def _agente_ejecutar_una_accion(db, mecanico, accion):
                 "No pude identificar con claridad el número de OT o el estado de destino en tu mensaje.",
             )
 
-        orden = db.execute("SELECT * FROM ordenes_trabajo WHERE id = ?", (ot_id,)).fetchone()
+        # El número que manda el mecánico es el de Talca, no la llave interna.
+        orden = _agente_resolver_orden(db, ot_id)
         if orden is None:
             return resultado(ot_id, False, f"No encontré ninguna OT con el número {ot_id}.")
 
@@ -8476,6 +8484,34 @@ def _agente_ejecutar_una_accion(db, mecanico, accion):
         accion.get("ot_id") if isinstance(accion.get("ot_id"), int) else None, False,
         "No pude identificar una acción concreta en esa parte de tu mensaje.", codigo="no_reconocida",
     )
+
+
+def _agente_resolver_orden(db, numero):
+    """La orden a la que se refiere el número que escribió el mecánico.
+
+    **Acá el riesgo no es visual, es de escritura cruzada.** El mecánico
+    escribe el número que tiene a la vista, que es el de Talca. Si esto
+    buscara por `ordenes_trabajo.id`, un "OT 8112" podría caer sobre la orden
+    interna 8112, que es el auto de otra persona — y el agente escribe
+    diagnósticos y cambia estados. De las 7.116 órdenes importadas hay 6.117
+    números que existen en las dos series apuntando a órdenes distintas.
+
+    Por eso la búsqueda es **estricta por `talca_id`**. El único caso en que
+    se mira el id interno es el de las órdenes creadas acá que todavía no
+    tienen número de Talca: se muestran como `L-<id>` y no hay ambigüedad
+    posible, porque ninguna de ellas tiene talca_id que pueda chocar.
+
+    Devuelve la fila o None."""
+    if not isinstance(numero, int):
+        return None
+    orden = db.execute(
+        "SELECT * FROM ordenes_trabajo WHERE talca_id = ?", (numero,)
+    ).fetchone()
+    if orden is not None:
+        return orden
+    return db.execute(
+        "SELECT * FROM ordenes_trabajo WHERE id = ? AND talca_id IS NULL", (numero,)
+    ).fetchone()
 
 
 def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", imagen_bytes=None, imagen_mime=None):
@@ -11789,6 +11825,242 @@ app.register_blueprint(bp_convertidores)
 from modulos.facturacion import bp as bp_facturacion  # noqa: E402
 app.register_blueprint(bp_facturacion)
 
+# Sincronización con Talca.PHP -- ver modulos/sync_talca.py. No registra
+# blueprint. Lo que aporta acá son tres cosas: su migración, que init_db()
+# llama al final (ver init_sync_talca_db más arriba), el hilo de fondo que
+# corre el pull cada tanto, y los dos endpoints de abajo (diagnóstico de
+# conexión y estado del sync).
+#
+# El comando manual "python -m modulos.sync_talca" sigue funcionando igual y
+# no depende de nada de acá: importa de core.py y abre su propia conexión.
+from modulos.sync_talca import (  # noqa: E402
+    diagnostico_conexion,
+    init_sync_talca_db,
+    leer_estado as sync_leer_estado,
+    sincronizar_entidad as sync_entidad,
+)
+
+# El orden NO es cosmético: los vehículos se cuelgan de `clientes.talca_id` y
+# las órdenes de las dos cosas. Es el mismo orden que corre el comando manual
+# con 'todo'.
+SYNC_ORDEN_ENTIDADES = ["clientes", "vehiculos", "ordenes"]
+
+# Cada cuánto corre el hilo de fondo, en segundos. **0 o sin definir = el hilo
+# NO arranca**, que es como queda en local: ahí el sync se sigue corriendo a
+# mano, porque depurar un job que se dispara solo cada tantos segundos es
+# innecesariamente doloroso.
+#
+# 300 (5 minutos) es el valor por defecto cuando la variable está definida
+# pero vacía o mal escrita. El plan original hablaba de 30 segundos; contra un
+# hosting compartido, y con el pull siendo idempotente, 5 minutos es mucho más
+# barato y no cambia nada de lo que el taller ve.
+SYNC_INTERVALO_DEFECTO = 300
+
+
+def sync_intervalo_segundos():
+    """Los segundos entre corridas, o 0 si el hilo no debe arrancar.
+
+    Se lee en cada llamada y no al importar, igual que el resto de la
+    configuración de esta integración (ver ClienteTalcaHTTP), así que el
+    endpoint de estado informa lo que está puesto AHORA."""
+    crudo = (os.environ.get("SYNC_INTERVALO_SEGUNDOS") or "").strip()
+    if not crudo:
+        return 0
+    try:
+        intervalo = int(crudo)
+    except ValueError:
+        # Un valor mal escrito no apaga el sync en silencio: si alguien se
+        # tomó el trabajo de definir la variable, la intención era que
+        # corriera. Se usa el defecto y el endpoint de estado muestra el
+        # crudo para que se vea el error de tipeo.
+        return SYNC_INTERVALO_DEFECTO
+    return intervalo if intervalo > 0 else 0
+
+
+def sync_automatico_configurado():
+    return sync_intervalo_segundos() > 0
+
+
+def _correr_sync_una_vuelta(cliente_api=None):
+    """Una pasada por las tres entidades, en orden. Devuelve la lista de
+    resultados, uno por entidad.
+
+    **Un fallo en una entidad no impide que corran las siguientes**, a
+    diferencia del comando manual, que se detiene. La diferencia es
+    deliberada y es segura por dos motivos:
+
+      - `precondiciones` sigue mandando. Si clientes nunca se sincronizó,
+        vehículos y órdenes se niegan a correr igual, así que el escenario
+        peligroso -- colgar media base del cliente genérico en una carga
+        inicial a medias -- no puede ocurrir por esta vía.
+      - Si clientes ya corrió alguna vez y hoy falla, lo peor que pasa es que
+        un vehículo cuyo dueño es nuevo caiga en el genérico. Eso se repara
+        solo: `reconciliar_duenos_pendientes` lo reengancha en cuanto
+        clientes vuelva a andar.
+
+    En un hilo que corre cada 5 minutos, cortar las tres entidades porque una
+    tuvo un timeout significaría que un corte de red de un minuto deja las
+    órdenes sin sincronizar hasta que alguien lo note. La marca de agua de la
+    que falló no avanza -- eso lo hace `_sincronizar`, no este código -- así
+    que la vuelta siguiente reintenta desde el último punto bueno."""
+    resultados = []
+    db = _conectar_db()
+    try:
+        for nombre in SYNC_ORDEN_ENTIDADES:
+            try:
+                resultados.append(sync_entidad(db, nombre, cliente_api=cliente_api))
+            except Exception as exc:
+                # _sincronizar ya atrapa lo suyo y devuelve un resultado de
+                # error sin levantar. Esto es la red por si algo se escapa
+                # (un sqlite3.Error al guardar el estado, por ejemplo): el
+                # hilo tiene que seguir vivo pase lo que pase.
+                resultados.append({
+                    "entidad": nombre,
+                    "resultado": "error",
+                    "detalle": f"{type(exc).__name__}: {exc}",
+                })
+    finally:
+        db.close()
+
+    # Reintentos de push Python -> Talca: al FINAL de la vuelta, cuando los
+    # upserts del pull ya procesaron (o saltaron) sus filas. Si hubiera
+    # corrido al principio, podría liberar push_pendiente de una fila que el
+    # pull del mismo ciclo haría upsert encima.
+    #
+    # No se pasa el cliente_api del pull: ese es un ClienteTalca (GET) y
+    # procesar_pendientes espera un ClientePushTalca (POST/PUT). Pasando None
+    # la función construye su propio ClientePushTalcaHTTP.
+    try:
+        from modulos.push_talca import procesar_pendientes
+        procesar_pendientes()
+    except Exception as exc:
+        logger.error("procesar_pendientes push: %s", exc)
+
+    return resultados
+
+
+def _hilo_sync_talca(veces=None, dormir=None):
+    """El bucle. `veces` y `dormir` existen solo para los tests: en producción
+    se llama sin argumentos y gira para siempre, durmiendo de verdad.
+
+    El intervalo se relee en cada vuelta, así que cambiarlo en Railway toma
+    efecto sin reiniciar el proceso. Si se pone en 0 con el hilo ya andando,
+    el hilo se queda dormido con el intervalo por defecto en vez de girar a
+    toda velocidad -- apagar el sync de verdad exige reiniciar, que es lo que
+    Railway hace al cambiar una variable de todos modos."""
+    dormir = dormir or time.sleep
+    vuelta = 0
+    while veces is None or vuelta < veces:
+        vuelta += 1
+        try:
+            _correr_sync_una_vuelta()
+        except Exception:
+            # Nada puede matar este hilo: si muere, el sync se apaga en
+            # silencio y las dos bases divergen sin que nadie se entere.
+            pass
+        dormir(sync_intervalo_segundos() or SYNC_INTERVALO_DEFECTO)
+
+
+_hilo_sync_talca_iniciado = False
+
+
+def iniciar_hilo_sync_talca():
+    global _hilo_sync_talca_iniciado
+    if not sync_automatico_configurado():
+        return
+    if not _hilo_sync_talca_iniciado:
+        _hilo_sync_talca_iniciado = True
+        hilo = threading.Thread(target=_hilo_sync_talca, daemon=True)
+        hilo.start()
+
+
+@app.route("/api/admin/sync/estado", methods=["GET"])
+@requiere_rol()
+def sync_estado():
+    """Cómo le fue a cada entidad en su última corrida, para poder mirarlo
+    desde Railway sin entrar a la base.
+
+    Es de solo lectura: no dispara ninguna sincronización ni toca la marca de
+    agua. Todo lo que devuelve sale de `sync_talca_estado`, que es la misma
+    tabla que escriben tanto el hilo como el comando manual -- así que una
+    corrida hecha a mano desde un equipo local también se ve acá.
+
+    No incluye ningún dato de conexión: para saber si el hosting responde
+    está /api/admin/sync/diagnostico, que sí sale a la red."""
+    db = get_db()
+    entidades = []
+    for nombre in SYNC_ORDEN_ENTIDADES:
+        estado = sync_leer_estado(db, nombre)
+        entidades.append({
+            "entidad": nombre,
+            "marca_agua": estado["marca_agua"],
+            "ultima_corrida_en": estado["ultima_corrida_en"],
+            "ultimo_resultado": estado["ultimo_resultado"],
+            "ultimo_detalle": estado["ultimo_detalle"],
+            "filas_recibidas": estado["filas_recibidas"],
+            "filas_creadas": estado["filas_creadas"],
+            "filas_actualizadas": estado["filas_actualizadas"],
+            "filas_omitidas": estado["filas_omitidas"],
+            # Marca de agua vacía = esta entidad nunca terminó una corrida
+            # completa. Es la diferencia entre "nunca corrió" y "corrió y no
+            # trajo nada", que desde afuera se ven igual.
+            "sincronizada_alguna_vez": bool(estado["marca_agua"]),
+        })
+    # Cola del push Python -> Talca. Va acá y no en un endpoint aparte porque
+    # es la otra mitad de la misma pregunta: "¿están las dos bases al día?".
+    #
+    # `esperas` es el hueco que este informe viene a tapar: una entrada que
+    # espera el talca_id de su cliente no incrementa intentos ni marca error
+    # (esperar no es fallar), así que sin esto quedaría trabada sin escalar a
+    # nada visible -- y con ella el pull dejaría de actualizar ese equipo.
+    try:
+        from modulos.push_talca import resumen_esperas
+        cola = db.execute(
+            """
+            SELECT entidad,
+                   COUNT(*) AS pendientes,
+                   SUM(CASE WHEN intentos > 0 THEN 1 ELSE 0 END) AS con_fallos
+              FROM sync_talca_push_pendientes
+             WHERE resuelto_en = ''
+             GROUP BY entidad
+            """
+        ).fetchall()
+        push = {
+            "pendientes_por_entidad": {r["entidad"]: r["pendientes"] for r in cola},
+            "con_fallos_por_entidad": {r["entidad"]: (r["con_fallos"] or 0) for r in cola},
+            "esperas": resumen_esperas(db),
+        }
+    except Exception as exc:      # la cola puede no existir en una base vieja
+        push = {"error": str(exc)}
+
+    return jsonify({
+        "automatico_configurado": sync_automatico_configurado(),
+        "intervalo_segundos": sync_intervalo_segundos(),
+        "intervalo_configurado_crudo": os.environ.get("SYNC_INTERVALO_SEGUNDOS"),
+        "hilo_iniciado": _hilo_sync_talca_iniciado,
+        "orden": SYNC_ORDEN_ENTIDADES,
+        "entidades": entidades,
+        "push": push,
+    })
+
+
+@app.route("/api/admin/sync/diagnostico", methods=["GET"])
+@requiere_rol()
+def sync_diagnostico():
+    """¿Se alcanza el hosting de Talca DESDE ACÁ? Hace una sola llamada a
+    /api/ping con el mismo cliente HTTP del sync -- mismo User-Agent, mismos
+    reintentos, mismo timeout -- e informa qué pasó.
+
+    Existe porque hay fallas que no se pueden reproducir desde un equipo
+    local: Bluehosting ya cortó la conexión por User-Agent (ver
+    TALCA_USER_AGENT), y mod_security suele bloquear rangos de datacenter
+    como los de Railway. Desde una casa la llamada funciona y desde el
+    servidor no, sin que cambie una línea de código.
+
+    Es de solo lectura: no toca la base, ni la marca de agua, ni el sync.
+    Nunca devuelve el valor de TALCA_API_KEY, solo si está definida."""
+    return jsonify(diagnostico_conexion())
+
 # Transiciones de estado que el agente de WhatsApp tiene permitido aplicar
 # (ver _agente_procesar_mensaje más arriba). A pedido del taller, el agente
 # puede mover una OT desde CUALQUIER estado abierto hacia CUALQUIER otro
@@ -12947,6 +13219,14 @@ RESET_OPERATIVO_TABLAS = [
     # -- Órdenes de trabajo --
     "orden_items",
     "ordenes_trabajo",
+    # -- Registro de las órdenes preexistentes que el sync de Talca reclamó en
+    #    vez de duplicar (ver _adoptar_orden en modulos/sync_talca.py). Va con
+    #    'ordenes_trabajo' y NO con las tablas preservadas del sync: cada fila
+    #    apunta a una orden por su id, así que vaciada esa tabla la lista
+    #    quedaría describiendo filas que ya no existen. Es lo contrario de
+    #    'sync_talca_omitidos' y 'sync_talca_reasignados', que siguen siendo
+    #    ciertas porque el reseteo preserva clientes y equipos. --
+    "sync_talca_adopciones",
     # -- Facturación electrónica (DTE) emitida a clientes --
     "documentos_tributarios",
     # -- Inventario / bodega --
@@ -12985,6 +13265,19 @@ RESET_OPERATIVO_TABLAS_PRESERVADAS = [
     "clientes", "equipos", "usuarios", "categorias", "marcas", "modelos",
     "ubicaciones", "configuracion_facturacion", "estado_resultado_manual",
     "respaldos_log",
+    # -- Sincronización con Talca.PHP (ver modulos/sync_talca.py). Se
+    #    preservan por la misma razón que 'clientes': el reseteo deja los
+    #    clientes en pie, y con ellos su talca_id, así que borrar la marca de
+    #    agua obligaría a repetir la carga completa desde Talca sin ninguna
+    #    ganancia. 'sync_talca_omitidos' además es el registro auditable de
+    #    qué filas del sistema viejo se decidió no importar. --
+    "sync_talca_estado", "sync_talca_omitidos", "sync_talca_reasignados",
+    # -- Push Python -> Talca (ver modulos/push_talca.py). 'sync_talca_push_pendientes'
+    #    NO se puede vaciar: cada entrada es un cambio que Talca todavía no tiene,
+    #    y la fila local sigue con push_pendiente=1. Borrar la cola dejaría esas
+    #    filas marcadas para siempre, y el pull deja de actualizar lo que tiene ese
+    #    flag. 'sync_talca_conflictos' es registro histórico de revisión manual. --
+    "sync_talca_push_pendientes", "sync_talca_conflictos",
     # login_intentos_fallidos: contador de intentos fallidos de login (ver
     # Migración 34) -- es seguridad de las cuentas del sistema, igual que
     # 'usuarios' más arriba, no datos operativos del taller.
@@ -13218,6 +13511,9 @@ iniciar_hilo_respaldos()
 iniciar_hilo_respaldos_locales()
 iniciar_hilo_alertas_stock()
 iniciar_hilo_recalculo_stock_minimo()
+# Solo arranca si SYNC_INTERVALO_SEGUNDOS está definida y es > 0. En local no
+# lo está, así que el sync se sigue corriendo a mano.
+iniciar_hilo_sync_talca()
 
 if __name__ == "__main__":
     debug_mode = os.environ.get("FLASK_DEBUG") == "1"

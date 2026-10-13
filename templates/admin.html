@@ -143,25 +143,19 @@
     <pre class="ayuda-inline" id="resultado-reset-operativo" style="margin-top:10px; white-space:pre-wrap; word-break:break-word;"></pre>
   </section>
 
+  <!-- Las herramientas de carga por archivo (migración de datos, ítems de
+       garantías) se retiraron: las reemplazó la sincronización con Talca, que
+       empareja por el id numérico de Talca en vez de por RUT y patente. Ver el
+       bloque "REEMPLAZADOS POR EL SYNC CON TALCA" en app.py. Se dejan
+       nombradas acá, sin formulario, porque un botón que siempre falla es peor
+       que un aviso de que ya no se usa -- y a la de migración de datos se
+       llegaba tipeando la URL a mano. -->
   <section class="chart-card" style="margin-top:22px;">
-    <h3>Migración de datos (clientes / autos / OT abiertas)</h3>
-    <!-- Antes esta herramienta solo se podía llegar tipeando la URL a mano
-         (/admin/migracion-datos) -- no tenía ningún link visible desde acá,
-         a diferencia de las demás herramientas de mantenimiento de esta
-         página. -->
-    <p class="chart-sub">Herramienta de uso único para la carga inicial desde el sistema anterior (clientes, autos y OT que seguían abiertas al momento de migrar).</p>
-    <a href="/admin/migracion-datos" class="btn btn-secundario">Ir a Migración de datos</a>
-  </section>
-
-  <section class="chart-card" style="margin-top:22px;">
-    <h3>Migración: repuestos/mano de obra de garantías</h3>
-    <p class="chart-sub">Carga el archivo <code>garantias_items_extraidos.json</code> (extraído del sistema anterior) para agregar los repuestos y mano de obra históricos a las garantías que ya están migradas. Solo agrega ítems informativos — no toca stock ni el catálogo. Es seguro correrla más de una vez: las garantías que ya tengan estos ítems se saltan.</p>
-    <input type="file" id="migracion-garantias-items-archivo" accept="application/json" style="margin-bottom:10px">
-    <br>
-    <button class="btn btn-secundario" id="btn-migracion-garantias-items">Migrar ítems de garantías</button>
-    <p class="ayuda-inline" id="resultado-migracion-garantias-items" style="margin-top:10px;"></p>
+    <h3>Migración por archivo (retirada)</h3>
+    <p class="chart-sub">La carga de clientes, autos, OT abiertas, repuestos y garantías desde archivos JSON ya no se usa: esos datos los trae la sincronización con Talca, emparejando por el <code>id</code> de Talca. Emparejar por RUT o patente duplicaba registros en silencio (442 clientes sin RUT, 90 RUT repetidos, 285 patentes repetidas).</p>
+    <p class="ayuda-inline">Reemplazo, desde la máquina donde corre el sistema: <code>python -m modulos.sync_talca</code></p>
     <hr style="border-color: var(--linea); margin:16px 0;">
-    <p class="chart-sub">Diagnóstico de un solo uso: si la migración de arriba falla con "FOREIGN KEY constraint failed", este botón muestra el esquema real de las tablas y si hay alguna violación de integridad referencial concreta, para poder revisarlo sin acceder directo a la base.</p>
+    <p class="chart-sub">Diagnóstico de solo lectura sobre las tablas de garantías: muestra el esquema real y si hay alguna violación de integridad referencial concreta, para poder revisarlo sin acceder directo a la base.</p>
     <button class="btn btn-secundario" id="btn-diagnostico-garantias">Diagnosticar tablas de garantías</button>
     <pre class="ayuda-inline" id="resultado-diagnostico-garantias" style="margin-top:10px; white-space:pre-wrap; word-break:break-word;"></pre>
   </section>

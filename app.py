@@ -12328,12 +12328,46 @@ def _migracion_inferir_estado(requerimiento):
 @app.route("/admin/migracion-datos", methods=["GET"])
 @requiere_rol()
 def vista_migracion_datos():
-    return render_template("migracion_datos.html")
+    """Página retirada: era la única interfaz de /api/admin/migracion/importar,
+    que ahora responde 410. Se conserva la ruta -- y no se borra -- porque a
+    esta herramienta se llegaba tipeando la URL a mano (ver el comentario en
+    templates/admin.html), así que un 404 mandaría a buscar el link "perdido"
+    en vez de explicar por qué ya no se usa. Devuelve 410 igual que su API."""
+    return render_template("migracion_datos.html"), 410
 
 
 @app.route("/api/admin/migracion/importar", methods=["POST"])
 @requiere_rol()
 def migracion_importar():
+    """REEMPLAZADO POR EL SYNC — responde 410. Ver el bloque "REEMPLAZADOS POR
+    EL SYNC CON TALCA" más abajo.
+
+    Creaba clientes, autos y OT de una, desde tres JSON subidos a mano:
+    emparejaba los clientes por RUT normalizado y los equipos por patente —
+    exactamente el criterio de identidad que el sync tiene prohibido.
+
+    Dos cosas lo hacen peor que los otros dos bloqueados:
+
+    1. **No escribe legacy_ot_no.** Las órdenes que creaba quedaban sin
+       ninguna marca de identidad de Talca, así que el sync de órdenes (que
+       adopta por legacy_ot_no = talca_id) no tendría por dónde reclamarlas:
+       entrarían de nuevo, duplicadas.
+    2. **Ya no compite solo por órdenes.** Sus INSERT de clientes y equipos
+       tampoco escriben talca_id, y el sync ya cargó 4.212 clientes y 5.161
+       equipos. Su dedup de clientes mira `WHERE rut != ''` (ciega a los 442
+       sin RUT, arbitraria entre los 90 RUT repetidos) y **los autos no
+       tienen dedup en absoluto**: arma el índice por patente pero inserta
+       sin consultarlo. Correrlo hoy duplica la flota entera.
+
+    El código de abajo queda como referencia de cómo entraron los datos
+    históricos que ya están en producción. No se ejecuta."""
+    return _respuesta_reemplazado_por_sync(
+        "/api/admin/migracion/importar",
+        "Este además creaba clientes y equipos sin talca_id, sobre los 4.212 "
+        "clientes y 5.161 equipos que el sync ya cargó, y sus órdenes quedaban "
+        "sin legacy_ot_no: ni siquiera serían adoptables después.",
+    )
+
     db = get_db()
 
     def leer_json(campo):
@@ -12496,7 +12530,30 @@ def migracion_repuestos_ot_abiertas():
 
     Es seguro correrla más de una vez sobre la misma orden: si esa orden
     ya tiene ítems cargados por esta migración (usuario = 'Migración
-    histórica'), se salta para no duplicar."""
+    histórica'), se salta para no duplicar.
+
+    REEMPLAZADO POR EL SYNC — responde 410. Ver el bloque "REEMPLAZADOS POR
+    EL SYNC CON TALCA" más abajo.
+
+    No crea órdenes, pero **no las busca por legacy_ot_no**: las resuelve por
+    patente, y con `setdefault` sin ORDER BY, o sea que entre las varias
+    órdenes de un mismo vehículo gana una arbitraria. Hoy no matchea nada
+    (ordenes_trabajo está en 0); cuando el sync traiga las ~7.100 OT sobre
+    5.161 vehículos, casi toda patente va a tener varias y estos ítems —
+    que alimentan TOTAL COSTO y UTILIDAD del documento impreso — se
+    colgarían de la orden equivocada, sin ningún error.
+
+    Tiene arreglo, no solo bloqueo: su JSON de entrada ya trae `legacy_no`
+    (hoy solo se usa para reportar). Emparejando por legacy_ot_no queda en
+    la misma categoría que pagos-ot-abiertas y puede volver a vivir."""
+    return _respuesta_reemplazado_por_sync(
+        "/api/admin/migracion/repuestos-ot-abiertas",
+        "Este no crea órdenes, pero las busca por patente y con setdefault: "
+        "entre las varias órdenes de un mismo vehículo gana una arbitraria. "
+        "Su JSON de entrada ya trae legacy_no; emparejando por legacy_ot_no "
+        "podría volver a habilitarse.",
+    )
+
     archivo = request.files.get("repuestos_json")
     if not archivo or archivo.filename == "":
         return jsonify({"error": "Debes adjuntar el archivo repuestos_json"}), 400
@@ -12597,7 +12654,37 @@ def migracion_garantias_abiertas():
     Espera un archivo 'garantias_json': lista de objetos con legacy_no,
     patente, cliente_rut, motivo, diagnostico, fecha_recepcion,
     origen_legacy_no. Idempotente: si ya existe una garantía con el mismo
-    cliente + fecha_recepcion, se salta."""
+    cliente + fecha_recepcion, se salta.
+
+    REEMPLAZADO POR EL SYNC — responde 410. Ver el bloque "REEMPLAZADOS POR
+    EL SYNC CON TALCA" más abajo.
+
+    No toca ordenes_trabajo, y aun así se bloquea, por dos motivos:
+
+    1. **Consume números del correlativo compartido.** En este sistema las
+       garantías comparten correlativo con las OT (_asignar_id_correlativo
+       en modulos/operativo.py hace max(MAX(id) ordenes_trabajo, MAX(id)
+       garantias) + 1), y este endpoint inserta en garantias sin id
+       explícito, o sea que se lleva números por rowid de SQLite. Durante el
+       mes de convivencia está decidido que Talca es el único que reparte
+       esos números: repartirlos por fuera del sync es exactamente lo que no
+       puede pasar.
+    2. **Crea identidad con RUT y patente**, que no son llave, y encima
+       adivina: si la patente no calza pero el cliente tiene un solo
+       vehículo, le cuelga ese. La tabla garantias no guarda ningún id de
+       Talca, así que nada de lo que cree es adoptable después — y Talca
+       tiene 1.424 filas tipo='Garantia' destinadas a esta misma tabla
+       cuando llegue el paso 5.
+
+    El código de abajo queda como referencia. No se ejecuta."""
+    return _respuesta_reemplazado_por_sync(
+        "/api/admin/migracion/garantias-abiertas",
+        "Este no toca ordenes_trabajo, pero crea filas en garantias, que "
+        "comparte correlativo con las OT (_asignar_id_correlativo en "
+        "modulos/operativo.py): reparte números de OT por fuera del sync, y "
+        "durante la convivencia solo Talca puede repartirlos.",
+    )
+
     archivo = request.files.get("garantias_json")
     if not archivo or archivo.filename == "":
         return jsonify({"error": "Debes adjuntar el archivo garantias_json"}), 400
@@ -12696,7 +12783,23 @@ def migracion_garantias_items():
     con producto_id = NULL a propósito (no se tocan ni catálogo ni stock).
     Es seguro correrla más de una vez: si la garantía ya tiene ítems
     cargados por esta migración (usuario = 'Migración histórica'), se
-    salta para no duplicar."""
+    salta para no duplicar.
+
+    REEMPLAZADO POR EL SYNC — responde 410. Ver el bloque "REEMPLAZADOS POR
+    EL SYNC CON TALCA" más abajo.
+
+    Va junto con migracion_garantias_abiertas, que es de donde salían las
+    garantías que este endpoint completa: bloqueado aquel, este no tendría
+    de qué colgarse (todo caería en garantias_sin_match). Tampoco cumple el
+    criterio por sí solo — empareja por RUT + fecha_recepcion exacta, no por
+    ninguna llave de Talca."""
+    return _respuesta_reemplazado_por_sync(
+        "/api/admin/migracion/garantias-items",
+        "Este solo cuelga ítems, pero empareja por RUT + fecha_recepcion, no "
+        "por una llave de Talca, y las garantías de las que colgaba las creaba "
+        "garantias-abiertas, que también quedó bloqueado.",
+    )
+
     archivo = request.files.get("garantias_items_json")
     if not archivo or archivo.filename == "":
         return jsonify({"error": "Debes adjuntar el archivo garantias_items_json"}), 400
@@ -12865,6 +12968,111 @@ def _cargar_json_data(nombre_archivo):
         return json.load(f)
 
 
+# ---------------------------------------------------------------------------
+# REEMPLAZADOS POR EL SYNC CON TALCA (modulos/sync_talca.py)
+# ---------------------------------------------------------------------------
+#
+# Seis endpoints de migración quedaron BLOQUEADOS con HTTP 410 Gone. Dos están
+# acá abajo; los otros cuatro, bastante más arriba en este mismo archivo, donde
+# vive el resto de la migración histórica:
+#
+#   - /api/admin/migracion/ordenes-historicas   (acá abajo)
+#   - /api/admin/migracion/backfill-legacy-no   (acá abajo)
+#   - /api/admin/migracion/importar             (+ la vista /admin/migracion-datos)
+#   - /api/admin/migracion/repuestos-ot-abiertas
+#   - /api/admin/migracion/garantias-abiertas
+#   - /api/admin/migracion/garantias-items
+#
+# El criterio para decidir cuáles caen: **si solo cuelgan hijos de una orden
+# que ya existe, buscándola por legacy_ot_no, se quedan; si crean o
+# identifican órdenes, 410.** Por eso pagos-ot-abiertas sigue vivo y
+# repuestos-ot-abiertas no: los dos solo agregan hijos, pero el primero
+# resuelve la orden por legacy_ot_no y el segundo por patente.
+#
+# Los cuatro nuevos, en una línea cada uno (el detalle está en su docstring):
+#
+#   - importar: crea clientes, autos y OT por RUT y patente. Sus órdenes no
+#     llevan legacy_ot_no, así que ni siquiera serían adoptables; y sus
+#     clientes y equipos tampoco llevan talca_id, sobre los 4.212 clientes y
+#     5.161 equipos que el sync ya cargó (los autos no tienen dedup alguno).
+#   - repuestos-ot-abiertas: no crea órdenes, pero las busca por patente con
+#     setdefault, o sea que gana una arbitraria entre las varias del mismo
+#     vehículo. Reparable: su JSON ya trae legacy_no.
+#   - garantias-abiertas: no toca ordenes_trabajo y cae igual, porque
+#     garantias comparte correlativo con las OT (_asignar_id_correlativo en
+#     modulos/operativo.py) e inserta sin id explícito: reparte números de OT
+#     por fuera del sync, y durante la convivencia solo Talca los reparte.
+#   - garantias-items: cuelga de las garantías que creaba el anterior,
+#     emparejando por RUT + fecha_recepcion.
+#
+# El motivo es la identidad de las órdenes, no el volumen ni el rendimiento.
+# Ambos endpoints emparejan contra Talca por RUT (el cliente) y por patente
+# (el equipo), y sobre los datos reales ninguno de los dos es una llave:
+#
+#   - clientes: 442 filas sin RUT, 90 RUT duplicados (195 filas), 127 con
+#     dígito verificador inválido.
+#   - vehiculos: 285 patentes duplicadas (641 filas), 417 fuera de formato
+#     chileno (CXMANO, VENTA, GASTOSGEN, SIN/AUTO...).
+#   - data/migracion_legacy_no_abiertas.json, que es justamente el insumo del
+#     backfill, trae valores que no son patentes: la primera entrada es
+#     {"patente": "SEPT.21", "legacy_no": 2671}.
+#   - data/migracion_historica_ordenes.json tiene 16 patentes que aparecen con
+#     más de un RUT, afectando a 65 de sus 2.983 órdenes.
+#
+# El sync usa el 'id' numérico de Talca (guardado como talca_id) y nada más.
+# Dejar los dos escritores vivos sobre ordenes_trabajo, cada uno con su propio
+# criterio de identidad, es la receta para divergencias silenciosas: la misma
+# OT entrando dos veces, o colgada del cliente equivocado, sin ningún error.
+#
+# El código NO se borra: queda abajo del guard, intacto, como referencia de
+# qué se cargó y cómo (los datos históricos que ya están en producción
+# entraron por acá). Si alguna vez hay que releerlo para entender una fila
+# vieja, está; lo que no puede es volver a ejecutarse.
+#
+# /api/admin/migracion/pagos-ot-abiertas NO se bloquea: solo inserta en
+# pagos_orden y busca la orden por legacy_ot_no — que es el número de OT de
+# Talca, la misma llave que usa el sync. No escribe identidad de órdenes ni
+# crea clientes o equipos. Ver su docstring.
+# ---------------------------------------------------------------------------
+
+MENSAJE_REEMPLAZADO_POR_SYNC = (
+    "Endpoint retirado: la sincronización con Talca lo reemplazó. "
+    "Emparejaba las órdenes por RUT y por patente, y sobre los datos reales "
+    "ninguno de los dos es una llave única (90 RUT duplicados en clientes, "
+    "285 patentes duplicadas en vehiculos), así que correrlo junto al sync "
+    "duplica órdenes o las cuelga del cliente equivocado en silencio. "
+    "El sync empareja solo por el id numérico de Talca (talca_id). "
+    "Reemplazo: 'python -m modulos.sync_talca ordenes' "
+    "(el sync cubre clientes, vehículos y órdenes). Si hace falta recargar todo: "
+    "'python -m modulos.sync_talca <entidad> --recarga-completa'."
+)
+
+
+def _respuesta_reemplazado_por_sync(endpoint, detalle=""):
+    """Respuesta 410 Gone de los endpoints de migración que el sync reemplazó.
+
+    410 y no 404: la ruta existió y se retiró a propósito. Un 404 haría
+    pensar que está mal escrita la URL y llevaría a buscar el endpoint que
+    'falta' en vez de leer por qué no debe correr.
+
+    'detalle' se agrega al final del mensaje común, para los endpoints que
+    caen por algo propio además del emparejamiento por RUT y patente (el
+    correlativo compartido de garantias-abiertas, la falta de legacy_ot_no
+    de importar). El motivo tiene que viajar en la respuesta: quien reciba
+    el 410 no siempre va a poder leer el código."""
+    return (
+        jsonify(
+            {
+                "error": MENSAJE_REEMPLAZADO_POR_SYNC + (f" {detalle}" if detalle else ""),
+                "codigo": "reemplazado_por_sync_talca",
+                "endpoint": endpoint,
+                "reemplazo": "python -m modulos.sync_talca ordenes",
+            }
+        ),
+        410,
+    )
+
+
 @app.route("/api/admin/migracion/diagnostico-archivos", methods=["GET"])
 @requiere_rol()
 def migracion_diagnostico_archivos():
@@ -12892,12 +13100,20 @@ def migracion_diagnostico_archivos():
 @app.route("/api/admin/migracion/backfill-legacy-no", methods=["POST"])
 @requiere_rol()
 def migracion_backfill_legacy_no():
-    """Rellena ordenes_trabajo.legacy_ot_no en las 101 OT abiertas ya
-    migradas (emparejando por patente), usando data/migracion_legacy_no_abiertas.json.
-    Solo toca filas que todavía tienen legacy_ot_no NULL — es seguro correrla
-    más de una vez. Este número es la clave que después usan los endpoints de
-    pagos e historial para encontrar la orden correcta sin depender de la
-    patente (que puede repetirse si el mismo auto vuelve más adelante)."""
+    """REEMPLAZADO POR EL SYNC — responde 410. Ver el bloque "REEMPLAZADOS POR
+    EL SYNC CON TALCA" más arriba.
+
+    Rellenaba ordenes_trabajo.legacy_ot_no en las 101 OT abiertas ya migradas
+    **emparejando por patente**, usando data/migracion_legacy_no_abiertas.json.
+    Eso es exactamente lo que el sync tiene prohibido: hay 285 patentes
+    duplicadas en Talca, y el propio JSON de entrada trae valores que no son
+    patentes ({"patente": "SEPT.21", "legacy_no": 2671} es la primera fila).
+    El sync trae legacy_ot_no/talca_id directo del id de Talca, sin adivinar.
+
+    El código de abajo queda como referencia de cómo se cargaron los datos
+    históricos que ya están en producción. No se ejecuta."""
+    return _respuesta_reemplazado_por_sync("/api/admin/migracion/backfill-legacy-no")
+
     try:
         mapa = _cargar_json_data("migracion_legacy_no_abiertas.json")
     except FileNotFoundError:
@@ -12933,8 +13149,25 @@ def migracion_backfill_legacy_no():
 def migracion_pagos_ot_abiertas():
     """Carga los abonos/pagos históricos (tabla legacy pago_ot) de las 101 OT
     abiertas ya migradas, usando data/migracion_pagos_ot_abiertas.json.
-    Requiere haber corrido antes /api/admin/migracion/backfill-legacy-no.
-    Idempotente por orden (usuario = 'Migración histórica' en pagos_orden)."""
+    Idempotente por orden (usuario = 'Migración histórica' en pagos_orden).
+
+    NO se bloqueó junto a los otros dos, y la razón es la llave: busca la
+    orden por legacy_ot_no, que es el número de OT en Talca — la misma
+    identidad que usa el sync. No empareja por RUT ni por patente, no crea
+    clientes ni equipos, y no escribe una sola columna de ordenes_trabajo:
+    solo inserta filas en pagos_orden. No compite con el sync.
+
+    Sí dependía de backfill-legacy-no (ahora 410) para que esas 101 órdenes
+    tuvieran legacy_ot_no. Eso no lo rompe: cuando el sync de órdenes entre
+    (paso 5 del plan en CLAUDE.md), legacy_ot_no lo va a poblar el sync desde
+    el id de Talca, que es lo correcto. Las órdenes que no tengan el número
+    aparecen en 'ordenes_sin_match' en vez de escribirse en el lugar
+    equivocado.
+
+    Pendiente cuando llegue el sync de órdenes: si alguna vez llega a
+    importar pago_ot desde Talca, este endpoint pasa a ser un segundo
+    escritor de pagos_orden y hay que bloquearlo también. Hoy el sync no
+    toca pagos."""
     try:
         datos = _cargar_json_data("migracion_pagos_ot_abiertas.json")
     except FileNotFoundError:
@@ -12977,7 +13210,21 @@ def migracion_pagos_ot_abiertas():
 @app.route("/api/admin/migracion/ordenes-historicas", methods=["POST"])
 @requiere_rol()
 def migracion_ordenes_historicas():
-    """Migra las OT CERRADAS de los últimos 3 años (base legacy TalleresTC)
+    """REEMPLAZADO POR EL SYNC — responde 410. Ver el bloque "REEMPLAZADOS POR
+    EL SYNC CON TALCA" más arriba.
+
+    Emparejaba el cliente por RUT y el equipo por patente, creando ambos si no
+    los encontraba, e insertaba en ordenes_trabajo con legacy_ot_no como única
+    marca de identidad. Dos escritores sobre la misma tabla con criterios de
+    identidad distintos (RUT/patente contra talca_id) divergen en silencio: en
+    data/migracion_historica_ordenes.json hay 16 patentes que aparecen con más
+    de un RUT, afectando a 65 de sus 2.983 órdenes.
+
+    El código de abajo queda como referencia de cómo se cargaron los datos
+    históricos que ya están en producción. No se ejecuta.
+
+    --- Documentación original ---
+    Migra las OT CERRADAS de los últimos 3 años (base legacy TalleresTC)
     como historial completo: cliente, equipo, orden (estado 'entregado'),
     repuestos, mano de obra externa y pagos — todo en un solo paso, replicando
     lo que ya existe en el sistema viejo. Usa data/migracion_historica_ordenes.json
@@ -12988,6 +13235,8 @@ def migracion_ordenes_historicas():
     arriesgar un timeout del proxy en una sola request; se llama repetidas
     veces avanzando el offset hasta que 'siguiente_offset' sea null.
     Idempotente por legacy_ot_no: si la orden ya existe, se salta completa."""
+    return _respuesta_reemplazado_por_sync("/api/admin/migracion/ordenes-historicas")
+
     try:
         datos = _cargar_json_data("migracion_historica_ordenes.json")
     except FileNotFoundError:

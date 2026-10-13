@@ -24,6 +24,13 @@ existe.
 
 Un proceso por módulo elimina las dos cosas de raíz: cada uno arranca con su
 propio intérprete, importa core y app desde cero y ve solo su base.
+
+**Los módulos corren sin las variables que salen hacia afuera** (correo, SMS,
+WhatsApp, facturación, IA, Sentry, la API de Talca, Railway). Varios tests dan
+por hecho que "en pruebas no hay transporte de correo"; si la máquina tiene
+RESEND_API_KEY definida -- de este u otro sistema --, mandan correo real. Pasó
+el 13-10-2026 desde una PC que tenía la llave de otro proyecto. Correr un
+test_*.py suelto, a mano, NO pasa por este filtro.
 """
 
 import os
@@ -42,6 +49,28 @@ for _flujo in (sys.stdout, sys.stderr):
         pass
 
 DIR_TESTS = os.path.dirname(os.path.abspath(__file__))
+
+# Variables que no llegan a ningún módulo de tests. Por prefijo, para que una
+# variable nueva del mismo servicio quede cubierta sin tocar esto.
+PREFIJOS_FUERA = (
+    "RESEND_", "SMTP_", "TWILIO_", "META_WA_", "WHATSAPP_", "SIMPLEAPI_",
+    "TALCA_", "RAILWAY_", "RESPALDO_", "ALERTA_STOCK_",
+)
+NOMBRES_FUERA = {
+    "DB_PATH", "SYNC_INTERVALO_SEGUNDOS", "PROVEEDOR_DTE", "SENTRY_DSN",
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "PRESUPUESTO_COPIA_TALLER",
+}
+
+
+def entorno_de_pruebas():
+    """Copia del entorno sin las variables de PREFIJOS_FUERA y NOMBRES_FUERA.
+    Devuelve también los nombres quitados (nunca los valores)."""
+    quitadas = sorted(
+        k for k in os.environ
+        if k in NOMBRES_FUERA or k.startswith(PREFIJOS_FUERA)
+    )
+    entorno = {k: v for k, v in os.environ.items() if k not in quitadas}
+    return entorno, quitadas
 
 
 def modulos(filtros):
@@ -81,6 +110,10 @@ def main():
         print("No hay módulos que calcen con ese filtro.")
         return 1
 
+    entorno, quitadas = entorno_de_pruebas()
+    if quitadas:
+        print(f"Sin estas variables del entorno: {', '.join(quitadas)}")
+
     inicio = time.time()
     fallados, total_tests = [], 0
 
@@ -88,7 +121,7 @@ def main():
         proc = subprocess.run(
             [sys.executable, "-m", "unittest", nombre],
             cwd=DIR_TESTS, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+            encoding="utf-8", errors="replace", env=entorno,
         )
         salida = (proc.stdout or "") + (proc.stderr or "")
         total_tests += cuantos(salida)

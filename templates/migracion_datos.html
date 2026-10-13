@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Inventario Taller — Migración de datos</title>
+<title>Inventario Taller — Migración de datos (retirada)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 {% include "_tema.html" %}
@@ -12,6 +12,14 @@
 </head>
 <body>
 
+{#
+  Esta página era la única interfaz de /api/admin/migracion/importar, que ahora
+  responde 410 (ver el bloque "REEMPLAZADOS POR EL SYNC CON TALCA" en app.py).
+  Se reemplazó el formulario por este aviso en vez de borrar la página: a la
+  herramienta se llegaba tipeando la URL a mano, y un formulario que siempre
+  falla -- o un 404 -- es peor que uno que dice explícitamente que ya no se usa.
+#}
+
 <div class="app">
 
   <header class="topbar">
@@ -19,7 +27,7 @@
       <span class="brand-tag">ADM</span>
       <div class="brand-text">
         <h1>Inventario<span>Taller</span></h1>
-        <p class="brand-sub">Migración de datos — clientes / autos / OTs abiertas</p>
+        <p class="brand-sub">Migración de datos — retirada</p>
       </div>
     </div>
     <div class="topbar-acciones">
@@ -28,60 +36,29 @@
     </div>
   </header>
 
-  <p class="ayuda-inline">Herramienta de uso único para la carga inicial de datos del taller (migración desde el sistema anterior). Sube los 3 archivos JSON ya generados y procesados. Los clientes con RUT que ya exista en el sistema no se duplican — se reutiliza el cliente existente.</p>
+  <section class="tabla-wrap" style="padding: 24px; max-width: 720px;">
+    <h3>Esta herramienta ya no se usa</h3>
+    <p class="chart-sub">La carga de clientes, autos y OT por archivo se
+    reemplazó por la sincronización con Talca, que trae esos datos sola y los
+    empareja por el <code>id</code> numérico de Talca.</p>
 
-  <section class="tabla-wrap" style="padding: 24px; max-width: 640px;">
-    <form id="form-migracion">
-      <div class="campo">
-        <label>1) Clientes (clientes_a_crear.json)</label>
-        <input type="file" id="mig-clientes" accept=".json" required>
-      </div>
-      <div class="campo">
-        <label>2) Autos (autos_a_crear.json)</label>
-        <input type="file" id="mig-autos" accept=".json" required>
-      </div>
-      <div class="campo">
-        <label>3) Órdenes abiertas (ordenes_a_crear.json)</label>
-        <input type="file" id="mig-ordenes" accept=".json" required>
-      </div>
-      <button type="submit" class="btn btn-primary" id="mig-btn-enviar" style="margin-top: 16px;">Importar</button>
-    </form>
-    <div id="mig-resultado" style="margin-top: 24px; white-space: pre-wrap; font-family: 'IBM Plex Mono', monospace; font-size: 13px;"></div>
+    <p class="ayuda-inline">El importador emparejaba los clientes por RUT y los
+    autos por patente, y sobre los datos reales ninguno de los dos es una llave
+    única: hay 442 clientes sin RUT, 90 RUT repetidos y 285 patentes repetidas.
+    Correrlo hoy, además, duplicaría los 4.212 clientes y 5.161 equipos que el
+    sync ya cargó, porque las filas que creaba no llevan <code>talca_id</code>.</p>
+
+    <p class="ayuda-inline">En su lugar, desde la máquina donde corre el
+    sistema:</p>
+    <pre class="ayuda-inline" style="white-space: pre-wrap;">python -m modulos.sync_talca</pre>
+
+    <p class="ayuda-inline">Las órdenes de trabajo llegan por la misma vía.
+    No hace falta cargar nada a mano.</p>
+
+    <a href="/administracion" class="btn btn-secundario" style="margin-top: 16px;">← Volver a Administración</a>
   </section>
 
 </div>
-
-<script>
-document.getElementById("form-migracion").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  // Crea clientes/autos/OTs reales de una -- a diferencia del resto de
-  // acciones "de una sola vez" del sistema (ej. resetear contraseña,
-  // aprobar recepción de factura), esta no tenía ningún confirm() pese a
-  // ser la más difícil de deshacer a mano si se sube el archivo
-  // equivocado.
-  if (!confirm("¿Importar estos 3 archivos? Va a crear clientes, autos y OT reales en el sistema. Revisá que sean los archivos correctos antes de continuar.")) return;
-  const btn = document.getElementById("mig-btn-enviar");
-  const out = document.getElementById("mig-resultado");
-  const fd = new FormData();
-  fd.append("clientes_json", document.getElementById("mig-clientes").files[0]);
-  fd.append("autos_json", document.getElementById("mig-autos").files[0]);
-  fd.append("ordenes_json", document.getElementById("mig-ordenes").files[0]);
-  btn.disabled = true;
-  btn.textContent = "Importando… (puede tardar unos minutos, no cierres esta pestaña)";
-  out.textContent = "";
-  try {
-    const res = await fetch("/api/admin/migracion/importar", { method: "POST", body: fd });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Error inesperado");
-    out.textContent = JSON.stringify(data, null, 2);
-  } catch (err) {
-    out.textContent = "ERROR: " + err.message;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Importar";
-  }
-});
-</script>
 
 </body>
 </html>

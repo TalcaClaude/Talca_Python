@@ -910,6 +910,15 @@ document.getElementById("rep-conv-hasta").addEventListener("change", cargarResum
 document.getElementById("btn-rep-conv-excel").addEventListener("click", () => {
   window.location.href = `/api/convertidores/reportes/excel?${rangoFechasConvertidores()}`;
 });
+document.getElementById("btn-rep-conv-ot-excel").addEventListener("click", () => {
+  const params = new URLSearchParams();
+  params.set("estado", document.getElementById("rep-conv-ot-estado").value);
+  const desde = document.getElementById("rep-conv-ot-desde").value;
+  const hasta = document.getElementById("rep-conv-ot-hasta").value;
+  if (desde) params.set("desde", desde);
+  if (hasta) params.set("hasta", hasta);
+  window.location.href = `/api/convertidores/reportes/ot?${params.toString()}`;
+});
 
 // ---------------------------------------------------------------------------
 // Init

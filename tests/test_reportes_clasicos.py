@@ -261,6 +261,71 @@ class TestReporteCompras(unittest.TestCase):
         self.assertTrue(resp.data.startswith(b"%PDF"))
 
 
+class TestReporteOTConvertidores(unittest.TestCase):
+    """Reporte de OT de convertidores (/api/convertidores/reportes/ot): como
+    createXLS_ot_convertidor de Talca PHP, más la hoja de costos por mes."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+        db = taller_app._conectar_db()
+        cli = db.execute("INSERT INTO clientes (nombre, rut, creado_en) VALUES ('CLIENTE CONV', '11.222.333-4', ?)",
+                         (TS,)).lastrowid
+        ot = db.execute("INSERT INTO ordenes_trabajo (cliente_id, estado, fecha_recepcion, creado_en, actualizado_en, "
+                        "talca_id) VALUES (?, 'recibido', '2024-01-01T09:00:00', ?, ?, 8400)", (cli, TS, TS)).lastrowid
+        # Externo: precio 200.000, reparación 50.000, cerrado en julio.
+        cls.externo = db.execute(
+            "INSERT INTO convertidores_torque (origen_tipo, cliente_id, marca, modelo, numero_serie, estado, "
+            "precio_venta, fecha_recepcion, fecha_cierre) VALUES ('cliente_directo', ?, 'TOYOTA', 'U660', 'S1', "
+            "'entregado', 200000, '2024-06-20T09:00:00', '2024-07-15T10:00:00')", (cli,)).lastrowid
+        db.execute("INSERT INTO convertidor_items (convertidor_id, tipo, descripcion, cantidad, costo_unitario, creado_en) "
+                   "VALUES (?, 'repuesto', 'KIT', 1, 50000, ?)", (cls.externo, TS))
+        # Interno (desde la caja de un auto): abierto, sin precio, reparación 30.000.
+        cls.interno = db.execute(
+            "INSERT INTO convertidores_torque (origen_tipo, cliente_id, orden_origen_id, estado, precio_venta, "
+            "fecha_recepcion) VALUES ('desde_ot_auto', ?, ?, 'reparacion', 99999, '2024-07-01T09:00:00')",
+            (cli, ot)).lastrowid
+        db.execute("INSERT INTO convertidor_items (convertidor_id, tipo, descripcion, cantidad, costo_unitario, creado_en) "
+                   "VALUES (?, 'repuesto', 'DISCOS', 1, 30000, ?)", (cls.interno, TS))
+        db.commit()
+        db.close()
+
+    def _libro(self, **params):
+        resp = self.client.get("/api/convertidores/reportes/ot", query_string=params)
+        if resp.status_code != 200:
+            self.fail(f"HTTP {resp.status_code}: {resp.data[:300]!r}")
+        return load_workbook(io.BytesIO(resp.data))
+
+    def _filas(self, **params):
+        filas = list(self._libro(**params)["OT de convertidores"].iter_rows(values_only=True))
+        i = next(k for k, f in enumerate(filas) if f and f[0] == "N°")
+        return [dict(zip(filas[i], f)) for f in filas[i + 1:] if f and isinstance(f[0], int)]
+
+    def test_cerradas_por_fecha_de_cierre_con_utilidad_real(self):
+        filas = self._filas(estado="cerradas", desde="2024-07-01", hasta="2024-07-31")
+        self.assertEqual([self.externo], [f["N°"] for f in filas])
+        f = filas[0]
+        self.assertEqual((200000, 50000, 150000), (f["Precio de venta"], f["Costo reparación"], f["Utilidad"]))
+        self.assertEqual("11.222.333-4", f["RUT"])
+
+    def test_abiertas_por_recepcion_y_el_interno_no_tiene_precio(self):
+        filas = self._filas(estado="abiertas", desde="2024-07-01", hasta="2024-07-31")
+        self.assertEqual([self.interno], [f["N°"] for f in filas])
+        f = filas[0]
+        self.assertEqual("", f["Precio de venta"] or "")   # interno: su precio_venta no se usa
+        self.assertEqual(30000, f["Costo reparación"])
+        self.assertEqual("8400", str(f["OT de origen"]))
+
+    def test_costos_por_mes(self):
+        hoja = self._libro(estado="todas")["Costos por mes"]
+        filas = [r for r in hoja.iter_rows(min_row=2, values_only=True) if r[0]]
+        julio = [r for r in filas if r[0] == "2024-07"]
+        self.assertEqual(1, len(julio))
+        self.assertEqual((1, 50000, 200000), (julio[0][2], julio[0][3], julio[0][4]))
+
+
 class TestReporteCobros(unittest.TestCase):
     """Reporte de cobros (/api/reportes/cobros): como createXLS_pay de Talca PHP,
     pagos de OT filtrados por fecha de pago, con el N° de OT de Talca."""

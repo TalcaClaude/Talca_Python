@@ -1525,6 +1525,145 @@ def reporte_resumen():
     return jsonify({"total": total})
 
 
+# ---------------------------------------------------------------------------
+# Reporte de OT de convertidores: el de createXLS_ot_convertidor de Talca PHP.
+# ABIERTAS se filtran por fecha de recepción; CERRADAS por fecha de cierre;
+# "todas" por recepción. Segunda hoja: costos por mes de cierre (como
+# "Costos Convertidores" de Talca PHP).
+#
+# El costo es lo que costó la reparación (total_reparacion), NO costo_estimado:
+# para los externos con precio de venta, costo_estimado devuelve ese precio y
+# la utilidad saldría siempre 0. Talca Python no registra pagos por convertidor,
+# así que la columna "Pagado" de Talca PHP no existe acá.
+# ---------------------------------------------------------------------------
+
+ESTADOS_REPORTE_CONVERTIDORES = ("todas", "abiertas", "cerradas")
+
+
+def _numero_ot_origen(db, orden_id):
+    # Mismo criterio que numero_ot de operativo (sin importarlo: no hay imports
+    # entre módulos hermanos): el N° de Talca, o L-<id> si la OT es local.
+    if not orden_id:
+        return ""
+    fila = db.execute("SELECT id, talca_id FROM ordenes_trabajo WHERE id = ?", (orden_id,)).fetchone()
+    if fila is None:
+        return f"L-{orden_id}"
+    return str(fila["talca_id"]) if fila["talca_id"] is not None else f"L-{fila['id']}"
+
+
+def _convertidores_para_reporte(desde, hasta, estado):
+    db = get_db()
+    cerrados = tuple(sorted(ESTADOS_CONVERTIDOR_CERRADOS))
+    marcas = ", ".join("?" for _ in cerrados)
+    if estado == "cerradas":
+        campo = "fecha_cierre"
+        sql = f"SELECT * FROM convertidores_torque WHERE estado IN ({marcas})"
+        params = list(cerrados)
+    elif estado == "abiertas":
+        campo = "fecha_recepcion"
+        sql = f"SELECT * FROM convertidores_torque WHERE estado NOT IN ({marcas})"
+        params = list(cerrados)
+    else:
+        campo = "fecha_recepcion"
+        sql = "SELECT * FROM convertidores_torque WHERE 1=1"
+        params = []
+    if desde:
+        sql += f" AND substr({campo}, 1, 10) >= ?"
+        params.append(desde)
+    if hasta:
+        sql += f" AND substr({campo}, 1, 10) <= ?"
+        params.append(hasta)
+    sql += f" ORDER BY {campo} DESC, id DESC"
+    filas = []
+    for r in db.execute(sql, params).fetchall():
+        c = _convertidor_dict(db, r)
+        interno = c["origen_tipo"] in ORIGENES_INTERNOS
+        precio = None if interno or c["precio_venta"] in (None, "") else round(c["precio_venta"], 2)
+        costo = round(c["total_reparacion"], 2)
+        rut = ""
+        if c["cliente_id"]:
+            fila_rut = db.execute("SELECT rut FROM clientes WHERE id = ?", (c["cliente_id"],)).fetchone()
+            rut = (fila_rut["rut"] if fila_rut else "") or ""
+        filas.append({
+            "numero": c["id"],
+            "cliente": c["cliente"]["nombre"] if c["cliente"] else "",
+            "rut": rut,
+            "convertidor": " ".join(filter(None, [c["marca"], c["modelo"], c["numero_serie"]])),
+            "origen": ORIGENES_CONVERTIDOR_LABEL.get(c["origen_tipo"], c["origen_tipo"]),
+            "precio": precio,
+            "costo": costo,
+            "utilidad": round(precio - costo, 2) if precio is not None else None,
+            "estado": ESTADOS_CONVERTIDOR_LABEL.get(c["estado"], c["estado"]),
+            "ot_origen": _numero_ot_origen(db, c["orden_origen_id"]),
+            "creacion": (c["fecha_recepcion"] or "")[:10],
+            "cierre": (c["fecha_cierre"] or "")[:10],
+            "regional": "Sí" if c["es_regional"] else "No",
+        })
+    return filas
+
+
+COLUMNAS_REPORTE_CONVERTIDORES = [
+    ("numero", "N°"), ("cliente", "Cliente"), ("rut", "RUT"), ("convertidor", "Convertidor"),
+    ("origen", "Origen"), ("precio", "Precio de venta"), ("costo", "Costo reparación"),
+    ("utilidad", "Utilidad"), ("estado", "Estado"), ("ot_origen", "OT de origen"),
+    ("creacion", "F. recepción"), ("cierre", "F. cierre"), ("regional", "Regional"),
+]
+
+
+@bp.route("/api/convertidores/reportes/ot", methods=["GET"])
+@requiere_rol("convertidores")
+def reporte_ot_convertidores():
+    desde, hasta = _rango_fechas()
+    estado = (request.args.get("estado") or "todas").strip().lower()
+    if estado not in ESTADOS_REPORTE_CONVERTIDORES:
+        estado = "todas"
+    filas = _convertidores_para_reporte(desde, hasta, estado)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "OT de convertidores"
+    suma = lambda k: round(sum(f[k] or 0 for f in filas), 2)  # noqa: E731
+    _excel_resumen(ws, "Reporte de OT de convertidores", [
+        ("Estado", {"todas": "Todas", "abiertas": "Abiertas (por fecha de recepción)",
+                    "cerradas": "Cerradas (por fecha de cierre)"}[estado]),
+        ("Rango", f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"),
+        ("Convertidores", len(filas)),
+        ("Precio de venta", f"${suma('precio'):,.0f}".replace(",", ".")),
+        ("Costo reparación", f"${suma('costo'):,.0f}".replace(",", ".")),
+    ])
+    fila_encabezado = ws.max_row + 1
+    claves = [c for c, _ in COLUMNAS_REPORTE_CONVERTIDORES]
+    ws.append([t for _, t in COLUMNAS_REPORTE_CONVERTIDORES])
+    for f in filas:
+        ws.append([f[c] if f[c] is not None else "" for c in claves])
+    ws.append([])
+    total_fila = [""] * len(claves)
+    total_fila[claves.index("origen")] = "TOTAL"
+    for k in ("precio", "costo", "utilidad"):
+        total_fila[claves.index(k)] = suma(k)
+    ws.append(total_fila)
+    _estilo_encabezado(ws, fila=fila_encabezado)
+    _autoancho(ws)
+
+    # Costos por mes de cierre (solo cerrados), por origen.
+    ws2 = wb.create_sheet("Costos por mes")
+    ws2.append(["Mes de cierre", "Origen", "Convertidores", "Costo reparación", "Precio de venta"])
+    por_mes = {}
+    for f in (filas if estado == "cerradas" else _convertidores_para_reporte(desde, hasta, "cerradas")):
+        clave = ((f["cierre"] or "")[:7] or "(sin fecha)", f["origen"])
+        acc = por_mes.setdefault(clave, [0, 0.0, 0.0])
+        acc[0] += 1
+        acc[1] += f["costo"] or 0
+        acc[2] += f["precio"] or 0
+    for (mes, origen), (cant, costo, precio) in sorted(por_mes.items(), reverse=True):
+        ws2.append([mes, origen, cant, round(costo, 2), round(precio, 2)])
+    _estilo_encabezado(ws2)
+    _autoancho(ws2)
+
+    sufijo = f"_{estado}" + (f"_{desde}_a_{hasta}" if (desde or hasta) else "")
+    return _excel_response(wb, f"reporte_ot_convertidores{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+
 @bp.route("/api/convertidores/reportes/excel", methods=["GET"])
 @requiere_rol("convertidores")
 def reporte_excel():

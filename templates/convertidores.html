@@ -178,6 +178,25 @@
       </div>
     </div>
 
+    <div class="dash-panel">
+      <h3 class="dash-titulo">Reporte de OT de convertidores</h3>
+      <p class="bodega-intro">Cada convertidor con cliente, RUT, origen, precio de venta, costo de reparación y utilidad, más una hoja de costos por mes de cierre. Las abiertas se filtran por fecha de recepción y las cerradas por fecha de cierre.</p>
+      <div class="reportes-rango">
+        <label>Estado
+          <select id="rep-conv-ot-estado">
+            <option value="todas">Todas</option>
+            <option value="abiertas">Abiertas</option>
+            <option value="cerradas">Cerradas</option>
+          </select>
+        </label>
+        <label>Desde <input type="date" id="rep-conv-ot-desde"></label>
+        <label>Hasta <input type="date" id="rep-conv-ot-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-rep-conv-ot-excel">Descargar Excel</button>
+      </div>
+    </div>
+
   </section>
 
   </section>

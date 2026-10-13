@@ -1,0 +1,151 @@
+"""
+Tests de los reportes clásicos (los mismos que hoy saca Talca PHP), empezando
+por el "Reporte de OT" de Operativo (/api/operativo/reportes/ordenes).
+
+Criterio copiado de createXLS_OT de Talca PHP:
+  - estado=abiertas  -> OT no cerradas, filtradas por fecha de creación
+  - estado=cerradas  -> OT entregadas/canceladas, filtradas por fecha de cierre
+                        (fecha_cierre_talca si vino del sync; si no, la de entrega)
+  - estado=todas     -> todas, filtradas por fecha de creación
+  - las OT borradas en Talca nunca salen
+Montos: el total de la OT es el precio (+ IVA), NO la suma de los ítems; los
+gastos son repuestos + mano de obra con costo + convertidores + caja chica por
+OT; margen = neto - gastos.
+
+Cómo correrlos:
+    python tests/correr_todo.py reportes_clasicos
+"""
+import io
+import os
+import sys
+import tempfile
+import unittest
+
+_TMP_DB_FD, _TMP_DB_PATH = tempfile.mkstemp(prefix="test_taller_reportes_", suffix=".db")
+os.close(_TMP_DB_FD)
+os.remove(_TMP_DB_PATH)
+os.environ["DB_PATH"] = _TMP_DB_PATH
+os.environ.setdefault("SECRET_KEY", "clave-de-pruebas")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import app as taller_app  # noqa: E402
+
+from openpyxl import load_workbook  # noqa: E402
+
+TS = "2026-10-13T10:00:00"
+
+
+class TestReporteOT(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        r = cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+        assert r.status_code in (200, 302), r.status_code
+
+        db = taller_app._conectar_db()
+        cli = db.execute("INSERT INTO clientes (nombre, creado_en) VALUES ('CLIENTE REPORTE', ?)", (TS,)).lastrowid
+        eq = db.execute(
+            "INSERT INTO equipos (cliente_id, identificador, marca, modelo, color, anio, creado_en) "
+            "VALUES (?, 'ABCD12', 'TOYOTA', 'RAV4', 'ROJO', 2020, ?)", (cli, TS)).lastrowid
+
+        def orden(estado, recepcion, **extra):
+            campos = {"cliente_id": cli, "equipo_id": eq, "estado": estado, "fecha_recepcion": recepcion,
+                      "creado_en": TS, "actualizado_en": TS, **extra}
+            cols = ", ".join(campos)
+            marcas = ", ".join("?" for _ in campos)
+            return db.execute(f"INSERT INTO ordenes_trabajo ({cols}) VALUES ({marcas})", list(campos.values())).lastrowid
+
+        # A: abierta, creada en octubre. Precio 100.000 + IVA = 119.000; pagó 50.000;
+        # un repuesto de 20.000 y una mano de obra sin costo.
+        cls.a = orden("recibido", "2026-10-05T09:00:00", precio_referencial=100000, precio_iva=1,
+                      trabajo_a_realizar="OVERHAUL COMPLETO", referencia="GOOGLE")
+        db.execute("INSERT INTO orden_items (orden_id, tipo, descripcion, cantidad, costo_unitario, creado_en) "
+                   "VALUES (?, 'repuesto', 'KIT', 1, 20000, ?)", (cls.a, TS))
+        db.execute("INSERT INTO orden_items (orden_id, tipo, descripcion, cantidad, costo_unitario, creado_en) "
+                   "VALUES (?, 'mano_obra', 'MO', 1, 0, ?)", (cls.a, TS))
+        db.execute("INSERT INTO pagos_orden (orden_id, metodo_pago, monto, fecha, creado_en) "
+                   "VALUES (?, 'efectivo', 50000, '2026-10-06', ?)", (cls.a, TS))
+        # B: creada en septiembre, entregada (cerrada) en octubre, sin IVA.
+        cls.b = orden("entregado", "2026-09-20T09:00:00", fecha_entrega_real="2026-10-02T17:00:00",
+                      precio_referencial=50000)
+        # C: borrada en Talca: no sale nunca.
+        cls.c = orden("recibido", "2026-10-07T09:00:00", borrada_en_talca=1, precio_referencial=999)
+        # D: vino del sync (talca_id), creada en agosto, cerrada en Talca en octubre.
+        cls.d = orden("entregado", "2026-08-01T09:00:00", talca_id=8100, estado_talca="CERRADA BLOQUEADA",
+                      fecha_cierre_talca="2026-10-03 12:00:00", fecha_entrega_real="2026-10-04T12:00:00",
+                      tipo_talca="Nueva Orden", patente="ZZ9999", precio_referencial=30000)
+        db.commit()
+        db.close()
+
+    def _filas(self, **params):
+        resp = self.client.get("/api/operativo/reportes/ordenes", query_string=params)
+        if resp.status_code != 200:  # el cuerpo es un Excel: solo se lee como texto si falló
+            self.fail(f"HTTP {resp.status_code}: {resp.data[:300]!r}")
+        ws = load_workbook(io.BytesIO(resp.data)).active
+        filas = list(ws.iter_rows(values_only=True))
+        i = next(k for k, f in enumerate(filas) if f and f[0] == "N° OT")
+        enc = filas[i]
+        datos = [dict(zip(enc, f)) for f in filas[i + 1:] if f and f[0] not in (None, "")]
+        return datos
+
+    def _numeros(self, **params):
+        return sorted(str(f["N° OT"]) for f in self._filas(**params))
+
+    def test_abiertas_por_fecha_de_creacion(self):
+        self.assertEqual([f"L-{self.a}"], self._numeros(estado="abiertas", desde="2026-10-01", hasta="2026-10-31"))
+
+    def test_cerradas_por_fecha_de_cierre(self):
+        # B y D se cerraron en octubre aunque se crearon antes; A no está cerrada.
+        self.assertEqual(sorted([f"L-{self.b}", "8100"]),
+                         self._numeros(estado="cerradas", desde="2026-10-01", hasta="2026-10-31"))
+        self.assertEqual([], self._numeros(estado="cerradas", desde="2026-09-01", hasta="2026-09-30"))
+
+    def test_cierre_del_sync_manda_sobre_la_entrega(self):
+        # D se cerró en Talca el 03-10 y se entregó el 04-10: el reporte usa el cierre.
+        self.assertEqual(["8100"], self._numeros(estado="cerradas", desde="2026-10-03", hasta="2026-10-03"))
+
+    def test_todas_por_fecha_de_creacion(self):
+        self.assertEqual([f"L-{self.a}"], self._numeros(estado="todas", desde="2026-10-01", hasta="2026-10-31"))
+        self.assertEqual([f"L-{self.b}"], self._numeros(estado="todas", desde="2026-09-01", hasta="2026-09-30"))
+
+    def test_las_borradas_en_talca_no_salen(self):
+        for estado in ("todas", "abiertas", "cerradas"):
+            with self.subTest(estado=estado):
+                self.assertNotIn(f"L-{self.c}", self._numeros(estado=estado))
+
+    def test_montos_salen_del_precio_y_no_de_los_items(self):
+        a = next(f for f in self._filas(estado="abiertas") if f["N° OT"] == f"L-{self.a}")
+        self.assertEqual(119000, a["Total OT"])       # 100.000 + IVA
+        self.assertEqual(50000, a["Total cobrado"])
+        self.assertEqual(69000, a["Diferencia"])
+        self.assertEqual(20000, a["Total gastos"])
+        self.assertEqual(80000, a["Margen"])          # neto 100.000 - gastos 20.000
+        self.assertEqual("SI", a["Con IVA"])
+        self.assertEqual("OVERHAUL COMPLETO", a["Requerimiento"])
+        self.assertEqual("ABCD12", a["Patente"])
+
+    def test_la_patente_de_la_ot_manda_sobre_la_del_vehiculo(self):
+        d = next(f for f in self._filas(estado="cerradas") if str(f["N° OT"]) == "8100")
+        self.assertEqual("ZZ9999", d["Patente"])
+        self.assertEqual("CERRADA BLOQUEADA", d["Estado en Talca"])
+        self.assertEqual("2026-10-03", d["F. cierre"])
+        self.assertEqual(63, d["Días a cierre"])
+
+    def test_estado_desconocido_cae_a_todas(self):
+        self.assertEqual(self._numeros(estado="todas"), self._numeros(estado="cualquiera"))
+
+    def test_pdf_responde(self):
+        resp = self.client.get("/api/operativo/reportes/ordenes/pdf", query_string={"estado": "cerradas"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data.startswith(b"%PDF"))
+
+    def test_resumen_cuenta_con_el_mismo_criterio(self):
+        r = self.client.get("/api/operativo/reportes/resumen",
+                            query_string={"ordenes_estado": "abiertas", "ordenes_desde": "2026-10-01"}).get_json()
+        self.assertEqual(1, r["ordenes"]["total"])
+        self.assertEqual(119000, r["ordenes"]["total_facturado"])
+
+
+if __name__ == "__main__":
+    unittest.main()

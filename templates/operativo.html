@@ -455,9 +455,16 @@
   <section class="dash-grid">
 
     <div class="dash-panel">
-      <h3 class="dash-titulo">Órdenes de trabajo</h3>
-      <p class="bodega-intro">Todas las órdenes registradas con su cliente, equipo, estado y total — filtrable por rango de fechas de recepción. Deja las fechas vacías para exportar todo.</p>
+      <h3 class="dash-titulo">Reporte de OT</h3>
+      <p class="bodega-intro">Órdenes con su total, lo cobrado, la diferencia, los gastos y el margen. Las abiertas se filtran por fecha de creación y las cerradas por fecha de cierre. Deja las fechas vacías para exportar todo.</p>
       <div class="reportes-rango">
+        <label>Estado
+          <select id="rep-ordenes-estado">
+            <option value="todas">Todas</option>
+            <option value="abiertas">Abiertas</option>
+            <option value="cerradas">Cerradas</option>
+          </select>
+        </label>
         <label>Desde <input type="date" id="rep-ordenes-desde"></label>
         <label>Hasta <input type="date" id="rep-ordenes-hasta"></label>
       </div>

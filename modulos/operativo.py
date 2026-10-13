@@ -5360,101 +5360,181 @@ ESTADOS_LABEL = {
 }
 
 
-def _ordenes_para_reporte(desde, hasta):
+ESTADOS_CERRADOS_REPORTE = ("entregado", "cancelado")
+ESTADOS_REPORTE_ORDENES = ("todas", "abiertas", "cerradas")
+
+
+def _estado_reporte_ordenes(parametro="estado"):
+    estado = (request.args.get(parametro) or "todas").strip().lower()
+    return estado if estado in ESTADOS_REPORTE_ORDENES else "todas"
+
+
+def _ordenes_para_reporte(desde, hasta, estado="todas"):
+    """Órdenes para el "Reporte de OT", con el mismo criterio de fechas que el
+    de Talca PHP (createXLS_OT): las ABIERTAS se filtran por la fecha de
+    creación, las CERRADAS por la fecha de cierre, y "todas" por la fecha de
+    creación.
+
+    La fecha de cierre es fecha_cierre_talca (la que trae el sync) y, si no
+    hay, fecha_entrega_real: en Talca Python cerrar una OT es entregarla.
+    Las OT borradas en Talca (borrada_en_talca) no salen, igual que Talca PHP
+    excluye isDeleted."""
     db = get_db()
-    sql = "SELECT * FROM ordenes_trabajo WHERE 1=1"
+    if estado == "cerradas":
+        campo_fecha = "COALESCE(fecha_cierre_talca, fecha_entrega_real)"
+        sql = "SELECT * FROM ordenes_trabajo WHERE estado IN ('entregado', 'cancelado')"
+    elif estado == "abiertas":
+        campo_fecha = "fecha_recepcion"
+        sql = "SELECT * FROM ordenes_trabajo WHERE estado NOT IN ('entregado', 'cancelado')"
+    else:
+        campo_fecha = "fecha_recepcion"
+        sql = "SELECT * FROM ordenes_trabajo WHERE 1=1"
+    sql += " AND COALESCE(borrada_en_talca, 0) = 0"
     params = []
     if desde:
-        sql += " AND substr(fecha_recepcion, 1, 10) >= ?"
+        sql += f" AND substr({campo_fecha}, 1, 10) >= ?"
         params.append(desde)
     if hasta:
-        sql += " AND substr(fecha_recepcion, 1, 10) <= ?"
+        sql += f" AND substr({campo_fecha}, 1, 10) <= ?"
         params.append(hasta)
-    sql += " ORDER BY fecha_recepcion DESC"
+    sql += f" ORDER BY {campo_fecha} DESC, id DESC"
     rows = db.execute(sql, params).fetchall()
     return [_orden_dict(db, r) for r in rows]
+
+
+def _dias_entre(desde_iso, hasta_iso):
+    try:
+        a = datetime.fromisoformat((desde_iso or "")[:10])
+        b = datetime.fromisoformat((hasta_iso or "")[:10])
+    except ValueError:
+        return None
+    return (b - a).days
+
+
+def _fila_reporte_orden(o):
+    """Una fila del Reporte de OT. Los montos salen de _orden_dict: el total
+    de la OT es precio_referencial (+ IVA si corresponde), NO la suma de los
+    ítems, y los gastos son repuestos + mano de obra con costo + convertidores
+    + boletas de caja chica "Gastos por OT". El margen es neto - gastos, igual
+    que utilidad_estimada."""
+    equipo = o["equipo"] or {}
+    cierre = o.get("fecha_cierre_talca") or (
+        o.get("fecha_entrega_real") if o["estado"] in ESTADOS_CERRADOS_REPORTE else None)
+    gastos = round(o["costo_repuestos"] + o["mano_obra_cargada"] + o["costo_convertidores"] + o["costo_caja_chica"], 2)
+    return {
+        "numero": numero_ot(o),
+        "cliente": o.get("cliente_nombre_talca") or (o["cliente"]["nombre"] if o["cliente"] else ""),
+        "requerimiento": o.get("trabajo_a_realizar") or "",
+        "creacion": (o.get("fecha_recepcion") or "")[:10],
+        "estado": ESTADOS_LABEL.get(o["estado"], o["estado"]),
+        "estado_talca": o.get("estado_talca") or "",
+        "marca": equipo.get("marca") or "",
+        "modelo": equipo.get("modelo") or "",
+        "color": equipo.get("color") or "",
+        "anio": equipo.get("anio") or "",
+        "patente": o.get("patente") or equipo.get("identificador") or "",
+        "obs": o.get("observaciones_talca") or "",
+        "tipo": o.get("tipo_talca") or "",
+        "con_iva": "SI" if o.get("precio_iva") else "NO",
+        "total": o["valor_total"],
+        "cobrado": round(o["total_pagado"], 2),
+        "saldo": round(o["valor_total"] - o["total_pagado"], 2),
+        "gastos": gastos,
+        "margen": round(o["valor_neto"] - gastos, 2),
+        "cierre": (cierre or "")[:10],
+        "salida": (o.get("fecha_entrega_real") or "")[:10],
+        "origen": o.get("referencia") or "",
+        "dias_cierre": _dias_entre(o.get("fecha_recepcion"), cierre) if cierre else None,
+        "dias_salida": (_dias_entre(o.get("fecha_recepcion"), o.get("fecha_entrega_real"))
+                        if o.get("fecha_entrega_real") else None),
+    }
+
+
+COLUMNAS_REPORTE_ORDENES = [
+    ("numero", "N° OT"), ("cliente", "Cliente"), ("requerimiento", "Requerimiento"),
+    ("creacion", "F. creación"), ("estado", "Estado"), ("estado_talca", "Estado en Talca"),
+    ("marca", "Marca"), ("modelo", "Modelo"), ("color", "Color"), ("anio", "Año"),
+    ("patente", "Patente"), ("obs", "Observaciones"), ("tipo", "Tipo"), ("con_iva", "Con IVA"),
+    ("total", "Total OT"), ("cobrado", "Total cobrado"), ("saldo", "Diferencia"),
+    ("gastos", "Total gastos"), ("margen", "Margen"), ("cierre", "F. cierre"),
+    ("salida", "F. salida"), ("origen", "Origen"), ("dias_cierre", "Días a cierre"),
+    ("dias_salida", "Días a salida"),
+]
+MONTOS_REPORTE_ORDENES = ("total", "cobrado", "saldo", "gastos", "margen")
+ETIQUETA_ESTADO_REPORTE = {"todas": "Todas", "abiertas": "Abiertas (por fecha de creación)",
+                           "cerradas": "Cerradas (por fecha de cierre)"}
+
+
+def _totales_reporte_ordenes(filas):
+    return {k: round(sum(f[k] for f in filas), 2) for k in MONTOS_REPORTE_ORDENES}
+
+
+def _pesos(valor):
+    return f"${valor:,.0f}".replace(",", ".")
 
 
 @bp.route("/api/operativo/reportes/ordenes", methods=["GET"])
 @requiere_rol("operativo")
 def reporte_ordenes():
     desde, hasta = _rango_fechas()
-    ordenes = _ordenes_para_reporte(desde, hasta)
+    estado = _estado_reporte_ordenes()
+    filas = [_fila_reporte_orden(o) for o in _ordenes_para_reporte(desde, hasta, estado)]
+    tot = _totales_reporte_ordenes(filas)
 
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Órdenes de trabajo"
-    total_previo = sum(o["total"] for o in ordenes)
-    rango_txt = f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"
-    _excel_resumen(ws, "Órdenes de trabajo", [
-        ("Rango", rango_txt),
-        ("Órdenes", len(ordenes)),
-        ("Total facturado", f"${total_previo:,.0f}".replace(",", ".")),
+    _excel_resumen(ws, "Reporte de OT", [
+        ("Estado", ETIQUETA_ESTADO_REPORTE[estado]),
+        ("Rango", f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"),
+        ("Órdenes", len(filas)),
+        ("Total OT", _pesos(tot["total"])),
+        ("Total cobrado", _pesos(tot["cobrado"])),
+        ("Margen", _pesos(tot["margen"])),
     ])
     fila_encabezado = ws.max_row + 1
-    ws.append(["Fecha recepción", "Cliente", "Equipo", "Estado", "Mecánico", "Entrega estimada", "Entrega real", "Total"])
-    total_general = 0
-    for o in ordenes:
-        total_general += o["total"]
-        equipo_txt = ""
-        if o["equipo"]:
-            equipo_txt = " ".join(filter(None, [o["equipo"].get("marca"), o["equipo"].get("modelo"), o["equipo"].get("identificador")]))
-        ws.append([
-            (o["fecha_recepcion"] or "")[:10],
-            o["cliente"]["nombre"] if o["cliente"] else "—",
-            equipo_txt or "—",
-            ESTADOS_LABEL.get(o["estado"], o["estado"]),
-            o["mecanico"] or "—",
-            (o["fecha_entrega_estimada"] or "")[:10],
-            (o["fecha_entrega_real"] or "")[:10],
-            round(o["total"], 2),
-        ])
+    claves = [c for c, _ in COLUMNAS_REPORTE_ORDENES]
+    ws.append([titulo for _, titulo in COLUMNAS_REPORTE_ORDENES])
+    for f in filas:
+        ws.append([f[c] for c in claves])
     ws.append([])
-    ws.append(["", "", "", "", "", "", "TOTAL", round(total_general, 2)])
+    total_fila = [""] * len(claves)
+    total_fila[claves.index("con_iva")] = "TOTAL"
+    for k in MONTOS_REPORTE_ORDENES:
+        total_fila[claves.index(k)] = tot[k]
+    ws.append(total_fila)
     _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
-    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
-    nombre = f"ordenes_trabajo{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
-    return _excel_response(wb, nombre)
+    sufijo = f"_{estado}" + (f"_{desde}_a_{hasta}" if (desde or hasta) else "")
+    return _excel_response(wb, f"reporte_ot{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
 
 
 @bp.route("/api/operativo/reportes/ordenes/pdf", methods=["GET"])
 @requiere_rol("operativo")
 def reporte_ordenes_pdf():
     desde, hasta = _rango_fechas()
-    ordenes = _ordenes_para_reporte(desde, hasta)
+    estado = _estado_reporte_ordenes()
+    filas = [_fila_reporte_orden(o) for o in _ordenes_para_reporte(desde, hasta, estado)]
+    tot = _totales_reporte_ordenes(filas)
 
     rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
-    buffer, doc, elementos, estilos = _pdf_documento(f"Órdenes de trabajo{rango_txt}")
-
-    total_general = sum(o["total"] for o in ordenes)
+    buffer, doc, elementos, estilos = _pdf_documento(f"Reporte de OT — {ETIQUETA_ESTADO_REPORTE[estado]}{rango_txt}")
     _pdf_resumen(elementos, estilos, [
-        ("Órdenes", len(ordenes)),
-        ("Total facturado", fmt_money_pdf(total_general)),
+        ("Órdenes", len(filas)),
+        ("Total OT", fmt_money_pdf(tot["total"])),
+        ("Total cobrado", fmt_money_pdf(tot["cobrado"])),
+        ("Margen", fmt_money_pdf(tot["margen"])),
     ])
-    filas = []
-    for o in ordenes:
-        equipo_txt = ""
-        if o["equipo"]:
-            equipo_txt = " ".join(filter(None, [o["equipo"].get("marca"), o["equipo"].get("modelo"), o["equipo"].get("identificador")]))
-        filas.append([
-            (o["fecha_recepcion"] or "")[:10],
-            o["cliente"]["nombre"] if o["cliente"] else "—",
-            equipo_txt or "—",
-            ESTADOS_LABEL.get(o["estado"], o["estado"]),
-            o["mecanico"] or "—",
-            fmt_money_pdf(o["total"]),
-        ])
     _pdf_tabla(
-        elementos, estilos, f"Total: {fmt_money_pdf(total_general)} — {len(ordenes)} orden(es)",
-        ["Fecha", "Cliente", "Equipo", "Estado", "Mecánico", "Total"],
-        filas,
+        elementos, estilos, f"{len(filas)} orden(es)",
+        ["N° OT", "Creación", "Cliente", "Patente", "Estado", "Total", "Cobrado", "Saldo", "Margen"],
+        [[f["numero"], f["creacion"], f["cliente"], f["patente"], f["estado"], fmt_money_pdf(f["total"]),
+          fmt_money_pdf(f["cobrado"]), fmt_money_pdf(f["saldo"]), fmt_money_pdf(f["margen"])] for f in filas],
     )
 
-    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
-    nombre = f"ordenes_trabajo{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-    return _pdf_response(buffer, doc, elementos, nombre)
+    sufijo = f"_{estado}" + (f"_{desde}_a_{hasta}" if (desde or hasta) else "")
+    return _pdf_response(buffer, doc, elementos, f"reporte_ot{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf")
 
 
 @bp.route("/api/operativo/reportes/garantias", methods=["GET"])
@@ -5545,7 +5625,7 @@ def reportes_operativo_resumen():
 
     ordenes_desde = (request.args.get("ordenes_desde") or "").strip()
     ordenes_hasta = (request.args.get("ordenes_hasta") or "").strip()
-    ordenes = _ordenes_para_reporte(ordenes_desde, ordenes_hasta)
+    ordenes = _ordenes_para_reporte(ordenes_desde, ordenes_hasta, _estado_reporte_ordenes("ordenes_estado"))
 
     garantias_desde = (request.args.get("garantias_desde") or "").strip()
     garantias_hasta = (request.args.get("garantias_hasta") or "").strip()
@@ -5560,6 +5640,6 @@ def reportes_operativo_resumen():
     total_garantias = db.execute(sql, params).fetchone()[0]
 
     return jsonify({
-        "ordenes": {"total": len(ordenes), "total_facturado": round(sum(o["total"] for o in ordenes), 2)},
+        "ordenes": {"total": len(ordenes), "total_facturado": round(sum(o["valor_total"] for o in ordenes), 2)},
         "garantias": {"total": total_garantias},
     })

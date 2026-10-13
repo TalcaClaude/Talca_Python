@@ -1607,6 +1607,7 @@ function rangoFechasParamsOperativo() {
   const desde = document.getElementById("rep-ordenes-desde").value;
   const hasta = document.getElementById("rep-ordenes-hasta").value;
   const params = new URLSearchParams();
+  params.set("estado", document.getElementById("rep-ordenes-estado").value);
   if (desde) params.set("desde", desde);
   if (hasta) params.set("hasta", hasta);
   return params.toString();
@@ -1626,6 +1627,7 @@ async function cargarResumenReportesOperativo() {
   const params = new URLSearchParams();
   const ordenesDesde = document.getElementById("rep-ordenes-desde").value;
   const ordenesHasta = document.getElementById("rep-ordenes-hasta").value;
+  params.set("ordenes_estado", document.getElementById("rep-ordenes-estado").value);
   if (ordenesDesde) params.set("ordenes_desde", ordenesDesde);
   if (ordenesHasta) params.set("ordenes_hasta", ordenesHasta);
   const garantiasDesde = document.getElementById("rep-garantias-desde").value;
@@ -1636,7 +1638,7 @@ async function cargarResumenReportesOperativo() {
   try {
     const r = await api(`/api/operativo/reportes/resumen?${params.toString()}`);
     document.getElementById("rep-contador-ordenes").textContent =
-      `${r.ordenes.total} orden(es) · total facturado ${fmtMoney(r.ordenes.total_facturado)}`;
+      `${r.ordenes.total} orden(es) · total OT ${fmtMoney(r.ordenes.total_facturado)}`;
     document.getElementById("rep-contador-garantias").textContent =
       `${r.garantias.total} garantía(s) en el rango seleccionado`;
   } catch (e) {
@@ -1645,6 +1647,7 @@ async function cargarResumenReportesOperativo() {
   }
 }
 
+document.getElementById("rep-ordenes-estado").addEventListener("change", cargarResumenReportesOperativo);
 document.getElementById("rep-ordenes-desde").addEventListener("change", cargarResumenReportesOperativo);
 document.getElementById("rep-ordenes-hasta").addEventListener("change", cargarResumenReportesOperativo);
 document.getElementById("rep-garantias-desde").addEventListener("change", cargarResumenReportesOperativo);

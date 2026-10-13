@@ -2778,6 +2778,13 @@ document.getElementById("btn-reporte-finanzas-pdf").addEventListener("click", ()
   window.location.href = `/api/reportes/finanzas-resumen/pdf?${rangoFechasParams("reportes-finanzas-desde", "reportes-finanzas-hasta")}`;
 });
 
+document.getElementById("btn-reporte-cobros").addEventListener("click", () => {
+  window.location.href = `/api/reportes/cobros?${rangoFechasParams("reportes-cobros-desde", "reportes-cobros-hasta")}`;
+});
+document.getElementById("btn-reporte-cobros-pdf").addEventListener("click", () => {
+  window.location.href = `/api/reportes/cobros/pdf?${rangoFechasParams("reportes-cobros-desde", "reportes-cobros-hasta")}`;
+});
+
 document.getElementById("btn-reporte-caja").addEventListener("click", () => {
   window.location.href = `/api/reportes/caja-gastos?${rangoFechasParams("reportes-caja-desde", "reportes-caja-hasta")}`;
 });

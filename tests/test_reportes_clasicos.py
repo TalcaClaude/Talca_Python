@@ -147,5 +147,67 @@ class TestReporteOT(unittest.TestCase):
         self.assertEqual(119000, r["ordenes"]["total_facturado"])
 
 
+class TestReporteCobros(unittest.TestCase):
+    """Reporte de cobros (/api/reportes/cobros): como createXLS_pay de Talca PHP,
+    pagos de OT filtrados por fecha de pago, con el N° de OT de Talca."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+        db = taller_app._conectar_db()
+        cli = db.execute("INSERT INTO clientes (nombre, creado_en) VALUES ('CLIENTE COBROS', ?)", (TS,)).lastrowid
+        cls.local = db.execute(
+            "INSERT INTO ordenes_trabajo (cliente_id, estado, fecha_recepcion, creado_en, actualizado_en) "
+            "VALUES (?, 'recibido', '2025-01-15T09:00:00', ?, ?)", (cli, TS, TS)).lastrowid
+        cls.talca = db.execute(
+            "INSERT INTO ordenes_trabajo (cliente_id, estado, fecha_recepcion, creado_en, actualizado_en, talca_id, "
+            "cliente_nombre_talca) VALUES (?, 'recibido', '2025-01-15T09:00:00', ?, ?, 8200, 'NOMBRE EN LA OT')",
+            (cli, TS, TS)).lastrowid
+        for orden, metodo, monto, fecha in [(cls.local, "efectivo", 10000, "2026-11-05"),
+                                            (cls.talca, "transferencia", 25000, "2026-11-20"),
+                                            (cls.talca, "transferencia", 7000, "2026-12-01")]:
+            db.execute("INSERT INTO pagos_orden (orden_id, metodo_pago, monto, fecha, usuario, creado_en) "
+                       "VALUES (?, ?, ?, ?, 'cajero', ?)", (orden, metodo, monto, fecha, TS))
+        db.commit()
+        db.close()
+
+    def _filas(self, **params):
+        resp = self.client.get("/api/reportes/cobros", query_string=params)
+        if resp.status_code != 200:
+            self.fail(f"HTTP {resp.status_code}: {resp.data[:300]!r}")
+        filas = list(load_workbook(io.BytesIO(resp.data)).active.iter_rows(values_only=True))
+        i = next(k for k, f in enumerate(filas) if f and f[0] == "ID pago")
+        return [dict(zip(filas[i], f)) for f in filas[i + 1:] if f and f[0] not in (None, "")]
+
+    def test_filtra_por_fecha_de_pago(self):
+        filas = self._filas(desde="2026-11-01", hasta="2026-11-30")
+        self.assertEqual([25000, 10000], [f["Monto"] for f in filas])  # más reciente primero
+
+    def test_muestra_el_numero_de_talca_y_el_nombre_de_la_ot(self):
+        f = next(x for x in self._filas(desde="2026-11-20", hasta="2026-11-20"))
+        self.assertEqual("8200", str(f["N° OT"]))
+        self.assertEqual("NOMBRE EN LA OT", f["Cliente"])
+        self.assertEqual("transferencia", f["Tipo de cobro"])
+
+    def test_una_ot_local_sale_con_prefijo_L(self):
+        f = next(x for x in self._filas(desde="2026-11-05", hasta="2026-11-05"))
+        self.assertEqual(f"L-{self.local}", f["N° OT"])
+
+    def test_el_resumen_financiero_ya_no_muestra_el_id_interno(self):
+        resp = self.client.get("/api/reportes/finanzas-resumen", query_string={"desde": "2026-11-20", "hasta": "2026-11-20"})
+        self.assertEqual(200, resp.status_code)
+        ws = load_workbook(io.BytesIO(resp.data))["Ingresos (pagos)"]
+        otes = [r[1] for r in ws.iter_rows(min_row=2, values_only=True) if r[0]]
+        self.assertIn("8200", [str(x) for x in otes])
+        self.assertNotIn(f"#{self.talca}", otes)
+
+    def test_pdf_responde(self):
+        resp = self.client.get("/api/reportes/cobros/pdf")
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.data.startswith(b"%PDF"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -504,6 +504,19 @@
     </div>
 
     <div class="dash-panel">
+      <h3 class="dash-titulo">Reporte de cobros</h3>
+      <p class="bodega-intro">Cada pago recibido por una OT, con su N° de OT, cliente, monto y tipo de cobro — filtrable por fecha de pago. Deja las fechas vacías para exportar todo.</p>
+      <div class="reportes-rango">
+        <label>Desde <input type="date" id="reportes-cobros-desde"></label>
+        <label>Hasta <input type="date" id="reportes-cobros-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-reporte-cobros">Descargar Excel</button>
+        <button class="btn btn-secundario" id="btn-reporte-cobros-pdf">Descargar PDF</button>
+      </div>
+    </div>
+
+    <div class="dash-panel">
       <h3 class="dash-titulo">Gastos de Caja Chica</h3>
       <p class="bodega-intro">Todos los gastos registrados, con su categoría y estado de rendición — filtrable por rango de fechas.</p>
       <div class="reportes-rango">

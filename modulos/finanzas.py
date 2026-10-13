@@ -35,9 +35,11 @@ from core import (
     _crear_libro_excel,
     _estilo_encabezado,
     _excel_response,
+    _excel_resumen,
     _iniciar_transaccion_stock,
     _pdf_documento,
     _pdf_response,
+    _pdf_resumen,
     _pdf_tabla,
     _rango_fechas,
     coincide_busqueda,
@@ -1747,7 +1749,8 @@ def reporte_caja_gastos_pdf():
 def _ingresos_para_reporte(desde, hasta):
     db = get_db()
     sql = """
-        SELECT p.*, o.id AS orden_numero, c.nombre AS cliente_nombre
+        SELECT p.*, o.id AS orden_id_interno, o.talca_id AS orden_talca_id,
+               COALESCE(NULLIF(o.cliente_nombre_talca, ''), c.nombre) AS cliente_nombre
         FROM pagos_orden p
         JOIN ordenes_trabajo o ON o.id = p.orden_id
         JOIN clientes c ON c.id = o.cliente_id
@@ -1761,7 +1764,11 @@ def _ingresos_para_reporte(desde, hasta):
         sql += " AND p.fecha <= ?"
         params.append(hasta + "T23:59:59")
     sql += " ORDER BY p.fecha DESC, p.id DESC"
-    return [dict(r) for r in db.execute(sql, params).fetchall()]
+    filas = [dict(r) for r in db.execute(sql, params).fetchall()]
+    for f in filas:
+        # El número que ve el taller es el de Talca; el id interno nunca se muestra.
+        f["orden_numero"] = operativo.numero_ot({"id": f["orden_id_interno"], "talca_id": f["orden_talca_id"]})
+    return filas
 
 
 def _cxc_pendiente_y_vencido(db):
@@ -1879,7 +1886,7 @@ def reporte_finanzas_resumen():
     ws2 = wb.create_sheet("Ingresos (pagos)")
     ws2.append(["Fecha", "OT", "Cliente", "Método de pago", "Monto"])
     for p in ingresos:
-        ws2.append([p["fecha"], f"#{p['orden_numero']}", p["cliente_nombre"], p["metodo_pago"], round(p["monto"], 2)])
+        ws2.append([p["fecha"], p["orden_numero"], p["cliente_nombre"], p["metodo_pago"], round(p["monto"], 2)])
     ws2.append([])
     ws2.append(["", "", "", "Total", round(sum(p["monto"] for p in ingresos), 2)])
     _estilo_encabezado(ws2)
@@ -1901,6 +1908,74 @@ def reporte_finanzas_resumen():
     sufijo = f"_{desde or 'inicio'}_a_{hasta or 'hoy'}"
     nombre = f"resumen_financiero{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
     return _excel_response(wb, nombre)
+
+
+# ---------------------------------------------------------------------------
+# Reporte de cobros: el mismo que createXLS_pay de Talca PHP (pagos de OT por
+# fecha de pago). Una fila por pago, con el N° de OT de Talca.
+# ---------------------------------------------------------------------------
+
+COLUMNAS_REPORTE_COBROS = [("id", "ID pago"), ("fecha", "Fecha"), ("orden_numero", "N° OT"),
+                           ("cliente_nombre", "Cliente"), ("monto", "Monto"),
+                           ("metodo_pago", "Tipo de cobro"), ("usuario", "Registrado por")]
+
+
+def _resumen_por_metodo(pagos):
+    por_metodo = {}
+    for p in pagos:
+        por_metodo[p["metodo_pago"] or "(sin método)"] = por_metodo.get(p["metodo_pago"] or "(sin método)", 0) + p["monto"]
+    return sorted(por_metodo.items(), key=lambda kv: -kv[1])
+
+
+@bp.route("/api/reportes/cobros", methods=["GET"])
+@requiere_rol("finanzas")
+def reporte_cobros():
+    desde, hasta = _rango_fechas()
+    pagos = _ingresos_para_reporte(desde, hasta)
+    total = round(sum(p["monto"] for p in pagos), 2)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Cobros"
+    _excel_resumen(ws, "Reporte de cobros", [
+        ("Rango (fecha de pago)", f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"),
+        ("Pagos", len(pagos)),
+        ("Total cobrado", f"${total:,.0f}".replace(",", ".")),
+        *[(f"  {metodo}", f"${monto:,.0f}".replace(",", ".")) for metodo, monto in _resumen_por_metodo(pagos)],
+    ])
+    fila_encabezado = ws.max_row + 1
+    ws.append([titulo for _, titulo in COLUMNAS_REPORTE_COBROS])
+    for p in pagos:
+        fila = {**p, "fecha": (p["fecha"] or "")[:10], "monto": round(p["monto"], 2)}
+        ws.append([fila.get(clave) or "" if clave != "monto" else fila["monto"] for clave, _ in COLUMNAS_REPORTE_COBROS])
+    ws.append([])
+    ws.append(["", "", "", "TOTAL", total])
+    _estilo_encabezado(ws, fila=fila_encabezado)
+    _autoancho(ws)
+
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    return _excel_response(wb, f"reporte_cobros{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+
+@bp.route("/api/reportes/cobros/pdf", methods=["GET"])
+@requiere_rol("finanzas")
+def reporte_cobros_pdf():
+    desde, hasta = _rango_fechas()
+    pagos = _ingresos_para_reporte(desde, hasta)
+    total = round(sum(p["monto"] for p in pagos), 2)
+
+    rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
+    buffer, doc, elementos, estilos = _pdf_documento(f"Reporte de cobros{rango_txt}")
+    _pdf_resumen(elementos, estilos, [("Pagos", len(pagos)), ("Total cobrado", fmt_money_pdf(total))]
+                 + [(metodo, fmt_money_pdf(monto)) for metodo, monto in _resumen_por_metodo(pagos)])
+    _pdf_tabla(
+        elementos, estilos, f"Total: {fmt_money_pdf(total)} — {len(pagos)} pago(s)",
+        ["ID", "Fecha", "N° OT", "Cliente", "Monto", "Tipo de cobro"],
+        [[p["id"], (p["fecha"] or "")[:10], p["orden_numero"], p["cliente_nombre"], fmt_money_pdf(p["monto"]),
+          p["metodo_pago"] or ""] for p in pagos],
+    )
+    sufijo = f"_{desde}_a_{hasta}" if (desde or hasta) else ""
+    return _pdf_response(buffer, doc, elementos, f"reporte_cobros{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf")
 
 
 @bp.route("/api/reportes/finanzas-resumen/pdf", methods=["GET"])
@@ -1935,7 +2010,7 @@ def reporte_finanzas_resumen_pdf():
     )
 
     filas_ingresos = [
-        [p["fecha"][:10], f"#{p['orden_numero']}", p["cliente_nombre"], p["metodo_pago"], fmt_money_pdf(p["monto"])]
+        [p["fecha"][:10], p["orden_numero"], p["cliente_nombre"], p["metodo_pago"], fmt_money_pdf(p["monto"])]
         for p in ingresos
     ]
     _pdf_tabla(

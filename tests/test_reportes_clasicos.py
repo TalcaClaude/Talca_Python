@@ -201,6 +201,66 @@ class TestReporteGastosOT(unittest.TestCase):
         self.assertEqual([], self._filas(estado="abiertas", desde="2025-04-01", hasta="2025-04-30"))
 
 
+class TestReporteCompras(unittest.TestCase):
+    """Reporte de compras (/api/reportes/compras): como createXLS_rc de Talca
+    PHP, un documento por fila con RUT, condición de pago y neto/IVA/total."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+        db = taller_app._conectar_db()
+        prov = db.execute("INSERT INTO proveedores (nombre, rut, creado_en) VALUES ('REPUESTOS SUR', '76.111.222-3', ?)",
+                          (TS,)).lastrowid
+        prod = db.execute(
+            "INSERT INTO productos (codigo_interno, nombre, descripcion, categoria, marca, modelo, ubicacion, "
+            "stock_disponible, stock_reservado, stock_merma, stock_minimo, costo_compra, creado_en, actualizado_en) "
+            "VALUES ('', 'X', '', 'A', '', 'B', '', 0, 0, 0, 0, 0, ?, ?)", (TS, TS)).lastrowid
+        # Factura nueva: trae sus montos (Migración 33).
+        nueva = db.execute(
+            "INSERT INTO facturas (numero, proveedor_id, fecha, creado_en, condicion_pago, monto_neto, monto_iva, "
+            "monto_total, tipo_documento) VALUES ('F-1', ?, '2025-05-10', ?, 'credito', 100000, 19000, 119000, 'factura')",
+            (prov, TS)).lastrowid
+        db.execute("INSERT INTO factura_lineas (factura_id, producto_id, cantidad, precio_unitario) VALUES (?, ?, 2, 50000)",
+                   (nueva, prod))
+        # Factura antigua sin montos guardados: se calcula desde las líneas.
+        vieja = db.execute(
+            "INSERT INTO facturas (numero, proveedor, fecha, creado_en) VALUES ('F-0', 'PROVEEDOR SUELTO', '2025-05-02', ?)",
+            (TS,)).lastrowid
+        db.execute("INSERT INTO factura_lineas (factura_id, producto_id, cantidad, precio_unitario) VALUES (?, ?, 1, 10000)",
+                   (vieja, prod))
+        db.commit()
+        db.close()
+
+    def _filas(self, **params):
+        resp = self.client.get("/api/reportes/compras", query_string=params)
+        if resp.status_code != 200:
+            self.fail(f"HTTP {resp.status_code}: {resp.data[:300]!r}")
+        filas = list(load_workbook(io.BytesIO(resp.data)).active.iter_rows(values_only=True))
+        i = next(k for k, f in enumerate(filas) if f and f[0] == "Fecha")
+        return [dict(zip(filas[i], f)) for f in filas[i + 1:] if f and f[0] not in (None, "")]
+
+    def test_columnas_de_talca_php(self):
+        f = next(x for x in self._filas(desde="2025-05-10", hasta="2025-05-10"))
+        self.assertEqual(("F-1", "REPUESTOS SUR", "76.111.222-3", "credito"),
+                         (f["N° documento"], f["Proveedor"], f["RUT"], f["Condición de pago"]))
+        self.assertEqual((100000, 19000, 119000), (f["Neto"], f["IVA"], f["Total"]))
+
+    def test_factura_sin_montos_se_calcula_desde_las_lineas(self):
+        f = next(x for x in self._filas(desde="2025-05-02", hasta="2025-05-02"))
+        self.assertEqual((10000, 1900, 11900), (f["Neto"], f["IVA"], f["Total"]))
+        self.assertEqual("PROVEEDOR SUELTO", f["Proveedor"])
+
+    def test_filtra_por_fecha_del_documento(self):
+        self.assertEqual(["F-1", "F-0"], [f["N° documento"] for f in self._filas(desde="2025-05-01", hasta="2025-05-31")])
+
+    def test_pdf_responde(self):
+        resp = self.client.get("/api/reportes/compras/pdf", query_string={"desde": "2025-05-01"})
+        self.assertEqual(200, resp.status_code)
+        self.assertTrue(resp.data.startswith(b"%PDF"))
+
+
 class TestReporteCobros(unittest.TestCase):
     """Reporte de cobros (/api/reportes/cobros): como createXLS_pay de Talca PHP,
     pagos de OT filtrados por fecha de pago, con el N° de OT de Talca."""

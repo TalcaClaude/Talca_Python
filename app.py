@@ -12048,6 +12048,17 @@ def _facturas_para_reporte(desde, hasta):
             (f["id"],),
         ).fetchone()[0]
         resumen["total"] = total
+        # Como createXLS_rc de Talca PHP: RUT del proveedor y desglose neto/IVA/total.
+        # monto_neto/monto_iva/monto_total vienen de la factura (Migración 33);
+        # una factura anterior sin esos montos usa la suma de líneas como neto.
+        proveedor = db.execute("SELECT rut FROM proveedores WHERE id = ?", (f["proveedor_id"],)).fetchone() \
+            if f["proveedor_id"] else None
+        resumen["proveedor_rut"] = (proveedor["rut"] if proveedor else "") or ""
+        neto = f["monto_neto"] if f["monto_neto"] else total
+        iva = f["monto_iva"] if f["monto_neto"] else (0 if f["exento_iva"] else round(total * 0.19, 2))
+        resumen["neto"] = round(neto, 2)
+        resumen["iva"] = round(iva, 2)
+        resumen["total_con_iva"] = round(f["monto_total"] if f["monto_neto"] else neto + iva, 2)
         resultado.append(resumen)
     return resultado
 
@@ -12061,21 +12072,24 @@ def reporte_compras():
     wb = _crear_libro_excel()
     ws = wb.active
     ws.title = "Compras"
-    monto_previo = sum(f["total"] for f in facturas)
+    totales = {k: round(sum(f[k] for f in facturas), 2) for k in ("neto", "iva", "total_con_iva")}
     rango_txt = f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"
     _excel_resumen(ws, "Compras realizadas", [
-        ("Rango", rango_txt),
-        ("Facturas", len(facturas)),
-        ("Monto total", f"${monto_previo:,.0f}".replace(",", ".")),
+        ("Rango (fecha del documento)", rango_txt),
+        ("Documentos", len(facturas)),
+        ("Neto", f"${totales['neto']:,.0f}".replace(",", ".")),
+        ("IVA", f"${totales['iva']:,.0f}".replace(",", ".")),
+        ("Total", f"${totales['total_con_iva']:,.0f}".replace(",", ".")),
     ])
     fila_encabezado = ws.max_row + 1
-    ws.append(["Fecha", "N° factura", "Proveedor", "N° líneas", "Líneas aplicadas", "Total"])
-    total_general = 0
+    ws.append(["Fecha", "Tipo", "N° documento", "Proveedor", "RUT", "Condición de pago", "Neto", "IVA", "Total",
+               "N° líneas", "Líneas aplicadas"])
     for f in facturas:
-        total_general += f["total"]
-        ws.append([f["fecha"], f["numero"], f["proveedor_display"], f["total_lineas"], f["lineas_aplicadas"], round(f["total"], 2)])
+        ws.append([f["fecha"], (f.get("tipo_documento") or "factura").capitalize(), f["numero"],
+                   f["proveedor_display"], f["proveedor_rut"], f.get("condicion_pago") or "",
+                   f["neto"], f["iva"], f["total_con_iva"], f["total_lineas"], f["lineas_aplicadas"]])
     ws.append([])
-    ws.append(["", "", "", "", "TOTAL", round(total_general, 2)])
+    ws.append(["", "", "", "", "", "TOTAL", totales["neto"], totales["iva"], totales["total_con_iva"]])
     _estilo_encabezado(ws, fila=fila_encabezado)
     _autoancho(ws)
 
@@ -12093,18 +12107,21 @@ def reporte_compras_pdf():
     rango_txt = f" ({desde or '…'} a {hasta or '…'})" if (desde or hasta) else ""
     buffer, doc, elementos, estilos = _pdf_documento(f"Compras realizadas{rango_txt}")
 
-    total_general = sum(f["total"] for f in facturas)
+    total_general = sum(f["total_con_iva"] for f in facturas)
     _pdf_resumen(elementos, estilos, [
-        ("Facturas", len(facturas)),
-        ("Monto total", fmt_money_pdf(total_general)),
+        ("Documentos", len(facturas)),
+        ("Neto", fmt_money_pdf(sum(f["neto"] for f in facturas))),
+        ("IVA", fmt_money_pdf(sum(f["iva"] for f in facturas))),
+        ("Total", fmt_money_pdf(total_general)),
     ])
     filas = [
-        [f["fecha"], f["numero"], f["proveedor_display"] or "—", f["total_lineas"], fmt_money_pdf(f["total"])]
+        [f["fecha"], f["numero"], f["proveedor_display"] or "—", f["proveedor_rut"], fmt_money_pdf(f["neto"]),
+         fmt_money_pdf(f["iva"]), fmt_money_pdf(f["total_con_iva"])]
         for f in facturas
     ]
     _pdf_tabla(
-        elementos, estilos, f"Total facturado: {fmt_money_pdf(total_general)} — {len(facturas)} factura(s)",
-        ["Fecha", "N° factura", "Proveedor", "N° líneas", "Total"],
+        elementos, estilos, f"Total: {fmt_money_pdf(total_general)} — {len(facturas)} documento(s)",
+        ["Fecha", "N°", "Proveedor", "RUT", "Neto", "IVA", "Total"],
         filas,
     )
 

@@ -384,6 +384,61 @@ TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 
 # ---------------------------------------------------------------------------
+# Proveedor de WhatsApp: Twilio o la Cloud API de Meta
+# ---------------------------------------------------------------------------
+# Los dos caminos conviven y se eligen con WHATSAPP_PROVEEDOR. **El defecto
+# es 'twilio'**: mientras no se defina la variable no cambia nada, y volver
+# atrás es cambiarla en Railway -- se lee en cada request, no al importar, así
+# que no hace falta redesplegar.
+#
+# Por qué se agregó Meta: Twilio bloquea la descarga de media en cuentas trial
+# (error 20003) y cobra comisión de plataforma sobre las tarifas de Meta.
+# Contra Meta directo, las conversaciones de SERVICIO no se cobran desde el
+# 1-nov-2024 (no hay cuota mensual: simplemente son gratis), y desde el
+# 1-jul-2025 solo se cobran las plantillas de marketing, utilidad y
+# autenticación.
+#
+# Lo único que cambia entre proveedores es el TRANSPORTE. El agente que
+# interpreta, la resolución de OT por talca_id, el registro de mecánicos, las
+# acciones y el push hacia Talca no se enteran de cuál está activo.
+#
+# **Límite conocido: la ventana de 24 horas** (Meta solo deja responder dentro de las
+# 24 h siguientes al último mensaje del usuario; iniciar una conversación exige plantillas aprobadas).
+WHATSAPP_PROVEEDOR_DEFECTO = "twilio"
+
+
+def whatsapp_proveedor():
+    """El proveedor activo, leído en cada llamada. Un valor desconocido cae al
+    defecto en vez de romper: quedarse sin webhook por un typo en una variable
+    de entorno sería peor que seguir con Twilio."""
+    valor = (os.environ.get("WHATSAPP_PROVEEDOR") or "").strip().lower()
+    return valor if valor in ("twilio", "meta") else WHATSAPP_PROVEEDOR_DEFECTO
+
+
+# -- Credenciales de la Cloud API de Meta -----------------------------------
+# De dónde sale cada una (App Dashboard de Meta for Developers):
+#
+#   META_WA_ACCESS_TOKEN    WhatsApp > API Setup da uno TEMPORAL (24 h), útil
+#                           para probar. Para producción hay que generar uno
+#                           permanente en Business Settings > System Users.
+#   META_WA_PHONE_NUMBER_ID WhatsApp > API Setup, campo "Phone number ID".
+#                           **No es el número de teléfono**, es un id numérico.
+#   META_WA_APP_SECRET      Settings > Basic > App Secret. Firma los webhooks.
+#   META_WA_VERIFY_TOKEN    La inventa uno. Tiene que quedar IDÉNTICA acá y en
+#                           la configuración del webhook del App Dashboard, o
+#                           la verificación inicial falla.
+#   META_WA_API_VERSION     Opcional. Existe para que subir de versión sea
+#                           cambiar una variable y no tocar código.
+META_WA_ACCESS_TOKEN = os.environ.get("META_WA_ACCESS_TOKEN", "")
+META_WA_PHONE_NUMBER_ID = os.environ.get("META_WA_PHONE_NUMBER_ID", "")
+META_WA_APP_SECRET = os.environ.get("META_WA_APP_SECRET", "")
+META_WA_VERIFY_TOKEN = os.environ.get("META_WA_VERIFY_TOKEN", "")
+# v25.0 es la versión vigente al implementar esto (verificada contra la
+# documentación de Meta, agosto 2026).
+META_WA_API_VERSION = os.environ.get("META_WA_API_VERSION", "v25.0")
+META_WA_GRAPH = "https://graph.facebook.com"
+
+# ---------------------------------------------------------------------------
 # Transcripción de notas de voz de WhatsApp: la API de Claude no acepta
 # audio como entrada (solo texto/imágenes), así que las notas de voz se
 # transcriben primero con la API de OpenAI (Whisper) y el TEXTO resultante
@@ -1605,6 +1660,20 @@ def init_db():
     if "tipo" not in columnas_agente_mecanicos:
         db.execute("ALTER TABLE agente_mecanicos ADD COLUMN tipo TEXT NOT NULL DEFAULT 'completo'")
         db.commit()
+
+    # Teléfonos de agente_mecanicos sin '+': _normalizar_telefono se queda solo
+    # con los dígitos porque la Cloud API de Meta manda el número sin '+'. Las
+    # filas guardadas antes con '+' se dejan en la misma forma o dejarían de
+    # encontrarse. telefono es UNIQUE: si el mismo número ya existe sin '+'
+    # (registrado dos veces), esa fila NO se toca -- un UPDATE a ciegas chocaría
+    # contra la llave y la app no arrancaría. Queda duplicada a la vista en la
+    # administración de mecánicos para que alguien la borre.
+    db.execute(
+        "UPDATE agente_mecanicos SET telefono = REPLACE(telefono, '+', '')"
+        " WHERE telefono LIKE '%+%'"
+        " AND REPLACE(telefono, '+', '') NOT IN (SELECT telefono FROM agente_mecanicos)"
+    )
+    db.commit()
 
     db.execute(
         """
@@ -7596,16 +7665,25 @@ def cambiar_condicion_pago_factura(factura_id):
 
 
 def _normalizar_telefono(valor):
-    """Deja un teléfono en un formato comparable sin importar cómo lo haya
-    mandado Twilio ('whatsapp:+56912345678') o cómo lo haya tipeado la
-    persona al registrar un mecánico ('+56 9 1234 5678', '56912345678',
-    etc.): se queda solo con dígitos y un '+' inicial opcional."""
+    """Deja un teléfono en un formato comparable sin importar de dónde venga:
+    Twilio lo manda como 'whatsapp:+56912345678', **Meta lo manda SIN el más**
+    ('56912345678'), y la persona que registra al mecánico lo escribe como se
+    le ocurra ('+56 9 1234 5678', '56912345678').
+
+    **Se queda con los dígitos y NADA más — el '+' también se descarta.**
+
+    Antes se conservaba el '+' cuando venía, y eso hacía que un mecánico
+    registrado como '+56946596850' no calzara con el '56946596850' que manda
+    la Cloud API de Meta: el agente respondía "este número no está registrado"
+    y parecía un problema del agente cuando era del formato. Con Twilio no se
+    notaba porque él siempre manda el '+'.
+
+    Los teléfonos ya guardados se normalizan por migración (ver init_db,
+    agente_mecanicos), así que las dos puntas quedan en la misma forma."""
     valor = (valor or "").strip()
     if valor.lower().startswith("whatsapp:"):
         valor = valor[len("whatsapp:"):]
-    con_signo = valor.startswith("+")
-    solo_digitos = re.sub(r"\D", "", valor)
-    return ("+" if con_signo else "") + solo_digitos
+    return re.sub(r"\D", "", valor)
 
 
 def _normalizar_patente(valor):
@@ -8902,17 +8980,273 @@ def _agente_procesar_mensaje(db, telefono_crudo, texto_mensaje, origen="texto", 
     )
 
 
+# ---------------------------------------------------------------------------
+# Adaptadores de WhatsApp: lo único que cambia entre Twilio y Meta es el
+# transporte (firma, lectura del mensaje, descarga de media y entrega).
+# ---------------------------------------------------------------------------
+
+def _wsp_media_tipo(mime):
+    if (mime or "").startswith("image/"):
+        return "imagen"
+    if (mime or "").startswith("audio/"):
+        return "audio"
+    return "otro" if mime else ""
+
+
+# -- Twilio -----------------------------------------------------------------
+# Todo esto es el código que ya funcionaba, movido detrás de la interfaz. No
+# cambió su comportamiento: con WHATSAPP_PROVEEDOR sin definir (o en 'twilio')
+# el webhook se comporta exactamente como antes.
+
+def _twilio_extraer_mensaje(req):
+    num_media = int(req.form.get("NumMedia", "0") or "0")
+    media = None
+    mime = ""
+    if num_media > 0:
+        mime = req.form.get("MediaContentType0", "")
+        url = req.form.get("MediaUrl0", "")
+        if url:
+            media = {"url": url, "mime": mime}
+    return {
+        "telefono": req.form.get("From", ""),
+        "texto": req.form.get("Body", ""),
+        "media": media,
+        "media_tipo": _wsp_media_tipo(mime),
+    }
+
+
+def _twilio_descargar_media(ref):
+    """Basic Auth con el par SID/token. Distinto de Meta, que usa Bearer y
+    necesita dos pasos."""
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        raise RuntimeError(
+            "el servidor todavía no tiene configuradas las credenciales de Twilio "
+            "(TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) para poder descargarla"
+        )
+    try:
+        resp = requests.get(ref["url"], auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=60)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(str(exc)) from exc
+    return resp.content, ref["mime"]
+
+
+def _twilio_entregar(telefono, texto):
+    """En Twilio la respuesta HTTP ES la entrega: el TwiML que se devuelve es
+    lo que el mecánico recibe por WhatsApp. Por eso `telefono` no se usa."""
+    cuerpo = (
+        "<?xml version='1.0' encoding='UTF-8'?>"
+        f"<Response><Message>{html.escape(texto)}</Message></Response>"
+    )
+    return cuerpo, 200, {"Content-Type": "text/xml; charset=utf-8"}
+
+
+# -- Meta (Cloud API) --------------------------------------------------------
+
+def _meta_validar_firma(req):
+    """HMAC-SHA256 del App Secret sobre el CUERPO CRUDO, comparado contra
+    X-Hub-Signature-256 (que viene con prefijo 'sha256=').
+
+    Nada que ver con el esquema de Twilio, que firma la URL más los
+    parámetros. Acá la URL no participa, así que ProxyFix no influye.
+
+    El cuerpo se toma con get_data(cache=True) **antes** de cualquier parseo:
+    Flask lo cachea, así que get_json() más adelante sigue funcionando."""
+    cabecera = req.headers.get("X-Hub-Signature-256", "")
+    cuerpo = req.get_data(cache=True)
+    if not cabecera.startswith("sha256="):
+        logger.warning(
+            "Webhook de WhatsApp (Meta) rechazado: falta X-Hub-Signature-256 "
+            "o viene sin el prefijo 'sha256=' (recibido=%r, bytes=%d)",
+            cabecera[:20], len(cuerpo),
+        )
+        return False
+    esperada = hmac.new(
+        META_WA_APP_SECRET.encode("utf-8"), cuerpo, hashlib.sha256
+    ).hexdigest()
+    if hmac.compare_digest(esperada, cabecera[len("sha256="):]):
+        return True
+    logger.warning(
+        "Webhook de WhatsApp (Meta) rechazado: la firma no coincide.\n"
+        "  bytes del cuerpo   : %d\n"
+        "  firma recibida     : %s…\n"
+        "  firma calculada    : %s…\n"
+        "  Se firma el CUERPO CRUDO con META_WA_APP_SECRET (no la URL, no el "
+        "access token). Si el largo de arriba es 0, algo consumió el body antes.",
+        len(cuerpo), cabecera[7:19], esperada[:12],
+    )
+    return False
+
+
+def _meta_extraer_mensaje(req):
+    """Navega entry[0].changes[0].value.messages[0].
+
+    Devuelve None —o sea "ignorar, responder 200"— para todo lo que no sea un
+    mensaje de un usuario: los eventos de estado de entrega traen `statuses`
+    en vez de `messages`, y Meta va a seguir agregando tipos. Cada nivel se
+    lee defensivamente: un payload con otra forma no puede reventar el
+    webhook."""
+    datos = req.get_json(silent=True) or {}
+    try:
+        valor = datos["entry"][0]["changes"][0]["value"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    mensajes = valor.get("messages")
+    if not mensajes:
+        return None                      # statuses, o un evento sin mensajes
+    msg = mensajes[0]
+
+    tipo = msg.get("type", "")
+    texto = ""
+    media = None
+    mime = ""
+    if tipo == "text":
+        texto = (msg.get("text") or {}).get("body", "")
+    elif tipo in ("image", "audio", "video", "document", "voice"):
+        bloque = msg.get(tipo) or {}
+        mime = bloque.get("mime_type", "")
+        if bloque.get("id"):
+            media = {"id": bloque["id"], "mime": mime}
+        # Una imagen puede venir con pie de foto; se usa como el texto.
+        texto = bloque.get("caption", "") or ""
+
+    return {
+        # Meta manda el número SIN '+' ('56946596850'). _normalizar_telefono
+        # se queda solo con los dígitos, así que calza igual que el de Twilio.
+        "telefono": msg.get("from", ""),
+        "texto": texto,
+        "media": media,
+        "media_tipo": _wsp_media_tipo(mime),
+    }
+
+
+def _meta_descargar_media(ref):
+    """Dos pasos, como exige la Cloud API:
+
+      1. GET /{version}/{media-id}  -> devuelve `url` y `mime_type`
+      2. GET esa url                -> los bytes
+
+    **Las dos llamadas necesitan el Bearer**; sin él la segunda falla, que es
+    la diferencia más fácil de pasar por alto respecto del Basic Auth de
+    Twilio. Y la url del paso 1 **vence a los 5 minutos**, por eso se pide y
+    se usa en el mismo request en vez de guardarla."""
+    if not META_WA_ACCESS_TOKEN:
+        raise RuntimeError(
+            "el servidor todavía no tiene configurado META_WA_ACCESS_TOKEN para "
+            "poder descargarla"
+        )
+    cabeceras = {"Authorization": f"Bearer {META_WA_ACCESS_TOKEN}"}
+    try:
+        meta_resp = requests.get(
+            f"{META_WA_GRAPH}/{META_WA_API_VERSION}/{ref['id']}",
+            headers=cabeceras, timeout=30,
+        )
+        meta_resp.raise_for_status()
+        datos = meta_resp.json()
+        url = datos.get("url")
+        if not url:
+            raise RuntimeError(f"la Graph API no devolvió url para el media {ref['id']}")
+        binario = requests.get(url, headers=cabeceras, timeout=60)
+        binario.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(str(exc)) from exc
+    return binario.content, datos.get("mime_type") or ref.get("mime") or ""
+
+
+def _meta_entregar(telefono, texto):
+    """En Meta la respuesta al webhook NO llega al usuario: hay que devolver
+    200 de inmediato y mandar el mensaje por separado a la Graph API.
+
+    El envío es **best-effort**: si falla, se loguea y se devuelve 200 igual.
+    Un no-200 haría que Meta reintente el webhook en loop, que es peor que
+    perder una respuesta -- el trabajo pedido por el mecánico ya se aplicó
+    antes de llegar acá."""
+    if not META_WA_ACCESS_TOKEN or not META_WA_PHONE_NUMBER_ID:
+        logger.error(
+            "No se pudo responder por WhatsApp: faltan META_WA_ACCESS_TOKEN o "
+            "META_WA_PHONE_NUMBER_ID. El mensaje SÍ se procesó."
+        )
+        return "", 200
+    try:
+        resp = requests.post(
+            f"{META_WA_GRAPH}/{META_WA_API_VERSION}/{META_WA_PHONE_NUMBER_ID}/messages",
+            headers={
+                "Authorization": f"Bearer {META_WA_ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": _normalizar_telefono(telefono),
+                "type": "text",
+                "text": {"preview_url": False, "body": texto},
+            },
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            logger.error(
+                "La Graph API rechazó la respuesta a %s: HTTP %s %s",
+                _normalizar_telefono(telefono), resp.status_code, (resp.text or "")[:300],
+            )
+    except requests.RequestException as exc:
+        logger.error("No se pudo entregar la respuesta por la Graph API: %s", exc)
+    return "", 200
+
+
+WHATSAPP_ADAPTADORES = {
+    # 'secreto' es lo que permite verificar que el request viene de la
+    # plataforma. SIN él el webhook NO procesa nada (responde 503): sin firma
+    # cualquiera podría mandar un POST haciéndose pasar por un mecánico
+    # registrado y el agente actuaría sobre eso (hallazgo #15 del informe de
+    # revisión). La versión anterior aceptaba el tráfico sin validar cuando
+    # faltaba el secreto; eso NO se trajo de vuelta.
+    "twilio": {
+        "secreto": lambda: TWILIO_AUTH_TOKEN,
+        "falta_secreto": "TWILIO_AUTH_TOKEN",
+        "validar_firma": lambda req: _validar_firma_twilio(req),
+        "extraer_mensaje": _twilio_extraer_mensaje,
+        "descargar_media": _twilio_descargar_media,
+        "entregar": _twilio_entregar,
+    },
+    "meta": {
+        "secreto": lambda: META_WA_APP_SECRET,
+        "falta_secreto": "META_WA_APP_SECRET",
+        "validar_firma": _meta_validar_firma,
+        "extraer_mensaje": _meta_extraer_mensaje,
+        "descargar_media": _meta_descargar_media,
+        "entregar": _meta_entregar,
+    },
+}
+
+
 def _validar_firma_twilio(req):
     """Valida que un request al webhook realmente venga de Twilio, según
     su algoritmo documentado: HMAC-SHA1 del AUTH_TOKEN sobre la URL
     completa + cada parámetro del POST (ordenado alfabéticamente),
     codificado en base64, comparado contra el header X-Twilio-Signature.
-    Solo se llama si TWILIO_AUTH_TOKEN está configurado (ver más arriba);
-    no se ha podido probar contra tráfico real de Twilio en este entorno
-    de desarrollo (no hay cuenta conectada), así que conviene revisarla
-    con cuidado apenas se conecte una cuenta real."""
+    Solo se llama si TWILIO_AUTH_TOKEN está configurado (ver más arriba).
+
+    **`req.url` tiene que ser la URL que vio Twilio, no la que ve Flask.**
+    Detrás del proxy de Railway, Flask recibe la petición como `http://` y
+    con el host interno; Twilio firmó la `https://` pública. Si los dos
+    strings difieren, el HMAC no coincide nunca y el webhook rechaza TODO el
+    tráfico legítimo con 403.
+
+    Lo que lo hace funcionar es el `ProxyFix` que se aplica sobre
+    `app.wsgi_app` (ver más arriba, cerca del manejador de errores): lee
+    `X-Forwarded-Proto` y `X-Forwarded-Host` y reconstruye `request.url` con
+    el esquema y host originales. **No es opcional para este endpoint**: si
+    alguien lo saca, esta función deja de validar nada correcto.
+
+    `TestFirmaTwilio` cubre justamente eso, con una firma calculada a mano
+    sobre la URL https y mandada en una petición http con los headers del
+    proxy."""
     firma_recibida = req.headers.get("X-Twilio-Signature", "")
     if not firma_recibida:
+        logger.warning(
+            "Webhook de WhatsApp rechazado: no vino el header X-Twilio-Signature "
+            "(url=%s, origen=%s)", req.url, req.remote_addr,
+        )
         return False
     base = req.url
     for clave in sorted(req.form.keys()):
@@ -8920,7 +9254,34 @@ def _validar_firma_twilio(req):
     firma_calculada = base64.b64encode(
         hmac.new(TWILIO_AUTH_TOKEN.encode("utf-8"), base.encode("utf-8"), hashlib.sha1).digest()
     ).decode("utf-8")
-    return hmac.compare_digest(firma_calculada, firma_recibida)
+    if hmac.compare_digest(firma_calculada, firma_recibida):
+        return True
+
+    # Sin esto el fallo es invisible: la respuesta dice "no se pudo verificar"
+    # y en el log no queda POR QUÉ. La URL es el dato que importa —si aparece
+    # http:// o un host interno, el problema es el proxy, no la credencial— y
+    # por eso se registra junto con los headers que la determinan.
+    #
+    # Se loguean prefijos de las firmas, no completas: no son secretas, pero
+    # tampoco hay motivo para dejarlas enteras en un log. El AUTH_TOKEN nunca
+    # se registra.
+    logger.warning(
+        "Webhook de WhatsApp rechazado: la firma no coincide.\n"
+        "  URL usada para el HMAC : %s\n"
+        "  X-Forwarded-Proto      : %s\n"
+        "  X-Forwarded-Host       : %s\n"
+        "  parámetros firmados    : %s\n"
+        "  firma recibida         : %s…\n"
+        "  firma calculada        : %s…\n"
+        "  Si la URL de arriba no es la https pública que Twilio tiene "
+        "configurada, el problema es el proxy (ver ProxyFix), no el token.",
+        req.url,
+        req.headers.get("X-Forwarded-Proto", "(ausente)"),
+        req.headers.get("X-Forwarded-Host", "(ausente)"),
+        sorted(req.form.keys()),
+        firma_recibida[:12], firma_calculada[:12],
+    )
+    return False
 
 
 # Perfiles válidos para un mecánico registrado en el Agente de WhatsApp:
@@ -9325,109 +9686,129 @@ def listar_mensajes_agente():
     return jsonify([dict(r) for r in filas])
 
 
-@app.route("/webhook/whatsapp", methods=["POST"])
+@app.route("/webhook/whatsapp", methods=["GET", "POST"])
 def webhook_whatsapp():
-    """Punto de entrada para mensajes REALES de WhatsApp, pensado para el
-    formato que manda Twilio (form-encoded, con 'From' y 'Body') — Twilio
-    es la forma más simple de conectar WhatsApp Business sin pasar por la
-    verificación directa de Meta. Como acá no hay ninguna cuenta real
-    conectada todavía, este endpoint no se ha podido probar con tráfico
-    real, solo con /api/agente/simular-mensaje (misma función por debajo)
-    y con tests automatizados. Nunca debería devolver un error 500:
-    cualquier excepción se atrapa acá mismo y se responde con un TwiML de
-    error genérico, para que WhatsApp no quede reintentando en loop.
+    """Punto de entrada para mensajes REALES de WhatsApp.
 
-    Es una ruta pública (ver RUTAS_PUBLICAS) porque Twilio no manda ninguna
-    sesión de este sistema — la única verificación posible es la firma de
-    Twilio (ver _validar_firma_twilio), y por eso TWILIO_AUTH_TOKEN es
-    obligatorio para que este endpoint acepte tráfico: sin token no hay
-    forma de comprobar que un mensaje realmente vino de Twilio, y antes
-    esta ruta igual procesaba cualquier request tal cual si el token no
-    estaba configurado -- cualquiera podía mandar un POST acá haciéndose
-    pasar por cualquier número de teléfono (incluido el de un mecánico
-    registrado) y el agente actuaba sobre eso (mover el estado de una OT,
-    etc.) sin ninguna verificación de origen. Se confirmó que
-    TWILIO_AUTH_TOKEN SÍ está configurado en producción hoy (este riesgo no
-    se llegó a explotar), pero se cierra la puerta para cuando el token
-    falte por cualquier motivo (hallazgo #15 del informe de revisión). Para
-    probar el flujo del agente SIN una cuenta de Twilio real, sigue
-    disponible /api/agente/simular-mensaje (protegido por sesión normal, no
-    por esto)."""
-    def _twiml(texto, status=200):
-        cuerpo = f"<?xml version='1.0' encoding='UTF-8'?><Response><Message>{html.escape(texto)}</Message></Response>"
-        return cuerpo, status, {"Content-Type": "text/xml; charset=utf-8"}
+    **Es agnóstico del proveedor.** Twilio y la Cloud API de Meta conviven
+    detrás de WHATSAPP_ADAPTADORES; acá solo se orquesta el flujo. Lo que
+    cambia entre uno y otro es el transporte: el agente que interpreta, la
+    resolución de OT por talca_id, el registro de mecánicos, las acciones y el
+    push hacia Talca no se enteran de cuál está activo.
 
+    Ruta pública (ver RUTAS_PUBLICAS): ninguno de los dos manda una sesión de
+    este sistema, así que la única verificación posible es la firma -- y por
+    eso sin el secreto del proveedor activo no se procesa nada (503).
+
+    **Nunca devuelve 500.** Cualquier excepción se atrapa y se responde 200
+    con un mensaje de disculpa: un no-200 hace que la plataforma reintente en
+    loop, y con Meta eso además duplicaría acciones ya aplicadas.
+
+    El GET solo existe para Meta: es la verificación inicial del webhook."""
+    proveedor = whatsapp_proveedor()
+    adaptador = WHATSAPP_ADAPTADORES[proveedor]
+
+    # -- Verificación inicial del webhook (solo Meta) ------------------------
+    # Meta llama una vez con hub.mode=subscribe y espera que se le devuelva
+    # hub.challenge tal cual, si hub.verify_token coincide con el configurado.
+    if request.method == "GET":
+        if proveedor != "meta":
+            return "", 405
+        if (request.args.get("hub.mode") == "subscribe"
+                and META_WA_VERIFY_TOKEN
+                and request.args.get("hub.verify_token") == META_WA_VERIFY_TOKEN):
+            logger.info("Webhook de WhatsApp (Meta): verificación superada.")
+            return request.args.get("hub.challenge", ""), 200
+        logger.warning(
+            "Webhook de WhatsApp (Meta): verificación RECHAZADA "
+            "(mode=%r, token coincide=%s, META_WA_VERIFY_TOKEN definida=%s)",
+            request.args.get("hub.mode"),
+            request.args.get("hub.verify_token") == META_WA_VERIFY_TOKEN,
+            bool(META_WA_VERIFY_TOKEN),
+        )
+        return "", 403
+
+    def _error(texto):
+        """Un fallo del que hay que avisarle al mecánico. Siempre 200: ver el
+        docstring."""
+        try:
+            return adaptador["entregar"](telefono_crudo, texto)
+        except Exception:
+            logger.exception("No se pudo entregar el mensaje de error")
+            return "", 200
+
+    telefono_crudo = ""
     try:
-        if not TWILIO_AUTH_TOKEN:
-            return _twiml("El agente de WhatsApp todavía no está configurado del todo (falta TWILIO_AUTH_TOKEN) -- este mensaje no se procesó.", 503)
-        if not _validar_firma_twilio(request):
-            return _twiml("No se pudo verificar el origen del mensaje.", 403)
+        if not adaptador["secreto"]():
+            logger.error(
+                "Webhook de WhatsApp (%s) sin %s: el mensaje NO se procesó.",
+                proveedor, adaptador["falta_secreto"],
+            )
+            if proveedor == "twilio":
+                cuerpo, _, cabeceras = _twilio_entregar(
+                    "", f"El agente de WhatsApp todavía no está configurado del todo (falta "
+                        f"{adaptador['falta_secreto']}) -- este mensaje no se procesó.")
+                return cuerpo, 503, cabeceras
+            return "", 503
+        if not adaptador["validar_firma"](request):
+            # 403 sin cuerpo: si la firma no coincide, no es quien dice ser y
+            # no hay a quién responderle.
+            return "", 403
 
-        telefono = request.form.get("From", "")
-        texto = request.form.get("Body", "")
+        mensaje = adaptador["extraer_mensaje"](request)
+        if mensaje is None:
+            # No es un mensaje de un usuario (con Meta: eventos de estado de
+            # entrega). Se acusa recibo y listo.
+            return "", 200
+
+        telefono_crudo = mensaje["telefono"]
+        texto = mensaje["texto"]
         db = get_db()
 
-        # Adjuntos: Twilio manda NumMedia > 0 + MediaUrl0/MediaContentType0
-        # apuntando al archivo. Se distingue por tipo: una foto se manda a
-        # clasificar por IA (ver _llamar_claude_vision_clasificar_foto_
-        # whatsapp dentro de _agente_procesar_mensaje) — puede ser una
-        # factura de compra o la foto de un vehículo (en ese caso, el
-        # 'Body' que haya venido junto a la foto se usa como pie de foto
-        # con la acción a realizar, ej. "listo para probar"). Un audio se
-        # transcribe como si fuera el texto del mensaje (nota de voz). Solo
-        # se mira el primer adjunto.
-        num_media = int(request.form.get("NumMedia", "0") or "0")
+        # Adjuntos. Una foto se manda a clasificar por IA (puede ser una
+        # factura de compra o la foto de un vehículo, en cuyo caso el texto
+        # que venga con ella se usa como pie de foto con la acción a
+        # realizar). Un audio se transcribe y se trata como el texto del
+        # mensaje. Solo se mira el primer adjunto.
         origen = "texto"
         imagen_bytes = None
         imagen_mime = None
-        if num_media > 0:
-            media_url = request.form.get("MediaUrl0", "")
-            content_type = request.form.get("MediaContentType0", "")
-            if content_type.startswith("image/") and media_url:
-                if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-                    return _twiml(
-                        "Recibí una foto, pero el servidor todavía no tiene configuradas las credenciales de "
-                        "Twilio (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) para poder descargarla."
-                    )
+        if mensaje["media"]:
+            if mensaje["media_tipo"] == "imagen":
                 try:
-                    media_resp = requests.get(
-                        media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=60
-                    )
-                    media_resp.raise_for_status()
-                    imagen_bytes = media_resp.content
-                    imagen_mime = content_type
+                    imagen_bytes, imagen_mime = adaptador["descargar_media"](mensaje["media"])
                     origen = "foto_factura"
-                except requests.RequestException as e:
-                    return _twiml(f"No pude descargar tu foto: {e}")
+                except RuntimeError as exc:
+                    return _error(f"No pude descargar tu foto: {exc}")
             elif not texto.strip():
-                if content_type.startswith("audio/") and media_url:
-                    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-                        return _twiml(
-                            "Recibí una nota de voz, pero el servidor todavía no tiene configuradas las "
-                            "credenciales de Twilio (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN) para poder "
-                            "descargarla. Escribe el mensaje en texto mientras tanto."
-                        )
+                if mensaje["media_tipo"] == "audio":
                     try:
-                        media_resp = requests.get(
-                            media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN), timeout=60
-                        )
-                        media_resp.raise_for_status()
-                        texto = _transcribir_audio_whatsapp(media_resp.content, content_type)
+                        audio, mime_audio = adaptador["descargar_media"](mensaje["media"])
+                        texto = _transcribir_audio_whatsapp(audio, mime_audio)
                         origen = "voz"
-                    except requests.RequestException as e:
-                        return _twiml(f"No pude descargar tu nota de voz: {e}")
-                    except RuntimeError as e:
-                        return _twiml(str(e))
+                    except RuntimeError as exc:
+                        return _error(f"No pude procesar tu nota de voz: {exc}")
                 else:
-                    return _twiml("Recibí un adjunto que no pude procesar (solo entiendo texto, fotos de facturas o notas de voz).")
+                    return _error(
+                        "Recibí un adjunto que no pude procesar (solo entiendo texto, "
+                        "fotos de facturas o notas de voz)."
+                    )
 
         resultado = _agente_procesar_mensaje(
-            db, telefono, texto, origen=origen, imagen_bytes=imagen_bytes, imagen_mime=imagen_mime
+            db, telefono_crudo, texto, origen=origen,
+            imagen_bytes=imagen_bytes, imagen_mime=imagen_mime,
         )
-        return _twiml(resultado.get("respuesta_texto") or "No pude procesar tu mensaje.")
+        return adaptador["entregar"](
+            telefono_crudo, resultado.get("respuesta_texto") or "No pude procesar tu mensaje."
+        )
     except Exception:
-        logging.exception("Error en /webhook/whatsapp")
-        return _twiml("Hubo un error interno procesando tu mensaje. Avisa en el taller.")
+        logger.exception("Error en /webhook/whatsapp (proveedor=%s)", proveedor)
+        return _error("Hubo un error interno procesando tu mensaje. Avisa en el taller.")
+
+
+# ---------------------------------------------------------------------------
+# API: Resumen (base para el futuro Dashboard)
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

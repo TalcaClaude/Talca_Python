@@ -1038,5 +1038,565 @@ class TestDetectorTextoConfirmaListoParaEntrega(unittest.TestCase):
                 self.assertTrue(taller_app._agente_texto_confirma_listo_para_entrega(frase))
 
 
+# ---------------------------------------------------------------------------
+# Firma de Twilio detrás del proxy de Railway
+# ---------------------------------------------------------------------------
+
+import base64   # noqa: E402
+import hashlib  # noqa: E402
+import hmac     # noqa: E402
+
+
+def _firma_twilio(url, params, token):
+    """La firma tal como la calcula Twilio: HMAC-SHA1 del AUTH_TOKEN sobre la
+    URL completa + cada par clave/valor del POST en orden alfabético, en
+    base64. Se calcula acá a mano, sin usar el código de la app, para que el
+    test compruebe el algoritmo y no se limite a repetirlo."""
+    base = url + "".join(k + params[k] for k in sorted(params))
+    return base64.b64encode(
+        hmac.new(token.encode("utf-8"), base.encode("utf-8"), hashlib.sha1).digest()
+    ).decode("utf-8")
+
+
+class TestFirmaTwilio(unittest.TestCase):
+    """El webhook está detrás del proxy de Railway: Flask recibe la petición
+    como http:// y con el host interno, pero Twilio firmó la https:// pública.
+
+    Si `request.url` no reflejara la URL original, el HMAC no coincidiría
+    nunca y el webhook rechazaría TODO el tráfico legítimo con 403 — sin más
+    síntoma que "no se pudo verificar". Lo que lo evita es el ProxyFix sobre
+    app.wsgi_app; estos tests son los que fallan si alguien lo saca."""
+
+    TOKEN = "token_de_prueba_para_firmar_12345"
+    HOST = "taller.up.railway.app"
+    RUTA = "/webhook/whatsapp"
+    PARAMS = {
+        "From": "whatsapp:+56911111111",
+        "Body": "OT 8112 lista para entregar",
+        "MessageSid": "SM0123456789abcdef",
+    }
+
+    @property
+    def url_publica(self):
+        return f"https://{self.HOST}{self.RUTA}"
+
+    def setUp(self):
+        taller_app.app.config["TESTING"] = True
+        self.client = taller_app.app.test_client()
+        self._token_original = taller_app.TWILIO_AUTH_TOKEN
+        taller_app.TWILIO_AUTH_TOKEN = self.TOKEN
+        self.addCleanup(
+            lambda: setattr(taller_app, "TWILIO_AUTH_TOKEN", self._token_original))
+
+    def _headers_proxy(self, extra=None):
+        h = {"X-Forwarded-Proto": "https", "X-Forwarded-Host": self.HOST}
+        h.update(extra or {})
+        return h
+
+    # -- el caso que importa --------------------------------------------------
+
+    def test_firma_de_la_url_https_valida_en_una_peticion_http(self):
+        """El escenario real de Railway: Twilio firma la https pública y la
+        petición llega a Flask como http."""
+        firma = _firma_twilio(self.url_publica, self.PARAMS, self.TOKEN)
+        resp = self.client.post(
+            self.RUTA, data=self.PARAMS,
+            headers=self._headers_proxy({"X-Twilio-Signature": firma}),
+        )
+        self.assertEqual(200, resp.status_code, resp.get_data(as_text=True))
+
+    def test_sin_los_headers_del_proxy_la_misma_firma_se_rechaza(self):
+        """Es el bug que ProxyFix evita: sin los headers, `request.url` es
+        http://localhost y el HMAC se calcula sobre otra cosa. Este test
+        documenta el modo de falla; si algún día pasa, ProxyFix se fue."""
+        firma = _firma_twilio(self.url_publica, self.PARAMS, self.TOKEN)
+        resp = self.client.post(
+            self.RUTA, data=self.PARAMS, headers={"X-Twilio-Signature": firma})
+        self.assertEqual(403, resp.status_code)
+
+    # -- los rechazos que tienen que seguir funcionando -----------------------
+
+    def test_sin_firma_da_403(self):
+        resp = self.client.post(self.RUTA, data=self.PARAMS,
+                                headers=self._headers_proxy())
+        self.assertEqual(403, resp.status_code)
+
+    def test_firma_invalida_da_403(self):
+        resp = self.client.post(
+            self.RUTA, data=self.PARAMS,
+            headers=self._headers_proxy({"X-Twilio-Signature": "firma-inventada"}),
+        )
+        self.assertEqual(403, resp.status_code)
+
+    def test_un_parametro_alterado_invalida_la_firma(self):
+        """La firma cubre los parámetros, no solo la URL: si alguien cambia el
+        cuerpo, deja de validar."""
+        firma = _firma_twilio(self.url_publica, self.PARAMS, self.TOKEN)
+        alterado = dict(self.PARAMS, Body="OT 9999 lista para entregar")
+        resp = self.client.post(
+            self.RUTA, data=alterado,
+            headers=self._headers_proxy({"X-Twilio-Signature": firma}),
+        )
+        self.assertEqual(403, resp.status_code)
+
+    def test_una_firma_de_otro_host_no_sirve(self):
+        """Evita que una firma capturada de otro despliegue valga acá."""
+        firma = _firma_twilio(
+            f"https://otro-host.example{self.RUTA}", self.PARAMS, self.TOKEN)
+        resp = self.client.post(
+            self.RUTA, data=self.PARAMS,
+            headers=self._headers_proxy({"X-Twilio-Signature": firma}),
+        )
+        self.assertEqual(403, resp.status_code)
+
+    # -- el log, que es lo que hacía invisible el problema --------------------
+
+    def test_el_rechazo_registra_la_url_usada_para_el_hmac(self):
+        firma = _firma_twilio(self.url_publica, self.PARAMS, self.TOKEN)
+        with self.assertLogs(taller_app.logger, level="WARNING") as capturado:
+            self.client.post(self.RUTA, data=self.PARAMS,
+                             headers={"X-Twilio-Signature": firma})
+        salida = "\n".join(capturado.output)
+        self.assertIn("http://localhost/webhook/whatsapp", salida,
+                      "el log tiene que decir con qué URL se calculó el HMAC")
+        self.assertIn("(ausente)", salida,
+                      "y que los headers del proxy no vinieron")
+
+    def test_el_log_no_filtra_el_auth_token(self):
+        with self.assertLogs(taller_app.logger, level="WARNING") as capturado:
+            self.client.post(self.RUTA, data=self.PARAMS,
+                             headers=self._headers_proxy(
+                                 {"X-Twilio-Signature": "firma-inventada"}))
+        self.assertNotIn(self.TOKEN, "\n".join(capturado.output))
+
+
+class TestScriptSimuladorWhatsapp(unittest.TestCase):
+    """`scripts/simular_whatsapp.py` es la única forma de ejercitar el webhook
+    de punta a punta mientras Twilio bloquee el sandbox en cuentas trial.
+
+    Si el script y el webhook se separan —otro conjunto de parámetros, otro
+    orden al concatenar— el script empezaría a dar 403 y se leería como "la
+    firma está mal en el servidor", que es el diagnóstico equivocado."""
+
+    TOKEN = "token_de_prueba_para_el_script_98765"
+    HOST = "taller.up.railway.app"
+
+    def setUp(self):
+        import importlib.util
+        raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ruta = os.path.join(raiz, "scripts", "simular_whatsapp.py")
+        spec = importlib.util.spec_from_file_location("simular_whatsapp", ruta)
+        self.sim = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.sim)
+
+        taller_app.app.config["TESTING"] = True
+        self.client = taller_app.app.test_client()
+        self._token_original = taller_app.TWILIO_AUTH_TOKEN
+        taller_app.TWILIO_AUTH_TOKEN = self.TOKEN
+        self.addCleanup(
+            lambda: setattr(taller_app, "TWILIO_AUTH_TOKEN", self._token_original))
+
+    def test_la_firma_del_script_la_acepta_el_webhook(self):
+        url = f"https://{self.HOST}/webhook/whatsapp"
+        params = self.sim.construir_params("OT 8112 lista", "+56911111111", "+14155238886")
+        firma = self.sim.firmar(url, params, self.TOKEN)
+        resp = self.client.post("/webhook/whatsapp", data=params, headers={
+            "X-Twilio-Signature": firma,
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": self.HOST,
+        })
+        self.assertEqual(200, resp.status_code, resp.get_data(as_text=True))
+
+    def test_manda_los_campos_que_manda_twilio(self):
+        params = self.sim.construir_params("hola", "+56911111111", "+14155238886")
+        self.assertEqual(
+            {"Body", "From", "To", "MessageSid", "AccountSid", "NumMedia"},
+            set(params),
+        )
+        self.assertTrue(params["From"].startswith("whatsapp:"))
+        self.assertTrue(params["MessageSid"].startswith("SM"))
+        self.assertTrue(params["AccountSid"].startswith("AC"))
+
+    def test_el_script_no_contiene_ni_imprime_credenciales(self):
+        raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(raiz, "scripts", "simular_whatsapp.py"),
+                  encoding="utf-8") as fh:
+            fuente = fh.read()
+        # El token solo se lee del entorno y se usa para firmar; nunca se
+        # imprime. Lo único que se muestra de él es su largo.
+        self.assertNotIn("print(token", fuente)
+        self.assertNotIn('print(f"  Token        : {token', fuente)
+        self.assertIn("no se imprime", fuente)
+
+
+# ---------------------------------------------------------------------------
+# Cloud API de Meta: el segundo proveedor de WhatsApp
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+
+class BaseMeta(unittest.TestCase):
+    """Los dos proveedores conviven detrás de WHATSAPP_PROVEEDOR. Estos tests
+    corren con 'meta' activo; TestFirmaTwilio cubre que el camino de Twilio
+    siga intacto."""
+
+    APP_SECRET = "app_secret_de_prueba_para_firmar_98765"
+    VERIFY = "verify_token_de_prueba"
+    TELEFONO = "+56946596850"
+
+    def setUp(self):
+        taller_app.app.config["TESTING"] = True
+        self.client = taller_app.app.test_client()
+        self._previo = {
+            "proveedor": os.environ.get("WHATSAPP_PROVEEDOR"),
+            "secret": taller_app.META_WA_APP_SECRET,
+            "verify": taller_app.META_WA_VERIFY_TOKEN,
+        }
+        os.environ["WHATSAPP_PROVEEDOR"] = "meta"
+        taller_app.META_WA_APP_SECRET = self.APP_SECRET
+        taller_app.META_WA_VERIFY_TOKEN = self.VERIFY
+        self.addCleanup(self._restaurar)
+
+        self.db = taller_app._conectar_db()
+        self.db.execute("DELETE FROM agente_mecanicos")
+        self.db.commit()
+
+    def _restaurar(self):
+        if self._previo["proveedor"] is None:
+            os.environ.pop("WHATSAPP_PROVEEDOR", None)
+        else:
+            os.environ["WHATSAPP_PROVEEDOR"] = self._previo["proveedor"]
+        taller_app.META_WA_APP_SECRET = self._previo["secret"]
+        taller_app.META_WA_VERIFY_TOKEN = self._previo["verify"]
+        self.db.execute("DELETE FROM agente_mecanicos")
+        self.db.commit()
+        self.db.close()
+
+    def payload_texto(self, cuerpo, de=None):
+        de = (de or self.TELEFONO).lstrip("+")
+        return {
+            "object": "whatsapp_business_account",
+            "entry": [{"id": "1", "changes": [{"field": "messages", "value": {
+                "messaging_product": "whatsapp",
+                "metadata": {"display_phone_number": "1", "phone_number_id": "2"},
+                "contacts": [{"profile": {"name": "X"}, "wa_id": de}],
+                "messages": [{"from": de, "id": "wamid.AAA", "timestamp": "1749416383",
+                              "type": "text", "text": {"body": cuerpo}}],
+            }}]}],
+        }
+
+    def enviar(self, payload, firmar=True):
+        cuerpo = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if firmar:
+            headers["X-Hub-Signature-256"] = "sha256=" + hmac.new(
+                self.APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+        return self.client.post("/webhook/whatsapp", data=cuerpo, headers=headers)
+
+
+class TestMetaFirma(BaseMeta):
+
+    def test_firma_valida_sobre_el_cuerpo_crudo(self):
+        self.assertEqual(200, self.enviar(self.payload_texto("hola")).status_code)
+
+    def test_sin_firma_da_403(self):
+        self.assertEqual(403, self.enviar(self.payload_texto("hola"), firmar=False).status_code)
+
+    def test_cuerpo_alterado_invalida_la_firma(self):
+        """La firma cubre los bytes exactos: si alguien cambia el payload
+        despues de firmarlo, deja de validar."""
+        cuerpo = _json.dumps(self.payload_texto("hola")).encode()
+        firma = "sha256=" + hmac.new(self.APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+        otro = _json.dumps(self.payload_texto("otra cosa")).encode()
+        resp = self.client.post("/webhook/whatsapp", data=otro, headers={
+            "Content-Type": "application/json", "X-Hub-Signature-256": firma})
+        self.assertEqual(403, resp.status_code)
+
+    def test_firma_sin_el_prefijo_sha256_se_rechaza(self):
+        cuerpo = _json.dumps(self.payload_texto("hola")).encode()
+        crudo = hmac.new(self.APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+        resp = self.client.post("/webhook/whatsapp", data=cuerpo, headers={
+            "Content-Type": "application/json", "X-Hub-Signature-256": crudo})
+        self.assertEqual(403, resp.status_code)
+
+    def test_el_log_del_rechazo_no_filtra_el_app_secret(self):
+        with self.assertLogs(taller_app.logger, level="WARNING") as cap:
+            self.client.post("/webhook/whatsapp",
+                             data=_json.dumps(self.payload_texto("hola")).encode(),
+                             headers={"Content-Type": "application/json",
+                                      "X-Hub-Signature-256": "sha256=malo"})
+        salida = "\n".join(cap.output)
+        self.assertNotIn(self.APP_SECRET, salida)
+        self.assertIn("bytes del cuerpo", salida,
+                      "el log debe decir cuanto cuerpo se firmo: si es 0, algo lo consumio antes")
+
+
+class TestMetaVerificacion(BaseMeta):
+    """El GET inicial que hace Meta al configurar el webhook."""
+
+    def test_devuelve_el_challenge_con_el_token_correcto(self):
+        resp = self.client.get("/webhook/whatsapp", query_string={
+            "hub.mode": "subscribe", "hub.verify_token": self.VERIFY,
+            "hub.challenge": "424242"})
+        self.assertEqual(200, resp.status_code)
+        self.assertEqual("424242", resp.get_data(as_text=True))
+
+    def test_token_incorrecto_da_403(self):
+        resp = self.client.get("/webhook/whatsapp", query_string={
+            "hub.mode": "subscribe", "hub.verify_token": "otro", "hub.challenge": "1"})
+        self.assertEqual(403, resp.status_code)
+
+    def test_con_twilio_activo_el_get_no_existe(self):
+        os.environ["WHATSAPP_PROVEEDOR"] = "twilio"
+        resp = self.client.get("/webhook/whatsapp", query_string={
+            "hub.mode": "subscribe", "hub.verify_token": self.VERIFY, "hub.challenge": "1"})
+        self.assertEqual(405, resp.status_code)
+
+
+class TestMetaPayloadsQueNoSonMensajes(BaseMeta):
+    """Meta manda muchos eventos que no son mensajes. Ignorarlos con 200 sin
+    romperse es lo que evita que reintente en loop."""
+
+    def test_evento_de_estado_se_ignora_con_200(self):
+        payload = {"object": "whatsapp_business_account", "entry": [{"id": "1", "changes": [
+            {"field": "messages", "value": {
+                "messaging_product": "whatsapp",
+                "metadata": {"display_phone_number": "1", "phone_number_id": "2"},
+                "statuses": [{"id": "wamid.X", "status": "delivered",
+                              "timestamp": "1750263773", "recipient_id": "56946596850"}],
+            }}]}]}
+        self.assertEqual(200, self.enviar(payload).status_code)
+
+    def test_payload_truncado_no_revienta(self):
+        for payload in ({}, {"object": "x"}, {"entry": []}, {"entry": [{"changes": []}]},
+                        {"entry": [{"changes": [{"value": {}}]}]}):
+            with self.subTest(payload=payload):
+                self.assertEqual(200, self.enviar(payload).status_code)
+
+    def test_un_tipo_de_mensaje_desconocido_no_revienta(self):
+        payload = self.payload_texto("x")
+        msg = payload["entry"][0]["changes"][0]["value"]["messages"][0]
+        msg["type"] = "sticker"
+        msg.pop("text")
+        self.assertEqual(200, self.enviar(payload).status_code)
+
+
+class TestMetaTelefonoSinMas(BaseMeta):
+    """El caso que rompia el reconocimiento del mecanico.
+
+    Meta manda el numero SIN '+' ('56946596850'); el taller lo registra CON
+    '+'. Antes _normalizar_telefono conservaba el signo, asi que no calzaban y
+    el agente respondia "este numero no esta registrado" -- un error que
+    parece del agente cuando es del formato."""
+
+    def registrar(self, telefono_guardado):
+        self.db.execute(
+            "INSERT INTO agente_mecanicos (nombre, telefono, activo, tipo, creado_en)"
+            " VALUES ('FRANCO', ?, 1, 'completo', '2026-01-01T00:00:00')",
+            (telefono_guardado,))
+        self.db.commit()
+
+    def buscar(self, crudo_entrante):
+        norm = taller_app._normalizar_telefono(crudo_entrante)
+        return self.db.execute(
+            "SELECT id FROM agente_mecanicos WHERE telefono = ? AND activo = 1",
+            (norm,)).fetchone()
+
+    def test_registrado_con_mas_lo_encuentra_lo_que_manda_meta(self):
+        # Asi lo deja el endpoint de registro, que normaliza al guardar.
+        self.registrar(taller_app._normalizar_telefono("+56946596850"))
+        self.assertIsNotNone(self.buscar("56946596850"),
+                             "Meta manda sin '+' y tiene que calzar igual")
+
+    def test_las_tres_formas_de_escribirlo_dan_lo_mismo(self):
+        formas = ["+56946596850", "56946596850", "whatsapp:+56946596850",
+                  "+56 9 4659 6850"]
+        normalizadas = {taller_app._normalizar_telefono(f) for f in formas}
+        self.assertEqual({"56946596850"}, normalizadas)
+
+    def test_una_fila_vieja_con_mas_la_arregla_la_migracion(self):
+        """Las filas guardadas antes del cambio tienen el '+' adentro. Sin la
+        migracion de init_db dejarian de encontrarse."""
+        self.registrar("+56946596850")
+        self.assertIsNone(self.buscar("56946596850"), "antes de migrar no calza")
+        self.db.execute(
+            "UPDATE agente_mecanicos SET telefono = REPLACE(telefono, '+', '')"
+            " WHERE telefono LIKE '%+%'")
+        self.db.commit()
+        self.assertIsNotNone(self.buscar("56946596850"), "despues de migrar si")
+
+
+class TestMetaEntregaAsincrona(BaseMeta):
+    """Con Meta la respuesta NO viaja en el HTTP del webhook: se manda aparte
+    por la Graph API."""
+
+    def test_el_webhook_responde_200_con_cuerpo_vacio(self):
+        resp = self.enviar(self.payload_texto("hola"))
+        self.assertEqual(200, resp.status_code)
+        self.assertEqual("", resp.get_data(as_text=True))
+
+    def test_manda_la_respuesta_a_la_graph_api(self):
+        llamadas = []
+
+        class RespFalsa:
+            status_code = 200
+            text = "{}"
+
+        def fake_post(url, **kw):
+            llamadas.append((url, kw))
+            return RespFalsa()
+
+        taller_app.META_WA_ACCESS_TOKEN = "token-de-prueba"
+        taller_app.META_WA_PHONE_NUMBER_ID = "123456"
+        original = taller_app.requests.post
+        taller_app.requests.post = fake_post
+        try:
+            self.enviar(self.payload_texto("hola"))
+        finally:
+            taller_app.requests.post = original
+            taller_app.META_WA_ACCESS_TOKEN = ""
+            taller_app.META_WA_PHONE_NUMBER_ID = ""
+
+        self.assertEqual(1, len(llamadas), "debia salir una llamada a la Graph API")
+        url, kw = llamadas[0]
+        self.assertIn("/123456/messages", url)
+        self.assertIn(taller_app.META_WA_API_VERSION, url)
+        cuerpo = kw["json"]
+        self.assertEqual("whatsapp", cuerpo["messaging_product"])
+        self.assertEqual("text", cuerpo["type"])
+        self.assertEqual("56946596850", cuerpo["to"], "el destinatario sin '+'")
+        self.assertTrue(cuerpo["text"]["body"])
+        self.assertIn("Bearer token-de-prueba", kw["headers"]["Authorization"])
+
+    def test_si_falla_la_graph_api_igual_responde_200(self):
+        """Un no-200 haria que Meta reintente el webhook en loop, y el trabajo
+        pedido ya se aplico antes de intentar responder."""
+        def fake_post(url, **kw):
+            raise taller_app.requests.RequestException("sin red")
+
+        taller_app.META_WA_ACCESS_TOKEN = "token-de-prueba"
+        taller_app.META_WA_PHONE_NUMBER_ID = "123456"
+        original = taller_app.requests.post
+        taller_app.requests.post = fake_post
+        try:
+            resp = self.enviar(self.payload_texto("hola"))
+        finally:
+            taller_app.requests.post = original
+            taller_app.META_WA_ACCESS_TOKEN = ""
+            taller_app.META_WA_PHONE_NUMBER_ID = ""
+        self.assertEqual(200, resp.status_code)
+
+
+class TestConvivenciaProveedores(unittest.TestCase):
+    """El requisito central: poder volver a Twilio cambiando una variable."""
+
+    def test_el_defecto_es_twilio(self):
+        previo = os.environ.pop("WHATSAPP_PROVEEDOR", None)
+        try:
+            self.assertEqual("twilio", taller_app.whatsapp_proveedor())
+        finally:
+            if previo is not None:
+                os.environ["WHATSAPP_PROVEEDOR"] = previo
+
+    def test_un_valor_desconocido_cae_a_twilio(self):
+        """Quedarse sin webhook por un typo seria peor que seguir con Twilio."""
+        previo = os.environ.get("WHATSAPP_PROVEEDOR")
+        os.environ["WHATSAPP_PROVEEDOR"] = "metaa"
+        try:
+            self.assertEqual("twilio", taller_app.whatsapp_proveedor())
+        finally:
+            if previo is None:
+                os.environ.pop("WHATSAPP_PROVEEDOR", None)
+            else:
+                os.environ["WHATSAPP_PROVEEDOR"] = previo
+
+    def test_los_dos_adaptadores_tienen_las_mismas_funciones(self):
+        # Las cuatro del transporte más 'secreto' y 'falta_secreto': sin el
+        # secreto del proveedor activo el webhook no procesa nada (503).
+        esperadas = {"validar_firma", "extraer_mensaje", "descargar_media", "entregar",
+                     "secreto", "falta_secreto"}
+        for nombre, adaptador in taller_app.WHATSAPP_ADAPTADORES.items():
+            with self.subTest(proveedor=nombre):
+                self.assertEqual(esperadas, set(adaptador))
+
+    def test_el_codigo_de_twilio_sigue_estando(self):
+        """Requisito explicito: no borrar el camino de Twilio."""
+        for fn in ("_validar_firma_twilio", "_twilio_extraer_mensaje",
+                   "_twilio_descargar_media", "_twilio_entregar"):
+            self.assertTrue(hasattr(taller_app, fn), f"falta {fn}")
+
+
+# ---------------------------------------------------------------------------
+# Sin el secreto del proveedor activo, el webhook NO procesa nada (503).
+# La versión anterior aceptaba el tráfico sin validar la firma cuando faltaba
+# el secreto; eso no se trajo de vuelta (hallazgo #15).
+# ---------------------------------------------------------------------------
+
+class TestSinSecretoNoSeProcesa(BaseMeta):
+
+    def test_meta_sin_app_secret_da_503_y_no_llama_al_agente(self):
+        taller_app.META_WA_APP_SECRET = ""
+        with patch.object(taller_app, "_agente_procesar_mensaje") as agente:
+            resp = self.enviar(self.payload_texto("OT 8112 lista"), firmar=False)
+        self.assertEqual(503, resp.status_code)
+        agente.assert_not_called()
+
+    def test_meta_con_app_secret_y_sin_firma_da_403(self):
+        with patch.object(taller_app, "_agente_procesar_mensaje") as agente:
+            resp = self.enviar(self.payload_texto("OT 8112 lista"), firmar=False)
+        self.assertEqual(403, resp.status_code)
+        agente.assert_not_called()
+
+    def test_twilio_sin_auth_token_da_503_y_no_llama_al_agente(self):
+        os.environ["WHATSAPP_PROVEEDOR"] = "twilio"
+        previo = taller_app.TWILIO_AUTH_TOKEN
+        taller_app.TWILIO_AUTH_TOKEN = ""
+        self.addCleanup(lambda: setattr(taller_app, "TWILIO_AUTH_TOKEN", previo))
+        with patch.object(taller_app, "_agente_procesar_mensaje") as agente:
+            resp = self.client.post("/webhook/whatsapp", data={"From": "whatsapp:+56946596850", "Body": "hola"})
+        self.assertEqual(503, resp.status_code)
+        self.assertIn("TWILIO_AUTH_TOKEN", resp.get_data(as_text=True))
+        agente.assert_not_called()
+
+    def test_la_verificacion_get_no_existe_con_twilio(self):
+        os.environ["WHATSAPP_PROVEEDOR"] = "twilio"
+        resp = self.client.get("/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=x&hub.challenge=1")
+        self.assertEqual(405, resp.status_code)
+
+
+class TestMigracionTelefonosSinMas(unittest.TestCase):
+    """init_db deja los teléfonos de agente_mecanicos sin '+', pero telefono es
+    UNIQUE: si el mismo número ya está sin '+', esa fila no se toca. Un UPDATE
+    a ciegas chocaría contra la llave y la app no arrancaría."""
+
+    def setUp(self):
+        self.db = taller_app._conectar_db()
+        self.db.execute("DELETE FROM agente_mecanicos")
+        self.db.commit()
+        self.addCleanup(self._limpiar)
+
+    def _limpiar(self):
+        self.db.execute("DELETE FROM agente_mecanicos")
+        self.db.commit()
+        self.db.close()
+
+    def _insertar(self, nombre, telefono):
+        self.db.execute(
+            "INSERT INTO agente_mecanicos (nombre, telefono, activo, creado_en) VALUES (?, ?, 1, '2026-10-13T00:00:00')",
+            (nombre, telefono))
+        self.db.commit()
+
+    def _telefonos(self):
+        return sorted(r[0] for r in self.db.execute("SELECT telefono FROM agente_mecanicos"))
+
+    def test_quita_el_mas_y_no_se_cae_con_un_duplicado(self):
+        self._insertar("UNO", "+56911111111")
+        self._insertar("DOS", "+56922222222")
+        self._insertar("DOS OTRA VEZ", "56922222222")
+        taller_app.init_db()  # no debe lanzar IntegrityError
+        self.assertEqual(["+56922222222", "56911111111", "56922222222"], self._telefonos())
+
+
 if __name__ == "__main__":
     unittest.main()

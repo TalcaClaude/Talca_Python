@@ -2410,9 +2410,16 @@ class TestAgenteWhatsApp(unittest.TestCase):
         return {"acciones": list(acciones), "resumen": resumen}
 
     def test_normalizar_telefono_uniforma_formatos_distintos(self):
-        self.assertEqual(taller_app._normalizar_telefono("whatsapp:+569 1234 5678"), "+56912345678")
-        self.assertEqual(taller_app._normalizar_telefono("+56 9 1234 5678"), "+56912345678")
-        self.assertEqual(taller_app._normalizar_telefono("56912345678"), "56912345678")
+        """Todas las formas colapsan a solo digitos, **incluido el '+'**.
+
+        Antes se conservaba el signo cuando venia, y por eso un mecanico
+        registrado como '+56946596850' no calzaba con el '56946596850' que
+        manda la Cloud API de Meta (Twilio siempre manda el '+', asi que no
+        se notaba). Ver TestMetaTelefonoSinMas."""
+        for crudo in ("whatsapp:+569 1234 5678", "+56 9 1234 5678",
+                      "56912345678", "+56912345678", "whatsapp:56912345678"):
+            with self.subTest(crudo=crudo):
+                self.assertEqual("56912345678", taller_app._normalizar_telefono(crudo))
 
     def test_telefono_no_registrado_no_puede_mover_nada(self):
         cliente = self._crear_cliente()
@@ -2823,7 +2830,8 @@ class TestAgenteWhatsApp(unittest.TestCase):
             self._simular("+56999999999", "hola")
 
         mensajes = self.client.get("/api/agente/mensajes").get_json()
-        self.assertTrue(any(m["telefono"] == "+56999999999" for m in mensajes))
+        # El telefono se guarda normalizado: solo digitos, sin '+'.
+        self.assertTrue(any(m["telefono"] == "56999999999" for m in mensajes))
 
     def test_listar_ordenes_abiertas_excluye_entregadas_y_canceladas(self):
         cliente = self._crear_cliente("Matías Vega")

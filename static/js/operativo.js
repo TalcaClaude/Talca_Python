@@ -1620,6 +1620,16 @@ document.getElementById("btn-rep-ordenes-pdf").addEventListener("click", () => {
   window.location.href = `/api/operativo/reportes/ordenes/pdf?${rangoFechasParamsOperativo()}`;
 });
 
+document.getElementById("btn-rep-gastos-ot-excel").addEventListener("click", () => {
+  const params = new URLSearchParams();
+  params.set("estado", document.getElementById("rep-gastos-ot-estado").value);
+  const desde = document.getElementById("rep-gastos-ot-desde").value;
+  const hasta = document.getElementById("rep-gastos-ot-hasta").value;
+  if (desde) params.set("desde", desde);
+  if (hasta) params.set("hasta", hasta);
+  window.location.href = `/api/operativo/reportes/gastos-ot?${params.toString()}`;
+});
+
 // Preview con contadores: se muestra cuántas órdenes/garantías trae cada
 // reporte ANTES de descargarlo, igual que en Logística — se recalcula al
 // entrar a la pestaña y cada vez que cambia un rango de fecha.

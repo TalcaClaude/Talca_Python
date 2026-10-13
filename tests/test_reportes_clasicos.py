@@ -147,6 +147,60 @@ class TestReporteOT(unittest.TestCase):
         self.assertEqual(119000, r["ordenes"]["total_facturado"])
 
 
+class TestReporteGastosOT(unittest.TestCase):
+    """Reporte de gastos por OT (/api/operativo/reportes/gastos-ot): como
+    createXLS_sell_nuevo de Talca PHP, una fila por gasto de cada OT."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+        db = taller_app._conectar_db()
+        cli = db.execute("INSERT INTO clientes (nombre, creado_en) VALUES ('CLIENTE GASTOS', ?)", (TS,)).lastrowid
+        cls.ot = db.execute(
+            "INSERT INTO ordenes_trabajo (cliente_id, estado, fecha_recepcion, creado_en, actualizado_en, talca_id) "
+            "VALUES (?, 'recibido', '2025-03-10T09:00:00', ?, ?, 8300)", (cli, TS, TS)).lastrowid
+        items = [("repuesto", "DISCOS", 2, 15000, 0), ("mano_obra", "TORNERIA EXTERNA", 1, 10000, 1),
+                 ("mano_obra", "MO INTERNA", 1, 0, 0)]
+        for tipo, desc, cant, costo, iva in items:
+            db.execute("INSERT INTO orden_items (orden_id, tipo, descripcion, cantidad, costo_unitario, aplica_iva, "
+                       "creado_en) VALUES (?, ?, ?, ?, ?, ?, '2025-03-11T10:00:00')", (cls.ot, tipo, desc, cant, costo, iva))
+        gasto = db.execute("INSERT INTO caja_movimientos (tipo, medio_pago, fecha, monto, creado_en) "
+                           "VALUES ('gasto', 'efectivo_cajero', '2025-03-12T10:00:00', 8000, ?)", (TS,)).lastrowid
+        db.execute("INSERT INTO caja_gasto_detalles (gasto_id, numero_documento, monto, rubro_gav, descripcion, "
+                   "orden_id, creado_en) VALUES (?, 'B-77', 8000, 'gastos_por_ot', 'RETEN', ?, ?)", (gasto, cls.ot, TS))
+        db.commit()
+        db.close()
+
+    def _filas(self, **params):
+        resp = self.client.get("/api/operativo/reportes/gastos-ot", query_string=params)
+        if resp.status_code != 200:
+            self.fail(f"HTTP {resp.status_code}: {resp.data[:300]!r}")
+        filas = list(load_workbook(io.BytesIO(resp.data)).active.iter_rows(values_only=True))
+        i = next(k for k, f in enumerate(filas) if f and f[0] == "N° OT")
+        return [dict(zip(filas[i], f)) for f in filas[i + 1:] if f and f[0] not in (None, "")]
+
+    def test_una_fila_por_gasto_con_costo(self):
+        filas = self._filas(estado="abiertas", desde="2025-03-01", hasta="2025-03-31")
+        self.assertEqual(["Repuesto", "Mano de obra / externo", "Caja chica"], [f["Tipo de gasto"] for f in filas])
+        self.assertEqual([30000, 11900, 8000], [f["Costo"] for f in filas])  # la externa lleva IVA
+        self.assertTrue(all(str(f["N° OT"]) == "8300" for f in filas))
+
+    def test_la_mano_de_obra_interna_sin_costo_no_sale(self):
+        filas = self._filas(estado="abiertas", desde="2025-03-01", hasta="2025-03-31")
+        self.assertNotIn("MO INTERNA", [f["Descripción"] for f in filas])
+
+    def test_la_boleta_de_caja_chica_trae_su_documento_y_fecha(self):
+        caja = next(f for f in self._filas(estado="abiertas", desde="2025-03-01", hasta="2025-03-31")
+                    if f["Tipo de gasto"] == "Caja chica")
+        self.assertEqual("B-77", caja["Documento"])
+        self.assertEqual("2025-03-12", caja["F. gasto"])
+
+    def test_fuera_del_rango_no_trae_nada(self):
+        self.assertEqual([], self._filas(estado="abiertas", desde="2025-04-01", hasta="2025-04-30"))
+
+
 class TestReporteCobros(unittest.TestCase):
     """Reporte de cobros (/api/reportes/cobros): como createXLS_pay de Talca PHP,
     pagos de OT filtrados por fecha de pago, con el N° de OT de Talca."""

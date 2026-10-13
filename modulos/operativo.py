@@ -5537,6 +5537,83 @@ def reporte_ordenes_pdf():
     return _pdf_response(buffer, doc, elementos, f"reporte_ot{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.pdf")
 
 
+# ---------------------------------------------------------------------------
+# Reporte de gastos por OT: el mismo que createXLS_sell_nuevo de Talca PHP.
+# Una fila por gasto de cada OT del período (mismo criterio de estado y fechas
+# que el Reporte de OT): repuestos, mano de obra con costo (trabajos externos),
+# convertidores y boletas de caja chica cargadas a la OT ("Gastos por OT").
+# ---------------------------------------------------------------------------
+
+TIPO_GASTO_ITEM = {"repuesto": "Repuesto", "mano_obra": "Mano de obra / externo",
+                   "convertidor_torque": "Convertidor"}
+COLUMNAS_REPORTE_GASTOS_OT = [
+    ("numero", "N° OT"), ("estado", "Estado OT"), ("fecha_ot", "F. OT"), ("tipo", "Tipo de gasto"),
+    ("descripcion", "Descripción"), ("cantidad", "Cantidad"), ("costo_unitario", "Costo unitario"),
+    ("costo", "Costo"), ("documento", "Documento"), ("fecha_gasto", "F. gasto"),
+]
+
+
+def _filas_gastos_ot(ordenes, estado):
+    filas = []
+    for o in ordenes:
+        base = _fila_reporte_orden(o)
+        fecha_ot = base["cierre"] if estado == "cerradas" else base["creacion"]
+        for it in o["items"]:
+            if it["subtotal"] <= 0:
+                continue  # mano de obra interna sin costo: no es un gasto
+            filas.append({
+                "numero": base["numero"], "estado": base["estado"], "fecha_ot": fecha_ot,
+                "tipo": TIPO_GASTO_ITEM.get(it["tipo"], it["tipo"]),
+                "descripcion": " - ".join(filter(None, [it.get("descripcion"), it.get("detalle")])),
+                "cantidad": it["cantidad"], "costo_unitario": it["costo_unitario"], "costo": it["subtotal"],
+                "documento": "", "fecha_gasto": (it.get("creado_en") or "")[:10],
+            })
+        for b in o["costos_caja_chica"]:
+            filas.append({
+                "numero": base["numero"], "estado": base["estado"], "fecha_ot": fecha_ot,
+                "tipo": "Caja chica", "descripcion": b.get("descripcion") or "",
+                "cantidad": 1, "costo_unitario": b["monto"], "costo": b["monto"],
+                "documento": b.get("numero_documento") or "", "fecha_gasto": (b.get("fecha_retiro") or "")[:10],
+            })
+    return filas
+
+
+@bp.route("/api/operativo/reportes/gastos-ot", methods=["GET"])
+@requiere_rol("operativo")
+def reporte_gastos_ot():
+    desde, hasta = _rango_fechas()
+    estado = _estado_reporte_ordenes()
+    ordenes = _ordenes_para_reporte(desde, hasta, estado)
+    filas = _filas_gastos_ot(ordenes, estado)
+    total = round(sum(f["costo"] for f in filas), 2)
+
+    wb = _crear_libro_excel()
+    ws = wb.active
+    ws.title = "Gastos por OT"
+    _excel_resumen(ws, "Reporte de gastos por OT", [
+        ("Estado", ETIQUETA_ESTADO_REPORTE[estado]),
+        ("Rango", f"{desde or '(sin límite)'} a {hasta or '(sin límite)'}"),
+        ("Órdenes", len(ordenes)),
+        ("Gastos", len(filas)),
+        ("Total gastos", _pesos(total)),
+    ])
+    fila_encabezado = ws.max_row + 1
+    claves = [c for c, _ in COLUMNAS_REPORTE_GASTOS_OT]
+    ws.append([t for _, t in COLUMNAS_REPORTE_GASTOS_OT])
+    for f in filas:
+        ws.append([f[c] for c in claves])
+    ws.append([])
+    total_fila = [""] * len(claves)
+    total_fila[claves.index("costo_unitario")] = "TOTAL"
+    total_fila[claves.index("costo")] = total
+    ws.append(total_fila)
+    _estilo_encabezado(ws, fila=fila_encabezado)
+    _autoancho(ws)
+
+    sufijo = f"_{estado}" + (f"_{desde}_a_{hasta}" if (desde or hasta) else "")
+    return _excel_response(wb, f"reporte_gastos_ot{sufijo}_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+
 @bp.route("/api/operativo/reportes/garantias", methods=["GET"])
 @requiere_rol("operativo")
 def reporte_garantias():

@@ -476,6 +476,25 @@
     </div>
 
     <div class="dash-panel">
+      <h3 class="dash-titulo">Reporte de gastos por OT</h3>
+      <p class="bodega-intro">Cada gasto de las OT del período: repuestos, trabajos externos, convertidores y boletas de caja chica cargadas a la OT. Mismo criterio de estado y fechas que el Reporte de OT.</p>
+      <div class="reportes-rango">
+        <label>Estado
+          <select id="rep-gastos-ot-estado">
+            <option value="todas">Todas</option>
+            <option value="abiertas">Abiertas</option>
+            <option value="cerradas">Cerradas</option>
+          </select>
+        </label>
+        <label>Desde <input type="date" id="rep-gastos-ot-desde"></label>
+        <label>Hasta <input type="date" id="rep-gastos-ot-hasta"></label>
+      </div>
+      <div class="reportes-botones">
+        <button class="btn btn-secundario" id="btn-rep-gastos-ot-excel">Descargar Excel</button>
+      </div>
+    </div>
+
+    <div class="dash-panel">
       <h3 class="dash-titulo">Garantías</h3>
       <p class="bodega-intro">Detalle de garantías registradas, con resumen por responsable y por equipo — útil para detectar qué persona, modelo o proveedor genera más reclamos. Filtrable por rango de fecha de registro.</p>
       <div class="reportes-rango">

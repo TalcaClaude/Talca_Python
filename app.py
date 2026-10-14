@@ -12223,6 +12223,12 @@ app.register_blueprint(bp_convertidores)
 from modulos.facturacion import bp as bp_facturacion  # noqa: E402
 app.register_blueprint(bp_facturacion)
 
+# Carga inicial del inventario y la caja chica histórica desde Talca PHP (solo
+# admin, una vez: el ensayo en test y el día del corte) -- ver
+# modulos/carga_inicial.py.
+from modulos.carga_inicial import bp as bp_carga_inicial  # noqa: E402
+app.register_blueprint(bp_carga_inicial)
+
 # Sincronización con Talca.PHP -- ver modulos/sync_talca.py. No registra
 # blueprint. Lo que aporta acá son tres cosas: su migración, que init_db()
 # llama al final (ver init_sync_talca_db más arriba), el hilo de fondo que

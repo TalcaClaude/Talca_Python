@@ -3687,6 +3687,7 @@ def eliminar_orden(orden_id):
                 usuario=usuario_actual(), factura=None, categoria="Devolución",
                 proveedor_id=item["proveedor_id"], recalcular_costo_promedio=False,
             )
+        push_talca.encolar_anulacion_consumo(db, item["id"])
 
     db.execute("UPDATE garantias SET orden_origen_id = NULL WHERE orden_origen_id = ?", (orden_id,))
     # Estas tres tablas también referencian la OT sin cascada (a propósito:
@@ -3851,6 +3852,7 @@ def registrar_salida_directa_a_orden(db, orden_id, producto_id, cantidad, catego
         (orden_id, producto_id, producto["nombre"], cantidad, costo_unitario, movimiento_id, usuario, ts, detalle_item, proveedor_id),
     )
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
+    push_talca.encolar_consumo(db, cur.lastrowid)  # el repuesto viaja a la OT de Talca PHP
 
     nuevo_item = dict(db.execute("SELECT * FROM orden_items WHERE id = ?", (cur.lastrowid,)).fetchone())
     nuevo_item["subtotal"] = _item_subtotal(nuevo_item)
@@ -4036,6 +4038,7 @@ def agregar_item_orden(orden_id):
         (orden_id, tipo, producto_id, descripcion, cantidad, costo_unitario, movimiento_id, usuario, ts, detalle, aplica_iva, proveedor_id_salida, factura_id_salida),
     )
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (ts, orden_id))
+    push_talca.encolar_consumo(db, cur.lastrowid)  # el repuesto viaja a la OT de Talca PHP
     db.commit()
 
     nuevo_item = dict(db.execute("SELECT * FROM orden_items WHERE id = ?", (cur.lastrowid,)).fetchone())
@@ -4089,6 +4092,8 @@ def eliminar_item_orden(orden_id, item_id):
         # pero sí hay que liberar la unidad -- ver convertidores.py.
         convertidores.revertir_convertidor_al_quitar_item(db, item["convertidor_id"])
 
+    if item["tipo"] == "repuesto":
+        push_talca.encolar_anulacion_consumo(db, item_id)  # se desvincula de la OT de Talca PHP
     db.execute("DELETE FROM orden_items WHERE id = ?", (item_id,))
     db.execute("UPDATE ordenes_trabajo SET actualizado_en = ? WHERE id = ?", (now_iso(), orden_id))
     db.commit()

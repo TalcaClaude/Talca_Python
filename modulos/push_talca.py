@@ -329,6 +329,105 @@ def encolar_push(db, entidad, python_id, talca_id, operacion, campos,
 # Cliente HTTP para el push
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Consumos (fase 3 de la integración del inventario)
+#
+# Mientras convivan los dos sistemas, el inventario se mueve solo en Talca
+# Python, pero la OT de Talca PHP calcula su TOTAL COSTO y UTILIDAD sumando las
+# filas de `inventario` con esa ot_relacionada (Nota_model::getOti). Por eso
+# cada repuesto cargado a una OT acá viaja allá como filas de inventario (una
+# por unidad, como trabaja Talca PHP), y al quitarlo se desvinculan.
+#
+# La llave entre los dos lados es la `referencia` "TALCA PYTHON ITEM <id>"
+# (orden_items.id), que queda en inventario.obs. python_id de la cola es el
+# id del ítem. Solo repuestos: mano de obra externa y convertidores tienen
+# otras tablas en Talca PHP y quedan para después.
+# ---------------------------------------------------------------------------
+
+def referencia_consumo(item_id):
+    return f"TALCA PYTHON ITEM {item_id}"
+
+
+def encolar_consumo(db, item_id):
+    """Encola el envío a Talca de un repuesto recién cargado a una OT. Va dentro
+    de la transacción del endpoint. Si el ítem no es un repuesto con producto,
+    no hace nada."""
+    item = db.execute("SELECT * FROM orden_items WHERE id = ?", (item_id,)).fetchone()
+    if item is None or item["tipo"] != "repuesto" or not item["producto_id"]:
+        return
+    producto = db.execute("SELECT categoria, modelo, nombre FROM productos WHERE id = ?",
+                          (item["producto_id"],)).fetchone()
+    campos = {
+        "orden_id": item["orden_id"],
+        "cantidad": int(round(item["cantidad"])),
+        # Mismo mapeo que "Importar Excel": en Talca Python 'categoria' guarda
+        # el MODELO de Talca PHP y 'modelo' la DESCRIPCION.
+        "modelo": (producto["categoria"] if producto else "") or "",
+        "descripcion": ((producto["modelo"] if producto else "") or item["descripcion"] or "")[:250],
+        "costo_neto": int(round(item["costo_unitario"] or 0)),
+        "referencia": referencia_consumo(item_id),
+    }
+    encolar_push(db, "consumos", item_id, None, "crear", campos, "")
+
+
+def encolar_anulacion_consumo(db, item_id):
+    """Encola la desvinculación en Talca de un repuesto que se quitó de la OT.
+    Solo si ese ítem alguna vez se encoló para viajar (los anteriores a esta
+    función nunca llegaron a Talca)."""
+    hubo = db.execute(
+        "SELECT 1 FROM sync_talca_push_pendientes WHERE entidad = 'consumos' AND python_id = ? "
+        "AND operacion = 'crear' LIMIT 1", (item_id,)).fetchone()
+    if hubo:
+        encolar_push(db, "consumos", item_id, None, "anular",
+                     {"referencia": referencia_consumo(item_id)}, "")
+
+
+def _ejecutar_consumo(db, id_cola, entrada, campos, cliente_push):
+    """La rama de la cola para 'consumos'. Devuelve 'ok' o 'espera' (o lanza
+    PushTalcaError, que el llamador registra como fallo)."""
+    python_id = entrada["python_id"]
+    if entrada["operacion"] == "crear":
+        orden = db.execute("SELECT talca_id FROM ordenes_trabajo WHERE id = ?",
+                           (campos.get("orden_id"),)).fetchone()
+        if orden is None:
+            # La OT se borró antes de llegar a Talca: no hay nada que mandar.
+            _resolver_entrada(db, id_cola)
+            db.commit()
+            return "ok"
+        if orden["talca_id"] is None:
+            _registrar_espera(db, id_cola, "consumos", python_id, entrada["creado_en"],
+                              "la OT todavía no tiene número de Talca")
+            db.commit()
+            return "espera"
+        body = {k: v for k, v in campos.items() if k != "orden_id"}
+        body["ot"] = int(orden["talca_id"])
+        if entrada["idempotency_key"]:
+            body["idempotency_key"] = entrada["idempotency_key"]
+        resp = cliente_push.consumo("crear", body)
+        _resolver_entrada(db, id_cola)
+        db.commit()
+        _log.info("push consumos CREATE ok: item=%s OT Talca=%s filas=%s%s", python_id, body["ot"],
+                  resp.get("ids"), " (idempotente)" if resp.get("idempotente") else "")
+        return "ok"
+
+    # anular: espera a que el 'crear' del mismo ítem se haya resuelto; si no,
+    # podría desvincular antes de que existan las filas y ese costo quedaría
+    # para siempre en la OT de Talca PHP.
+    crear_pendiente = db.execute(
+        "SELECT 1 FROM sync_talca_push_pendientes WHERE entidad = 'consumos' AND python_id = ? "
+        "AND operacion = 'crear' AND resuelto_en = '' LIMIT 1", (python_id,)).fetchone()
+    if crear_pendiente:
+        _registrar_espera(db, id_cola, "consumos", python_id, entrada["creado_en"],
+                          "el repuesto todavía no llegó a Talca")
+        db.commit()
+        return "espera"
+    resp = cliente_push.consumo("anular", {"referencia": campos["referencia"]})
+    _resolver_entrada(db, id_cola)
+    db.commit()
+    _log.info("push consumos ANULAR ok: item=%s filas desvinculadas=%s", python_id, resp.get("desvinculadas"))
+    return "ok"
+
+
 class PushTalcaError(Exception):
     """Error al escribir hacia Talca. El mensaje está pensado para mostrarse
     en logs; nunca incluye la API key."""
@@ -367,6 +466,12 @@ class ClientePushTalca:
 
     def crear_vehiculo(self, campos, idem_key=""):
         return self.crear("vehiculos", campos, idem_key=idem_key)
+
+    def consumo(self, accion, body):
+        """POST /api/consumos (accion='crear') o /api/consumos/anular
+        (accion='anular'). Devuelve el JSON de Talca; lanza PushTalcaError si
+        no fue 2xx o no trae ok."""
+        raise NotImplementedError
 
     def actualizar_vehiculo(self, idd, campos, talca_updated_at_conocido):
         return self.actualizar("vehiculos", idd, campos, talca_updated_at_conocido)
@@ -467,6 +572,27 @@ class ClientePushTalcaHTTP(ClientePushTalca):
             raise PushTalcaError(
                 f"Talca respondió algo que no es JSON ({url}): {(resp.text or '')[:200]!r}"
             ) from exc
+
+    def consumo(self, accion, body):
+        self._verificar_config()
+        url = url_entidad(self.base_url, "consumos") + ("/anular" if accion == "anular" else "")
+        try:
+            resp = _requests.post(url, json=body, headers=self._cabeceras(), timeout=self.timeout)
+        except Exception as exc:
+            raise PushTalcaError(f"No se pudo conectar con Talca ({url}): {exc}") from exc
+        if resp.status_code not in (200, 201):
+            raise PushTalcaError(
+                f"Talca respondió HTTP {resp.status_code} en {url}: {(resp.text or '')[:200]!r}"
+            )
+        try:
+            datos = resp.json()
+        except ValueError as exc:
+            raise PushTalcaError(
+                f"Talca respondió algo que no es JSON ({url}): {(resp.text or '')[:200]!r}"
+            ) from exc
+        if not datos.get("ok"):
+            raise PushTalcaError(f"Respuesta inesperada de Talca en {url}: {datos!r}")
+        return datos
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +768,16 @@ def _ejecutar_push_entrada(id_cola, cliente_push=None):
         idem_key  = entrada["idempotency_key"] if "idempotency_key" in claves else ""
         requiere_dueno = entrada["requiere_dueno"] if "requiere_dueno" in claves else 0
         tabla = TABLA_LOCAL.get(entidad, entidad)
+
+        if entidad == "consumos":
+            try:
+                return _ejecutar_consumo(db, id_cola, entrada, campos, cliente_push)
+            except PushTalcaError as exc:
+                _registrar_fallo(db, id_cola, str(exc))
+                db.commit()
+                _log.warning("push consumos fallo (item=%s intento %s): %s",
+                             python_id, entrada["intentos"] + 1, exc)
+                return "error"
 
         # -- Espera: la identidad todavía no existe en Talca -----------------
         # Va ANTES de cualquier otra cosa: no tiene sentido gastar un intento

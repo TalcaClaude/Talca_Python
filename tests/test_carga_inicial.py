@@ -140,7 +140,7 @@ class TestCargaInicial(_Base):
         os.remove(os.path.join(os.path.dirname(_TMP_DB_PATH), r.get_json()["respaldo"]))
         r = self._post(plan_de_prueba())
         self.assertEqual(409, r.status_code)
-        self.assertIn("ya tiene productos", r.get_json()["error"])
+        self.assertIn("ya tiene 3 productos", r.get_json()["error"])
 
     def test_totales_que_no_cuadran_no_escriben_nada(self):
         r = self._post(plan_de_prueba(unidades_inventario=7), accion="aplicar", confirmar="CARGAR")
@@ -171,6 +171,61 @@ class TestCargaInicial(_Base):
         r = self._post(plan_de_prueba(), cliente=otro)
         self.assertIn(r.status_code, (302, 401, 403))
         self.assertEqual(0, self._contar("productos"))
+
+    def _catalogo_de_prueba(self):
+        """Como lo deja "Importar Excel": productos con una entrada de ajuste."""
+        db = core._conectar_db()
+        for i in range(3):
+            pid = db.execute(
+                "INSERT INTO productos (codigo_interno, nombre, descripcion, categoria, marca, modelo, ubicacion, "
+                "stock_disponible, stock_reservado, stock_merma, stock_minimo, costo_compra, creado_en, actualizado_en) "
+                "VALUES ('', ?, '', 'X', '', ?, '334', 0, 0, 0, 0, 0, ?, ?)",
+                (f"PRUEBA {i}", f"PRUEBA {i}", core.now_iso(), core.now_iso())).lastrowid
+            core._aplicar_entrada_stock(db, db.execute("SELECT * FROM productos WHERE id = ?", (pid,)).fetchone(),
+                                        2, 100, motivo="Carga inicial por importación de Excel", usuario="t",
+                                        categoria="Ajuste de inventario")
+        db.commit()
+        db.close()
+
+    def test_sin_marcar_reemplazar_un_catalogo_de_prueba_se_rechaza(self):
+        self._catalogo_de_prueba()
+        r = self._post(plan_de_prueba())
+        self.assertEqual(409, r.status_code)
+        self.assertIn("Reemplazar el catálogo existente", r.get_json()["error"])
+
+    def test_reemplazar_un_catalogo_de_prueba(self):
+        self._catalogo_de_prueba()
+        datos_ensayo = self._post_reemplazar(plan_de_prueba())
+        self.assertEqual(200, datos_ensayo.status_code, datos_ensayo.get_data(as_text=True))
+        self.assertEqual(3, datos_ensayo.get_json()["productos_de_prueba_reemplazados"])
+        self.assertEqual(3, self._contar("productos"))  # el ensayo no borró nada
+        r = self._post_reemplazar(plan_de_prueba(), aplicar=True)
+        self.assertEqual(200, r.status_code, r.get_data(as_text=True))
+        os.remove(os.path.join(os.path.dirname(_TMP_DB_PATH), r.get_json()["respaldo"]))
+        db = core._conectar_db()
+        nombres = {x[0] for x in db.execute("SELECT modelo FROM productos")}
+        db.close()
+        self.assertEqual({"DISCOS", "ACEITE 1L", "RETEN 40X62"}, nombres)
+
+    def test_un_catalogo_usado_no_se_reemplaza(self):
+        self._catalogo_de_prueba()
+        db = core._conectar_db()
+        pid = db.execute("SELECT id FROM productos LIMIT 1").fetchone()[0]
+        core._aplicar_salida_stock(db, db.execute("SELECT * FROM productos WHERE id = ?", (pid,)).fetchone(),
+                                   1, motivo="CONSUMO", usuario="t", categoria="Consumo interno")
+        db.commit()
+        db.close()
+        r = self._post_reemplazar(plan_de_prueba(), aplicar=True)
+        self.assertEqual(409, r.status_code)
+        self.assertIn("se usó", r.get_json()["error"])
+        self.assertEqual(3, self._contar("productos"))
+
+    def _post_reemplazar(self, plan, aplicar=False):
+        datos = {"accion": "aplicar" if aplicar else "ensayar", "reemplazar": "1",
+                 "archivo": (io.BytesIO(json.dumps(plan).encode("utf-8")), "plan.json")}
+        if aplicar:
+            datos["confirmar_texto"] = "CARGAR"
+        return self.client.post("/api/admin/carga-inicial", data=datos, content_type="multipart/form-data")
 
     def test_la_pantalla_responde(self):
         r = self.client.get("/admin/carga-inicial")

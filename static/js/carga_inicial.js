@@ -20,6 +20,7 @@ async function enviarPlan(accion) {
   const formData = new FormData();
   formData.append("archivo", input.files[0]);
   formData.append("accion", accion);
+  if (document.getElementById("ci-reemplazar").checked) formData.append("reemplazar", "1");
   if (accion === "aplicar") formData.append("confirmar_texto", document.getElementById("ci-confirmar").value);
   const res = await fetch("/api/admin/carga-inicial", { method: "POST", body: formData });
   const data = await res.json().catch(() => ({}));
@@ -42,7 +43,8 @@ function mostrarResultado(data) {
     </tr>`).join("");
   document.getElementById("ci-detalle").textContent =
     `Proveedores creados: ${data.proveedores_creados} (reusados: ${data.proveedores_reusados}). ` +
-    `Productos nuevos por caja chica: ${data.productos_nuevos_por_caja}.`;
+    `Productos nuevos por caja chica: ${data.productos_nuevos_por_caja}.` +
+    (data.productos_de_prueba_reemplazados ? ` Productos de prueba reemplazados: ${data.productos_de_prueba_reemplazados}.` : "");
   document.getElementById("ci-aplicar").style.display = data.aplicado ? "none" : "";
 }
 

@@ -45,6 +45,38 @@ class CargaInicialError(Exception):
     """Algo impide la carga; el mensaje se muestra tal cual en la pantalla."""
 
 
+# Lo que cuenta como USO REAL de un producto: si cualquiera de estas consultas
+# encuentra algo, el catálogo existente no se puede reemplazar. Un catálogo que
+# solo tiene entradas de carga/ajuste (lo que deja "Importar Excel", o crear un
+# producto con stock inicial) es de prueba y sí se puede reemplazar.
+USOS_DE_PRODUCTOS = [
+    ("repuestos cargados a OT", "SELECT COUNT(*) FROM orden_items WHERE producto_id IS NOT NULL"),
+    ("repuestos en garantías", "SELECT COUNT(*) FROM garantia_items WHERE producto_id IS NOT NULL"),
+    ("repuestos en convertidores", "SELECT COUNT(*) FROM convertidor_items WHERE producto_id IS NOT NULL"),
+    ("reservas", "SELECT COUNT(*) FROM reservas"),
+    ("líneas de facturas de compra", "SELECT COUNT(*) FROM factura_lineas"),
+    ("caja chica con producto", "SELECT COUNT(*) FROM caja_movimientos WHERE producto_id IS NOT NULL"),
+    ("boletas de caja chica con producto", "SELECT COUNT(*) FROM caja_gasto_detalles WHERE producto_id IS NOT NULL"),
+    ("mermas", "SELECT COUNT(*) FROM merma_proveedores"),
+    ("movimientos que no son carga ni ajuste de entrada",
+     "SELECT COUNT(*) FROM movimientos WHERE NOT (tipo = 'entrada' AND categoria = 'Ajuste de inventario')"),
+]
+
+
+def _vaciar_catalogo_de_prueba(db):
+    """Borra el catálogo existente si nunca se usó (ver USOS_DE_PRODUCTOS). Va
+    DENTRO de la transacción de la carga: en un ensayo se deshace con todo lo
+    demás. Devuelve cuántos productos había."""
+    usos = [(nombre, n) for nombre, sql in USOS_DE_PRODUCTOS for n in [db.execute(sql).fetchone()[0]] if n]
+    if usos:
+        detalle = "; ".join(f"{nombre}: {n}" for nombre, n in usos)
+        raise CargaInicialError(f"El catálogo existente se usó ({detalle}): no se reemplaza. Hay que revisarlo a mano.")
+    cantidad = db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+    for tabla in ("movimientos", "stock_minimo_calculo", "stock_proveedores", "productos"):
+        db.execute(f"DELETE FROM {tabla}")
+    return cantidad
+
+
 def validar_plan(plan):
     if not isinstance(plan, dict):
         raise CargaInicialError("El archivo no es un plan de carga (se esperaba un objeto JSON).")
@@ -61,16 +93,23 @@ def validar_plan(plan):
                 raise CargaInicialError(f"Línea de caja chica sin clasificar: {ln.get('descripcion')!r}.")
 
 
-def ejecutar_carga(plan, usuario, aplicar=False, db_path=None):
+def ejecutar_carga(plan, usuario, aplicar=False, db_path=None, reemplazar=False):
     """Aplica el plan. Devuelve un dict con los chequeos y, si aplicar, la ruta
     del respaldo previo. Lanza CargaInicialError (con la base intacta) si algo
-    impide la carga o si algún total no cuadra."""
+    impide la carga o si algún total no cuadra.
+
+    reemplazar=True permite partir de un catálogo con productos de PRUEBA (por
+    ejemplo, un Excel subido con "Importar Excel" para probar): se borran dentro
+    de la misma transacción, solo si nunca se usaron."""
     validar_plan(plan)
     db_path = db_path or core.DB_PATH
     db = _conectar_db(db_path)
     try:
-        if db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]:
-            raise CargaInicialError("La base ya tiene productos: la carga inicial es sobre un catálogo vacío.")
+        productos_previos = db.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+        if productos_previos and not reemplazar:
+            raise CargaInicialError(
+                f"La base ya tiene {productos_previos} productos: la carga inicial es sobre un catálogo vacío. "
+                "Si son de prueba y nunca se usaron, marca \"Reemplazar el catálogo existente\".")
         if db.execute("SELECT COUNT(*) FROM caja_movimientos WHERE descripcion LIKE ?", (MARCA_CAJA + "%",)).fetchone()[0]:
             raise CargaInicialError("La carga histórica de caja chica ya existe en esta base.")
 
@@ -85,6 +124,8 @@ def ejecutar_carga(plan, usuario, aplicar=False, db_path=None):
         ts = now_iso()
         _iniciar_transaccion_stock(db)
         try:
+            reemplazados = _vaciar_catalogo_de_prueba(db) if productos_previos else 0
+
             # 1. proveedores
             prov_id = {}
             creados_prov = 0
@@ -208,6 +249,7 @@ def ejecutar_carga(plan, usuario, aplicar=False, db_path=None):
                 "proveedores_creados": creados_prov,
                 "proveedores_reusados": len(prov_id) - creados_prov,
                 "productos_nuevos_por_caja": nuevos_por_caja,
+                "productos_de_prueba_reemplazados": reemplazados,
                 "aplicado": False,
                 "respaldo": None,
             }
@@ -269,7 +311,8 @@ def api_carga_inicial():
     except (UnicodeDecodeError, ValueError):
         return jsonify({"error": "El archivo no es un JSON válido."}), 400
     try:
-        resultado = ejecutar_carga(plan, usuario_actual() or "CARGA TALCA PHP", aplicar=(accion == "aplicar"))
+        resultado = ejecutar_carga(plan, usuario_actual() or "CARGA TALCA PHP", aplicar=(accion == "aplicar"),
+                                   reemplazar=(request.form.get("reemplazar") == "1"))
     except CargaInicialError as exc:
         return jsonify({"error": str(exc)}), 409
     resultado["origen_plan"] = plan.get("origen", {})

@@ -585,6 +585,65 @@ function renderItemsConvertidor(convertidor) {
   });
 }
 
+// Pagos del convertidor: mismo método que Talca PHP (monto, tipo y fecha;
+// quitar un pago lo desvincula, no lo borra).
+const CONV_METODO_PAGO_LABEL = {
+  efectivo: "Efectivo", tarjeta: "Tarjeta", transferencia: "Transferencia", cheque: "Cheque", otro: "Otro",
+};
+
+function renderPagosConvertidor(convertidor) {
+  const tbody = document.getElementById("tbody-conv-pagos");
+  const pagos = convertidor.pagos || [];
+  if (pagos.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" class="vacio">Sin pagos todavía.</td></tr>`;
+  } else {
+    tbody.innerHTML = pagos.map(p => `
+      <tr>
+        <td>${escapeHtml((p.fecha || "").slice(0, 10))}</td>
+        <td>${escapeHtml(CONV_METODO_PAGO_LABEL[p.metodo_pago] || p.metodo_pago)}</td>
+        <td class="num">${fmtMoney(p.monto)}</td>
+        <td><button type="button" class="btn-link btn-link--peligro" data-quitar-conv-pago="${p.id}">Quitar</button></td>
+      </tr>
+    `).join("");
+  }
+  document.getElementById("convd-total-pagado").innerHTML = `<strong>${fmtMoney(convertidor.total_pagado || 0)}</strong>`;
+  tbody.querySelectorAll("[data-quitar-conv-pago]").forEach(btn => {
+    btn.addEventListener("click", () => quitarPagoConvertidor(parseInt(btn.dataset.quitarConvPago, 10)));
+  });
+}
+
+async function quitarPagoConvertidor(pagoId) {
+  if (!confirm("¿Quitar este pago del convertidor? Deja de sumar en lo pagado.")) return;
+  const convertidorId = document.getElementById("convd-id").value;
+  try {
+    await api(`/api/convertidores/${convertidorId}/pagos/${pagoId}`, { method: "DELETE" });
+    toast("Pago quitado.");
+    renderPagosConvertidor(await api(`/api/convertidores/${convertidorId}`));
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+document.getElementById("form-conv-pago").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const convertidorId = document.getElementById("convd-id").value;
+  try {
+    const convertidor = await api(`/api/convertidores/${convertidorId}/pagos`, {
+      method: "POST",
+      body: JSON.stringify({
+        monto: document.getElementById("convp-monto").value,
+        metodo_pago: document.getElementById("convp-metodo").value,
+        fecha: document.getElementById("convp-fecha").value,
+      }),
+    });
+    toast("Pago agregado.");
+    document.getElementById("form-conv-pago").reset();
+    renderPagosConvertidor(convertidor);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
 async function abrirDetalleConvertidor(id) {
   try {
     const convertidor = await api(`/api/convertidores/${id}`);
@@ -628,6 +687,8 @@ async function abrirDetalleConvertidor(id) {
     document.getElementById("convd-campo-precio-venta").style.display = esInterno ? "none" : "flex";
     document.getElementById("convd-precio-venta").value = convertidor.precio_venta != null ? fmtMoney(convertidor.precio_venta).replace(/[^0-9]/g, "") : "";
     renderItemsConvertidor(convertidor);
+    renderPagosConvertidor(convertidor);
+    document.getElementById("form-conv-pago").reset();
 
     if (state.opProductos.length === 0) {
       const dataProductos = await api("/api/productos");

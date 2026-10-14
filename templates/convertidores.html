@@ -416,6 +416,51 @@
         </div>
       </div>
     </form>
+
+    <h3 class="subtitulo">Pagos</h3>
+    <div class="tabla-wrap">
+      <table class="tabla">
+        <thead>
+          <tr><th>Fecha</th><th>Tipo de pago</th><th class="num">Monto</th><th></th></tr>
+        </thead>
+        <tbody id="tbody-conv-pagos">
+          <tr><td colspan="4" class="vacio">Sin pagos todavía.</td></tr>
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="2" style="text-align:right"><strong>Total pagado</strong></td>
+            <td class="num" id="convd-total-pagado"><strong>—</strong></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    <form id="form-conv-pago">
+      <div class="grid-3">
+        <div class="campo">
+          <label>Monto *</label>
+          <input type="number" id="convp-monto" min="1" step="1" required>
+        </div>
+        <div class="campo">
+          <label>Tipo de pago</label>
+          <select id="convp-metodo">
+            <option value="efectivo">Efectivo</option>
+            <option value="tarjeta">Tarjeta</option>
+            <option value="transferencia">Transferencia</option>
+            <option value="cheque">Cheque</option>
+            <option value="otro">Otro</option>
+          </select>
+        </div>
+        <div class="campo">
+          <label>Fecha</label>
+          <input type="date" id="convp-fecha">
+        </div>
+      </div>
+      <div class="modal-actions modal-actions--start">
+        <button type="submit" class="btn btn-secundario">Agregar pago</button>
+      </div>
+    </form>
+
     <div class="modal-actions">
       <button type="button" class="btn btn-secundario" data-close="modal-op-convertidor-detalle">Cerrar</button>
     </div>

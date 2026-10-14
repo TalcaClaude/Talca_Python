@@ -305,6 +305,30 @@ def init_convertidores_db(db):
     )
     db.commit()
 
+    # Pagos de convertidor, con el mismo método que Talca PHP (pago_ot con
+    # ot_relacionada_conver): monto, tipo de pago y fecha contra el
+    # convertidor; "pagado" es la suma; quitar un pago NO lo borra, lo
+    # desvincula (Talca PHP deja ot_relacionada_conver en NULL). Va en su
+    # propia tabla y no en pagos_orden porque ahí orden_id es NOT NULL y
+    # reconstruirla tocaría todos los pagos de OT.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pagos_convertidor (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            convertidor_id INTEGER NOT NULL REFERENCES convertidores_torque(id),
+            metodo_pago TEXT NOT NULL DEFAULT 'efectivo',
+            monto REAL NOT NULL,
+            fecha TEXT NOT NULL,
+            usuario TEXT DEFAULT '',
+            creado_en TEXT NOT NULL,
+            desvinculado_en TEXT,
+            desvinculado_por TEXT DEFAULT ''
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_pagos_convertidor_conv ON pagos_convertidor (convertidor_id)")
+    db.commit()
+
 
 # ---------------------------------------------------------------------------
 # Página del módulo
@@ -805,6 +829,12 @@ def _convertidor_dict(db, row):
         "SELECT garantia_id FROM garantia_items WHERE convertidor_id = ? ORDER BY id DESC LIMIT 1", (d["id"],)
     ).fetchone()
     d["instalado_en_garantia_id"] = carga_garantia["garantia_id"] if carga_garantia else None
+    pagos = db.execute(
+        "SELECT * FROM pagos_convertidor WHERE convertidor_id = ? AND desvinculado_en IS NULL "
+        "ORDER BY fecha ASC, id ASC", (d["id"],)
+    ).fetchall()
+    d["pagos"] = [dict(p) for p in pagos]
+    d["total_pagado"] = round(sum(p["monto"] for p in pagos), 2)
     # Mismo criterio pero para el otro camino posible: que esta unidad haya
     # quedado cargada como repuesto DENTRO de otro convertidor (ver
     # agregar_item_convertidor). Los dos campos son mutuamente excluyentes
@@ -1359,6 +1389,65 @@ def eliminar_item_convertidor(convertidor_id, item_id):
 
 
 # ---------------------------------------------------------------------------
+# Pagos de convertidor (método de Talca PHP: agrega_pago_f_Conver /
+# borrapago_conver_real). Mismos tipos de pago que los de una OT.
+# ---------------------------------------------------------------------------
+
+METODOS_PAGO_CONVERTIDOR = ["efectivo", "tarjeta", "transferencia", "cheque", "otro"]  # = operativo.METODOS_PAGO
+
+
+@bp.route("/api/convertidores/<int:convertidor_id>/pagos", methods=["POST"])
+@requiere_rol("convertidores")
+def agregar_pago_convertidor(convertidor_id):
+    db = get_db()
+    if db.execute("SELECT id FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone() is None:
+        return jsonify({"error": "Convertidor no encontrado"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        monto = float(data.get("monto"))
+        if monto <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "El monto debe ser un número mayor a 0"}), 400
+    metodo = (data.get("metodo_pago") or "efectivo").strip().lower()
+    if metodo not in METODOS_PAGO_CONVERTIDOR:
+        return jsonify({"error": f"Tipo de pago inválido. Debe ser uno de: {', '.join(METODOS_PAGO_CONVERTIDOR)}"}), 400
+    fecha = (data.get("fecha") or "").strip() or now_iso()[:10]
+    try:
+        datetime.fromisoformat(fecha[:10])
+    except ValueError:
+        return jsonify({"error": "La fecha del pago no es válida (AAAA-MM-DD)"}), 400
+    db.execute(
+        "INSERT INTO pagos_convertidor (convertidor_id, metodo_pago, monto, fecha, usuario, creado_en) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (convertidor_id, metodo, round(monto, 2), fecha[:10], usuario_actual(), now_iso()),
+    )
+    db.execute("UPDATE convertidores_torque SET actualizado_en = ? WHERE id = ?", (now_iso(), convertidor_id))
+    db.commit()
+    row = db.execute("SELECT * FROM convertidores_torque WHERE id = ?", (convertidor_id,)).fetchone()
+    return jsonify(_convertidor_dict(db, row)), 201
+
+
+@bp.route("/api/convertidores/<int:convertidor_id>/pagos/<int:pago_id>", methods=["DELETE"])
+@requiere_rol("convertidores")
+def quitar_pago_convertidor(convertidor_id, pago_id):
+    """Como borrapago_conver_real de Talca PHP: el pago no se borra, se
+    desvincula del convertidor y deja de sumar en "pagado"."""
+    db = get_db()
+    pago = db.execute(
+        "SELECT id FROM pagos_convertidor WHERE id = ? AND convertidor_id = ? AND desvinculado_en IS NULL",
+        (pago_id, convertidor_id),
+    ).fetchone()
+    if pago is None:
+        return jsonify({"error": "Pago no encontrado en este convertidor"}), 404
+    db.execute("UPDATE pagos_convertidor SET desvinculado_en = ?, desvinculado_por = ? WHERE id = ?",
+               (now_iso(), usuario_actual(), pago_id))
+    db.execute("UPDATE convertidores_torque SET actualizado_en = ? WHERE id = ?", (now_iso(), convertidor_id))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
 
@@ -1533,8 +1622,8 @@ def reporte_resumen():
 #
 # El costo es lo que costó la reparación (total_reparacion), NO costo_estimado:
 # para los externos con precio de venta, costo_estimado devuelve ese precio y
-# la utilidad saldría siempre 0. Talca Python no registra pagos por convertidor,
-# así que la columna "Pagado" de Talca PHP no existe acá.
+# la utilidad saldría siempre 0. "Pagado" es la suma de pagos_convertidor no
+# desvinculados (método de Talca PHP).
 # ---------------------------------------------------------------------------
 
 ESTADOS_REPORTE_CONVERTIDORES = ("todas", "abiertas", "cerradas")
@@ -1593,6 +1682,7 @@ def _convertidores_para_reporte(desde, hasta, estado):
             "precio": precio,
             "costo": costo,
             "utilidad": round(precio - costo, 2) if precio is not None else None,
+            "pagado": c["total_pagado"],
             "estado": ESTADOS_CONVERTIDOR_LABEL.get(c["estado"], c["estado"]),
             "ot_origen": _numero_ot_origen(db, c["orden_origen_id"]),
             "creacion": (c["fecha_recepcion"] or "")[:10],
@@ -1604,7 +1694,7 @@ def _convertidores_para_reporte(desde, hasta, estado):
 
 COLUMNAS_REPORTE_CONVERTIDORES = [
     ("numero", "N°"), ("cliente", "Cliente"), ("rut", "RUT"), ("convertidor", "Convertidor"),
-    ("origen", "Origen"), ("precio", "Precio de venta"), ("costo", "Costo reparación"),
+    ("origen", "Origen"), ("precio", "Precio de venta"), ("pagado", "Pagado"), ("costo", "Costo reparación"),
     ("utilidad", "Utilidad"), ("estado", "Estado"), ("ot_origen", "OT de origen"),
     ("creacion", "F. recepción"), ("cierre", "F. cierre"), ("regional", "Regional"),
 ]
@@ -1639,7 +1729,7 @@ def reporte_ot_convertidores():
     ws.append([])
     total_fila = [""] * len(claves)
     total_fila[claves.index("origen")] = "TOTAL"
-    for k in ("precio", "costo", "utilidad"):
+    for k in ("precio", "pagado", "costo", "utilidad"):
         total_fila[claves.index(k)] = suma(k)
     ws.append(total_fila)
     _estilo_encabezado(ws, fila=fila_encabezado)

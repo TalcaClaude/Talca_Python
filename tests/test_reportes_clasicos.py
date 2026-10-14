@@ -326,6 +326,67 @@ class TestReporteOTConvertidores(unittest.TestCase):
         self.assertEqual((1, 50000, 200000), (julio[0][2], julio[0][3], julio[0][4]))
 
 
+class TestPagosConvertidor(unittest.TestCase):
+    """Pagos de convertidor con el método de Talca PHP: monto, tipo y fecha
+    contra el convertidor; "pagado" es la suma; quitar un pago lo desvincula
+    (la fila queda), no lo borra."""
+
+    @classmethod
+    def setUpClass(cls):
+        taller_app.app.config["TESTING"] = True
+        cls.client = taller_app.app.test_client()
+        cls.client.post("/login", data={"username": "admin", "password": "taller2026"})
+        db = taller_app._conectar_db()
+        cli = db.execute("INSERT INTO clientes (nombre, creado_en) VALUES ('CLIENTE PAGOS CONV', ?)", (TS,)).lastrowid
+        cls.conv = db.execute(
+            "INSERT INTO convertidores_torque (origen_tipo, cliente_id, estado, precio_venta, fecha_recepcion, "
+            "fecha_cierre) VALUES ('cliente_directo', ?, 'entregado', 150000, '2023-02-01T09:00:00', "
+            "'2023-02-10T09:00:00')", (cli,)).lastrowid
+        db.commit()
+        db.close()
+
+    def _pagar(self, **cuerpo):
+        return self.client.post(f"/api/convertidores/{self.conv}/pagos", json=cuerpo)
+
+    def test_agregar_y_quitar_un_pago(self):
+        r = self._pagar(monto=100000, metodo_pago="transferencia", fecha="2023-02-10")
+        self.assertEqual(201, r.status_code, r.get_data(as_text=True))
+        self.assertEqual(100000, r.get_json()["total_pagado"])
+        pago_id = r.get_json()["pagos"][-1]["id"]
+        r = self._pagar(monto=50000)
+        self.assertEqual(150000, r.get_json()["total_pagado"])
+
+        r = self.client.delete(f"/api/convertidores/{self.conv}/pagos/{pago_id}")
+        self.assertEqual(200, r.status_code)
+        self.assertEqual(50000, self.client.get(f"/api/convertidores/{self.conv}").get_json()["total_pagado"])
+        # No se borró: quedó desvinculado, como en Talca PHP.
+        db = taller_app._conectar_db()
+        fila = db.execute("SELECT desvinculado_en FROM pagos_convertidor WHERE id = ?", (pago_id,)).fetchone()
+        db.close()
+        self.assertIsNotNone(fila)
+        self.assertIsNotNone(fila["desvinculado_en"])
+        # Quitarlo dos veces: ya no está vinculado.
+        self.assertEqual(404, self.client.delete(f"/api/convertidores/{self.conv}/pagos/{pago_id}").status_code)
+
+    def test_validaciones(self):
+        self.assertEqual(400, self._pagar(monto=0).status_code)
+        self.assertEqual(400, self._pagar(monto="abc").status_code)
+        self.assertEqual(400, self._pagar(monto=1000, metodo_pago="bitcoin").status_code)
+        self.assertEqual(400, self._pagar(monto=1000, fecha="13-10-2026").status_code)
+        self.assertEqual(404, self.client.post("/api/convertidores/999999/pagos", json={"monto": 1000}).status_code)
+
+    def test_el_reporte_muestra_lo_pagado(self):
+        self._pagar(monto=30000, fecha="2023-02-11")
+        resp = self.client.get("/api/convertidores/reportes/ot",
+                               query_string={"estado": "cerradas", "desde": "2023-02-01", "hasta": "2023-02-28"})
+        filas = list(load_workbook(io.BytesIO(resp.data))["OT de convertidores"].iter_rows(values_only=True))
+        i = next(k for k, f in enumerate(filas) if f and f[0] == "N°")
+        fila = next(dict(zip(filas[i], f)) for f in filas[i + 1:] if f and f[0] == self.conv)
+        pagado_api = self.client.get(f"/api/convertidores/{self.conv}").get_json()["total_pagado"]
+        self.assertEqual(pagado_api, fila["Pagado"])
+        self.assertGreater(fila["Pagado"], 0)
+
+
 class TestReporteCobros(unittest.TestCase):
     """Reporte de cobros (/api/reportes/cobros): como createXLS_pay de Talca PHP,
     pagos de OT filtrados por fecha de pago, con el N° de OT de Talca."""

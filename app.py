@@ -13861,6 +13861,7 @@ RESET_OPERATIVO_TABLAS = [
     "garantia_items",
     "garantias",
     # -- Convertidores de torque --
+    "pagos_convertidor",
     "convertidor_items",
     "convertidores_torque",
     # -- Órdenes de trabajo --
